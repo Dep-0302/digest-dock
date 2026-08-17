@@ -68,6 +68,8 @@ function loadBackgroundHelpers({
   fetchImpl = fetch,
   setTimeoutImpl = () => 0,
   clearTimeoutImpl = () => {},
+  storageGetImpl,
+  storageSetImpl = async () => {},
 } = {}) {
   const listeners = { addListener() {} };
   const sandbox = {
@@ -84,7 +86,10 @@ function loadBackgroundHelpers({
       storage: {
         local: {
           setAccessLevel: () => Promise.resolve(),
-          get: async () => ({ ytd_settings: settings }),
+          get:
+            storageGetImpl ||
+            (async () => ({ ytd_settings: settings })),
+          set: storageSetImpl,
         },
       },
       action: { onClicked: listeners },
@@ -165,16 +170,463 @@ function streamingResponse(chunks, { ok = true, status = 200 } = {}) {
 const encode = (value) => new TextEncoder().encode(value);
 const nextTurn = () => new Promise((resolve) => setImmediate(resolve));
 
-test("Transcript header exposes and wires Original, Chinese, and bilingual modes", () => {
+test("Header exposes tab-specific transcript, overview, and notes language modes", () => {
   const html = read("sidepanel.html");
+  const css = read("sidepanel.css");
   const js = read("sidepanel.js");
-  assert.match(html, /data-transcript-mode="original"[\s\S]*?>Original</);
+  const headerStart = html.indexOf('<div class="header-top">');
+  const tabsStart = html.indexOf('<div class="tabs"');
+  const controlStart = html.indexOf('id="transcriptModeControl"');
+  const overviewControlStart = html.indexOf('id="overviewModeControl"');
+  const notesControlStart = html.indexOf('id="notesModeControl"');
+  const settingsStart = html.indexOf('id="settingsBtn"');
+  const resultsStart = html.indexOf('id="resultsState"');
+
+  assert.ok(headerStart >= 0);
+  assert.ok(controlStart > headerStart && controlStart < tabsStart);
+  assert.ok(overviewControlStart > controlStart && overviewControlStart < tabsStart);
+  assert.ok(notesControlStart > overviewControlStart && notesControlStart < tabsStart);
+  assert.ok(settingsStart > notesControlStart && settingsStart < tabsStart);
+  assert.ok(controlStart < resultsStart, "mode control must live outside scrolling results");
+  assert.match(html, /id="transcriptModeControl"[\s\S]*?hidden/);
+  assert.match(html, /id="overviewModeControl"[\s\S]*?hidden/);
+  assert.match(html, /id="notesModeControl"[\s\S]*?hidden/);
+  assert.match(html, /data-transcript-mode="original"[\s\S]*?>原文</);
   assert.match(html, /data-transcript-mode="zh"[\s\S]*?>\u4e2d\u6587</);
   assert.match(html, /data-transcript-mode="bilingual"[\s\S]*?>\u53cc\u8bed</);
+  assert.match(html, /data-overview-mode="en"[\s\S]*?aria-pressed="false"[\s\S]*?>英文</);
+  assert.match(html, /data-overview-mode="zh"[\s\S]*?aria-pressed="false"[\s\S]*?>中文</);
+  assert.match(html, /data-overview-mode="bilingual"[\s\S]*?aria-pressed="true"[\s\S]*?>双语</);
+  assert.match(html, /data-notes-mode="original"[\s\S]*?>原文</);
+  assert.match(html, /data-notes-mode="zh"[\s\S]*?>中文</);
+  assert.match(html, /data-notes-mode="bilingual"[\s\S]*?aria-pressed="true"[\s\S]*?>双语</);
+  assert.match(css, /\.header-actions\s*\{[\s\S]*?display:\s*flex/);
+  assert.match(css, /\.language-mode-control\[hidden\]\s*\{[^}]*display:\s*none/);
+  assert.match(
+    js,
+    /function updateHeaderLanguageControlsVisibility\(\)[\s\S]*?transcriptControl\.hidden = !\(showingResults && activeTab === "transcript"\)[\s\S]*?overviewControl\.hidden = !\(showingResults && activeTab === "overview"\)[\s\S]*?notesControl\.hidden = !\(showingResults && activeTab === "notes"\)/,
+  );
+  assert.match(js, /function showState\(state\)[\s\S]*?updateHeaderLanguageControlsVisibility\(\)/);
+  assert.match(js, /function switchTab\(tabName\)[\s\S]*?updateHeaderLanguageControlsVisibility\(\)/);
   assert.match(js, /handleTranscriptModeChange\(button\.dataset\.transcriptMode\)/);
+  assert.match(js, /handleOverviewModeChange\(button\.dataset\.overviewMode\)/);
+  assert.match(js, /handleNotesModeChange\(button\.dataset\.notesMode\)/);
+  assert.match(js, /let currentOverviewMode = "bilingual"/);
+  assert.match(js, /let currentNotesMode = "bilingual"/);
+  assert.match(js, /currentAnalysis = hasUsableEnglishAnalysis\(cached\.analysis\)/);
+  assert.match(js, /action: "translateOverview"/);
+  assert.match(js, /function ensureOverviewChinese\(\)/);
+  assert.match(js, /action: "translateNotes"/);
+  assert.match(js, /function ensureNotesChinese\(\)/);
+  assert.match(js, /const REQUIRED_RUNTIME_PROTOCOL_VERSION = 3/);
+  assert.match(
+    js,
+    /runtimeProtocolVersion !== REQUIRED_RUNTIME_PROTOCOL_VERSION[\s\S]*?showRuntimeVersionError\(\)/,
+  );
+  assert.match(js, /扩展后台未响应中文翻译请求，请重新加载扩展/);
+  const backgroundSource = read("background.js");
+  assert.match(backgroundSource, /const RUNTIME_PROTOCOL_VERSION = 3/);
+  assert.match(
+    backgroundSource,
+    /runtimeProtocolVersion: RUNTIME_PROTOCOL_VERSION/,
+  );
   assert.match(js, /contentType: "transcriptBatch"/);
   assert.doesNotMatch(js, /English \+ Chinese/);
-  assert.match(js, /Original \(\$\{language\}\)/);
+  assert.match(js, /原文（\$\{language\}）/);
+  assert.match(js, /await startDigest\(videoId, tab\.url\)/);
+  assert.match(js, /runDigestSingleFlight\(videoId/);
+  assert.match(js, /runTabCheckSingleFlight\("active-tab"/);
+});
+
+test("duplicate digest starts for the same video share one in-flight task", async () => {
+  const { createSingleFlight } = loadSidepanelHelpers();
+  const run = createSingleFlight();
+  let callCount = 0;
+  let finish;
+  const task = () => {
+    callCount += 1;
+    return new Promise((resolve) => {
+      finish = resolve;
+    });
+  };
+
+  const first = run("video-1", task);
+  const second = run("video-1", task);
+  await nextTurn();
+  assert.equal(callCount, 1);
+  finish("done");
+  assert.equal(await first, "done");
+  assert.equal(await second, "done");
+
+  const third = run("video-1", async () => {
+    callCount += 1;
+    return "again";
+  });
+  assert.equal(await third, "again");
+  assert.equal(callCount, 2);
+});
+
+test("overview content renders English, Chinese, and aligned bilingual variants", () => {
+  const helpers = loadSidepanelHelpers();
+  const chapter = {
+    title: "English title",
+    titleZh: "中文标题",
+    summary: "English summary.",
+    summaryZh: "中文摘要。",
+  };
+  const quote = {
+    quote: "English quote.",
+    quoteZh: "中文引语。",
+  };
+
+  const englishChapter = helpers.renderChapterLanguageContent(chapter, "en");
+  const chineseChapter = helpers.renderChapterLanguageContent(chapter, "zh");
+  const bilingualChapter = helpers.renderChapterLanguageContent(chapter, "bilingual");
+  assert.match(englishChapter, /English title/);
+  assert.doesNotMatch(englishChapter, /中文标题/);
+  assert.match(chineseChapter, /中文标题/);
+  assert.doesNotMatch(chineseChapter, /English title/);
+  assert.match(bilingualChapter, /English title[\s\S]*中文标题/);
+
+  assert.match(helpers.renderQuoteLanguageContent(quote, "en"), /English quote/);
+  assert.match(helpers.renderQuoteLanguageContent(quote, "zh"), /中文引语/);
+  assert.match(
+    helpers.renderQuoteLanguageContent(quote, "bilingual"),
+    /English quote[\s\S]*中文引语/,
+  );
+  assert.equal(
+    helpers.overviewQuoteCopyText(quote, "bilingual"),
+    "English quote.\n中文引语。",
+  );
+  const englishOnlyAnalysis = {
+    chapters: [
+      {
+        title: "English title",
+        summary: "English summary.",
+      },
+    ],
+    keyQuotes: [{ quote: "English quote." }],
+  };
+  assert.equal(helpers.hasUsableEnglishAnalysis(englishOnlyAnalysis), true);
+  assert.equal(helpers.hasCompleteChineseAnalysis(englishOnlyAnalysis), false);
+  assert.equal(
+    helpers.hasCompleteChineseAnalysis({
+      ...englishOnlyAnalysis,
+      chapters: [chapter],
+      keyQuotes: [quote],
+    }),
+    true,
+  );
+  assert.match(
+    helpers.renderChapterLanguageContent(englishOnlyAnalysis.chapters[0], "bilingual"),
+    /English title/,
+  );
+  assert.doesNotMatch(
+    helpers.renderChapterLanguageContent(englishOnlyAnalysis.chapters[0], "bilingual"),
+    /overview-language-block--zh/,
+  );
+  assert.equal(
+    helpers.overviewQuoteCopyText(englishOnlyAnalysis.keyQuotes[0], "zh"),
+    "English quote.",
+  );
+});
+
+test("notes render and copy original, Chinese, and bilingual variants", () => {
+  const helpers = loadSidepanelHelpers();
+  const note = {
+    text: "Polished English note.",
+    translatedText: "润色后的中文笔记。",
+  };
+  assert.match(
+    helpers.renderNoteLanguageContent(note, "original"),
+    /Polished English note/,
+  );
+  assert.doesNotMatch(
+    helpers.renderNoteLanguageContent(note, "original"),
+    /中文笔记/,
+  );
+  assert.match(
+    helpers.renderNoteLanguageContent(note, "zh"),
+    /润色后的中文笔记/,
+  );
+  assert.match(
+    helpers.renderNoteLanguageContent(note, "bilingual"),
+    /Polished English note[\s\S]*润色后的中文笔记/,
+  );
+  assert.equal(
+    helpers.noteCopyTextForMode(note, "bilingual"),
+    "Polished English note.\n润色后的中文笔记。",
+  );
+  const englishOnly = { text: "English only." };
+  assert.match(
+    helpers.renderNoteLanguageContent(englishOnly, "zh"),
+    /English only/,
+  );
+  assert.equal(
+    helpers.noteCopyTextForMode(englishOnly, "zh"),
+    "English only.",
+  );
+});
+
+test("overview analysis validation preserves usable English when Chinese is incomplete", () => {
+  const background = loadBackgroundHelpers();
+  const normalized = background.validateAndFixTimestamps(
+    {
+      chapters: [
+        {
+          title: "English title",
+          titleZh: "中文标题",
+          summary: "English summary.",
+          summaryZh: "中文摘要。",
+          timestampSeconds: 5,
+        },
+        {
+          title: "Incomplete",
+          summary: "Missing Chinese fields.",
+          timestampSeconds: 9,
+        },
+      ],
+      keyQuotes: [
+        {
+          quote: "English quote.",
+          quoteZh: "中文引语。",
+          timestampSeconds: 12,
+        },
+        {
+          quote: "English-only quote.",
+          timestampSeconds: 15,
+        },
+      ],
+      keyMoments: [5, 12, 999],
+    },
+    100,
+  );
+
+  assert.equal(normalized.schemaVersion, 2);
+  assert.equal(normalized.chapters.length, 2);
+  assert.equal(normalized.chapters[0].titleZh, "中文标题");
+  assert.equal(normalized.chapters[0].summaryZh, "中文摘要。");
+  assert.equal(normalized.chapters[1].title, "Incomplete");
+  assert.equal(normalized.chapters[1].titleZh, "");
+  assert.equal(normalized.keyQuotes[0].quoteZh, "中文引语。");
+  assert.equal(normalized.keyQuotes[1].quote, "English-only quote.");
+  assert.equal(normalized.keyQuotes[1].quoteZh, "");
+  assert.deepEqual(normalized.keyMoments, [5, 12]);
+});
+
+test("overview generates English once and Chinese once; bilingual is display-only", async () => {
+  const requests = [];
+  const background = loadBackgroundHelpers({
+    fetchImpl: async (url, options) => {
+      if (url.startsWith("chrome-extension://")) {
+        const file = url.endsWith("translation.md")
+          ? "prompts/translation.md"
+          : "prompts/analysis.md";
+        return { ok: true, text: async () => read(file) };
+      }
+      requests.push(JSON.parse(options.body));
+      const content =
+        requests.length === 1
+          ? {
+              chapters: [
+                {
+                  title: "Opening",
+                  summary: "The opening section.",
+                  timestampSeconds: 0,
+                },
+              ],
+              keyQuotes: [
+                {
+                  quote: "Hello world.",
+                  timestampSeconds: 0,
+                },
+              ],
+              keyMoments: [0],
+            }
+          : {
+              chapters: [
+                {
+                  id: "chapter-0",
+                  titleZh: "开场",
+                  summaryZh: "开场部分。",
+                },
+              ],
+              keyQuotes: [
+                {
+                  id: "quote-0",
+                  quoteZh: "你好，世界。",
+                },
+              ],
+            };
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify(content),
+              },
+            },
+          ],
+        }),
+      };
+    },
+  });
+
+  const englishResult = await background.handleAnalyzeTranscript(
+    "[0:00] Hello world.",
+    "Example video",
+    "Example channel",
+    "Example description",
+    60,
+  );
+  const chineseResult = await background.handleTranslateOverview(
+    englishResult.analysis,
+    "Example video",
+  );
+
+  assert.equal(englishResult.success, true);
+  assert.equal(englishResult.analysis.chapters[0].title, "Opening");
+  assert.equal(englishResult.analysis.chapters[0].titleZh, "");
+  assert.equal(chineseResult.success, true);
+  assert.equal(chineseResult.translatedOverview.chapters[0].titleZh, "开场");
+  assert.equal(chineseResult.translatedOverview.keyQuotes[0].quoteZh, "你好，世界。");
+  assert.equal(requests.length, 2);
+  assert.match(requests[0].messages[0].content, /English structural overview/);
+  assert.doesNotMatch(requests[0].messages[0].content, /titleZh/);
+  assert.match(requests[1].messages[0].content, /Translate this English YouTube overview/);
+});
+
+test("notes generate Chinese once from polished English and persist it", async () => {
+  const backgroundSource = read("background.js");
+  assert.match(
+    backgroundSource,
+    /async function handleSaveNote\([\s\S]*?cleanupNoteText\([\s\S]*?saveNoteToStorage\(note\)[\s\S]*?handleTranslateNotes\(\[note\]\)/,
+  );
+  const requests = [];
+  let storedNotes = [
+    {
+      id: "note_1",
+      text: "A polished English note.",
+      videoTitle: "Example video",
+      translatedText: "",
+    },
+  ];
+  const background = loadBackgroundHelpers({
+    storageGetImpl: async (key) => {
+      if (key === "ytd_settings") {
+        return {
+          ytd_settings: {
+            provider: "deepseek",
+            aiApiKey: "test-key",
+            aiBaseUrl: "https://api.deepseek.com",
+            aiModel: "deepseek-v4-flash",
+          },
+        };
+      }
+      if (key === "ytd_notes") return { ytd_notes: storedNotes };
+      return {};
+    },
+    storageSetImpl: async (items) => {
+      if (items.ytd_notes) storedNotes = items.ytd_notes;
+    },
+    fetchImpl: async (url, options) => {
+      if (url.startsWith("chrome-extension://")) {
+        return { ok: true, text: async () => read("prompts/translation.md") };
+      }
+      requests.push(JSON.parse(options.body));
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  notes: [{ id: "note_1", textZh: "一条润色后的中文笔记。" }],
+                }),
+              },
+            },
+          ],
+        }),
+      };
+    },
+  });
+
+  const result = await background.handleTranslateNotes(storedNotes);
+  assert.equal(result.success, true);
+  assert.equal(result.translations[0].textZh, "一条润色后的中文笔记。");
+  assert.equal(storedNotes[0].translatedText, "一条润色后的中文笔记。");
+  assert.equal(requests.length, 1);
+  assert.match(requests[0].messages[0].content, /Translate these polished English video notes/);
+});
+
+test("relay recovery reinjects the content script once after extension reload", async () => {
+  const background = loadBackgroundHelpers();
+  const sendCalls = [];
+  const injectionCalls = [];
+  const result = await background.sendMessageToContentWithRecovery(
+    17,
+    { action: "getVideoInfo" },
+    {
+      async sendMessage(tabId, message) {
+        sendCalls.push({ tabId, message });
+        if (sendCalls.length === 1) {
+          throw new Error(
+            "Could not establish connection. Receiving end does not exist.",
+          );
+        }
+        return { title: "Recovered video" };
+      },
+      async executeScript(details) {
+        injectionCalls.push(details);
+      },
+    },
+  );
+
+  assert.deepEqual(result, { title: "Recovered video" });
+  assert.equal(sendCalls.length, 2);
+  assert.deepEqual(JSON.parse(JSON.stringify(injectionCalls)), [
+    { target: { tabId: 17 }, files: ["content.js"] },
+  ]);
+});
+
+test("relay recovery does not hide unrelated messaging failures", async () => {
+  const background = loadBackgroundHelpers();
+  assert.equal(
+    background.isTransientTabContextError(
+      new Error("Frame with ID 0 was removed."),
+    ),
+    true,
+  );
+  assert.equal(
+    background.isTransientTabContextError(
+      new Error("No tab with id: 1079106118"),
+    ),
+    true,
+  );
+  assert.equal(
+    background.isTransientTabContextError(new Error("Tab was closed")),
+    false,
+  );
+  let injectionCount = 0;
+  await assert.rejects(
+    background.sendMessageToContentWithRecovery(
+      17,
+      { action: "getVideoInfo" },
+      {
+        async sendMessage() {
+          throw new Error("Tab was closed");
+        },
+        async executeScript() {
+          injectionCount += 1;
+        },
+      },
+    ),
+    /Tab was closed/,
+  );
+  assert.equal(injectionCount, 0);
 });
 
 test("semantic segmentation rebuilds sentences across caption boundaries", () => {
@@ -253,7 +705,7 @@ test("structured translation batches align by stable ID and expose missing fallb
   );
   assert.equal(aligned[0].id, source[0].id);
   assert.equal(aligned[0].text, "");
-  assert.match(aligned[0].error, /unavailable/i);
+  assert.match(aligned[0].error, /暂时无法获得翻译/);
   assert.equal(aligned[1].text, "\u7b2c\u4e8c\u4e2a\u5b8c\u6574\u53e5\u5b50\u3002");
 });
 
@@ -424,7 +876,7 @@ test("provider idle silence aborts with a distinct Retry-able error", async () =
   const result = await request;
   assert.equal(result.success, false);
   assert.equal(result.code, "AI_IDLE_TIMEOUT");
-  assert.match(result.error, /inactive for 50 seconds.*Retry/i);
+  assert.match(result.error, /连续 50 秒没有响应.*重试/);
   assert.equal(timers.activeCount(120_000), 0);
 });
 
@@ -468,7 +920,7 @@ test("blank-line keepalives cannot evade the provider hard cap", async () => {
   const result = await request;
   assert.equal(result.success, false);
   assert.equal(result.code, "AI_HARD_TIMEOUT");
-  assert.match(result.error, /120-second limit.*Retry/i);
+  assert.match(result.error, /超过 120 秒.*重试/);
   assert.equal(timers.activeCount(50_000), 0);
 });
 
@@ -556,7 +1008,7 @@ test("translation message watchdog rejects, clears its timer, and ignores late r
   });
   assert.equal(timeoutDelay, 130_000);
   timeoutCallback();
-  await assert.rejects(request, /timed out after 130 seconds.*Retry/i);
+  await assert.rejects(request, /130 秒后超时.*重试/);
   assert.equal(clearCount, 1);
 
   resolveMessage({ success: true });
@@ -593,4 +1045,18 @@ test("Chinese prompt preserves natural bilingual-learning style rules", () => {
   assert.match(prompt, /Use 你, never 您/);
   assert.match(prompt, /spaces between Chinese and adjacent English words or digits/);
   assert.match(prompt, /source-language `text`/);
+});
+
+test("overview and notes keep English generation separate from Chinese translation", () => {
+  const analysisPrompt = read("prompts/analysis.md");
+  const translationPrompt = read("prompts/translation.md");
+  assert.match(analysisPrompt, /English structural overview/);
+  assert.doesNotMatch(analysisPrompt, /titleZh|summaryZh|quoteZh/);
+  assert.match(translationPrompt, /^## Overview translation$/m);
+  assert.match(translationPrompt, /"titleZh":"中文标题"/);
+  assert.match(translationPrompt, /"summaryZh":"中文摘要"/);
+  assert.match(translationPrompt, /"quoteZh":"中文引语"/);
+  assert.match(translationPrompt, /^## Notes translation$/m);
+  assert.match(translationPrompt, /Translate these polished English video notes/);
+  assert.match(translationPrompt, /"textZh":"中文笔记"/);
 });

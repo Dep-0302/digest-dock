@@ -96,7 +96,7 @@ class FakeElement {
   }
 }
 
-function createHarness() {
+function createHarness({ sendMessageImpl } = {}) {
   const actionRows = [];
   const fallbackRows = [];
   const elements = [];
@@ -153,8 +153,10 @@ function createHarness() {
     chrome: {
       runtime: {
         onMessage: { addListener() {} },
-        async sendMessage() {
-          return { success: true };
+        async sendMessage(message) {
+          return sendMessageImpl
+            ? sendMessageImpl(message)
+            : { success: true };
         },
       },
     },
@@ -238,6 +240,34 @@ test("Digest button skips a hidden responsive toolbar", () => {
   assert.equal(visibleGroup.children[1], nativeButton);
   assert.match(visibleGroup.children[0].style.cssText, /flex:\s*0 0 auto/);
   assert.match(visibleGroup.children[0].style.cssText, /width:\s*max-content/);
+});
+
+test("stale extension buttons ask for a page refresh without logging another failure", async () => {
+  const harness = createHarness({
+    async sendMessageImpl() {
+      throw new Error("Extension context invalidated.");
+    },
+  });
+  const { row, buttonGroup } = createActionRow({ width: 389, height: 36 });
+  harness.actionRows.push(row);
+  harness.context.injectDigestButton();
+  const button = buttonGroup.children[0];
+
+  await button.listeners.click({ preventDefault() {}, stopPropagation() {} });
+
+  assert.equal(button.disabled, true);
+  assert.match(button.innerHTML, /请刷新页面/);
+  const notice = harness.context.document.getElementById(
+    "ytd-extension-refresh-notice",
+  );
+  assert.ok(notice);
+  assert.match(notice.textContent, /请刷新当前 YouTube 页面/);
+  assert.equal(
+    harness.context.isExtensionContextInvalidatedError(
+      new Error("Extension context invalidated."),
+    ),
+    true,
+  );
 });
 
 test("Digest button replaces stale instances and removes duplicates", () => {

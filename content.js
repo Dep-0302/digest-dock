@@ -18,6 +18,38 @@ const debugLog = (...args) => {
   if (DEBUG) console.log(...args);
 };
 
+function isExtensionContextInvalidatedError(error) {
+  return String(error?.message || error || "").includes(
+    "Extension context invalidated",
+  );
+}
+
+function showExtensionRefreshNotice() {
+  const existing = document.getElementById("ytd-extension-refresh-notice");
+  if (existing) existing.remove();
+  const notice = document.createElement("div");
+  notice.id = "ytd-extension-refresh-notice";
+  notice.textContent =
+    "YouTube Digest 已更新。请刷新当前 YouTube 页面后再生成摘要。";
+  notice.style.cssText = `
+    position: fixed;
+    top: 18px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 999999;
+    max-width: min(520px, calc(100vw - 32px));
+    padding: 12px 18px;
+    border: 1px solid #e7cfc6;
+    border-radius: 12px;
+    background: #fff8f4;
+    color: #7d3527;
+    box-shadow: 0 8px 24px rgba(50, 42, 32, 0.2);
+    font: 600 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+    text-align: center;
+  `;
+  document.body.appendChild(notice);
+}
+
 // ============================================================
 // GLOBAL STATE
 // ============================================================
@@ -231,10 +263,10 @@ function createDigestButton() {
   const digestButton = document.createElement("button");
   digestButton.id = "ytd-digest-button";
   digestButton.type = "button";
-  digestButton.setAttribute("aria-label", "Open YouTube Digest");
+  digestButton.setAttribute("aria-label", "打开 YouTube Digest");
   digestButton.innerHTML = `
     <span class="ytd-digest-icon" style="font-size: 11px;">▶</span>
-    <span class="ytd-digest-label">Digest</span>
+    <span class="ytd-digest-label">生成摘要</span>
   `;
 
   // Style the button — rounded pill in our terracotta accent, sized to sit
@@ -289,6 +321,15 @@ function createDigestButton() {
       });
       debugLog("[YouTube Digest] openSidePanel response:", result);
     } catch (err) {
+      if (isExtensionContextInvalidatedError(err)) {
+        digestButton.disabled = true;
+        digestButton.innerHTML = `
+          <span class="ytd-digest-icon" style="font-size: 11px;">↻</span>
+          <span class="ytd-digest-label">请刷新页面</span>
+        `;
+        showExtensionRefreshNotice();
+        return;
+      }
       console.error("[YouTube Digest] Failed to open side panel:", err);
     }
   });
@@ -446,7 +487,7 @@ function injectNoteButton() {
       <path d="M12 20h9"></path>
       <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path>
     </svg>
-    <span>Note</span>
+    <span>笔记</span>
   `;
 
   // Soft rounded pill in the terracotta accent, with a gentle shadow.
@@ -590,7 +631,7 @@ async function saveCurrentNote() {
 
   if (noteButton) {
     noteButton.innerHTML =
-      '<span style="letter-spacing: 0.2px;">SAVING...</span>';
+      '<span style="letter-spacing: 0.2px;">正在保存…</span>';
     noteButton.style.pointerEvents = "none";
   }
 
@@ -606,21 +647,21 @@ async function saveCurrentNote() {
     if (result.success) {
       if (noteButton) {
         noteButton.innerHTML =
-          '<span style="letter-spacing: 0.2px;">SAVED</span>';
+          '<span style="letter-spacing: 0.2px;">已保存</span>';
         noteButton.style.background = "#7c8b6f";
       }
       showNoteSavedToast(result.note);
     } else {
       if (noteButton) {
         noteButton.innerHTML =
-          '<span style="letter-spacing: 0.2px;">ERROR</span>';
+          '<span style="letter-spacing: 0.2px;">出错了</span>';
       }
       console.error("[YouTube Digest] Save note error:", result.error);
     }
   } catch (err) {
     if (noteButton) {
       noteButton.innerHTML =
-        '<span style="letter-spacing: 0.2px;">ERROR</span>';
+        '<span style="letter-spacing: 0.2px;">出错了</span>';
     }
     console.error("[YouTube Digest] Save note exception:", err);
   }
@@ -645,11 +686,11 @@ function showNoteSavedToast(note) {
   const toast = document.createElement("div");
   toast.id = "ytd-note-toast";
   toast.innerHTML = `
-    <div style="font-weight: 700; margin-bottom: 6px; color: #c8674f;">📝 Note saved</div>
+    <div style="font-weight: 700; margin-bottom: 6px; color: #c8674f;">📝 笔记已保存</div>
     <div style="font-size: 12px; color: #6b6258; margin-bottom: 8px;">${escapeHtmlForContent(note.timestamp)} — ${escapeHtmlForContent(note.videoTitle)}</div>
     <div style="font-size: 13px; line-height: 1.55; color: #2e2a24;">"${escapeHtmlForContent(note.text)}"</div>
     <div style="margin-top: 10px; font-size: 11px;">
-      <a href="${escapeHtmlForContent(note.timestampedUrl)}" style="color: #c8674f; font-weight: 600; text-decoration: none;">🔗 Copy link</a>
+      <a href="${escapeHtmlForContent(note.timestampedUrl)}" style="color: #c8674f; font-weight: 600; text-decoration: none;">🔗 复制链接</a>
     </div>
   `;
 
@@ -683,7 +724,7 @@ function showNoteSavedToast(note) {
     e.preventDefault();
     try {
       await navigator.clipboard.writeText(note.timestampedUrl);
-      e.target.textContent = "✓ Copied!";
+      e.target.textContent = "✓ 已复制";
     } catch (err) {
       console.error("Copy failed:", err);
     }

@@ -127,6 +127,13 @@ body {
   flex: 1;
 }
 
+.header-actions {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  gap: 8px;
+}
+
 .settings-btn {
   flex-shrink: 0;
   padding: 5px 10px;
@@ -330,19 +337,12 @@ body {
 }
 
 .transcript-section-header {
-  align-items: stretch;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.transcript-header-main {
-  display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
+  gap: 12px;
 }
 
-.transcript-mode-control {
+.language-mode-control {
   display: inline-flex;
   align-items: center;
   gap: 2px;
@@ -353,7 +353,11 @@ body {
   white-space: nowrap;
 }
 
-.transcript-mode-btn {
+.language-mode-control[hidden] {
+  display: none;
+}
+
+.language-mode-btn {
   padding: 4px 8px;
   border: 0;
   border-radius: var(--r-pill);
@@ -363,11 +367,16 @@ body {
   font: 600 10.5px/1.3 var(--font-body);
 }
 
-.transcript-mode-btn:hover {
+.language-mode-btn:hover {
   color: var(--accent);
 }
 
-.transcript-mode-btn.active {
+.language-mode-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.language-mode-btn.active {
   background: var(--surface);
   color: var(--text);
   box-shadow: var(--shadow-sm);
@@ -386,6 +395,25 @@ body {
 
 .translation-spinner.visible {
   display: inline-block;
+}
+
+.overview-translation-status {
+  margin-bottom: 16px;
+  padding: 8px 11px;
+  border-radius: var(--r-sm);
+  background: var(--sage-dim);
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.overview-translation-status.error {
+  background: var(--accent-dim);
+  color: var(--accent-hover);
+}
+
+.overview-translation-status[hidden] {
+  display: none;
 }
 
 @keyframes translationSpin {
@@ -484,7 +512,21 @@ body {
   flex: 1;
   display: flex;
   flex-direction: column;
+  gap: 0;
+  min-width: 0;
+}
+
+.overview-language-block {
+  display: flex;
+  flex-direction: column;
   gap: 4px;
+  min-width: 0;
+}
+
+.overview-language-block + .overview-language-block {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
 }
 
 .chapter-title {
@@ -526,6 +568,10 @@ body {
   line-height: 1.65;
   color: var(--text);
   margin-bottom: 10px;
+}
+
+.quote-text .overview-language-block {
+  display: block;
 }
 
 .quote-text::before {
@@ -689,9 +735,20 @@ body {
 }
 
 @media (max-width: 390px) {
-  .transcript-header-main {
-    align-items: flex-start;
-    flex-direction: column;
+  .header {
+    padding-inline: 14px;
+  }
+
+  .header-top {
+    gap: 8px;
+  }
+
+  .header-actions {
+    gap: 6px;
+  }
+
+  .language-mode-btn {
+    padding-inline: 6px;
   }
 }
 
@@ -1224,6 +1281,25 @@ body {
   line-height: 1.7;
 }
 
+.notes-language-status {
+  margin-bottom: 14px;
+  padding: 8px 11px;
+  border-radius: var(--r-sm);
+  background: var(--sage-dim);
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.notes-language-status[hidden] {
+  display: none;
+}
+
+.notes-language-status.error {
+  background: var(--accent-dim);
+  color: var(--accent-hover);
+}
+
 .note-item {
   border: 1px solid var(--border);
   border-radius: var(--r-md);
@@ -1295,6 +1371,17 @@ body {
   line-height: 1.65;
   color: var(--text);
   margin-bottom: 12px;
+}
+
+.note-language-block {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.note-language-block + .note-language-block {
+  margin-top: 9px;
+  padding-top: 9px;
+  border-top: 1px solid var(--border);
 }
 
 .note-actions {

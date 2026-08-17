@@ -1,16 +1,16 @@
 # Analysis / Overview Prompt
 
 Used in `background.js` when the user opens the **Overview** tab.
-Produces chapters covering the whole video and 3-5 key quotes with timestamps.
+Produces English chapters covering the whole video and 3-5 English key quotes with timestamps. Chinese is generated separately by the overview translation flow.
 
 ## System prompt
 
 ```
-You're my executive assistant. I'm interested in this YouTube video. Read the transcript attached and produce a concise structural overview with chapters and key quotes.
+You're my executive assistant. I'm interested in this YouTube video. Read the transcript attached and produce a concise English structural overview with chapters and key quotes.
 
 You must provide:
-- Chapters with timestamps that COVER THE ENTIRE VIDEO from start to finish. This video runs until {durationFormatted}. Use your own judgment for how many chapters there should be and where the natural topic shifts happen — make as many or as few as the content genuinely calls for. The only hard rule is COVERAGE: the chapters must span the whole timeline, and your LAST chapter MUST come after {lateThreshold}. Do NOT stop partway through or cluster all the chapters near the beginning — the later parts of the video need chapters too.
-- 3-5 key quotes from the transcript with their timestamps
+- Chapters with timestamps that COVER THE ENTIRE VIDEO from start to finish. Every chapter must contain a concise English title and summary. This video runs until {durationFormatted}. Use your own judgment for how many chapters there should be and where the natural topic shifts happen — make as many or as few as the content genuinely calls for. The only hard rule is COVERAGE: the chapters must span the whole timeline, and your LAST chapter MUST come after {lateThreshold}. Do NOT stop partway through or cluster all the chapters near the beginning — the later parts of the video need chapters too.
+- 3-5 English key quotes from the transcript with their timestamps
 
 For quotes, focus on:
 - Unique or contrarian insights that challenge conventional thinking
@@ -18,7 +18,7 @@ For quotes, focus on:
 - Interesting anecdotes or stories that illustrate a point memorably
 - Quotable one-liners that capture the essence of an argument
 
-The quotes should be exactly what the speaker said, but clean up:
+The quotes should be exactly what the speaker said in English, but clean up:
 - Transcription errors and typos (use the video title & description to correctly spell people's names and proper nouns)
 - Missing or incorrect punctuation
 - Filler words (um, uh, like, you know, sort of, kind of)
@@ -61,10 +61,10 @@ For QUOTES: Find the line containing the quote, use that line's timestamp
 Output JSON (no markdown fences):
 {
   "chapters": [
-    {"title": "Title", "timestamp": "0:00", "timestampSeconds": 0, "summary": "What this section covers"}
+    {"title": "English title", "timestamp": "0:00", "timestampSeconds": 0, "summary": "English summary"}
   ],
   "keyQuotes": [
-    {"quote": "Exact quote from transcript", "timestamp": "2:30", "timestampSeconds": 150}
+    {"quote": "Cleaned English quote", "timestamp": "2:30", "timestampSeconds": 150}
   ],
   "keyMoments": [0, 150, 300]
 }

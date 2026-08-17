@@ -1,6 +1,7 @@
 const YTD_OPTIONS = (() => {
   const LANGUAGE_STORAGE_KEY = "ytd_options_language";
   const PREVIEW_STORAGE_PREFIX = "youtubeDigestPreview:";
+  const DEFAULT_LANGUAGE = "zh-CN";
   const SUPPORTED_LANGUAGES = new Set(["en", "zh-CN"]);
 
   const COPY = {
@@ -12,6 +13,7 @@ const YTD_OPTIONS = (() => {
         "Keys stay in this Chrome profile and are sent only to Supadata and DeepSeek. This open-source extension has no developer server or analytics.",
       transcriptProvider: "Transcript provider",
       supadataApiKeyLabel: "Supadata API key",
+      supadataPlaceholder: "Paste your Supadata key",
       supadataHelp: "Used to fetch timestamped YouTube subtitles. ",
       supadataLink: "Create a Supadata account and key",
       supadataHelpSuffix:
@@ -20,6 +22,7 @@ const YTD_OPTIONS = (() => {
       providerSummaryLabel: "Supported AI provider",
       providerBadge: "Supported in this version",
       deepseekApiKeyLabel: "DeepSeek API key",
+      deepseekPlaceholder: "Paste your DeepSeek key",
       deepseekHelp:
         "YouTube Digest uses DeepSeek V4 Flash for overviews, explanations, translation, and note polishing. ",
       deepseekLink: "Create a DeepSeek API key",
@@ -82,6 +85,7 @@ const YTD_OPTIONS = (() => {
         "密钥仅保存在当前 Chrome 个人资料中，只会发送给 Supadata 和 DeepSeek。本开源扩展没有开发者服务器，也不使用分析服务。",
       transcriptProvider: "字幕服务",
       supadataApiKeyLabel: "Supadata API 密钥",
+      supadataPlaceholder: "粘贴 Supadata 密钥",
       supadataHelp: "用于获取带时间戳的 YouTube 字幕。",
       supadataLink: "创建 Supadata 账号并获取密钥",
       supadataHelpSuffix: "。Supadata 会在引导流程中生成密钥。",
@@ -89,6 +93,7 @@ const YTD_OPTIONS = (() => {
       providerSummaryLabel: "支持的 AI 服务",
       providerBadge: "当前版本支持",
       deepseekApiKeyLabel: "DeepSeek API 密钥",
+      deepseekPlaceholder: "粘贴 DeepSeek 密钥",
       deepseekHelp:
         "YouTube Digest 使用 DeepSeek V4 Flash 生成概览、解释内容、翻译字幕和润色笔记。",
       deepseekLink: "创建 DeepSeek API 密钥",
@@ -142,7 +147,7 @@ const YTD_OPTIONS = (() => {
   };
 
   function normalizeLanguage(language) {
-    return SUPPORTED_LANGUAGES.has(language) ? language : "en";
+    return SUPPORTED_LANGUAGES.has(language) ? language : DEFAULT_LANGUAGE;
   }
 
   function translate(language, key, params = {}) {
@@ -360,7 +365,7 @@ const YTD_OPTIONS = (() => {
     const languageButtons = [...doc.querySelectorAll("[data-language]")];
     const statusStates = new Map();
     const promptDrafts = createPromptDrafts();
-    let currentLanguage = "en";
+    let currentLanguage = DEFAULT_LANGUAGE;
 
     function renderStatus(element) {
       const state = statusStates.get(element);
@@ -403,6 +408,12 @@ const YTD_OPTIONS = (() => {
           translate(currentLanguage, element.dataset.i18nAriaLabel),
         );
       }
+      for (const element of doc.querySelectorAll("[data-i18n-placeholder]")) {
+        element.setAttribute(
+          "placeholder",
+          translate(currentLanguage, element.dataset.i18nPlaceholder),
+        );
+      }
 
       updateLocalizedPrompt(
         customizationPrompt,
@@ -435,7 +446,7 @@ const YTD_OPTIONS = (() => {
       try {
         applyLanguage(await readPreferredLanguage(storage));
       } catch (_error) {
-        applyLanguage("en");
+        applyLanguage(DEFAULT_LANGUAGE);
       }
       await loadSettings();
     }
@@ -530,6 +541,7 @@ const YTD_OPTIONS = (() => {
 
   return {
     COPY,
+    DEFAULT_LANGUAGE,
     LANGUAGE_STORAGE_KEY,
     copyPromptValue,
     createPromptDrafts,

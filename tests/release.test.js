@@ -2,6 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
+const options = require("../options.js");
 
 const root = path.resolve(__dirname, "..");
 const read = (file) => fs.readFileSync(path.join(root, file), "utf8");
@@ -84,6 +85,16 @@ test("release copy documents current scope without em dashes", () => {
   );
   assert.match(chineseReadme, /不接受上游 Issue 或 Pull Request/);
   assert.match(chineseReadme, /增加更多翻译语言/);
+  assert.match(readme, /choose \*\*English\*\*, \*\*中文\*\*, or \*\*双语\*\*/);
+  assert.match(chineseReadme, /可选择 \*\*英文\*\*、\*\*中文\*\*或\*\*双语\*\*/);
+  assert.match(readme, /without a third generation call/);
+  assert.match(chineseReadme, /不会发起第三次生成/);
+  assert.match(readme, /Notes are polished in English once and translated into Simplified Chinese once/);
+  assert.match(chineseReadme, /笔记先生成一次润色后的英文，再单独生成一次简体中文/);
+  assert.match(
+    read("PRIVACY.md"),
+    /polished English note and its video title when generating the separately stored Simplified Chinese note/,
+  );
 
   assert.match(readme, /100 credits per month/i);
   assert.match(readme, /native transcript request uses \*\*1 credit\*\*/i);
@@ -132,15 +143,15 @@ test("release copy documents current scope without em dashes", () => {
   assert.doesNotMatch(detailsTag[0], /\sopen(?:\s|=|>)/i);
   assert.match(
     optionsPage,
-    /<summary class="customization-summary">[\s\S]*Want to use another AI model\?[\s\S]*Edit and copy a safe prompt for your coding agent[\s\S]*<\/summary>/,
+    /<summary class="customization-summary">[\s\S]*想使用其他 AI 模型？[\s\S]*编辑并复制一段可安全交给编程 Agent 的提示词[\s\S]*<\/summary>/,
   );
   assert.match(
     optionsPage,
-    /class="customization-steps"[\s\S]*Open the extracted YouTube Digest project folder in your coding[\s\S]*Replace \[PROVIDER\] and \[MODEL\][\s\S]*Never include API keys[\s\S]*<\/ol>/,
+    /class="customization-steps"[\s\S]*在编程 Agent 中打开 YouTube Digest 解压后的项目文件夹[\s\S]*把 \[PROVIDER\] 和 \[MODEL\] 替换成[\s\S]*不要在提示词或聊天中加入 API 密钥[\s\S]*<\/ol>/,
   );
   assert.match(
     optionsPage,
-    /class="prompt-reminder"[\s\S]*Before copying, replace \[PROVIDER\] and \[MODEL\]/,
+    /class="prompt-reminder"[\s\S]*复制前，请先把 \[PROVIDER\] 和 \[MODEL\] 替换成/,
   );
   assert.doesNotMatch(optionsPage, /~\/Documents\/youtube-digest/);
   assert.doesNotMatch(optionsPage, /%USERPROFILE%\\Documents\\youtube-digest/);
@@ -152,7 +163,7 @@ test("release copy documents current scope without em dashes", () => {
   assert.match(optionsScript, /Edited prompt copied\./);
   assert.match(optionsScript, /migration\.migrated[\s\S]*storage\.set/);
 
-  const customizationPrompt = `Customize this local YouTube Digest workspace to use [PROVIDER] with [MODEL]. Work only in the current workspace. Before editing, verify that it contains manifest.json and that the manifest name is YouTube Digest. If verification fails, stop and ask me to open the extracted YouTube Digest project folder in my coding agent. Do not search other folders, edit a guessed copy, assume an installation path, or claim Chrome can reveal the absolute OS source path. Update the provider's API endpoint, request format, and minimum Chrome host permissions. Preserve bring-your-own-key and local Chrome storage. Never put API keys in source code, commits, logs, screenshots, this prompt, or chat; after the code is ready, tell me where to enter the key myself. Keep DeepSeek-only request fields and retry behavior isolated to DeepSeek. Handle provider-specific rules separately so one provider does not affect another. Update README.md, README.zh-CN.md, PRIVACY.md, SECURITY.md, and tests. Run npm test, npm run check, and npm run package. Then explain how to reload the unpacked extension and test it on a real YouTube video.`;
+  const customizationPrompt = options.translate("zh-CN", "customizationPrompt");
   assert.ok(optionsPage.includes(`>${customizationPrompt}</textarea>`));
   assert.doesNotMatch(customizationPrompt, /Documents|USERPROFILE/);
 
@@ -190,11 +201,11 @@ test("notes filters preserve selected contrast and expose pressed state", () => 
 
   assert.match(
     html,
-    /id="notesFilterThis"[\s\S]*?aria-pressed="true"[\s\S]*?>[\s\S]*?This Video/,
+    /id="notesFilterThis"[\s\S]*?aria-pressed="true"[\s\S]*?>[\s\S]*?当前视频/,
   );
   assert.match(
     html,
-    /id="notesFilterAll"[\s\S]*?aria-pressed="false"[\s\S]*?>[\s\S]*?All Notes/,
+    /id="notesFilterAll"[\s\S]*?aria-pressed="false"[\s\S]*?>[\s\S]*?全部笔记/,
   );
   assert.match(
     css,
@@ -248,6 +259,8 @@ test("published prompt files contain runtime sections", () => {
       "Shared base rules",
       "Chinese rules",
       "Transcript batch translation",
+      "Overview translation",
+      "Notes translation",
     ],
   };
 

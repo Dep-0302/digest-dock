@@ -46,7 +46,7 @@ test("Settings copy covers English and Simplified Chinese", () => {
 
   const html = read("options.html");
   const referencedKeys = [
-    ...html.matchAll(/data-i18n(?:-html|-aria-label)?="([^"]+)"/g),
+    ...html.matchAll(/data-i18n(?:-html|-aria-label|-placeholder)?="([^"]+)"/g),
   ].map((match) => match[1]);
   for (const key of referencedKeys) {
     assert.ok(options.COPY.en[key], `Missing English copy for ${key}`);
@@ -90,22 +90,23 @@ test("non-extension preview safely persists language in localStorage", async () 
 
   const reopenedSession = options.createStorageAdapter(null, localStorage);
   assert.equal(await options.readPreferredLanguage(reopenedSession), "zh-CN");
-  assert.equal(options.normalizeLanguage("unsupported"), "en");
+  assert.equal(options.DEFAULT_LANGUAGE, "zh-CN");
+  assert.equal(options.normalizeLanguage("unsupported"), "zh-CN");
 });
 
 test("language controls expose a labelled group and one pressed button", () => {
   const html = read("options.html");
   assert.match(
     html,
-    /class="language-switch"[\s\S]*role="group"[\s\S]*aria-label="Interface language"/,
+    /class="language-switch"[\s\S]*role="group"[\s\S]*aria-label="界面语言"/,
   );
   assert.match(
     html,
-    /data-language="en"[\s\S]*aria-pressed="true"[\s\S]*English/,
+    /data-language="en"[\s\S]*aria-pressed="false"[\s\S]*English/,
   );
   assert.match(
     html,
-    /data-language="zh-CN"[\s\S]*aria-pressed="false"[\s\S]*中文/,
+    /data-language="zh-CN"[\s\S]*aria-pressed="true"[\s\S]*中文/,
   );
 
   const buttons = ["en", "zh-CN"].map((language) => ({
@@ -152,11 +153,11 @@ test("customization prompt switches languages and preserves technical values", (
   const englishPrompt = options.translate("en", "customizationPrompt");
   const chinesePrompt = options.translate("zh-CN", "customizationPrompt");
 
-  assert.match(html, /placeholder="Paste your Supadata key"/);
-  assert.match(html, /placeholder="Paste your DeepSeek key"/);
+  assert.match(html, /placeholder="粘贴 Supadata 密钥"/);
+  assert.match(html, /placeholder="粘贴 DeepSeek 密钥"/);
   assert.match(html, /https:\/\/dash\.supadata\.ai\/auth\/sign-up/);
   assert.match(html, /https:\/\/platform\.deepseek\.com\/api_keys/);
-  assert.ok(html.includes(`>${englishPrompt}</textarea>`));
+  assert.ok(html.includes(`>${chinesePrompt}</textarea>`));
   assert.match(chinesePrompt, /^请把当前本地 YouTube Digest 工作区改为使用/);
   assert.notEqual(chinesePrompt, englishPrompt);
   assert.match(

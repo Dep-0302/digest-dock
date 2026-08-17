@@ -43,6 +43,45 @@ The video is titled "{videoTitle}". Use the title and neighboring segments only 
 - Output only valid JSON. No markdown fences, commentary, labels, or extra keys.
 ```
 
+## Overview translation
+
+Input is a JSON object containing an already-generated English overview. Chapter
+and quote IDs are stable and must be preserved exactly.
+
+```
+You are a professional translator. Translate this English YouTube overview into {langName}.
+The video is titled "{videoTitle}". Use the title only as context for names and terminology.
+
+{baseRules}
+
+- Translate every chapter title and summary, and every key quote.
+- Keep titles concise and summaries faithful to the English meaning.
+- Preserve the speaker's tone in quotes; do not add facts, explanations, or commentary.
+- Do not merge, split, omit, or reorder items.
+- Return a JSON object with exactly this shape: {"chapters":[{"id":"chapter-0","titleZh":"中文标题","summaryZh":"中文摘要"}],"keyQuotes":[{"id":"quote-0","quoteZh":"中文引语"}]}.
+- Copy every input id exactly. Translate only the text fields.
+- Output only valid JSON. No markdown fences, commentary, labels, or extra keys.
+```
+
+## Notes translation
+
+Input is a JSON object containing 1 to 10 polished English notes. Every note has
+a stable `id`, its English `text`, and its `videoTitle` for terminology context.
+
+```
+You are a professional translator. Translate these polished English video notes into {langName}.
+
+{baseRules}
+
+- Translate each note as a complete thought in natural Simplified Chinese.
+- Preserve the speaker's meaning and tone; do not summarize, expand, or add facts.
+- Use each note's videoTitle only as context for names and terminology.
+- Do not merge, split, omit, or reorder notes.
+- Return a JSON object with exactly this shape: {"notes":[{"id":"unchanged-note-id","textZh":"中文笔记"}]}.
+- Copy every input id exactly. Translate only text values.
+- Output only valid JSON. No markdown fences, commentary, labels, or extra keys.
+```
+
 ## Variables
 
 - `{langName}` — "Simplified Chinese".

@@ -16,6 +16,8 @@
 importScripts("settings.js");
 
 const DEBUG = false;
+const ANALYSIS_SCHEMA_VERSION = 2;
+const RUNTIME_PROTOCOL_VERSION = 3;
 const AI_PROVIDER_IDLE_TIMEOUT_MS = 50_000;
 const AI_PROVIDER_HARD_TIMEOUT_MS = 120_000;
 const AI_PROVIDER_MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
@@ -34,6 +36,47 @@ chrome.storage.local
 async function getSettings() {
   const stored = await chrome.storage.local.get(YTD_SETTINGS.STORAGE_KEY);
   return YTD_SETTINGS.normalize(stored[YTD_SETTINGS.STORAGE_KEY]);
+}
+
+function isMissingContentReceiverError(error) {
+  const message = String(error?.message || error || "");
+  return (
+    message.includes("Could not establish connection") &&
+    message.includes("Receiving end does not exist")
+  );
+}
+
+function isTransientTabContextError(error) {
+  const message = String(error?.message || error || "");
+  return (
+    (message.includes("Frame with ID") && message.includes("was removed")) ||
+    message.includes("No tab with id")
+  );
+}
+
+async function sendMessageToContentWithRecovery(
+  tabId,
+  payload,
+  dependencies = {},
+) {
+  const sendMessage =
+    dependencies.sendMessage ||
+    ((targetTabId, message) => chrome.tabs.sendMessage(targetTabId, message));
+  const executeScript =
+    dependencies.executeScript ||
+    ((details) => chrome.scripting.executeScript(details));
+
+  try {
+    return await sendMessage(tabId, payload);
+  } catch (error) {
+    if (!isMissingContentReceiverError(error)) throw error;
+    debugLog(
+      "[YouTube Digest BG] Re-injecting content script after extension reload",
+      tabId,
+    );
+    await executeScript({ target: { tabId }, files: ["content.js"] });
+    return sendMessage(tabId, payload);
+  }
 }
 
 const promptFileCache = new Map();
@@ -81,7 +124,7 @@ async function requestAiCompletion({
   const settings = await getSettings();
   if (!settings.aiApiKey) {
     const error = new Error(
-      "DeepSeek API key not configured. Open YouTube Digest Settings.",
+      "尚未配置 DeepSeek API 密钥，请打开 YouTube Digest 设置。",
     );
     error.code = "NO_AI_KEY";
     throw error;
@@ -160,14 +203,14 @@ async function requestAiCompletion({
   } catch (error) {
     if (timeoutKind === "idle") {
       const timeoutError = new Error(
-        "DeepSeek request was inactive for 50 seconds. Please Retry.",
+        "DeepSeek 请求已连续 50 秒没有响应，请重试。",
       );
       timeoutError.code = "AI_IDLE_TIMEOUT";
       throw timeoutError;
     }
     if (timeoutKind === "hard") {
       const timeoutError = new Error(
-        "DeepSeek request exceeded the 120-second limit. Please Retry.",
+        "DeepSeek 请求超过 120 秒，请重试。",
       );
       timeoutError.code = "AI_HARD_TIMEOUT";
       throw timeoutError;
@@ -322,6 +365,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message.action === "translateOverview") {
+    handleTranslateOverview(message.analysis, message.videoTitle)
+      .then(sendResponse)
+      .catch((err) => sendResponse({ success: false, error: err.message }));
+    return true;
+  }
+
+  if (message.action === "translateNotes") {
+    handleTranslateNotes(message.notes)
+      .then(sendResponse)
+      .catch((err) => sendResponse({ success: false, error: err.message }));
+    return true;
+  }
+
   if (message.action === "explainSelection") {
     // Explain selected text using DeepSeek.
     handleExplainSelection(
@@ -389,6 +446,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({
           hasSupadataKey: !!settings.supadataApiKey,
           hasAiKey: !!settings.aiApiKey,
+          runtimeProtocolVersion: RUNTIME_PROTOCOL_VERSION,
         }),
       )
       .catch((error) => sendResponse({ error: error.message }));
@@ -492,7 +550,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             "URL:",
             tabs[0].url,
           );
-          let response = await chrome.tabs.sendMessage(
+          let response = await sendMessageToContentWithRecovery(
             tabs[0].id,
             message.payload,
           );
@@ -526,8 +584,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           sendResponse({ success: false, error: "No YouTube tab found" });
         }
       } catch (err) {
-        console.error("[YouTube Digest BG] Relay error:", err.message);
-        sendResponse({ success: false, error: err.message });
+        if (isTransientTabContextError(err)) {
+          debugLog("[YouTube Digest BG] YouTube tab context changed during relay");
+          sendResponse({
+            success: false,
+            error: "PAGE_CONTEXT_CHANGED",
+            message: "YouTube 页面正在刷新，请稍后重试。",
+          });
+        } else {
+          console.error("[YouTube Digest BG] Relay error:", err.message);
+          sendResponse({ success: false, error: err.message });
+        }
       }
     })();
     return true; // Keep channel open for async response
@@ -596,7 +663,7 @@ async function handleFetchTranscript(videoId) {
       return {
         success: false,
         error: "NO_SUPADATA_KEY",
-        message: "Supadata API key not configured. Open YouTube Digest Settings.",
+        message: "尚未配置 Supadata API 密钥，请打开 YouTube Digest 设置。",
       };
     }
 
@@ -630,7 +697,7 @@ async function handleFetchTranscript(videoId) {
       return {
         success: false,
         error: "NO_TRANSCRIPT",
-        message: "No native subtitle track is available for this video.",
+        message: "此视频没有可用的原生字幕轨道。",
       };
     }
 
@@ -640,14 +707,14 @@ async function handleFetchTranscript(videoId) {
         return {
           success: false,
           error: "INVALID_SUPADATA_KEY",
-          message: "Your Supadata API key is invalid. Open YouTube Digest Settings.",
+          message: "Supadata API 密钥无效，请打开 YouTube Digest 设置。",
         };
       }
       if (response.status === 404) {
         return {
           success: false,
           error: "NO_TRANSCRIPT",
-          message: "No subtitles found for this video.",
+          message: "未找到此视频的字幕。",
         };
       }
       if (response.status === 429) {
@@ -655,7 +722,7 @@ async function handleFetchTranscript(videoId) {
           success: false,
           error: "RATE_LIMITED",
           message:
-            "Supadata rate limit reached. Please wait a minute and try again.",
+            "Supadata 请求次数已达上限，请等待一分钟后重试。",
         };
       }
       throw new Error(
@@ -706,7 +773,7 @@ async function handleFetchTranscript(videoId) {
       return {
         success: false,
         error: "EMPTY_TRANSCRIPT",
-        message: "Supadata returned an empty transcript for this video.",
+        message: "Supadata 返回了空字幕。",
       };
     }
 
@@ -721,7 +788,7 @@ async function handleFetchTranscript(videoId) {
     console.error("Transcript fetch error:", error);
     return {
       success: false,
-      error: error.message || "Failed to fetch transcript",
+      error: error.message || "获取字幕失败",
     };
   }
 }
@@ -794,13 +861,13 @@ async function pollTranscriptJob(jobId, supadataApiKey) {
     }
 
     if (data.status === "failed") {
-      throw new Error("Transcript processing failed");
+      throw new Error("字幕处理失败");
     }
 
     // Status is 'queued' or 'active' — keep polling
   }
 
-  throw new Error("Transcript processing timed out");
+  throw new Error("字幕处理超时");
 }
 
 // ============================================================
@@ -871,7 +938,7 @@ async function handleAnalyzeTranscript(
       return {
         success: false,
         error: "NO_AI_KEY",
-        message: "DeepSeek API key not configured. Open YouTube Digest Settings.",
+        message: "尚未配置 DeepSeek API 密钥，请打开 YouTube Digest 设置。",
       };
     }
 
@@ -941,6 +1008,9 @@ async function handleAnalyzeTranscript(
     // Treat every model response as untrusted data. Rebuild the supported
     // schema and derive display timestamps from validated numeric seconds.
     analysis = validateAndFixTimestamps(analysis, maxTimestampSeconds);
+    if (!analysis.chapters.length || !analysis.keyQuotes.length) {
+      throw new Error("DeepSeek 没有返回可用的英文概览，请重试。");
+    }
 
     return {
       success: true,
@@ -952,19 +1022,19 @@ async function handleAnalyzeTranscript(
       return {
         success: false,
         error: "INVALID_AI_KEY",
-        message: "DeepSeek rejected the API key.",
+        message: "DeepSeek 拒绝了该 API 密钥。",
       };
     }
     if (error.status === 429) {
       return {
         success: false,
         error: "RATE_LIMITED",
-        message: "DeepSeek rate-limited this request. Try again shortly.",
+        message: "DeepSeek 限制了本次请求，请稍后重试。",
       };
     }
     return {
       success: false,
-      error: error.message || "Failed to analyze transcript",
+      error: error.message || "分析字幕失败",
     };
   }
 }
@@ -1005,10 +1075,17 @@ function validateAndFixTimestamps(analysis, maxSeconds) {
     .map((chapter) => {
       const seconds = safeSeconds(chapter?.timestampSeconds);
       const title = safeString(chapter?.title, 300);
-      if (seconds === null || !title) return null;
+      const titleZh = safeString(chapter?.titleZh, 300);
+      const summary = safeString(chapter?.summary, 1500);
+      const summaryZh = safeString(chapter?.summaryZh, 1500);
+      if (seconds === null || !title || !summary) {
+        return null;
+      }
       return {
         title,
-        summary: safeString(chapter?.summary, 1500),
+        titleZh,
+        summary,
+        summaryZh,
         timestampSeconds: seconds,
         timestamp: formatTimestamp(seconds),
       };
@@ -1023,9 +1100,11 @@ function validateAndFixTimestamps(analysis, maxSeconds) {
     .map((quote) => {
       const seconds = safeSeconds(quote?.timestampSeconds);
       const text = safeString(quote?.quote, 3000);
+      const textZh = safeString(quote?.quoteZh, 3000);
       if (seconds === null || !text) return null;
       return {
         quote: text,
+        quoteZh: textZh,
         timestampSeconds: seconds,
         timestamp: formatTimestamp(seconds),
       };
@@ -1040,7 +1119,12 @@ function validateAndFixTimestamps(analysis, maxSeconds) {
     .filter((seconds) => seconds !== null)
     .slice(0, 100);
 
-  return { chapters, keyQuotes, keyMoments };
+  return {
+    schemaVersion: ANALYSIS_SCHEMA_VERSION,
+    chapters,
+    keyQuotes,
+    keyMoments,
+  };
 }
 
 // ============================================================
@@ -1214,12 +1298,20 @@ async function handleSaveNote(
       timestampSeconds: safeTimestamp,
       timestampedUrl: timestampedUrl,
       text: cleanedText,
+      translatedText: "",
       rawText: matchedLine.text,
       createdAt: Date.now(),
     };
 
     // Save to storage
     await saveNoteToStorage(note);
+
+    // Generate the Chinese note separately. Failure never blocks the English
+    // note; the Notes tab can retry missing translations later in small batches.
+    const translationResult = await handleTranslateNotes([note]);
+    if (translationResult.success) {
+      note.translatedText = translationResult.translations[0]?.textZh || "";
+    }
 
     // Notify side panel to refresh notes list
     chrome.runtime.sendMessage({ action: "noteSaved", note }).catch(() => {});
@@ -1333,7 +1425,7 @@ async function saveNoteToStorage(note) {
 async function handleGetNotes(videoId) {
   try {
     const result = await chrome.storage.local.get("ytd_notes");
-    let notes = result.ytd_notes || [];
+    let notes = Array.isArray(result.ytd_notes) ? result.ytd_notes : [];
 
     if (videoId) {
       notes = notes.filter((n) => n.videoId === videoId);
@@ -1371,7 +1463,7 @@ async function handleExplainSelection(
       return {
         success: false,
         error: "NO_AI_KEY",
-        message: "DeepSeek API key not configured.",
+        message: "尚未配置 DeepSeek API 密钥。",
       };
     }
 
@@ -1408,7 +1500,7 @@ async function handleExplainSelection(
     console.error("Explain selection error:", error);
     return {
       success: false,
-      error: error.message || "Failed to explain selection",
+      error: error.message || "解释所选内容失败",
     };
   }
 }
@@ -1509,6 +1601,248 @@ function normalizeTranslatedSegmentBatch(parsed, sourceSegments) {
   };
 }
 
+function validateOverviewTranslationRequest(analysis) {
+  const chapters = Array.isArray(analysis?.chapters)
+    ? analysis.chapters.slice(0, 100)
+    : [];
+  const keyQuotes = Array.isArray(analysis?.keyQuotes)
+    ? analysis.keyQuotes.slice(0, 50)
+    : [];
+  if (!chapters.length || !keyQuotes.length) {
+    throw new Error("Overview translation requires chapters and key quotes");
+  }
+
+  let totalCharacters = 0;
+  const normalizedChapters = chapters.map((chapter, index) => {
+    const title =
+      typeof chapter?.title === "string" ? chapter.title.trim().slice(0, 300) : "";
+    const summary =
+      typeof chapter?.summary === "string"
+        ? chapter.summary.trim().slice(0, 1500)
+        : "";
+    if (!title || !summary) {
+      throw new Error("Overview chapter text is missing or invalid");
+    }
+    totalCharacters += title.length + summary.length;
+    return { id: `chapter-${index}`, title, summary };
+  });
+  const normalizedQuotes = keyQuotes.map((quote, index) => {
+    const text =
+      typeof quote?.quote === "string" ? quote.quote.trim().slice(0, 3000) : "";
+    if (!text) throw new Error("Overview quote text is missing or invalid");
+    totalCharacters += text.length;
+    return { id: `quote-${index}`, quote: text };
+  });
+  if (totalCharacters > 80_000) {
+    throw new Error("Overview translation input is too large");
+  }
+  return { chapters: normalizedChapters, keyQuotes: normalizedQuotes };
+}
+
+function normalizeOverviewTranslation(parsed, source) {
+  const chapterCandidates = new Map(
+    (Array.isArray(parsed?.chapters) ? parsed.chapters : [])
+      .filter((item) => typeof item?.id === "string")
+      .map((item) => [item.id, item]),
+  );
+  const quoteCandidates = new Map(
+    (Array.isArray(parsed?.keyQuotes) ? parsed.keyQuotes : [])
+      .filter((item) => typeof item?.id === "string")
+      .map((item) => [item.id, item]),
+  );
+
+  return {
+    chapters: source.chapters.map((chapter) => {
+      const candidate = chapterCandidates.get(chapter.id);
+      const titleZh =
+        typeof candidate?.titleZh === "string" ? candidate.titleZh.trim() : "";
+      const summaryZh =
+        typeof candidate?.summaryZh === "string"
+          ? candidate.summaryZh.trim()
+          : "";
+      return {
+        id: chapter.id,
+        titleZh: looksLikeChineseTranslation(titleZh, chapter.title)
+          ? titleZh
+          : "",
+        summaryZh: looksLikeChineseTranslation(summaryZh, chapter.summary)
+          ? summaryZh
+          : "",
+      };
+    }),
+    keyQuotes: source.keyQuotes.map((quote) => {
+      const candidate = quoteCandidates.get(quote.id);
+      const quoteZh =
+        typeof candidate?.quoteZh === "string" ? candidate.quoteZh.trim() : "";
+      return {
+        id: quote.id,
+        quoteZh: looksLikeChineseTranslation(quoteZh, quote.quote) ? quoteZh : "",
+      };
+    }),
+  };
+}
+
+async function handleTranslateOverview(analysis, videoTitle) {
+  try {
+    const settings = await getSettings();
+    if (!settings.aiApiKey) {
+      return { success: false, error: "尚未配置 DeepSeek API 密钥" };
+    }
+
+    const source = validateOverviewTranslationRequest(analysis);
+    const baseRules = await getTranslationBaseRules("zh");
+    const systemPrompt = await loadPromptSection(
+      "translation.md",
+      "Overview translation",
+      {
+        langName: "Simplified Chinese",
+        videoTitle: videoTitle || "Unknown",
+        baseRules,
+      },
+    );
+    const options = {
+      temperature: 0.2,
+      maxTokens: 8192,
+      responseFormat: { type: "json_object" },
+    };
+    let result = await callAiTranslation(
+      systemPrompt,
+      JSON.stringify(source),
+      options,
+    );
+    if (!result.success && result.code === "EMPTY_AI_RESPONSE") {
+      result = await callAiTranslation(systemPrompt, JSON.stringify(source), {
+        temperature: options.temperature,
+        maxTokens: options.maxTokens,
+      });
+    }
+    if (!result.success) return result;
+
+    const translatedOverview = normalizeOverviewTranslation(
+      parseLooseJson(result.text),
+      source,
+    );
+    const complete =
+      translatedOverview.chapters.every(
+        (chapter) => chapter.titleZh && chapter.summaryZh,
+      ) && translatedOverview.keyQuotes.every((quote) => quote.quoteZh);
+    if (!complete) {
+      return { success: false, error: "中文概览翻译不完整，请重试。" };
+    }
+    return { success: true, translatedOverview };
+  } catch (error) {
+    return { success: false, error: error.message || "中文概览生成失败" };
+  }
+}
+
+function validateNoteTranslationRequest(notes) {
+  if (!Array.isArray(notes) || notes.length < 1 || notes.length > 10) {
+    throw new Error("Note translation requires 1 to 10 notes");
+  }
+  let totalCharacters = 0;
+  const seenIds = new Set();
+  const normalized = notes.map((note) => {
+    const id = typeof note?.id === "string" ? note.id.trim() : "";
+    const text = typeof note?.text === "string" ? note.text.trim() : "";
+    const videoTitle =
+      typeof note?.videoTitle === "string"
+        ? note.videoTitle.trim().slice(0, 500)
+        : "";
+    if (
+      !/^[A-Za-z0-9:_-]{1,128}$/.test(id) ||
+      seenIds.has(id) ||
+      !text ||
+      text.length > 3000
+    ) {
+      throw new Error("Note translation input is missing or invalid");
+    }
+    seenIds.add(id);
+    totalCharacters += text.length;
+    return { id, text, videoTitle };
+  });
+  if (totalCharacters > 30_000) {
+    throw new Error("Note translation input is too large");
+  }
+  return normalized;
+}
+
+function normalizeNoteTranslation(parsed, sourceNotes) {
+  const candidates = new Map(
+    (Array.isArray(parsed?.notes) ? parsed.notes : [])
+      .filter((note) => typeof note?.id === "string")
+      .map((note) => [note.id, note]),
+  );
+  return sourceNotes.map((source) => {
+    const candidate = candidates.get(source.id);
+    const textZh =
+      typeof candidate?.textZh === "string" ? candidate.textZh.trim() : "";
+    return {
+      id: source.id,
+      textZh: looksLikeChineseTranslation(textZh, source.text) ? textZh : "",
+    };
+  });
+}
+
+async function handleTranslateNotes(notes) {
+  try {
+    const settings = await getSettings();
+    if (!settings.aiApiKey) {
+      return { success: false, error: "尚未配置 DeepSeek API 密钥" };
+    }
+    const sourceNotes = validateNoteTranslationRequest(notes);
+    const baseRules = await getTranslationBaseRules("zh");
+    const systemPrompt = await loadPromptSection(
+      "translation.md",
+      "Notes translation",
+      {
+        langName: "Simplified Chinese",
+        baseRules,
+      },
+    );
+    const options = {
+      temperature: 0.2,
+      maxTokens: 4096,
+      responseFormat: { type: "json_object" },
+    };
+    let result = await callAiTranslation(
+      systemPrompt,
+      JSON.stringify({ notes: sourceNotes }),
+      options,
+    );
+    if (!result.success && result.code === "EMPTY_AI_RESPONSE") {
+      result = await callAiTranslation(
+        systemPrompt,
+        JSON.stringify({ notes: sourceNotes }),
+        { temperature: options.temperature, maxTokens: options.maxTokens },
+      );
+    }
+    if (!result.success) return result;
+
+    const translations = normalizeNoteTranslation(
+      parseLooseJson(result.text),
+      sourceNotes,
+    );
+    if (translations.some((note) => !note.textZh)) {
+      return { success: false, error: "中文笔记翻译不完整，请重试。" };
+    }
+
+    const translatedById = new Map(
+      translations.map((note) => [note.id, note.textZh]),
+    );
+    const stored = await chrome.storage.local.get("ytd_notes");
+    const storedNotes = Array.isArray(stored.ytd_notes) ? stored.ytd_notes : [];
+    const updatedNotes = storedNotes.map((note) =>
+      translatedById.has(note.id)
+        ? { ...note, translatedText: translatedById.get(note.id) }
+        : note,
+    );
+    await chrome.storage.local.set({ ytd_notes: updatedNotes });
+    return { success: true, translations };
+  } catch (error) {
+    return { success: false, error: error.message || "中文笔记生成失败" };
+  }
+}
+
 /**
  * Translates content using DeepSeek.
  * @param {Object} content - JSON object containing semantic transcript segments
@@ -1539,7 +1873,7 @@ async function handleTranslateContent(
 
     const settings = await getSettings();
     if (!settings.aiApiKey) {
-      return { success: false, error: "DeepSeek API key not configured" };
+      return { success: false, error: "尚未配置 DeepSeek API 密钥" };
     }
 
     const sourceSegments = validateTranscriptBatchRequest(content);
@@ -1581,13 +1915,13 @@ async function handleTranslateContent(
     if (!aligned.segments.some((segment) => segment.text)) {
       return {
         success: false,
-        error: "Translation returned no valid Chinese segments",
+        error: "翻译结果中没有有效的中文片段",
       };
     }
     return { success: true, translatedContent: aligned };
   } catch (error) {
     console.error("[YouTube Digest] Translation error:", error);
-    return { success: false, error: error.message || "Translation failed" };
+    return { success: false, error: error.message || "翻译失败" };
   }
 }
 
@@ -1632,6 +1966,18 @@ async function callAiTranslation(
 globalThis.__YTD_TRANSLATION_TESTING__ = {
   requestAiCompletion,
   callAiTranslation,
+  handleAnalyzeTranscript,
+  handleGetNotes,
+  handleTranslateOverview,
+  handleTranslateNotes,
+  isMissingContentReceiverError,
+  isTransientTabContextError,
+  normalizeOverviewTranslation,
+  normalizeNoteTranslation,
+  sendMessageToContentWithRecovery,
+  validateAndFixTimestamps,
+  validateOverviewTranslationRequest,
+  validateNoteTranslationRequest,
   validateTranscriptBatchRequest,
   normalizeTranslatedSegmentBatch,
   handleTranslateContent,
