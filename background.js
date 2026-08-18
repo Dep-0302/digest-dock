@@ -1300,6 +1300,8 @@ async function handleSaveNote(
       text: cleanedText,
       translatedText: "",
       rawText: matchedLine.text,
+      sourceLanguage:
+        typeof matchedLine.language === "string" ? matchedLine.language : "",
       createdAt: Date.now(),
     };
 
@@ -1406,17 +1408,27 @@ async function cleanupNoteText(
 /**
  * Saves a note to chrome.storage.local
  */
-async function saveNoteToStorage(note) {
-  const result = await chrome.storage.local.get("ytd_notes");
-  const notes = result.ytd_notes || [];
-  notes.unshift(note); // Add to beginning (newest first)
+let noteStorageWriteQueue = Promise.resolve();
 
-  // Keep only last 100 notes to prevent storage bloat
-  if (notes.length > 100) {
-    notes.splice(100);
-  }
+function withNoteStorageWrite(task) {
+  const run = noteStorageWriteQueue.then(task);
+  noteStorageWriteQueue = run.catch(() => {});
+  return run;
+}
 
-  await chrome.storage.local.set({ ytd_notes: notes });
+function saveNoteToStorage(note) {
+  return withNoteStorageWrite(async () => {
+    const result = await chrome.storage.local.get("ytd_notes");
+    const notes = Array.isArray(result.ytd_notes) ? result.ytd_notes : [];
+    notes.unshift(note); // Add to beginning (newest first)
+
+    // Keep only last 100 notes to prevent storage bloat
+    if (notes.length > 100) {
+      notes.splice(100);
+    }
+
+    await chrome.storage.local.set({ ytd_notes: notes });
+  });
 }
 
 /**
@@ -1442,11 +1454,14 @@ async function handleGetNotes(videoId) {
  */
 async function handleDeleteNote(noteId) {
   try {
-    const result = await chrome.storage.local.get("ytd_notes");
-    let notes = result.ytd_notes || [];
-    notes = notes.filter((n) => n.id !== noteId);
-    await chrome.storage.local.set({ ytd_notes: notes });
-    return { success: true };
+    return await withNoteStorageWrite(async () => {
+      const result = await chrome.storage.local.get("ytd_notes");
+      const notes = Array.isArray(result.ytd_notes) ? result.ytd_notes : [];
+      await chrome.storage.local.set({
+        ytd_notes: notes.filter((note) => note.id !== noteId),
+      });
+      return { success: true };
+    });
   } catch (error) {
     return { success: false, error: error.message };
   }
@@ -1735,6 +1750,13 @@ async function handleTranslateOverview(analysis, videoTitle) {
   }
 }
 
+function noteHasChineseSource(note) {
+  const language = String(note?.sourceLanguage || "").trim();
+  const rawText = String(note?.rawText || "");
+  if (language) return /^zh(?:[-_]|$)/i.test(language);
+  return /[\u3400-\u9fff]/.test(rawText);
+}
+
 function validateNoteTranslationRequest(notes) {
   if (!Array.isArray(notes) || notes.length < 1 || notes.length > 10) {
     throw new Error("Note translation requires 1 to 10 notes");
@@ -1748,6 +1770,12 @@ function validateNoteTranslationRequest(notes) {
       typeof note?.videoTitle === "string"
         ? note.videoTitle.trim().slice(0, 500)
         : "";
+    const rawText =
+      typeof note?.rawText === "string" ? note.rawText.trim().slice(0, 3000) : "";
+    const sourceLanguage =
+      typeof note?.sourceLanguage === "string"
+        ? note.sourceLanguage.trim().slice(0, 20)
+        : "";
     if (
       !/^[A-Za-z0-9:_-]{1,128}$/.test(id) ||
       seenIds.has(id) ||
@@ -1758,7 +1786,7 @@ function validateNoteTranslationRequest(notes) {
     }
     seenIds.add(id);
     totalCharacters += text.length;
-    return { id, text, videoTitle };
+    return { id, text, videoTitle, rawText, sourceLanguage };
   });
   if (totalCharacters > 30_000) {
     throw new Error("Note translation input is too large");
@@ -1783,13 +1811,76 @@ function normalizeNoteTranslation(parsed, sourceNotes) {
   });
 }
 
-async function handleTranslateNotes(notes) {
+function noteTranslationUserContent(notes) {
+  return JSON.stringify({
+    notes: notes.map(({ id, text, videoTitle }) => ({ id, text, videoTitle })),
+  });
+}
+
+function persistNoteTranslations(translatedById) {
+  return withNoteStorageWrite(async () => {
+    const stored = await chrome.storage.local.get("ytd_notes");
+    const storedNotes = Array.isArray(stored.ytd_notes) ? stored.ytd_notes : [];
+    const updatedNotes = storedNotes.map((note) =>
+      translatedById.has(note.id)
+        ? { ...note, translatedText: translatedById.get(note.id) }
+        : note,
+    );
+    await chrome.storage.local.set({ ytd_notes: updatedNotes });
+  });
+}
+
+let noteTranslationQueue = Promise.resolve();
+
+function handleTranslateNotes(notes) {
+  const run = noteTranslationQueue.then(() => runTranslateNotes(notes));
+  noteTranslationQueue = run.catch(() => {});
+  return run;
+}
+
+async function runTranslateNotes(notes) {
   try {
+    const requestedNotes = validateNoteTranslationRequest(notes);
+    const storedBefore = await chrome.storage.local.get("ytd_notes");
+    const storedNotesBefore = Array.isArray(storedBefore.ytd_notes)
+      ? storedBefore.ytd_notes
+      : [];
+    const storedTranslationById = new Map(
+      storedNotesBefore
+        .filter(
+          (note) =>
+            typeof note?.id === "string" &&
+            typeof note?.translatedText === "string" &&
+            note.translatedText.trim(),
+        )
+        .map((note) => [note.id, note.translatedText.trim()]),
+    );
+    const existingTranslationById = new Map();
+    requestedNotes.forEach((note) => {
+      if (noteHasChineseSource(note)) {
+        existingTranslationById.set(note.id, note.rawText || note.text);
+      } else if (storedTranslationById.has(note.id)) {
+        existingTranslationById.set(note.id, storedTranslationById.get(note.id));
+      }
+    });
+    const existingTranslations = requestedNotes
+      .filter((note) => existingTranslationById.has(note.id))
+      .map((note) => ({
+        id: note.id,
+        textZh: existingTranslationById.get(note.id),
+      }));
+    const sourceNotes = requestedNotes.filter(
+      (note) => !existingTranslationById.has(note.id),
+    );
+    if (!sourceNotes.length) {
+      await persistNoteTranslations(existingTranslationById);
+      return { success: true, translations: existingTranslations, missingIds: [] };
+    }
+
     const settings = await getSettings();
     if (!settings.aiApiKey) {
       return { success: false, error: "尚未配置 DeepSeek API 密钥" };
     }
-    const sourceNotes = validateNoteTranslationRequest(notes);
     const baseRules = await getTranslationBaseRules("zh");
     const systemPrompt = await loadPromptSection(
       "translation.md",
@@ -1804,40 +1895,78 @@ async function handleTranslateNotes(notes) {
       maxTokens: 4096,
       responseFormat: { type: "json_object" },
     };
-    let result = await callAiTranslation(
-      systemPrompt,
-      JSON.stringify({ notes: sourceNotes }),
-      options,
-    );
+    const batchUserContent = noteTranslationUserContent(sourceNotes);
+    let result = await callAiTranslation(systemPrompt, batchUserContent, options);
     if (!result.success && result.code === "EMPTY_AI_RESPONSE") {
       result = await callAiTranslation(
         systemPrompt,
-        JSON.stringify({ notes: sourceNotes }),
+        batchUserContent,
         { temperature: options.temperature, maxTokens: options.maxTokens },
       );
     }
     if (!result.success) return result;
 
-    const translations = normalizeNoteTranslation(
-      parseLooseJson(result.text),
-      sourceNotes,
-    );
-    if (translations.some((note) => !note.textZh)) {
-      return { success: false, error: "中文笔记翻译不完整，请重试。" };
+    let translations;
+    try {
+      translations = normalizeNoteTranslation(
+        parseLooseJson(result.text),
+        sourceNotes,
+      );
+    } catch (_error) {
+      translations = sourceNotes.map((note) => ({ id: note.id, textZh: "" }));
     }
 
+    // Keep every valid item from the batch. Retry only missing items once,
+    // individually, so one malformed model entry cannot discard its siblings.
+    for (let index = 0; index < translations.length; index += 1) {
+      if (translations[index].textZh) continue;
+      const source = sourceNotes[index];
+      const retryUserContent = noteTranslationUserContent([source]);
+      let retry = await callAiTranslation(
+        systemPrompt,
+        retryUserContent,
+        options,
+      );
+      if (!retry.success && retry.code === "EMPTY_AI_RESPONSE") {
+        retry = await callAiTranslation(
+          systemPrompt,
+          retryUserContent,
+          { temperature: options.temperature, maxTokens: options.maxTokens },
+        );
+      }
+      if (!retry.success) continue;
+      try {
+        const [translated] = normalizeNoteTranslation(
+          parseLooseJson(retry.text),
+          [source],
+        );
+        if (translated?.textZh) translations[index] = translated;
+      } catch (_error) {
+        // Preserve the English note and continue with the remaining items.
+      }
+    }
+
+    const validTranslations = [
+      ...existingTranslations,
+      ...translations.filter((note) => note.textZh),
+    ];
+    if (!validTranslations.length) {
+      return { success: false, error: "中文笔记生成失败，请重试。" };
+    }
     const translatedById = new Map(
-      translations.map((note) => [note.id, note.textZh]),
+      validTranslations.map((note) => [note.id, note.textZh]),
     );
-    const stored = await chrome.storage.local.get("ytd_notes");
-    const storedNotes = Array.isArray(stored.ytd_notes) ? stored.ytd_notes : [];
-    const updatedNotes = storedNotes.map((note) =>
-      translatedById.has(note.id)
-        ? { ...note, translatedText: translatedById.get(note.id) }
-        : note,
-    );
-    await chrome.storage.local.set({ ytd_notes: updatedNotes });
-    return { success: true, translations };
+    await persistNoteTranslations(translatedById);
+    return {
+      success: true,
+      translations: validTranslations,
+      missingIds: requestedNotes
+        .filter(
+          (note) =>
+            !validTranslations.some((translated) => translated.id === note.id),
+        )
+        .map((note) => note.id),
+    };
   } catch (error) {
     return { success: false, error: error.message || "中文笔记生成失败" };
   }
@@ -1968,12 +2097,15 @@ globalThis.__YTD_TRANSLATION_TESTING__ = {
   callAiTranslation,
   handleAnalyzeTranscript,
   handleGetNotes,
+  handleDeleteNote,
   handleTranslateOverview,
   handleTranslateNotes,
   isMissingContentReceiverError,
   isTransientTabContextError,
+  noteHasChineseSource,
   normalizeOverviewTranslation,
   normalizeNoteTranslation,
+  saveNoteToStorage,
   sendMessageToContentWithRecovery,
   validateAndFixTimestamps,
   validateOverviewTranslationRequest,

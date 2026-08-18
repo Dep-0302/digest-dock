@@ -91,6 +91,8 @@ test("release copy documents current scope without em dashes", () => {
   assert.match(chineseReadme, /不会发起第三次生成/);
   assert.match(readme, /Notes are polished in English once and translated into Simplified Chinese once/);
   assert.match(chineseReadme, /笔记先生成一次润色后的英文，再单独生成一次简体中文/);
+  assert.match(readme, /source subtitle is already Chinese[\s\S]*no Chinese-translation request/);
+  assert.match(chineseReadme, /原字幕已经是中文[\s\S]*不再发送中文翻译请求/);
   assert.match(
     read("PRIVACY.md"),
     /polished English note and its video title when generating the separately stored Simplified Chinese note/,

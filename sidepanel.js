@@ -1754,19 +1754,36 @@ function setNotesModeButtons(mode) {
   });
 }
 
+function noteHasChineseSource(note) {
+  const language = String(note?.sourceLanguage || "").trim();
+  const rawText = String(note?.rawText || "");
+  if (language) return /^zh(?:[-_]|$)/i.test(language);
+  return /[\u3400-\u9fff]/.test(rawText);
+}
+
 function noteOriginalText(note) {
+  if (noteHasChineseSource(note)) {
+    return String(note?.rawText || note?.text || "").trim();
+  }
   return String(note?.text || note?.rawText || "").trim();
 }
 
 function noteChineseText(note) {
+  if (noteHasChineseSource(note)) return noteOriginalText(note);
   return String(note?.translatedText || "").trim();
 }
 
 function renderNoteLanguageContent(note, mode = currentNotesMode) {
   const original = noteOriginalText(note);
   const chinese = noteChineseText(note);
-  const renderBlock = (language, text) =>
-    `<span class="note-language-block note-language-block--${language}" lang="${language === "zh" ? "zh-CN" : "en"}">“${escapeHtml(text)}”</span>`;
+  const renderBlock = (language, text) => {
+    const contentLanguage =
+      language === "zh" ||
+      (language === "original" && noteHasChineseSource(note))
+        ? "zh-CN"
+        : "en";
+    return `<span class="note-language-block note-language-block--${language}" lang="${contentLanguage}">“${escapeHtml(text)}”</span>`;
+  };
 
   if (mode === "original") return renderBlock("original", original);
   if (mode === "zh") {
@@ -1774,6 +1791,7 @@ function renderNoteLanguageContent(note, mode = currentNotesMode) {
       ? renderBlock("zh", chinese)
       : renderBlock("original", original);
   }
+  if (chinese && chinese === original) return renderBlock("zh", chinese);
   return chinese
     ? renderBlock("original", original) + renderBlock("zh", chinese)
     : renderBlock("original", original);
@@ -1784,6 +1802,7 @@ function noteCopyTextForMode(note, mode = currentNotesMode) {
   const chinese = noteChineseText(note);
   if (mode === "original") return original;
   if (mode === "zh") return chinese || original;
+  if (chinese && chinese === original) return original;
   return [original, chinese].filter(Boolean).join("\n");
 }
 
@@ -1824,6 +1843,8 @@ async function ensureNotesChinese() {
           id: note.id,
           text: noteOriginalText(note),
           videoTitle: note.videoTitle || "",
+          rawText: note.rawText || "",
+          sourceLanguage: note.sourceLanguage || "",
         })),
       });
       if (generation !== notesTranslationGeneration) return;
@@ -1840,7 +1861,17 @@ async function ensureNotesChinese() {
       );
       renderNotes(currentNotes, currentNotesFilterVideoId);
     }
-    setNotesTranslationStatus();
+    const remainingCount = currentNotes.filter(
+      (note) => noteOriginalText(note) && !noteChineseText(note),
+    ).length;
+    if (remainingCount) {
+      setNotesTranslationStatus(
+        `${remainingCount} 条中文笔记仍未生成，已保留原文。切换到中文或双语可再次重试。`,
+        true,
+      );
+    } else {
+      setNotesTranslationStatus();
+    }
   } catch (error) {
     if (generation !== notesTranslationGeneration) return;
     setNotesTranslationStatus(
@@ -2504,6 +2535,7 @@ globalThis.__YTD_TRANSCRIPT_TESTING__ = {
   alignTranslatedSegmentBatch,
   hasUsableEnglishAnalysis,
   hasCompleteChineseAnalysis,
+  noteHasChineseSource,
   noteCopyTextForMode,
   renderNoteLanguageContent,
   renderChapterLanguageContent,

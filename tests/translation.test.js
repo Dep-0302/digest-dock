@@ -366,6 +366,37 @@ test("notes render and copy original, Chinese, and bilingual variants", () => {
     helpers.noteCopyTextForMode(englishOnly, "zh"),
     "English only.",
   );
+  const chineseSource = {
+    text: "AI-polished fallback",
+    rawText: "原字幕本身就是中文。",
+    sourceLanguage: "zh-CN",
+  };
+  assert.equal(helpers.noteHasChineseSource(chineseSource), true);
+  const chineseSourceBilingual = helpers.renderNoteLanguageContent(
+    chineseSource,
+    "bilingual",
+  );
+  assert.match(chineseSourceBilingual, /原字幕本身就是中文/);
+  assert.equal(
+    (chineseSourceBilingual.match(/<span\b/g) || []).length,
+    1,
+    "Chinese source text must not be duplicated in bilingual mode",
+  );
+  assert.equal(
+    helpers.noteCopyTextForMode(chineseSource, "bilingual"),
+    "原字幕本身就是中文。",
+  );
+  assert.match(
+    helpers.renderNoteLanguageContent(chineseSource, "original"),
+    /lang="zh-CN"/,
+  );
+  assert.equal(
+    helpers.noteHasChineseSource({
+      rawText: "東京で漢字を使います。",
+      sourceLanguage: "ja",
+    }),
+    false,
+  );
 });
 
 test("overview analysis validation preserves usable English when Chinese is incomplete", () => {
@@ -504,11 +535,17 @@ test("notes generate Chinese once from polished English and persist it", async (
     backgroundSource,
     /async function handleSaveNote\([\s\S]*?cleanupNoteText\([\s\S]*?saveNoteToStorage\(note\)[\s\S]*?handleTranslateNotes\(\[note\]\)/,
   );
+  assert.match(
+    backgroundSource,
+    /sourceLanguage:[\s\S]*?matchedLine\.language/,
+  );
   const requests = [];
   let storedNotes = [
     {
       id: "note_1",
       text: "A polished English note.",
+      rawText: "東京で漢字を使います。",
+      sourceLanguage: "ja",
       videoTitle: "Example video",
       translatedText: "",
     },
@@ -560,6 +597,273 @@ test("notes generate Chinese once from polished English and persist it", async (
   assert.equal(storedNotes[0].translatedText, "一条润色后的中文笔记。");
   assert.equal(requests.length, 1);
   assert.match(requests[0].messages[0].content, /Translate these polished English video notes/);
+  assert.deepEqual(JSON.parse(requests[0].messages[1].content), {
+    notes: [
+      {
+        id: "note_1",
+        text: "A polished English note.",
+        videoTitle: "Example video",
+      },
+    ],
+  });
+});
+
+test("Chinese source notes reuse their raw subtitle without an API call", async () => {
+  let storedNotes = [
+    {
+      id: "note_zh",
+      text: "Polished fallback text.",
+      rawText: "这条原字幕已经是中文。",
+      sourceLanguage: "zh-CN",
+      videoTitle: "示例视频",
+    },
+  ];
+  let apiCalls = 0;
+  const background = loadBackgroundHelpers({
+    storageGetImpl: async (key) =>
+      key === "ytd_notes" ? { ytd_notes: storedNotes } : {},
+    storageSetImpl: async (items) => {
+      if (items.ytd_notes) storedNotes = items.ytd_notes;
+    },
+    fetchImpl: async () => {
+      apiCalls += 1;
+      throw new Error("Chinese source notes must not call the API");
+    },
+  });
+
+  const result = await background.handleTranslateNotes(storedNotes);
+  assert.equal(result.success, true);
+  assert.equal(apiCalls, 0);
+  assert.equal(result.translations[0].textZh, "这条原字幕已经是中文。");
+  assert.equal(storedNotes[0].translatedText, "这条原字幕已经是中文。");
+  assert.equal(background.noteHasChineseSource(storedNotes[0]), true);
+});
+
+test("missing note translations retry individually instead of discarding the batch", async () => {
+  const requests = [];
+  let storedNotes = [
+    { id: "note_1", text: "First English note.", videoTitle: "Video" },
+    { id: "note_2", text: "Second English note.", videoTitle: "Video" },
+  ];
+  const background = loadBackgroundHelpers({
+    storageGetImpl: async (key) => {
+      if (key === "ytd_settings") {
+        return { ytd_settings: { aiApiKey: "test-key" } };
+      }
+      if (key === "ytd_notes") return { ytd_notes: storedNotes };
+      return {};
+    },
+    storageSetImpl: async (items) => {
+      if (items.ytd_notes) storedNotes = items.ytd_notes;
+    },
+    fetchImpl: async (url, options) => {
+      if (url.startsWith("chrome-extension://")) {
+        return { ok: true, text: async () => read("prompts/translation.md") };
+      }
+      requests.push(JSON.parse(options.body));
+      const notes =
+        requests.length === 1
+          ? [{ id: "note_1", textZh: "第一条中文笔记。" }]
+          : [{ id: "note_2", textZh: "第二条中文笔记。" }];
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [{ message: { content: JSON.stringify({ notes }) } }],
+        }),
+      };
+    },
+  });
+
+  const result = await background.handleTranslateNotes(storedNotes);
+  assert.equal(result.success, true);
+  assert.equal(requests.length, 2);
+  assert.deepEqual(result.missingIds, []);
+  assert.equal(storedNotes[0].translatedText, "第一条中文笔记。");
+  assert.equal(storedNotes[1].translatedText, "第二条中文笔记。");
+});
+
+test("valid note translations persist even when another item still fails", async () => {
+  let storedNotes = [
+    { id: "note_1", text: "First English note.", videoTitle: "Video" },
+    { id: "note_2", text: "Second English note.", videoTitle: "Video" },
+  ];
+  let apiCall = 0;
+  const background = loadBackgroundHelpers({
+    storageGetImpl: async (key) => {
+      if (key === "ytd_settings") {
+        return { ytd_settings: { aiApiKey: "test-key" } };
+      }
+      if (key === "ytd_notes") return { ytd_notes: storedNotes };
+      return {};
+    },
+    storageSetImpl: async (items) => {
+      if (items.ytd_notes) storedNotes = items.ytd_notes;
+    },
+    fetchImpl: async (url) => {
+      if (url.startsWith("chrome-extension://")) {
+        return { ok: true, text: async () => read("prompts/translation.md") };
+      }
+      apiCall += 1;
+      if (apiCall === 1) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            choices: [
+              {
+                message: {
+                  content: JSON.stringify({
+                    notes: [{ id: "note_1", textZh: "第一条中文笔记。" }],
+                  }),
+                },
+              },
+            ],
+          }),
+        };
+      }
+      return { ok: false, status: 429, json: async () => ({}) };
+    },
+  });
+
+  const result = await background.handleTranslateNotes(storedNotes);
+  assert.equal(result.success, true);
+  assert.deepEqual(result.missingIds, ["note_2"]);
+  assert.equal(storedNotes[0].translatedText, "第一条中文笔记。");
+  assert.equal(storedNotes[1].translatedText, undefined);
+});
+
+test("concurrent requests for the same note serialize and call the API once", async () => {
+  let storedNotes = [
+    { id: "note_1", text: "English note.", videoTitle: "Video" },
+  ];
+  let apiCalls = 0;
+  const background = loadBackgroundHelpers({
+    storageGetImpl: async (key) => {
+      if (key === "ytd_settings") {
+        return { ytd_settings: { aiApiKey: "test-key" } };
+      }
+      if (key === "ytd_notes") return { ytd_notes: storedNotes };
+      return {};
+    },
+    storageSetImpl: async (items) => {
+      if (items.ytd_notes) storedNotes = items.ytd_notes;
+    },
+    fetchImpl: async (url) => {
+      if (url.startsWith("chrome-extension://")) {
+        return { ok: true, text: async () => read("prompts/translation.md") };
+      }
+      apiCalls += 1;
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  notes: [{ id: "note_1", textZh: "中文笔记。" }],
+                }),
+              },
+            },
+          ],
+        }),
+      };
+    },
+  });
+  const request = [
+    { id: "note_1", text: "English note.", videoTitle: "Video" },
+  ];
+
+  const [first, second] = await Promise.all([
+    background.handleTranslateNotes(request),
+    background.handleTranslateNotes(request),
+  ]);
+  assert.equal(first.success, true);
+  assert.equal(second.success, true);
+  assert.equal(apiCalls, 1);
+  assert.equal(storedNotes[0].translatedText, "中文笔记。");
+});
+
+test("note translation, save, and delete share one storage write queue", async () => {
+  let storedNotes = [
+    { id: "note_1", text: "English note.", videoTitle: "Video" },
+  ];
+  let signalTranslationWrite;
+  const translationWriteStarted = new Promise((resolve) => {
+    signalTranslationWrite = resolve;
+  });
+  let releaseTranslationWrite;
+  const translationWriteGate = new Promise((resolve) => {
+    releaseTranslationWrite = resolve;
+  });
+  let blockedTranslationWrite = false;
+  const background = loadBackgroundHelpers({
+    storageGetImpl: async (key) => {
+      if (key === "ytd_settings") {
+        return { ytd_settings: { aiApiKey: "test-key" } };
+      }
+      if (key === "ytd_notes") {
+        return { ytd_notes: storedNotes.map((note) => ({ ...note })) };
+      }
+      return {};
+    },
+    storageSetImpl: async (items) => {
+      if (!Array.isArray(items.ytd_notes)) return;
+      const nextNotes = items.ytd_notes.map((note) => ({ ...note }));
+      if (
+        !blockedTranslationWrite &&
+        nextNotes.some((note) => note.translatedText === "中文笔记。")
+      ) {
+        blockedTranslationWrite = true;
+        signalTranslationWrite();
+        await translationWriteGate;
+      }
+      storedNotes = nextNotes;
+    },
+    fetchImpl: async (url) => {
+      if (url.startsWith("chrome-extension://")) {
+        return { ok: true, text: async () => read("prompts/translation.md") };
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  notes: [{ id: "note_1", textZh: "中文笔记。" }],
+                }),
+              },
+            },
+          ],
+        }),
+      };
+    },
+  });
+
+  const translation = background.handleTranslateNotes(storedNotes);
+  await translationWriteStarted;
+  const save = background.saveNoteToStorage({
+    id: "note_new",
+    text: "New note.",
+    videoTitle: "Video",
+  });
+  const deletion = background.handleDeleteNote("note_1");
+  releaseTranslationWrite();
+
+  const [translationResult, deletionResult] = await Promise.all([
+    translation,
+    deletion,
+    save,
+  ]);
+  assert.equal(translationResult.success, true);
+  assert.equal(deletionResult.success, true);
+  assert.deepEqual(
+    storedNotes.map((note) => note.id),
+    ["note_new"],
+  );
 });
 
 test("relay recovery reinjects the content script once after extension reload", async () => {
