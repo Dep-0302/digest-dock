@@ -492,9 +492,15 @@ function handleFrontTabUrl(url) {
 
 // Fires when a tab's URL changes — including YouTube's no-reload navigation.
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-  if (!changeInfo.url || !tab.active) return;
+  if (!tab.active) return;
   if (panelWindowId !== null && tab.windowId !== panelWindowId) return;
-  handleFrontTabUrl(changeInfo.url);
+  if (changeInfo.url) {
+    handleFrontTabUrl(changeInfo.url);
+    return;
+  }
+  if (changeInfo.status === "complete" && tabId === youtubeTabId) {
+    scheduleDigestRefresh();
+  }
 });
 
 // Fires when a different tab comes to the front — switching tabs, or a new
@@ -664,11 +670,20 @@ async function runCheckCurrentTab(generation) {
         });
         if (!isLatestCheck()) return;
         debugLog("[YouTube Digest Panel] getVideoInfo result:", result);
+        if (result?.error === "PAGE_REFRESH_REQUIRED") {
+          const refreshError = new Error(
+            result.message ||
+              "YouTube Digest 已更新，请刷新当前 YouTube 页面后重试。",
+          );
+          refreshError.code = "PAGE_REFRESH_REQUIRED";
+          throw refreshError;
+        }
         if (result.success && result.response) {
           videoInfo = result.response;
         }
       } catch (e) {
         if (!isLatestCheck()) return;
+        if (e?.code === "PAGE_REFRESH_REQUIRED") throw e;
         console.error("[YouTube Digest Panel] getVideoInfo error:", e);
       }
 
@@ -701,6 +716,11 @@ async function runCheckCurrentTab(generation) {
     if (isTransientTabLookupError(error)) {
       debugLog("[YouTube Digest Panel] Active tab changed during inspection");
       scheduleDigestRefresh();
+      return;
+    }
+    if (error?.code === "PAGE_REFRESH_REQUIRED") {
+      debugLog("[YouTube Digest Panel] YouTube page refresh required");
+      showPageRefreshRequired(youtubeTabId, error.message);
       return;
     }
     console.error("Tab check error:", error);
@@ -1473,6 +1493,15 @@ function showError(title, message) {
   document.getElementById("errorTitle").textContent = title;
   document.getElementById("errorMessage").textContent = message;
   document.getElementById("errorBtn").textContent = "重试";
+}
+
+function showPageRefreshRequired(tabId, message) {
+  showError(
+    "请刷新 YouTube 页面",
+    message || "YouTube Digest 已更新，请刷新当前 YouTube 页面后重试。",
+  );
+  document.getElementById("errorBtn").textContent = "刷新页面";
+  errorAction = () => chrome.tabs.reload(tabId);
 }
 
 function showConfigError(configStatus) {

@@ -13,6 +13,8 @@ function loadSidepanelRuntime({
   clearTimeoutImpl = () => {},
 } = {}) {
   const listeners = { addListener() {} };
+  const tabUpdatedListeners = [];
+  const tabActivatedListeners = [];
   const sandbox = {
     console,
     URL,
@@ -49,7 +51,18 @@ function loadSidepanelRuntime({
     chrome: {
       runtime: { onMessage: listeners, sendMessage },
       windows: { getCurrent: () => Promise.resolve({ id: 1 }) },
-      tabs: { onUpdated: listeners, onActivated: listeners },
+      tabs: {
+        onUpdated: {
+          addListener(listener) {
+            tabUpdatedListeners.push(listener);
+          },
+        },
+        onActivated: {
+          addListener(listener) {
+            tabActivatedListeners.push(listener);
+          },
+        },
+      },
     },
     YTD_SETTINGS: {},
   };
@@ -59,6 +72,8 @@ function loadSidepanelRuntime({
   return {
     helpers: sandbox.__YTD_TRANSCRIPT_TESTING__,
     sandbox,
+    tabUpdatedListeners,
+    tabActivatedListeners,
     evaluate: (code) => vm.runInContext(code, context),
   };
 }
@@ -556,6 +571,106 @@ test("a vanished tab is retried without surfacing an extension error", async () 
     runtime.helpers.isTransientTabLookupError(new Error("No tab with id: 77")),
     true,
   );
+});
+
+test("a missing content receiver prompts a page refresh without starting a digest", async () => {
+  const runtime = loadSidepanelRuntime();
+  const fixture = runtime.evaluate(`
+    (() => {
+      let tabReads = 0;
+      let digestStarts = 0;
+      let refreshPrompt = null;
+      chrome.tabs.query = async () => [
+        { id: 91, url: "https://www.youtube.com/watch?v=video-a" },
+      ];
+      chrome.tabs.get = async () => {
+        tabReads += 1;
+        return { id: 91, url: "https://www.youtube.com/watch?v=video-a" };
+      };
+      chrome.runtime.sendMessage = async () => ({
+        success: false,
+        error: "PAGE_REFRESH_REQUIRED",
+        message: "YouTube Digest 已更新，请刷新当前 YouTube 页面后重试。",
+      });
+      startDigest = async () => { digestStarts += 1; };
+      showPageRefreshRequired = (tabId, message) => {
+        refreshPrompt = { tabId, message };
+      };
+      return {
+        check: () => checkCurrentTab(),
+        snapshot: () => JSON.stringify({
+          tabReads,
+          digestStarts,
+          refreshPrompt,
+        }),
+      };
+    })()
+  `);
+
+  await fixture.check();
+  assert.deepEqual(JSON.parse(fixture.snapshot()), {
+    tabReads: 0,
+    digestStarts: 0,
+    refreshPrompt: {
+      tabId: 91,
+      message: "YouTube Digest 已更新，请刷新当前 YouTube 页面后重试。",
+    },
+  });
+});
+
+test("the refresh action reloads the page and rechecks after loading completes", async () => {
+  const timers = createFakeTimers();
+  const runtime = loadSidepanelRuntime({
+    setTimeoutImpl: timers.setTimeout,
+    clearTimeoutImpl: timers.clearTimeout,
+  });
+  const fixture = runtime.evaluate(`
+    (() => {
+      const elements = new Map();
+      const reloads = [];
+      let checks = 0;
+      document.getElementById = (id) => {
+        if (!elements.has(id)) {
+          elements.set(id, { style: {}, textContent: "" });
+        }
+        return elements.get(id);
+      };
+      showState = () => {};
+      checkCurrentTab = () => { checks += 1; };
+      chrome.tabs.reload = async (tabId) => { reloads.push(tabId); };
+      youtubeTabId = 91;
+      panelWindowId = 1;
+      showPageRefreshRequired(91, "请刷新当前 YouTube 页面。");
+      return {
+        press: () => errorAction(),
+        snapshot: () => JSON.stringify({
+          reloads,
+          checks,
+          buttonText: elements.get("errorBtn").textContent,
+        }),
+      };
+    })()
+  `);
+
+  await fixture.press();
+  runtime.tabUpdatedListeners[0](
+    91,
+    { status: "complete" },
+    {
+      id: 91,
+      active: true,
+      windowId: 1,
+      url: "https://www.youtube.com/watch?v=video-a",
+    },
+  );
+  assert.equal(timers.activeCount(600), 1);
+  timers.fireActive(600);
+
+  assert.deepEqual(JSON.parse(fixture.snapshot()), {
+    reloads: [91],
+    checks: 1,
+    buttonText: "刷新页面",
+  });
 });
 
 test("a stale video load cannot replace the latest video's digest state", async () => {
@@ -1621,34 +1736,103 @@ test("note translation, save, and delete share one storage write queue", async (
   );
 });
 
-test("relay recovery reinjects the content script once after extension reload", async () => {
+test("missing content receiver requires a page refresh instead of reinjection", async () => {
   const background = loadBackgroundHelpers();
   const sendCalls = [];
   const injectionCalls = [];
+  const waitCalls = [];
+  await assert.rejects(
+    background.sendMessageToContentWithRecovery(
+      17,
+      { action: "getVideoInfo" },
+      {
+        async sendMessage(tabId, message) {
+          sendCalls.push({ tabId, message });
+          throw new Error(
+            "Could not establish connection. Receiving end does not exist.",
+          );
+        },
+        async executeScript(details) {
+          injectionCalls.push(details);
+        },
+        async wait(delay) {
+          waitCalls.push(delay);
+        },
+      },
+    ),
+    (error) => {
+      assert.equal(error.code, "PAGE_REFRESH_REQUIRED");
+      assert.match(error.message, /刷新当前 YouTube 页面/);
+      return true;
+    },
+  );
+
+  assert.equal(sendCalls.length, 4);
+  assert.deepEqual(waitCalls, [150, 350, 700]);
+  assert.deepEqual(injectionCalls, []);
+  assert.equal(
+    background.isPageRefreshRequiredError({
+      code: "PAGE_REFRESH_REQUIRED",
+    }),
+    true,
+  );
+  assert.equal(
+    background.isPageRefreshRequiredError({
+      code: "PAGE_CONTEXT_CHANGED",
+    }),
+    false,
+  );
+});
+
+test("content messaging retries normal document startup without reinjection", async () => {
+  const background = loadBackgroundHelpers();
+  const waitCalls = [];
+  const injectionCalls = [];
+  let sendCount = 0;
   const result = await background.sendMessageToContentWithRecovery(
     17,
     { action: "getVideoInfo" },
     {
-      async sendMessage(tabId, message) {
-        sendCalls.push({ tabId, message });
-        if (sendCalls.length === 1) {
+      async sendMessage() {
+        sendCount += 1;
+        if (sendCount === 1) {
           throw new Error(
             "Could not establish connection. Receiving end does not exist.",
           );
         }
-        return { title: "Recovered video" };
+        return { title: "Ready after document_idle" };
       },
       async executeScript(details) {
         injectionCalls.push(details);
       },
+      async wait(delay) {
+        waitCalls.push(delay);
+      },
     },
   );
 
-  assert.deepEqual(result, { title: "Recovered video" });
-  assert.equal(sendCalls.length, 2);
-  assert.deepEqual(JSON.parse(JSON.stringify(injectionCalls)), [
-    { target: { tabId: 17 }, files: ["content.js"] },
-  ]);
+  assert.deepEqual(result, { title: "Ready after document_idle" });
+  assert.equal(sendCount, 2);
+  assert.deepEqual(waitCalls, [150]);
+  assert.deepEqual(injectionCalls, []);
+});
+
+test("missing content receiver classification stays narrow", () => {
+  const background = loadBackgroundHelpers();
+  assert.equal(
+    background.isMissingContentReceiverError(
+      new Error(
+        "Could not establish connection. Receiving end does not exist.",
+      ),
+    ),
+    true,
+  );
+  assert.equal(
+    background.isMissingContentReceiverError(
+      new Error("Could not establish connection."),
+    ),
+    false,
+  );
 });
 
 test("relay recovery does not hide unrelated messaging failures", async () => {

@@ -98,12 +98,7 @@ function init() {
  */
 function tryInjectNoteButton() {
   if (!window.location.pathname.includes("/watch")) return;
-
-  // Clear any existing retry so we don't stack timers
-  if (ytdNoteButtonRetryTimer) {
-    clearInterval(ytdNoteButtonRetryTimer);
-    ytdNoteButtonRetryTimer = null;
-  }
+  if (ytdNoteButton?.isConnected || ytdNoteButtonRetryTimer) return;
 
   let attempts = 0;
   const maxAttempts = 30; // ~3 seconds of retrying
@@ -417,11 +412,18 @@ function setupButtonObserver() {
   if (digestButtonObserver) return;
 
   digestButtonObserver = new MutationObserver(() => {
-    // Check if we need to inject the buttons
+    // The note button already has a bounded retry loop and is retried after
+    // yt-navigate-finish. Restarting that loop for every body mutation can
+    // starve YouTube's watch-page renderer while it builds the player DOM.
     if (window.location.pathname.includes("/watch")) {
       scheduleDigestButtonReconciliation();
-      if (!ytdNoteButton || !ytdNoteButton.isConnected) {
-        tryInjectNoteButton();
+      const playerContainer = document.getElementById("movie_player");
+      if (
+        playerContainer &&
+        !ytdNoteButton?.isConnected &&
+        !ytdNoteButtonRetryTimer
+      ) {
+        injectNoteButton();
       }
     }
   });
@@ -886,9 +888,9 @@ document.addEventListener("yt-navigate-finish", () => {
   }, 500);
 });
 
-// Keep the runtime implementation scoped so recovery injection can execute the
-// file more than once without redeclaring top-level const/let bindings. These
-// selected helpers stay visible only for the repository's Node regression tests.
+// Keep the runtime implementation scoped so an accidental duplicate injection
+// cannot redeclare top-level const/let bindings. These selected helpers stay
+// visible only for the repository's Node regression tests.
 Object.assign(globalThis, {
   findDigestButtonHost,
   injectDigestButton,

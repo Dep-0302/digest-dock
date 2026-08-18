@@ -191,6 +191,10 @@ function isTransientTabContextError(error) {
   );
 }
 
+function isPageRefreshRequiredError(error) {
+  return error?.code === "PAGE_REFRESH_REQUIRED";
+}
+
 async function sendMessageToContentWithRecovery(
   tabId,
   payload,
@@ -199,20 +203,34 @@ async function sendMessageToContentWithRecovery(
   const sendMessage =
     dependencies.sendMessage ||
     ((targetTabId, message) => chrome.tabs.sendMessage(targetTabId, message));
-  const executeScript =
-    dependencies.executeScript ||
-    ((details) => chrome.scripting.executeScript(details));
+  const retryDelays = dependencies.retryDelays || [150, 350, 700];
+  const wait =
+    dependencies.wait ||
+    ((delay) => new Promise((resolve) => setTimeout(resolve, delay)));
 
-  try {
-    return await sendMessage(tabId, payload);
-  } catch (error) {
-    if (!isMissingContentReceiverError(error)) throw error;
-    debugLog(
-      "[YouTube Digest BG] Re-injecting content script after extension reload",
-      tabId,
-    );
-    await executeScript({ target: { tabId }, files: ["content.js"] });
-    return sendMessage(tabId, payload);
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await sendMessage(tabId, payload);
+    } catch (error) {
+      if (!isMissingContentReceiverError(error)) throw error;
+      const retryDelay = retryDelays[attempt];
+      if (Number.isFinite(retryDelay)) {
+        await wait(retryDelay);
+        continue;
+      }
+
+      // A full content-script reinjection can coexist with the orphaned
+      // observer from the pre-reload extension context. Both instances then
+      // remove and recreate each other's watch-page buttons, starving
+      // YouTube's renderer. A few message-only retries cover normal
+      // document_idle startup; refreshing is the only safe recovery after
+      // those retries still find no live receiver.
+      const refreshError = new Error(
+        "YouTube Digest 已更新，请刷新当前 YouTube 页面后重试。",
+      );
+      refreshError.code = "PAGE_REFRESH_REQUIRED";
+      throw refreshError;
+    }
   }
 }
 
@@ -728,7 +746,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           sendResponse({ success: false, error: "No YouTube tab found" });
         }
       } catch (err) {
-        if (isTransientTabContextError(err)) {
+        if (isPageRefreshRequiredError(err)) {
+          debugLog("[YouTube Digest BG] Page refresh required after reload");
+          sendResponse({
+            success: false,
+            error: "PAGE_REFRESH_REQUIRED",
+            message: err.message,
+          });
+        } else if (isTransientTabContextError(err)) {
           debugLog("[YouTube Digest BG] YouTube tab context changed during relay");
           sendResponse({
             success: false,
@@ -2363,6 +2388,7 @@ globalThis.__YTD_TRANSLATION_TESTING__ = {
   isChineseLanguage,
   languagesSharePrimary,
   isMissingContentReceiverError,
+  isPageRefreshRequiredError,
   isTransientTabContextError,
   looksLikeChineseTranscript,
   noteHasChineseSource,
