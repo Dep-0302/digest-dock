@@ -6,6 +6,7 @@ const vm = require("node:vm");
 
 const root = path.resolve(__dirname, "..");
 const read = (file) => fs.readFileSync(path.join(root, file), "utf8");
+const bilibiliAdapter = require("../bilibili.js");
 
 function loadSidepanelHelpers({
   sendMessage = () => Promise.resolve({}),
@@ -52,6 +53,7 @@ function loadSidepanelHelpers({
       tabs: { onUpdated: listeners, onActivated: listeners },
     },
     YTD_SETTINGS: {},
+    BILIBILI_ADAPTER: bilibiliAdapter,
   };
   sandbox.globalThis = sandbox;
   vm.runInNewContext(read("sidepanel.js"), sandbox);
@@ -102,6 +104,7 @@ function loadBackgroundHelpers({
         onMessage: listeners,
         openOptionsPage() {},
         getURL: (resourcePath) => `chrome-extension://test/${resourcePath}`,
+        sendMessage: () => Promise.resolve({ success: true }),
       },
       tabs: { onUpdated: listeners, onActivated: listeners },
     },
@@ -110,6 +113,7 @@ function loadBackgroundHelpers({
       normalize: (value) => value,
       chatCompletionsUrl: (baseUrl) => `${baseUrl}/chat/completions`,
     },
+    BILIBILI_ADAPTER: bilibiliAdapter,
   };
   sandbox.globalThis = sandbox;
   vm.runInNewContext(read("background.js"), sandbox);
@@ -218,14 +222,14 @@ test("Header exposes tab-specific transcript, overview, and notes language modes
   assert.match(js, /function ensureOverviewChinese\(\)/);
   assert.match(js, /action: "translateNotes"/);
   assert.match(js, /function ensureNotesChinese\(\)/);
-  assert.match(js, /const REQUIRED_RUNTIME_PROTOCOL_VERSION = 3/);
+  assert.match(js, /const REQUIRED_RUNTIME_PROTOCOL_VERSION = 4/);
   assert.match(
     js,
-    /runtimeProtocolVersion !== REQUIRED_RUNTIME_PROTOCOL_VERSION[\s\S]*?showRuntimeVersionError\(\)/,
+    /runtimeProtocolVersion\s*!==\s*REQUIRED_RUNTIME_PROTOCOL_VERSION[\s\S]*?showRuntimeVersionError\(\)/,
   );
   assert.match(js, /扩展后台未响应中文翻译请求，请重新加载扩展/);
   const backgroundSource = read("background.js");
-  assert.match(backgroundSource, /const RUNTIME_PROTOCOL_VERSION = 3/);
+  assert.match(backgroundSource, /const RUNTIME_PROTOCOL_VERSION = 4/);
   assert.match(
     backgroundSource,
     /runtimeProtocolVersion: RUNTIME_PROTOCOL_VERSION/,
@@ -233,9 +237,10 @@ test("Header exposes tab-specific transcript, overview, and notes language modes
   assert.match(js, /contentType: "transcriptBatch"/);
   assert.doesNotMatch(js, /English \+ Chinese/);
   assert.match(js, /原文（\$\{language\}）/);
-  assert.match(js, /await startDigest\(videoId, tab\.url\)/);
+  assert.match(js, /await startDigest\([\s\S]*?currentMediaRef/);
   assert.match(js, /runDigestSingleFlight\(videoId/);
-  assert.match(js, /runTabCheckSingleFlight\("active-tab"/);
+  assert.match(js, /tabCheckGeneration \+= 1/);
+  assert.match(js, /generation !== tabCheckGeneration/);
 });
 
 test("duplicate digest starts for the same video share one in-flight task", async () => {
@@ -264,6 +269,59 @@ test("duplicate digest starts for the same video share one in-flight task", asyn
   });
   assert.equal(await third, "again");
   assert.equal(callCount, 2);
+});
+
+test("media locators separate Bilibili route identity from resolved CID identity", () => {
+  const { extractMediaLocator } = loadSidepanelHelpers();
+  const youtube = extractMediaLocator(
+    "https://www.youtube.com/watch?v=ydTeb_I0b94&list=example",
+  );
+  const bilibili = extractMediaLocator(
+    "https://www.bilibili.com/video/BV1zfg36ZEXi/?p=2&trackid=example",
+  );
+
+  assert.equal(youtube.mediaKey, "ydTeb_I0b94");
+  assert.equal(youtube.routeKey, "youtube:ydTeb_I0b94");
+  assert.equal(bilibili.routeKey, "bilibili:BV1zfg36ZEXi:p2");
+  assert.equal(bilibili.mediaKey, undefined);
+  assert.equal(
+    bilibili.canonicalUrl,
+    "https://www.bilibili.com/video/BV1zfg36ZEXi/?p=2",
+  );
+});
+
+test("background recognizes only supported YouTube and standard Bilibili video URLs", () => {
+  const background = loadBackgroundHelpers();
+  assert.equal(
+    background.isSupportedVideoUrl(
+      "https://www.youtube.com/watch?v=ydTeb_I0b94",
+    ),
+    true,
+  );
+  assert.equal(
+    background.isSupportedVideoUrl(
+      "https://www.bilibili.com/video/BV1zfg36ZEXi/?p=1",
+    ),
+    true,
+  );
+  assert.equal(
+    background.isSupportedVideoUrl(
+      "https://www.bilibili.com/bangumi/play/ep123",
+    ),
+    false,
+  );
+});
+
+test("analysis and notes reject responses from stale videos or parts", () => {
+  const source = read("sidepanel.js");
+  assert.match(
+    source,
+    /async function triggerAnalysis\(\)[\s\S]*?requestMediaKey = currentVideoId[\s\S]*?requestRouteKey = currentRouteKey[\s\S]*?requestTranscript = currentTranscriptTimestamped[\s\S]*?if \(isStale\(\)\) return;[\s\S]*?currentAnalysis = analysisResult\.analysis/,
+  );
+  assert.match(
+    source,
+    /async function loadNotes\(videoId\)[\s\S]*?const generation = notesTranslationGeneration[\s\S]*?generation !== notesTranslationGeneration[\s\S]*?videoId !== currentVideoId[\s\S]*?currentNotes =/,
+  );
 });
 
 test("overview content renders English, Chinese, and aligned bilingual variants", () => {
@@ -527,6 +585,208 @@ test("overview generates English once and Chinese once; bilingual is display-onl
   assert.match(requests[0].messages[0].content, /English structural overview/);
   assert.doesNotMatch(requests[0].messages[0].content, /titleZh/);
   assert.match(requests[1].messages[0].content, /Translate this English YouTube overview/);
+});
+
+test("Bilibili Chinese overview is generated once and mirrored for Chinese display", async () => {
+  const requests = [];
+  const background = loadBackgroundHelpers({
+    fetchImpl: async (url, options) => {
+      if (url.startsWith("chrome-extension://")) {
+        return { ok: true, text: async () => read("prompts/analysis.md") };
+      }
+      requests.push(JSON.parse(options.body));
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  chapters: [
+                    {
+                      title: "开场",
+                      summary: "介绍本期主题。",
+                      timestampSeconds: 0,
+                    },
+                  ],
+                  keyQuotes: [
+                    { quote: "先把问题想清楚。", timestampSeconds: 0 },
+                  ],
+                  keyMoments: [0],
+                }),
+              },
+            },
+          ],
+        }),
+      };
+    },
+  });
+
+  const result = await background.handleAnalyzeTranscript(
+    "[0:00] 先把问题想清楚。",
+    "示例视频",
+    "示例作者",
+    "示例简介",
+    60,
+    "bilibili",
+    "ai-zh",
+  );
+
+  assert.equal(result.success, true);
+  assert.equal(requests.length, 1);
+  assert.match(requests[0].messages[0].content, /生成简洁、结构清晰的中文概览/);
+  assert.doesNotMatch(requests[0].messages[0].content, /English structural overview/);
+  assert.equal(result.analysis.analysisLanguage, "zh-CN");
+  assert.equal(result.analysis.chapters[0].title, "开场");
+  assert.equal(result.analysis.chapters[0].titleZh, "开场");
+  assert.equal(result.analysis.keyQuotes[0].quoteZh, "先把问题想清楚。");
+});
+
+test("Bilibili Chinese note cleanup keeps the polished Chinese text", async () => {
+  const requests = [];
+  const background = loadBackgroundHelpers({
+    fetchImpl: async (url, options) => {
+      if (url.startsWith("chrome-extension://")) {
+        return { ok: true, text: async () => read("prompts/note-cleanup.md") };
+      }
+      requests.push(JSON.parse(options.body));
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  quote: "先把问题想清楚，再开始动手。",
+                }),
+              },
+            },
+          ],
+        }),
+      };
+    },
+  });
+
+  const cleaned = await background.cleanupNoteText(
+    "先把问题想清楚",
+    "嗯，我们应该",
+    "再开始动手",
+    "嗯，我们应该先把问题想清楚，再开始动手。",
+    "示例视频",
+    "bilibili",
+    "zh-CN",
+  );
+
+  assert.equal(cleaned, "先把问题想清楚，再开始动手。");
+  assert.equal(requests.length, 1);
+  assert.match(requests[0].messages[0].content, /整理成通顺、完整、可独立阅读的中文笔记/);
+});
+
+test("Bilibili timestamp note saves polished Chinese once without translation", async () => {
+  const requests = [];
+  let storedNotes = [];
+  const mediaRef = {
+    platform: "bilibili",
+    bvid: "BV1zfg36ZEXi",
+    aid: 123,
+    cid: 40830435549,
+    page: 1,
+    mediaKey: "bilibili:BV1zfg36ZEXi:40830435549",
+    canonicalUrl: "https://www.bilibili.com/video/BV1zfg36ZEXi/",
+    title: "示例视频",
+    channelName: "示例作者",
+  };
+  const background = loadBackgroundHelpers({
+    storageGetImpl: async (key) => {
+      if (key === "ytd_settings") {
+        return {
+          ytd_settings: {
+            provider: "deepseek",
+            aiApiKey: "test-key",
+            aiBaseUrl: "https://api.deepseek.com",
+            aiModel: "deepseek-v4-flash",
+          },
+        };
+      }
+      if (key === `digest_${mediaRef.mediaKey}`) {
+        return {
+          [`digest_${mediaRef.mediaKey}`]: {
+            transcript: [
+              { start: 0, text: "我们先把问题想清楚", language: "zh-CN" },
+              { start: 8, text: "然后再开始动手", language: "zh-CN" },
+            ],
+          },
+        };
+      }
+      if (key === "ytd_notes") return { ytd_notes: storedNotes };
+      return {};
+    },
+    storageSetImpl: async (items) => {
+      if (Array.isArray(items.ytd_notes)) storedNotes = items.ytd_notes;
+    },
+    fetchImpl: async (url, options) => {
+      if (url.startsWith("chrome-extension://")) {
+        return { ok: true, text: async () => read("prompts/note-cleanup.md") };
+      }
+      requests.push(JSON.parse(options.body));
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  quote: "我们先把问题想清楚，然后再开始动手。",
+                }),
+              },
+            },
+          ],
+        }),
+      };
+    },
+  });
+
+  const result = await background.handleSaveNote(
+    mediaRef,
+    5,
+    "示例视频",
+    "示例作者",
+  );
+
+  assert.equal(result.success, true);
+  assert.equal(requests.length, 1);
+  assert.equal(result.note.text, "我们先把问题想清楚，然后再开始动手。");
+  assert.equal(result.note.textLanguage, "zh-CN");
+  assert.equal(result.note.translatedText, "");
+  assert.equal(result.note.videoId, mediaRef.mediaKey);
+  assert.match(result.note.timestampedUrl, /BV1zfg36ZEXi\/\?t=5$/);
+  assert.equal(storedNotes[0].text, result.note.text);
+});
+
+test("new polished Chinese notes display cleaned text while legacy notes keep raw text", () => {
+  const sidepanel = loadSidepanelHelpers();
+  const polished = {
+    text: "整理后的完整中文笔记。",
+    rawText: "原始字幕碎片",
+    sourceLanguage: "zh-CN",
+    textLanguage: "zh-CN",
+  };
+  const legacy = {
+    text: "旧清理字段",
+    rawText: "旧版原始中文字幕",
+    sourceLanguage: "zh-CN",
+  };
+
+  assert.equal(sidepanel.noteOriginalText(polished), "整理后的完整中文笔记。");
+  assert.equal(sidepanel.noteChineseText(polished), "整理后的完整中文笔记。");
+  assert.equal(sidepanel.noteOriginalText(legacy), "旧版原始中文字幕");
+  assert.doesNotMatch(
+    sidepanel.renderNoteLanguageContent(polished, "zh"),
+    /原始字幕碎片/,
+  );
 });
 
 test("notes generate Chinese once from polished English and persist it", async () => {
@@ -893,6 +1153,38 @@ test("relay recovery reinjects the content script once after extension reload", 
   assert.equal(sendCalls.length, 2);
   assert.deepEqual(JSON.parse(JSON.stringify(injectionCalls)), [
     { target: { tabId: 17 }, files: ["content.js"] },
+  ]);
+});
+
+test("relay recovery injects the Bilibili adapter and content script on Bilibili", async () => {
+  const background = loadBackgroundHelpers();
+  const injectionCalls = [];
+  let attempts = 0;
+  await background.sendMessageToContentWithRecovery(
+    21,
+    { action: "getVideoInfo" },
+    {
+      async sendMessage() {
+        attempts += 1;
+        if (attempts === 1) {
+          throw new Error(
+            "Could not establish connection. Receiving end does not exist.",
+          );
+        }
+        return { title: "Bilibili video" };
+      },
+      async executeScript(details) {
+        injectionCalls.push(details);
+      },
+    },
+    "https://www.bilibili.com/video/BV1zfg36ZEXi/",
+  );
+
+  assert.deepEqual(JSON.parse(JSON.stringify(injectionCalls)), [
+    {
+      target: { tabId: 21 },
+      files: ["bilibili.js", "content-bilibili.js"],
+    },
   ]);
 });
 
@@ -1355,6 +1647,8 @@ test("overview and notes keep English generation separate from Chinese translati
   const analysisPrompt = read("prompts/analysis.md");
   const translationPrompt = read("prompts/translation.md");
   assert.match(analysisPrompt, /English structural overview/);
+  assert.match(analysisPrompt, /^## Chinese system prompt$/m);
+  assert.match(analysisPrompt, /生成简洁、结构清晰的中文概览/);
   assert.doesNotMatch(analysisPrompt, /titleZh|summaryZh|quoteZh/);
   assert.match(translationPrompt, /^## Overview translation$/m);
   assert.match(translationPrompt, /"titleZh":"中文标题"/);
@@ -1363,4 +1657,5 @@ test("overview and notes keep English generation separate from Chinese translati
   assert.match(translationPrompt, /^## Notes translation$/m);
   assert.match(translationPrompt, /Translate these polished English video notes/);
   assert.match(translationPrompt, /"textZh":"中文笔记"/);
+  assert.match(read("prompts/note-cleanup.md"), /^## Chinese system prompt$/m);
 });

@@ -4,6 +4,8 @@
 
 Turn every YouTube video into a resource for deep learning. YouTube Digest brings transcripts, bilingual translation, AI overviews, explanations, and timestamped notes into one Chrome side panel, so you can study ideas and language without losing your place.
 
+The current local version also supports standard `www.bilibili.com/video/BV...` pages with an existing human or AI subtitle track. It reads only the current part, reuses the current Bilibili browser session without reading or storing cookies, and generates Chinese overviews and polished Chinese notes directly from Chinese subtitles.
+
 - Turn captions into a readable, searchable learning resource.
 - Learn languages with the original transcript, a Simplified Chinese translation, or an aligned bilingual view.
 - Build understanding with an AI overview, chapters, key quotes, and selected-text explanations.
@@ -44,13 +46,13 @@ If you prefer to do it yourself:
 7. Select the exact project folder you chose, which must contain `manifest.json`.
 8. Pin YouTube Digest from Chrome's Extensions menu if you want quick access.
 
-Because this is an unpacked extension, it does not update automatically. After downloading an update or changing local files, click **Reload** on the YouTube Digest card at `chrome://extensions`, then refresh open YouTube tabs. Moving or deleting the source folder breaks the unpacked extension until you load it again from the new location.
+Because this is an unpacked extension, it does not update automatically. After downloading an update or changing local files, click **Reload** on the YouTube Digest card at `chrome://extensions`, then refresh open YouTube or Bilibili video tabs. Moving or deleting the source folder breaks the unpacked extension until you load it again from the new location.
 
 ## Set up your API keys
 
-YouTube Digest needs two keys under your own provider accounts:
+For YouTube, YouTube Digest uses two keys under your own provider accounts. Bilibili-only use needs the DeepSeek key but not Supadata:
 
-1. A **Supadata API key** to retrieve YouTube transcripts.
+1. A **Supadata API key** to retrieve YouTube transcripts; optional for Bilibili-only use.
 2. A **DeepSeek API key** for overviews, explanations, translation, and automatic note polishing.
 
 ### Get a Supadata API key
@@ -96,21 +98,26 @@ Keys and settings are stored in Chrome's local extension storage on your device.
 5. Select transcript text when you want an AI explanation.
 6. Save a note from the player or a key quote, then revisit it from **Notes** in **Original**, **中文**, or **双语** mode.
 
+For Bilibili, open a standard BV video with subtitles. The current part is treated as one independent learning resource; click the extension icon or the injected **生成摘要** button, and use the player overlay to save a timestamped note.
+
 ## What works today
 
 - Google Chrome 116 or newer, using the Side Panel API.
 - Standard `youtube.com/watch` video pages.
+- Standard `www.bilibili.com/video/BV...` pages, one current part at a time.
 - Native subtitle tracks returned by Supadata. YouTube Digest prefers English when available, but may show another native language.
+- Human or AI subtitle tracks exposed by the current Bilibili browser session. Bilibili transcript retrieval does not use Supadata credits.
 - Original, Simplified Chinese, and aligned bilingual transcript views.
 - English AI overviews with a separate Simplified Chinese translation; bilingual mode combines the two cached results without a third generation call. Selected-text explanations and automatic note polishing are also supported.
 - Notes are polished in English once and translated into Simplified Chinese once; bilingual note mode only combines the two stored versions.
 - When a note's source subtitle is already Chinese, the original subtitle is reused as the Chinese note and no Chinese-translation request is sent.
+- For Bilibili Chinese subtitles, the overview and polished note are generated directly in Chinese with one AI request each; no English round-trip is made.
 - Local notes and a local cache for recent transcript and digest results.
 - DeepSeek V4 Flash for all published AI features. Other providers require a local code adaptation and are not supported by this published version.
 
-Shorts, live streams, private or access-restricted videos, and videos without an available native transcript may not work. Firefox, Safari, mobile browsers, and other Chromium browsers are not currently tested or supported.
+Shorts, live streams, Bilibili bangumi pages, private or access-restricted videos, hardcoded image subtitles, and videos without an available native transcript may not work. Firefox, Safari, mobile browsers, and other Chromium browsers are not currently tested or supported.
 
-YouTube Digest forces Supadata's `mode=native`. It does not request AI-generated transcripts or perform local audio transcription when native captions are unavailable.
+For YouTube, YouTube Digest forces Supadata's `mode=native`. On both platforms it does not request generated transcription, perform local audio transcription, or use OCR when native captions are unavailable.
 
 ## Supadata free tier and request costs
 
@@ -165,40 +172,41 @@ If you want another AI provider or model, first open the exact YouTube Digest pr
 YouTube Digest makes provider requests directly from the extension:
 
 1. It sends a canonical YouTube watch URL to Supadata to request the native transcript.
-2. It sends the transcript and relevant video metadata to DeepSeek when you request AI features.
-3. Focused features send only the content they need, such as selected text with context or small transcript batches for translation.
-4. It stores keys, settings, notes, and recent cache entries locally in Chrome.
+2. For Bilibili, it requests the current video's metadata and existing subtitle track directly from Bilibili while reusing the browser's current session; it does not read or store cookie values.
+3. It sends the transcript and relevant video metadata to DeepSeek when you request AI features.
+4. Focused features send only the content they need, such as selected text with context or small transcript batches for translation.
+5. It stores keys, settings, notes, and recent cache entries locally in Chrome.
 
-There is no YouTube Digest account system, advertising, analytics, or telemetry. Supadata and DeepSeek still receive data under their own terms and privacy policies. See [PRIVACY.md](PRIVACY.md) for details.
+There is no YouTube Digest account system, advertising, analytics, or telemetry. Bilibili, Supadata, and DeepSeek still process requests under their own terms and privacy policies. See [PRIVACY.md](PRIVACY.md) for details.
 
 ## Troubleshooting
 
-### The Digest button is missing on a YouTube video
+### The Digest button is missing on a video
 
-- At `chrome://extensions`, find YouTube Digest and click **Reload**, then refresh the YouTube tab.
-- Confirm that you are on a standard `https://www.youtube.com/watch?...` page, not a Short, embed, or live page.
+- At `chrome://extensions`, find YouTube Digest and click **Reload**, then refresh the video tab.
+- Confirm that you are on a standard `https://www.youtube.com/watch?...` or `https://www.bilibili.com/video/BV...` page, not a Short, embed, live stream, or Bilibili bangumi page.
 - The current version automatically follows YouTube when its responsive action bar changes. Wait a moment after the page finishes loading.
 - If you have an older downloaded copy, resizing the YouTube window horizontally once may reveal the button. Then download the latest version so resizing is no longer required.
 - If it is still missing, ask your coding agent to inspect the content script on that exact video page.
 
 ### The side panel does not open
 
-- Confirm that you are on a standard `https://www.youtube.com/watch?...` page.
+- Confirm that you are on a standard `https://www.youtube.com/watch?...` or `https://www.bilibili.com/video/BV...` page.
 - At `chrome://extensions`, confirm YouTube Digest is enabled and click **Reload**.
-- Refresh the YouTube tab after reloading the extension.
+- Refresh the video tab after reloading the extension.
 - Ask your coding agent to inspect the extension if the problem continues.
 
 ### YouTube Digest asks for setup
 
-- Open **Settings** and save both a Supadata key and a DeepSeek key.
+- For YouTube, save both a Supadata key and a DeepSeek key. For Bilibili-only use, save a DeepSeek key; Supadata can remain empty.
 - This published version uses the fixed DeepSeek V4 Flash endpoint and model. There are no Base URL or Model fields to configure.
 - If Settings says a legacy custom provider was removed, enter a DeepSeek key. The old AI key was cleared so it could not be reused with the wrong service.
 
 ### No transcript is found
 
 - Confirm the video is public and has native captions.
-- Check your Supadata key, remaining credits, rate limit, and account status.
-- Remember that unavailable native lookups and manual retries may still consume credits.
+- For YouTube, check your Supadata key, remaining credits, rate limit, and account status. Unavailable native lookups and manual retries may still consume credits.
+- For Bilibili, confirm that the current part exposes an independent subtitle track and that you are signed in to Bilibili when the track requires a session. Hardcoded subtitles in the video image cannot be read.
 
 YouTube Digest will not fall back to generated transcription.
 
@@ -221,7 +229,7 @@ npm run check
 npm run package
 ```
 
-The agent should also reload the unpacked extension in Chrome and test several real YouTube videos. Automated checks do not prove that live provider requests and YouTube interactions work.
+The agent should also reload the unpacked extension in Chrome and test real videos on every supported platform it changed. Automated checks do not prove that live provider requests or page interactions work.
 
 ## License
 

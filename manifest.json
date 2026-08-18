@@ -3,10 +3,15 @@
   "name": "YouTube Digest",
   "version": "1.1.5",
   "minimum_chrome_version": "116",
-  "description": "把 YouTube 视频整理成包含字幕、双语翻译、AI 概览和笔记的学习资料。",
+  "description": "把 YouTube 和 B 站视频整理成包含字幕、AI 概览和时间戳笔记的学习资料。",
   "permissions": ["sidePanel", "storage", "tabs", "scripting"],
   "host_permissions": [
     "https://www.youtube.com/*",
+    "https://www.bilibili.com/*",
+    "https://api.bilibili.com/*",
+    "https://subtitle.bilibili.com/*",
+    "https://*.hdslb.com/*",
+    "https://*.bilivideo.com/*",
     "https://api.supadata.ai/*",
     "https://api.deepseek.com/*"
   ],
@@ -32,6 +37,11 @@
     {
       "matches": ["https://www.youtube.com/*"],
       "js": ["content.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://www.bilibili.com/video/BV*"],
+      "js": ["bilibili.js", "content-bilibili.js"],
       "run_at": "document_idle"
     }
   ],

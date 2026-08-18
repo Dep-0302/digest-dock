@@ -1,7 +1,7 @@
 # Analysis / Overview Prompt
 
 Used in `background.js` when the user opens the **Overview** tab.
-Produces English chapters covering the whole video and 3-5 English key quotes with timestamps. Chinese is generated separately by the overview translation flow.
+YouTube keeps the existing English-first flow. Bilibili videos with Chinese source subtitles use the Chinese section and do not require a second overview translation request.
 
 ## System prompt
 
@@ -76,11 +76,53 @@ CRITICAL:
 - EVERY timestamp must exist in the transcript — look it up!
 ```
 
+## Chinese system prompt
+
+```
+你是我的执行助理。请阅读附带的 B 站视频中文字幕，生成简洁、结构清晰的中文概览，包括章节和关键原话。
+
+你必须提供：
+- 覆盖完整视频时间轴的章节。每章包含简洁的中文标题、中文摘要和准确时间戳。视频持续到 {durationFormatted}，最后一章必须晚于 {lateThreshold}，不能只总结前半段。
+- 3 至 5 条最值得保留的中文关键原话及其时间戳。
+
+关键原话优先选择：
+- 反常识或具有独特判断的观点
+- 令人意外的事实、数字或结论
+- 能清楚说明方法或论点的故事与案例
+- 能概括核心思想、适合直接引用的句子
+
+引用应忠于说话者的实际中文表达。可以修正明显的转录错误、标点、口头禅、重复和断句，但不得翻译成英文、总结改写或添加原文不存在的内容。使用标题和简介校正人名、产品名、专业术语和缩写。
+
+字幕严格采用以下格式：
+[0:00] 欢迎观看今天的视频
+[0:15] 下面介绍这个项目
+[1:05] 最终结果超出预期
+
+时间戳规则：
+1. 每行开头都有 [M:SS] 或 [MM:SS]。
+2. 章节和引用必须使用对应内容所在行开头的时间戳。
+3. timestampSeconds 必须是该时间戳换算后的秒数。
+4. 不得编造字幕中不存在的时间戳，不得超出 {durationFormatted}（{maxTimestampSeconds} 秒）。
+
+只输出 JSON，不要 Markdown 代码块：
+{
+  "chapters": [
+    {"title": "中文标题", "timestamp": "0:00", "timestampSeconds": 0, "summary": "中文摘要"}
+  ],
+  "keyQuotes": [
+    {"quote": "润色后的中文原话", "timestamp": "2:30", "timestampSeconds": 150}
+  ],
+  "keyMoments": [0, 150, 300]
+}
+```
+
 ## User prompt
 
 ```
 Video title: {videoTitle}
 Channel: {channelName}
+Platform: {platform}
+Transcript language: {sourceLanguage}
 VIDEO DURATION: {durationFormatted} ({maxTimestampSeconds} seconds) — do not use any timestamp beyond this!
 
 VIDEO DESCRIPTION (use this to correctly spell names and terms):
@@ -99,3 +141,5 @@ TRANSCRIPT:
 - `{channelName}` — channel name.
 - `{videoDescription}` — full video description.
 - `{transcriptText}` — timestamped transcript text.
+- `{platform}` — source platform (`youtube` or `bilibili`).
+- `{sourceLanguage}` — detected source subtitle language.

@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "Bilibili Subtitle Verifier",
+  "version": "0.1.0",
+  "minimum_chrome_version": "116",
+  "description": "只读验证当前 B 站视频是否能提供带时间戳的独立字幕轨。",
+  "permissions": ["activeTab"],
+  "host_permissions": [
+    "https://www.bilibili.com/*",
+    "https://api.bilibili.com/*",
+    "https://subtitle.bilibili.com/*",
+    "https://*.hdslb.com/*",
+    "https://*.bilivideo.com/*"
+  ],
+  "action": {
+    "default_title": "验证当前 B 站字幕",
+    "default_popup": "popup.html"
+  }
+}

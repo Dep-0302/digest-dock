@@ -6,7 +6,7 @@
  */
 
 const DEBUG = false;
-const REQUIRED_RUNTIME_PROTOCOL_VERSION = 3;
+const REQUIRED_RUNTIME_PROTOCOL_VERSION = 4;
 const debugLog = (...args) => {
   if (DEBUG) console.log(...args);
 };
@@ -27,14 +27,15 @@ function createSingleFlight() {
 }
 
 const runDigestSingleFlight = createSingleFlight();
-const runTabCheckSingleFlight = createSingleFlight();
 
 // ============================================================
 // STATE
 // ============================================================
 
-let currentVideoId = null;
+let currentVideoId = null; // YouTube video ID or resolved cross-platform mediaKey.
 let currentVideoUrl = null;
+let currentMediaRef = null;
+let currentRouteKey = null;
 let currentAnalysis = null;
 let currentTranscript = null;
 let currentTranscriptText = null; // Plain text (for display/export)
@@ -45,7 +46,9 @@ let currentChannelName = "";
 let currentVideoDescription = "";
 let currentVideoDuration = 0;
 let isAnalysisLoading = false; // Track if analysis is in progress
-let youtubeTabId = null; // Store the YouTube tab ID for reliable messaging
+let analysisGeneration = 0;
+let videoTabId = null; // Exact supported video tab for seek/playback messaging.
+let currentConfigStatus = null;
 let errorAction = null;
 
 // --- Translation state ---
@@ -259,19 +262,15 @@ document.addEventListener("DOMContentLoaded", async () => {
   setupEventListeners();
   await evictOldCacheEntries(20);
 
-  const configStatus = await chrome.runtime.sendMessage({
+  currentConfigStatus = await chrome.runtime.sendMessage({
     action: "checkConfig",
   });
 
   if (
-    configStatus?.runtimeProtocolVersion !== REQUIRED_RUNTIME_PROTOCOL_VERSION
+    currentConfigStatus?.runtimeProtocolVersion !==
+    REQUIRED_RUNTIME_PROTOCOL_VERSION
   ) {
     showRuntimeVersionError();
-    return;
-  }
-
-  if (!configStatus.hasSupadataKey || !configStatus.hasAiKey) {
-    showConfigError(configStatus);
     return;
   }
 
@@ -324,6 +323,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 let navigationRefreshTimer = null;
 let panelWindowId = null;
+let tabCheckGeneration = 0;
 chrome.windows.getCurrent().then((w) => {
   panelWindowId = w.id;
 });
@@ -341,6 +341,65 @@ function scheduleDigestRefresh() {
 function panelIsShowingResults() {
   const results = document.getElementById("resultsState");
   return results && results.style.display !== "none";
+}
+
+function extractMediaLocator(url) {
+  try {
+    const parsed = new URL(String(url || ""));
+    if (
+      parsed.protocol === "https:" &&
+      parsed.hostname === "www.youtube.com" &&
+      parsed.pathname === "/watch" &&
+      parsed.searchParams.has("v")
+    ) {
+      const videoId = parsed.searchParams.get("v");
+      return {
+        platform: "youtube",
+        videoId,
+        mediaKey: videoId,
+        routeKey: `youtube:${videoId}`,
+        canonicalUrl: `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}`,
+      };
+    }
+
+    const bili = BILIBILI_ADAPTER.parseBilibiliVideoUrl(parsed.href);
+    return {
+      platform: "bilibili",
+      bvid: bili.bvid,
+      page: bili.page,
+      routeKey: `bilibili:${bili.bvid}:p${bili.page}`,
+      canonicalUrl: bili.canonicalUrl,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function isBilibiliChineseMedia() {
+  return (
+    currentMediaRef?.platform === "bilibili" &&
+    BILIBILI_ADAPTER.isChineseLanguage(currentTranscriptLanguage)
+  );
+}
+
+function applyMediaLanguageDefaults() {
+  const directChinese = isBilibiliChineseMedia();
+  currentTranscriptMode = "original";
+  currentOverviewMode = directChinese ? "zh" : "bilingual";
+  currentNotesMode = directChinese ? "zh" : "bilingual";
+  setTranscriptModeButtons(currentTranscriptMode);
+  setOverviewModeButtons(currentOverviewMode);
+  setNotesModeButtons(currentNotesMode);
+
+  document.querySelectorAll(".transcript-mode-btn").forEach((button) => {
+    button.hidden = directChinese && button.dataset.transcriptMode !== "original";
+  });
+  document.querySelectorAll(".overview-mode-btn").forEach((button) => {
+    button.hidden = directChinese && button.dataset.overviewMode !== "zh";
+  });
+  document.querySelectorAll(".notes-mode-btn").forEach((button) => {
+    button.hidden = directChinese && button.dataset.notesMode !== "zh";
+  });
 }
 
 function updateHeaderLanguageControlsVisibility() {
@@ -365,16 +424,16 @@ function updateHeaderLanguageControlsVisibility() {
  * refresh the digest when the video changed.
  */
 function handleFrontTabUrl(url) {
-  if (!(url || "").startsWith("https://www.youtube.com")) {
-    // Panel is a YouTube-only tool — remove itself from non-YouTube tabs.
+  const locator = extractMediaLocator(url);
+  if (!locator) {
     window.close();
     return;
   }
 
-  const newVideoId = extractVideoId(url);
+  const newRouteKey = locator.routeKey;
   // Refresh when the video changed, or when we're not currently showing
   // results (e.g. user went home, then clicked back into the same video).
-  if (newVideoId !== currentVideoId || !panelIsShowingResults()) {
+  if (newRouteKey !== currentRouteKey || !panelIsShowingResults()) {
     scheduleDigestRefresh();
   }
 }
@@ -484,35 +543,40 @@ function setNotesFilter(showAll) {
 // ============================================================
 
 function checkCurrentTab() {
-  return runTabCheckSingleFlight("active-tab", runCheckCurrentTab);
+  tabCheckGeneration += 1;
+  return runCheckCurrentTab(tabCheckGeneration);
 }
 
-async function runCheckCurrentTab() {
+async function runCheckCurrentTab(generation) {
   try {
-    // Try multiple strategies to find the YouTube tab
     let tab = null;
-
-    // Strategy 1: Active tab in last focused window
     let tabs = await chrome.tabs.query({
       active: true,
       lastFocusedWindow: true,
     });
-    if (tabs[0]?.url?.includes("youtube.com")) {
-      tab = tabs[0];
-    }
+    if (generation !== tabCheckGeneration) return;
+    if (extractMediaLocator(tabs[0]?.url)) tab = tabs[0];
 
-    // Strategy 2: Any active YouTube tab
     if (!tab) {
       tabs = await chrome.tabs.query({
-        url: "https://www.youtube.com/*",
+        url: [
+          "https://www.youtube.com/watch*",
+          "https://www.bilibili.com/video/BV*",
+        ],
         active: true,
       });
+      if (generation !== tabCheckGeneration) return;
       if (tabs[0]) tab = tabs[0];
     }
 
-    // Strategy 3: Any YouTube tab (last resort)
     if (!tab) {
-      tabs = await chrome.tabs.query({ url: "https://www.youtube.com/*" });
+      tabs = await chrome.tabs.query({
+        url: [
+          "https://www.youtube.com/watch*",
+          "https://www.bilibili.com/video/BV*",
+        ],
+      });
+      if (generation !== tabCheckGeneration) return;
       if (tabs[0]) tab = tabs[0];
     }
 
@@ -523,70 +587,83 @@ async function runCheckCurrentTab() {
       return;
     }
 
-    // Store the tab ID for reliable messaging later
-    youtubeTabId = tab.id;
+    const locator = extractMediaLocator(tab.url);
+    if (!locator) {
+      showState("welcome");
+      return;
+    }
 
-    const videoId = extractVideoId(tab.url);
+    if (
+      !currentConfigStatus?.hasAiKey ||
+      (locator.platform === "youtube" && !currentConfigStatus?.hasSupadataKey)
+    ) {
+      showConfigError(currentConfigStatus || {}, locator.platform === "youtube");
+      return;
+    }
 
-    if (videoId) {
-      currentVideoUrl = tab.url;
+    let nextMediaRef = locator;
+    let nextVideoTitle = "";
+    let nextChannelName = "";
+    let nextVideoDescription = "";
+    let nextVideoDuration = 0;
 
+    if (locator.platform === "bilibili") {
+      const resolved = await chrome.runtime.sendMessage({
+        action: "resolveBilibiliMedia",
+        url: tab.url,
+      });
+      if (!resolved?.success || !resolved.mediaRef) {
+        if (generation !== tabCheckGeneration) return;
+        showError(
+          "无法读取 B 站视频",
+          resolved?.message || resolved?.error || "媒体解析失败。",
+        );
+        return;
+      }
+      nextMediaRef = resolved.mediaRef;
+      nextVideoTitle = nextMediaRef.title || "";
+      nextChannelName = nextMediaRef.channelName || "";
+      nextVideoDescription = nextMediaRef.description || "";
+      nextVideoDuration = nextMediaRef.duration || 0;
+    } else {
       try {
-        // Route through background script for reliable message passing
         const result = await chrome.runtime.sendMessage({
           action: "relayToContent",
+          tabId: tab.id,
           payload: { action: "getVideoInfo" },
         });
-        debugLog("[YouTube Digest Panel] getVideoInfo result:", result);
         if (result.success && result.response) {
-          currentVideoTitle = result.response.title || "";
-          currentChannelName = result.response.channelName || "";
-          currentVideoDescription = result.response.description || "";
-          currentVideoDuration = result.response.duration || 0;
+          nextVideoTitle = result.response.title || "";
+          nextChannelName = result.response.channelName || "";
+          nextVideoDescription = result.response.description || "";
+          nextVideoDuration = result.response.duration || 0;
         }
-      } catch (e) {
-        console.error("[YouTube Digest Panel] getVideoInfo error:", e);
-        currentVideoTitle = "";
-        currentChannelName = "";
-        currentVideoDescription = "";
-        currentVideoDuration = 0;
+      } catch (error) {
+        console.error("[YouTube Digest Panel] getVideoInfo error:", error);
       }
-
-      await startDigest(videoId, tab.url);
-    } else {
-      showState("welcome");
     }
+
+    if (generation !== tabCheckGeneration) return;
+    videoTabId = tab.id;
+    currentVideoUrl = tab.url;
+    currentRouteKey = locator.routeKey;
+    currentMediaRef = nextMediaRef;
+    currentVideoTitle = nextVideoTitle;
+    currentChannelName = nextChannelName;
+    currentVideoDescription = nextVideoDescription;
+    currentVideoDuration = nextVideoDuration;
+
+    await startDigest(
+      nextMediaRef.mediaKey,
+      tab.url,
+      nextMediaRef,
+    );
   } catch (error) {
     console.error("Tab check error:", error);
     showError(
       "无法打开摘要",
-      error?.message || "读取当前 YouTube 视频失败，请刷新页面后重试。",
+      error?.message || "读取当前视频失败，请刷新页面后重试。",
     );
-  }
-}
-
-function extractVideoId(url) {
-  try {
-    const urlObj = new URL(url);
-
-    if (
-      urlObj.hostname.includes("youtube.com") &&
-      urlObj.searchParams.has("v")
-    ) {
-      return urlObj.searchParams.get("v");
-    }
-
-    if (urlObj.hostname === "youtu.be") {
-      return urlObj.pathname.slice(1);
-    }
-
-    if (urlObj.pathname.startsWith("/embed/")) {
-      return urlObj.pathname.split("/")[2];
-    }
-
-    return null;
-  } catch {
-    return null;
   }
 }
 
@@ -594,13 +671,24 @@ function extractVideoId(url) {
 // DIGEST PIPELINE
 // ============================================================
 
-function startDigest(videoId, videoUrl) {
+function startDigest(
+  videoId,
+  videoUrl,
+  mediaRef = currentMediaRef,
+  routeKey = currentRouteKey,
+) {
   return runDigestSingleFlight(videoId, () =>
-    runDigestLoad(videoId, videoUrl),
+    runDigestLoad(videoId, videoUrl, mediaRef, routeKey),
   );
 }
 
-async function runDigestLoad(videoId, videoUrl) {
+async function runDigestLoad(
+  videoId,
+  videoUrl,
+  mediaRef = currentMediaRef,
+  routeKey = currentRouteKey,
+) {
+  if (routeKey !== currentRouteKey) return;
   // Check if we already have this video loaded in memory
   if (videoId === currentVideoId && currentAnalysis) {
     showState("results");
@@ -610,6 +698,8 @@ async function runDigestLoad(videoId, videoUrl) {
   // Every video change invalidates observer work and in-flight translations.
   if (videoId !== currentVideoId) {
     translationGeneration += 1;
+    analysisGeneration += 1;
+    isAnalysisLoading = false;
     isOverviewTranslationLoading = false;
     if (transcriptScrollObserver) transcriptScrollObserver.disconnect();
     transcriptScrollObserver = null;
@@ -617,10 +707,12 @@ async function runDigestLoad(videoId, videoUrl) {
 
   // Check cache for this video
   const cached = await loadFromCache(videoId);
+  if (routeKey !== currentRouteKey) return;
   if (cached) {
     debugLog("Loading from cache:", videoId);
     currentVideoId = videoId;
     currentVideoUrl = videoUrl;
+    currentMediaRef = cached.mediaRef || mediaRef;
     currentAnalysis = hasUsableEnglishAnalysis(cached.analysis)
       ? cached.analysis
       : null;
@@ -628,6 +720,7 @@ async function runDigestLoad(videoId, videoUrl) {
     currentTranscriptText = cached.transcriptText;
     currentTranscriptTimestamped = cached.transcriptTimestamped;
     currentTranscriptLanguage = cached.transcriptLanguage || null;
+    applyMediaLanguageDefaults();
     isAnalysisLoading = false;
 
     // Restore semantic-segment translations from persistent storage.
@@ -667,6 +760,7 @@ async function runDigestLoad(videoId, videoUrl) {
 
   currentVideoId = videoId;
   currentVideoUrl = videoUrl;
+  currentMediaRef = mediaRef;
   currentAnalysis = null;
   currentTranscript = null;
   currentTranscriptText = null;
@@ -686,8 +780,10 @@ async function runDigestLoad(videoId, videoUrl) {
 
   const transcriptResult = await chrome.runtime.sendMessage({
     action: "fetchTranscript",
-    videoId: videoId,
+    videoId: currentMediaRef?.videoId || videoId,
+    mediaRef: currentMediaRef,
   });
+  if (routeKey !== currentRouteKey) return;
 
   if (!transcriptResult.success) {
     if (transcriptResult.error === "NO_SUPADATA_KEY") {
@@ -708,6 +804,8 @@ async function runDigestLoad(videoId, videoUrl) {
   currentTranscriptText = transcriptResult.transcriptText;
   currentTranscriptTimestamped = transcriptResult.transcriptTextTimestamped;
   currentTranscriptLanguage = transcriptResult.language || null;
+  if (transcriptResult.mediaRef) currentMediaRef = transcriptResult.mediaRef;
+  applyMediaLanguageDefaults();
 
   // Render transcript immediately (no LLM needed)
   renderTranscript();
@@ -1011,6 +1109,8 @@ async function saveQuoteAsNote(quote, btn) {
     const result = await chrome.runtime.sendMessage({
       action: "saveNote",
       videoId: currentVideoId,
+      mediaRef: currentMediaRef,
+      videoUrl: currentMediaRef?.canonicalUrl || currentVideoUrl,
       timestamp: quote.timestampSeconds,
       videoTitle: currentVideoTitle,
       channelName: currentChannelName,
@@ -1133,7 +1233,8 @@ function copyTranscript() {
 
 function exportTranscript() {
   const transcriptContent = currentTranscriptText || "";
-  const videoUrl = `https://youtube.com/watch?v=${currentVideoId}`;
+  const videoUrl =
+    currentMediaRef?.canonicalUrl || currentVideoUrl || "";
 
   let exportText = "";
   exportText += `字幕\n`;
@@ -1198,9 +1299,9 @@ function showError(title, message) {
   document.getElementById("errorBtn").textContent = "重试";
 }
 
-function showConfigError(configStatus) {
+function showConfigError(configStatus, requiresSupadata = true) {
   const missingKeys = [];
-  if (!configStatus.hasSupadataKey) missingKeys.push("Supadata");
+  if (requiresSupadata && !configStatus.hasSupadataKey) missingKeys.push("Supadata");
   if (!configStatus.hasAiKey) missingKeys.push("DeepSeek");
 
   showState("error");
@@ -1245,7 +1346,11 @@ function switchTab(tabName) {
   if (tabName === "overview") {
     if (!currentAnalysis && !isAnalysisLoading) {
       triggerAnalysis();
-    } else if (currentAnalysis && currentOverviewMode !== "en") {
+    } else if (
+      currentAnalysis &&
+      currentOverviewMode !== "en" &&
+      currentAnalysis.analysisLanguage !== "zh-CN"
+    ) {
       void ensureOverviewChinese();
     }
   }
@@ -1260,6 +1365,16 @@ async function triggerAnalysis() {
     return;
 
   isAnalysisLoading = true;
+  analysisGeneration += 1;
+  const generation = analysisGeneration;
+  const requestMediaKey = currentVideoId;
+  const requestRouteKey = currentRouteKey;
+  const requestTranscript = currentTranscriptTimestamped;
+  const isStale = () =>
+    generation !== analysisGeneration ||
+    requestMediaKey !== currentVideoId ||
+    requestRouteKey !== currentRouteKey ||
+    requestTranscript !== currentTranscriptTimestamped;
 
   // Show loading indicators in the Overview tab
   const chapterList = document.getElementById("chapterList");
@@ -1280,7 +1395,10 @@ async function triggerAnalysis() {
       channelName: currentChannelName,
       videoDescription: currentVideoDescription,
       videoDuration: currentVideoDuration,
+      platform: currentMediaRef?.platform || "youtube",
+      sourceLanguage: currentTranscriptLanguage || "",
     });
+    if (isStale()) return;
 
     if (!analysisResult.success) {
       const message = escapeHtml(
@@ -1292,21 +1410,28 @@ async function triggerAnalysis() {
       if (quotesList) {
         quotesList.innerHTML = `<div class="quote-item" style="color: var(--accent); border-left-color: var(--border);">关键语句生成失败：${message}</div>`;
       }
-      isAnalysisLoading = false;
+      if (generation === analysisGeneration) isAnalysisLoading = false;
       return;
     }
 
     if (!hasUsableEnglishAnalysis(analysisResult.analysis)) {
-      throw new Error("概览没有返回可用的英文内容，请重试。");
+      throw new Error("概览没有返回可用内容，请重试。");
     }
     currentAnalysis = analysisResult.analysis;
     renderAnalysisResults(currentAnalysis);
     highlightMomentsOnPage(currentAnalysis.keyMoments);
 
     // Save to cache now that we have analysis
-    await saveToCache(currentVideoId);
-    if (currentOverviewMode !== "en") void ensureOverviewChinese();
+    await saveToCache(requestMediaKey);
+    if (isStale()) return;
+    if (
+      currentOverviewMode !== "en" &&
+      currentAnalysis.analysisLanguage !== "zh-CN"
+    ) {
+      void ensureOverviewChinese();
+    }
   } catch (error) {
+    if (isStale()) return;
     console.error("[YouTube Digest Panel] Analysis error:", error);
     if (chapterList) {
       chapterList.innerHTML = `<li class="chapter-item" style="color: var(--accent); border: none;">出错了：${escapeHtml(error.message)}</li>`;
@@ -1316,7 +1441,7 @@ async function triggerAnalysis() {
     }
   }
 
-  isAnalysisLoading = false;
+  if (generation === analysisGeneration) isAnalysisLoading = false;
 }
 
 // ============================================================
@@ -1337,9 +1462,9 @@ async function seekTo(seconds) {
 
   try {
     // Try direct messaging to the stored YouTube tab first (fastest/reliable)
-    if (youtubeTabId) {
+    if (videoTabId) {
       try {
-        await chrome.tabs.sendMessage(youtubeTabId, payload);
+        await chrome.tabs.sendMessage(videoTabId, payload);
         debugLog("[YouTube Digest Panel] seekTo direct success");
         return;
       } catch (directErr) {
@@ -1353,6 +1478,7 @@ async function seekTo(seconds) {
     // Fallback: route through background script
     const result = await chrome.runtime.sendMessage({
       action: "relayToContent",
+      tabId: videoTabId,
       payload,
     });
     debugLog("[YouTube Digest Panel] seekTo relay result:", result);
@@ -1384,6 +1510,7 @@ async function highlightMomentsOnPage(moments) {
     // Route through background script for reliable message passing
     await chrome.runtime.sendMessage({
       action: "relayToContent",
+      tabId: videoTabId,
       payload: {
         action: "highlightMoments",
         moments: moments,
@@ -1644,6 +1771,7 @@ async function saveToCache(videoId) {
       transcriptText: currentTranscriptText,
       transcriptTimestamped: currentTranscriptTimestamped,
       transcriptLanguage: currentTranscriptLanguage,
+      mediaRef: currentMediaRef,
       videoTitle: currentVideoTitle,
       channelName: currentChannelName,
       paragraphCache: paragraphCacheForVideo,
@@ -1761,7 +1889,18 @@ function noteHasChineseSource(note) {
   return /[\u3400-\u9fff]/.test(rawText);
 }
 
+function noteHasPolishedChineseText(note) {
+  return Boolean(
+    /^zh(?:[-_]|$)/i.test(String(note?.textLanguage || "").trim()) &&
+    typeof note?.text === "string" &&
+    note.text.trim()
+  );
+}
+
 function noteOriginalText(note) {
+  if (noteHasPolishedChineseText(note)) {
+    return note.text.trim();
+  }
   if (noteHasChineseSource(note)) {
     return String(note?.rawText || note?.text || "").trim();
   }
@@ -1769,6 +1908,7 @@ function noteOriginalText(note) {
 }
 
 function noteChineseText(note) {
+  if (noteHasPolishedChineseText(note)) return note.text.trim();
   if (noteHasChineseSource(note)) return noteOriginalText(note);
   return String(note?.translatedText || "").trim();
 }
@@ -1900,12 +2040,19 @@ function handleNotesModeChange(mode) {
  */
 async function loadNotes(videoId) {
   notesTranslationGeneration += 1;
+  const generation = notesTranslationGeneration;
   setNotesTranslationLoading(false);
   try {
     const result = await chrome.runtime.sendMessage({
       action: "getNotes",
       videoId: videoId,
     });
+    if (
+      generation !== notesTranslationGeneration ||
+      (videoId && videoId !== currentVideoId)
+    ) {
+      return;
+    }
 
     if (result.success) {
       currentNotes = Array.isArray(result.notes) ? result.notes : [];
@@ -2095,6 +2242,7 @@ async function playbackTrackingTick() {
   try {
     const result = await chrome.runtime.sendMessage({
       action: "relayToContent",
+      tabId: videoTabId,
       payload: { action: "getCurrentTime" },
     });
 
@@ -2536,6 +2684,9 @@ globalThis.__YTD_TRANSCRIPT_TESTING__ = {
   hasUsableEnglishAnalysis,
   hasCompleteChineseAnalysis,
   noteHasChineseSource,
+  noteHasPolishedChineseText,
+  noteOriginalText,
+  noteChineseText,
   noteCopyTextForMode,
   renderNoteLanguageContent,
   renderChapterLanguageContent,
@@ -2543,4 +2694,5 @@ globalThis.__YTD_TRANSCRIPT_TESTING__ = {
   overviewQuoteCopyText,
   renderSubtitleInlineMarkup,
   renderTranscriptSegmentContent,
+  extractMediaLocator,
 };

@@ -13,11 +13,11 @@
 
 // Import safe defaults and validation helpers. Secret keys live in
 // chrome.storage.local and are never part of the extension source.
-importScripts("settings.js");
+importScripts("settings.js", "bilibili.js");
 
 const DEBUG = false;
 const ANALYSIS_SCHEMA_VERSION = 2;
-const RUNTIME_PROTOCOL_VERSION = 3;
+const RUNTIME_PROTOCOL_VERSION = 4;
 const AI_PROVIDER_IDLE_TIMEOUT_MS = 50_000;
 const AI_PROVIDER_HARD_TIMEOUT_MS = 120_000;
 const AI_PROVIDER_MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
@@ -58,6 +58,7 @@ async function sendMessageToContentWithRecovery(
   tabId,
   payload,
   dependencies = {},
+  targetUrl = "",
 ) {
   const sendMessage =
     dependencies.sendMessage ||
@@ -74,7 +75,10 @@ async function sendMessageToContentWithRecovery(
       "[YouTube Digest BG] Re-injecting content script after extension reload",
       tabId,
     );
-    await executeScript({ target: { tabId }, files: ["content.js"] });
+    const files = isBilibiliVideoUrl(targetUrl)
+      ? ["bilibili.js", "content-bilibili.js"]
+      : ["content.js"];
+    await executeScript({ target: { tabId }, files });
     return sendMessage(tabId, payload);
   }
 }
@@ -291,6 +295,91 @@ chrome.action.onClicked.addListener((tab) => {
  */
 chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
 
+const SUPPORTED_VIDEO_TAB_PATTERNS = [
+  "https://www.youtube.com/*",
+  "https://www.bilibili.com/video/BV*",
+];
+
+function isYouTubeVideoUrl(url) {
+  try {
+    const parsed = new URL(String(url || ""));
+    return (
+      parsed.protocol === "https:" &&
+      parsed.hostname === "www.youtube.com" &&
+      parsed.pathname === "/watch" &&
+      parsed.searchParams.has("v")
+    );
+  } catch {
+    return false;
+  }
+}
+
+function isBilibiliVideoUrl(url) {
+  try {
+    if (!globalThis.BILIBILI_ADAPTER) return false;
+    BILIBILI_ADAPTER.parseBilibiliVideoUrl(url);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isSupportedVideoUrl(url) {
+  return isYouTubeVideoUrl(url) || isBilibiliVideoUrl(url);
+}
+
+function youtubeMediaRef(videoId) {
+  const canonicalUrl = YTD_SETTINGS.canonicalYouTubeUrl(videoId);
+  return {
+    platform: "youtube",
+    videoId,
+    mediaKey: videoId,
+    canonicalUrl,
+  };
+}
+
+function bilibiliFailure(error) {
+  return {
+    success: false,
+    error: error?.code || "BILIBILI_ERROR",
+    message: error?.message || "读取 B 站视频失败。",
+  };
+}
+
+async function resolveMediaRef(mediaInput, sourceUrl = "") {
+  if (mediaInput && typeof mediaInput === "object") {
+    if (mediaInput.platform === "bilibili") {
+      if (mediaInput.bvid && mediaInput.aid && mediaInput.cid) return mediaInput;
+      return BILIBILI_ADAPTER.resolveMedia(
+        mediaInput.canonicalUrl || mediaInput.url || sourceUrl,
+      );
+    }
+    if (mediaInput.platform === "youtube" && mediaInput.videoId) {
+      return youtubeMediaRef(mediaInput.videoId);
+    }
+  }
+
+  if (sourceUrl && isBilibiliVideoUrl(sourceUrl)) {
+    return BILIBILI_ADAPTER.resolveMedia(sourceUrl);
+  }
+
+  const videoId = String(mediaInput || "").trim();
+  return youtubeMediaRef(videoId);
+}
+
+async function handleFetchMediaTranscript(mediaInput) {
+  try {
+    const mediaRef = await resolveMediaRef(mediaInput);
+    if (mediaRef.platform === "bilibili") {
+      const result = await BILIBILI_ADAPTER.fetchTranscript(mediaRef);
+      return { success: true, mediaRef, ...result };
+    }
+    return handleFetchTranscript(mediaRef.videoId);
+  } catch (error) {
+    return bilibiliFailure(error);
+  }
+}
+
 chrome.runtime.onInstalled.addListener(({ reason }) => {
   if (reason === "install") chrome.runtime.openOptionsPage();
 });
@@ -311,10 +400,10 @@ chrome.runtime.onInstalled.addListener(({ reason }) => {
  * visible when switching to an already-loaded non-YouTube tab.
  */
 function updatePanelForTab(tabId, url) {
-  const isYouTube = (url || "").startsWith("https://www.youtube.com");
+  const isSupported = isSupportedVideoUrl(url);
   // setOptions can reject if the tab just closed — ignore that harmlessly.
   chrome.sidePanel
-    .setOptions({ tabId, path: "sidepanel.html", enabled: isYouTube })
+    .setOptions({ tabId, path: "sidepanel.html", enabled: isSupported })
     .catch(() => {});
 }
 
@@ -344,10 +433,17 @@ chrome.tabs.onActivated.addListener(async ({ tabId }) => {
  */
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   // We need to return true to indicate we'll respond asynchronously
+  if (message.action === "resolveBilibiliMedia") {
+    BILIBILI_ADAPTER.resolveMedia(message.url)
+      .then((mediaRef) => sendResponse({ success: true, mediaRef }))
+      .catch((error) => sendResponse(bilibiliFailure(error)));
+    return true;
+  }
+
   if (message.action === "fetchTranscript") {
-    handleFetchTranscript(message.videoId)
+    handleFetchMediaTranscript(message.mediaRef || message.videoId)
       .then(sendResponse)
-      .catch((err) => sendResponse({ error: err.message }));
+      .catch((err) => sendResponse({ success: false, error: err.message }));
     return true; // Keep the message channel open for async response
   }
 
@@ -359,6 +455,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       message.channelName,
       message.videoDescription,
       message.videoDuration,
+      message.platform,
+      message.sourceLanguage,
     )
       .then(sendResponse)
       .catch((err) => sendResponse({ error: err.message }));
@@ -394,10 +492,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.action === "saveNote") {
     // Save a note at the current timestamp
     handleSaveNote(
-      message.videoId,
+      message.mediaRef || message.videoId,
       message.timestamp,
       message.videoTitle,
       message.channelName,
+      message.videoUrl || sender.tab?.url || "",
     )
       .then(sendResponse)
       .catch((err) => sendResponse({ success: false, error: err.message }));
@@ -406,7 +505,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message.action === "getNotes") {
     // Get all saved notes
-    handleGetNotes(message.videoId)
+    handleGetNotes(message.mediaKey || message.videoId)
       .then(sendResponse)
       .catch((err) => sendResponse({ success: false, error: err.message }));
     return true;
@@ -516,31 +615,35 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     debugLog("[YouTube Digest BG] Relay request:", message.payload?.action);
     (async () => {
       try {
-        // Query specifically for YouTube tabs to avoid side panel context issues
-        // Try multiple query strategies to find the right tab
-        let tabs = await chrome.tabs.query({
-          active: true,
-          lastFocusedWindow: true,
-        });
+        let tab = null;
+        if (Number.isInteger(message.tabId)) {
+          const requestedTab = await chrome.tabs.get(message.tabId).catch(() => null);
+          if (requestedTab && isSupportedVideoUrl(requestedTab.url)) tab = requestedTab;
+        }
+
+        let tabs = tab
+          ? [tab]
+          : await chrome.tabs.query({
+              active: true,
+              lastFocusedWindow: true,
+            });
         debugLog(
           "[YouTube Digest BG] Active tab in last focused window:",
           tabs.length,
           tabs[0]?.url,
         );
 
-        // If no YouTube tab found, try broader query
-        if (!tabs[0] || !tabs[0].url?.includes("youtube.com")) {
+        if (!tabs[0] || !isSupportedVideoUrl(tabs[0].url)) {
           tabs = await chrome.tabs.query({
-            url: "https://www.youtube.com/*",
+            url: SUPPORTED_VIDEO_TAB_PATTERNS,
             active: true,
           });
-          debugLog("[YouTube Digest BG] Active YouTube tabs:", tabs.length);
+          debugLog("[YouTube Digest BG] Active supported tabs:", tabs.length);
         }
 
-        // Still nothing? Try any YouTube tab
         if (!tabs[0]) {
-          tabs = await chrome.tabs.query({ url: "https://www.youtube.com/*" });
-          debugLog("[YouTube Digest BG] Any YouTube tabs:", tabs.length);
+          tabs = await chrome.tabs.query({ url: SUPPORTED_VIDEO_TAB_PATTERNS });
+          debugLog("[YouTube Digest BG] Any supported tabs:", tabs.length);
         }
 
         if (tabs[0]) {
@@ -553,6 +656,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           let response = await sendMessageToContentWithRecovery(
             tabs[0].id,
             message.payload,
+            {},
+            tabs[0].url,
           );
 
           // For getVideoInfo, PREFER YouTube's own player data over the
@@ -563,7 +668,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           // real channel ("Replit and Stripe"), and its description is
           // truncated while the box is collapsed. We fall back to the DOM
           // only for fields the player didn't provide.
-          if (message.payload?.action === "getVideoInfo") {
+          if (
+            message.payload?.action === "getVideoInfo" &&
+            isYouTubeVideoUrl(tabs[0].url)
+          ) {
             const playerInfo = await getPlayerVideoDetails(tabs[0].id);
             if (playerInfo) {
               response = {
@@ -580,16 +688,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           debugLog("[YouTube Digest BG] Got response from content:", response);
           sendResponse({ success: true, response });
         } else {
-          debugLog("[YouTube Digest BG] No YouTube tab found");
-          sendResponse({ success: false, error: "No YouTube tab found" });
+          debugLog("[YouTube Digest BG] No supported video tab found");
+          sendResponse({ success: false, error: "No supported video tab found" });
         }
       } catch (err) {
         if (isTransientTabContextError(err)) {
-          debugLog("[YouTube Digest BG] YouTube tab context changed during relay");
+          debugLog("[YouTube Digest BG] Video tab context changed during relay");
           sendResponse({
             success: false,
             error: "PAGE_CONTEXT_CHANGED",
-            message: "YouTube 页面正在刷新，请稍后重试。",
+            message: "视频页面正在刷新，请稍后重试。",
           });
         } else {
           console.error("[YouTube Digest BG] Relay error:", err.message);
@@ -914,6 +1022,13 @@ function parseLooseJson(text) {
 // DEEPSEEK ANALYSIS
 // ============================================================
 
+function shouldUseBilibiliChinese(platform, sourceLanguage) {
+  return (
+    platform === "bilibili" &&
+    BILIBILI_ADAPTER.isChineseLanguage(sourceLanguage)
+  );
+}
+
 /**
  * Sends the transcript to DeepSeek for analysis.
  *
@@ -931,6 +1046,8 @@ async function handleAnalyzeTranscript(
   channelName,
   videoDescription,
   videoDuration,
+  platform = "youtube",
+  sourceLanguage = "",
 ) {
   try {
     const settings = await getSettings();
@@ -972,6 +1089,7 @@ async function handleAnalyzeTranscript(
       lateThresholdSeconds % 60,
     ).padStart(2, "0")}`;
 
+    const directChinese = shouldUseBilibiliChinese(platform, sourceLanguage);
     const promptVariables = {
       durationFormatted,
       lateThreshold,
@@ -980,10 +1098,12 @@ async function handleAnalyzeTranscript(
       channelName: channelName || "Unknown",
       videoDescription: videoDescription || "No description available",
       transcriptText,
+      platform,
+      sourceLanguage: sourceLanguage || "unknown",
     };
     const systemPrompt = await loadPromptSection(
       "analysis.md",
-      "System prompt",
+      directChinese ? "Chinese system prompt" : "System prompt",
       promptVariables,
     );
     const userPrompt = await loadPromptSection(
@@ -992,7 +1112,7 @@ async function handleAnalyzeTranscript(
       promptVariables,
     );
 
-    debugLog("[YouTube Digest] Requesting video analysis", settings.aiModel);
+    debugLog("[YouTube Digest] Requesting video analysis", platform, settings.aiModel);
     const { text: responseText } = await requestAiCompletion({
       maxTokens: 8192,
       responseFormat: { type: "json_object" },
@@ -1009,7 +1129,26 @@ async function handleAnalyzeTranscript(
     // schema and derive display timestamps from validated numeric seconds.
     analysis = validateAndFixTimestamps(analysis, maxTimestampSeconds);
     if (!analysis.chapters.length || !analysis.keyQuotes.length) {
-      throw new Error("DeepSeek 没有返回可用的英文概览，请重试。");
+      throw new Error("DeepSeek 没有返回可用的概览，请重试。");
+    }
+
+    if (directChinese) {
+      analysis = {
+        ...analysis,
+        platform: "bilibili",
+        analysisLanguage: "zh-CN",
+        chapters: analysis.chapters.map((chapter) => ({
+          ...chapter,
+          titleZh: chapter.title,
+          summaryZh: chapter.summary,
+        })),
+        keyQuotes: analysis.keyQuotes.map((quote) => ({
+          ...quote,
+          quoteZh: quote.quote,
+        })),
+      };
+    } else {
+      analysis.analysisLanguage = "en";
     }
 
     return {
@@ -1168,13 +1307,18 @@ async function handleGetVideoInfo(tabId) {
  * Fetches the transcript if needed, finds the relevant line, and cleans it up.
  */
 async function handleSaveNote(
-  videoId,
+  mediaInput,
   timestamp,
   videoTitle,
   channelName,
+  sourceUrl = "",
 ) {
   try {
-    const canonicalVideoUrl = YTD_SETTINGS.canonicalYouTubeUrl(videoId);
+    const mediaRef = await resolveMediaRef(mediaInput, sourceUrl);
+    const mediaKey = mediaRef.mediaKey || mediaRef.videoId;
+    const canonicalVideoUrl = mediaRef.canonicalUrl;
+    const resolvedVideoTitle = videoTitle || mediaRef.title || "Untitled Video";
+    const resolvedChannelName = channelName || mediaRef.channelName || "";
     const safeTimestamp = Math.max(0, Math.floor(Number(timestamp) || 0));
 
     // First, try to get the transcript from the digest cache. The side panel
@@ -1183,9 +1327,9 @@ async function handleSaveNote(
     // refetched the transcript from Supadata on every saved note.
     let transcript = null;
     try {
-      const cached = await chrome.storage.local.get(`digest_${videoId}`);
-      if (cached[`digest_${videoId}`]?.transcript) {
-        transcript = cached[`digest_${videoId}`].transcript;
+      const cached = await chrome.storage.local.get(`digest_${mediaKey}`);
+      if (cached[`digest_${mediaKey}`]?.transcript) {
+        transcript = cached[`digest_${mediaKey}`].transcript;
         debugLog("[YouTube Digest] Using cached transcript for note");
       }
     } catch (e) {
@@ -1194,9 +1338,13 @@ async function handleSaveNote(
 
     // If no cached transcript, fetch it
     if (!transcript) {
-      const transcriptResult = await handleFetchTranscript(videoId);
+      const transcriptResult = await handleFetchMediaTranscript(mediaRef);
       if (!transcriptResult.success) {
-        return { success: false, error: "Could not fetch transcript" };
+        return {
+          success: false,
+          error: transcriptResult.error || "Could not fetch transcript",
+          message: transcriptResult.message || "无法读取字幕。",
+        };
       }
       transcript = transcriptResult.transcript;
     }
@@ -1273,7 +1421,9 @@ async function handleSaveNote(
       beforeLine,
       afterLine,
       contextLines.join(" "),
-      videoTitle,
+      resolvedVideoTitle,
+      mediaRef.platform,
+      matchedLine.language || "",
     );
 
     // Format timestamp as MM:SS
@@ -1282,18 +1432,33 @@ async function handleSaveNote(
     const formattedTimestamp = `${minutes}:${String(seconds).padStart(2, "0")}`;
 
     // Create timestamped URL
-    const timestampedUrl = `${canonicalVideoUrl}&t=${safeTimestamp}s`;
+    const timestampedUrl =
+      mediaRef.platform === "bilibili"
+        ? BILIBILI_ADAPTER.timestampUrl(mediaRef, safeTimestamp)
+        : `${canonicalVideoUrl}&t=${safeTimestamp}s`;
+    const directChineseNote = shouldUseBilibiliChinese(
+      mediaRef.platform,
+      matchedLine.language,
+    );
 
     // Create the note object
     const note = {
       id: `note_${Date.now()}`,
-      videoId: videoId,
+      videoId: mediaKey,
+      mediaKey,
+      platform: mediaRef.platform,
+      canonicalUrl: canonicalVideoUrl,
+      bvid: mediaRef.bvid || "",
+      cid: mediaRef.cid || null,
+      page: mediaRef.page || null,
       videoTitle:
-        typeof videoTitle === "string"
-          ? videoTitle.slice(0, 500)
+        typeof resolvedVideoTitle === "string"
+          ? resolvedVideoTitle.slice(0, 500)
           : "Untitled Video",
       channelName:
-        typeof channelName === "string" ? channelName.slice(0, 300) : "",
+        typeof resolvedChannelName === "string"
+          ? resolvedChannelName.slice(0, 300)
+          : "",
       timestamp: formattedTimestamp,
       timestampSeconds: safeTimestamp,
       timestampedUrl: timestampedUrl,
@@ -1302,6 +1467,7 @@ async function handleSaveNote(
       rawText: matchedLine.text,
       sourceLanguage:
         typeof matchedLine.language === "string" ? matchedLine.language : "",
+      textLanguage: directChineseNote ? "zh-CN" : "",
       createdAt: Date.now(),
     };
 
@@ -1310,9 +1476,11 @@ async function handleSaveNote(
 
     // Generate the Chinese note separately. Failure never blocks the English
     // note; the Notes tab can retry missing translations later in small batches.
-    const translationResult = await handleTranslateNotes([note]);
-    if (translationResult.success) {
-      note.translatedText = translationResult.translations[0]?.textZh || "";
+    if (!directChineseNote) {
+      const translationResult = await handleTranslateNotes([note]);
+      if (translationResult.success) {
+        note.translatedText = translationResult.translations[0]?.textZh || "";
+      }
     }
 
     // Notify side panel to refresh notes list
@@ -1336,6 +1504,8 @@ async function cleanupNoteText(
   afterText,
   fullContext,
   videoTitle,
+  platform = "youtube",
+  sourceLanguage = "",
 ) {
   const settings = await getSettings();
   if (!settings.aiApiKey) {
@@ -1350,10 +1520,14 @@ async function cleanupNoteText(
       beforeText: beforeText || "(none)",
       targetText,
       afterText: afterText || "(none)",
+      platform,
+      sourceLanguage: sourceLanguage || "unknown",
     };
     const systemPrompt = await loadPromptSection(
       "note-cleanup.md",
-      "System prompt",
+      shouldUseBilibiliChinese(platform, sourceLanguage)
+        ? "Chinese system prompt"
+        : "System prompt",
       variables,
     );
     const userPrompt = await loadPromptSection(
@@ -2095,7 +2269,9 @@ async function callAiTranslation(
 globalThis.__YTD_TRANSLATION_TESTING__ = {
   requestAiCompletion,
   callAiTranslation,
+  cleanupNoteText,
   handleAnalyzeTranscript,
+  handleSaveNote,
   handleGetNotes,
   handleDeleteNote,
   handleTranslateOverview,
@@ -2103,6 +2279,7 @@ globalThis.__YTD_TRANSLATION_TESTING__ = {
   isMissingContentReceiverError,
   isTransientTabContextError,
   noteHasChineseSource,
+  shouldUseBilibiliChinese,
   normalizeOverviewTranslation,
   normalizeNoteTranslation,
   saveNoteToStorage,
@@ -2113,4 +2290,7 @@ globalThis.__YTD_TRANSLATION_TESTING__ = {
   validateTranscriptBatchRequest,
   normalizeTranslatedSegmentBatch,
   handleTranslateContent,
+  isSupportedVideoUrl,
+  resolveMediaRef,
+  handleFetchMediaTranscript,
 };

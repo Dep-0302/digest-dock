@@ -29,6 +29,8 @@ public_allowlist=(
   "background.js"
   "settings.js"
   "content.js"
+  "bilibili.js"
+  "content-bilibili.js"
   "sidepanel.html"
   "sidepanel.css"
   "sidepanel.js"

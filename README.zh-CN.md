@@ -4,6 +4,8 @@
 
 把每个 YouTube 视频变成一份可以深入学习的资料。YouTube Digest 把字幕、双语翻译、AI 概览、内容讲解和时间戳笔记放进同一个 Chrome 侧边栏，让你可以持续学习视频中的知识和语言，同时不丢失原视频上下文。
 
+当前本地版本也支持带有人工或 AI 字幕轨的标准 `www.bilibili.com/video/BV...` 页面。它只处理当前分P，复用当前浏览器中的 B 站登录会话但不读取或保存 Cookie；中文字幕会直接生成中文概览和润色后的中文笔记。
+
 - 把零碎字幕变成清晰、可搜索的学习资料。
 - 查看原文、简体中文翻译，或中英双语对照字幕来学习语言。
 - 通过 AI 概览、章节、重点引用和选中文本讲解建立系统理解。
@@ -44,13 +46,13 @@ YouTube Digest 是一个需要自行提供 API Key 的开源项目，通过 GitH
 7. 选择你刚才确定的那个准确项目文件夹，其中必须包含 `manifest.json`。
 8. 如果需要，可以在 Chrome 扩展菜单中固定 YouTube Digest。
 
-这是一个本地加载的扩展，不会自动更新。下载新版或让 Agent 修改代码后，请在 `chrome://extensions` 中找到 YouTube Digest 并点击“重新加载”，然后刷新已经打开的 YouTube 页面。如果移动或删除源代码文件夹，Chrome 中加载的扩展会失效，需要从新的位置重新加载。
+这是一个本地加载的扩展，不会自动更新。下载新版或让 Agent 修改代码后，请在 `chrome://extensions` 中找到 YouTube Digest 并点击“重新加载”，然后刷新已经打开的 YouTube 或 B 站视频页面。如果移动或删除源代码文件夹，Chrome 中加载的扩展会失效，需要从新的位置重新加载。
 
 ## 设置 API Key
 
-YouTube Digest 需要你在自己的服务账号中准备两个 Key：
+使用 YouTube 时需要准备下面两个 Key；如果只使用 B 站，只需要 DeepSeek Key，不需要 Supadata：
 
-1. **Supadata API Key**，用于获取 YouTube 字幕。
+1. **Supadata API Key**，用于获取 YouTube 字幕；只使用 B 站时可不填写。
 2. **DeepSeek API Key**，用于生成概览、讲解内容、翻译和自动润色笔记。
 
 ### 获取 Supadata API Key
@@ -96,21 +98,26 @@ API Key 和设置保存在你设备上的 Chrome 扩展本地存储中。发布�
 5. 选中字幕，获取 AI 内容讲解。
 6. 从播放器或重点引用中保存笔记，之后可以在 **笔记** 中选择 **原文**、**中文**或**双语**查看。
 
+使用 B 站时，打开一个有字幕的标准 BV 视频。当前分P会作为一份独立学习资料；点击扩展图标或页面中的“生成摘要”，并通过播放器悬浮按钮保存时间戳笔记。
+
 ## 当前支持范围
 
 - Chrome 116 或更高版本。
 - 标准的 `youtube.com/watch` 视频页面。
+- 标准的 `www.bilibili.com/video/BV...` 视频页面，每次只处理当前分P。
 - Supadata 能够返回的原生字幕。YouTube Digest 会优先请求英文字幕，也可能显示其他可用的原生语言。
+- 当前 B 站浏览器会话可以访问的人工或 AI 字幕轨。B 站字幕读取不消耗 Supadata 额度。
 - 原文、简体中文和双语对照字幕。
 - 英文 AI 概览与简体中文翻译分别生成；双语模式只合并两份缓存结果，不会发起第三次生成。另支持选中文本讲解和自动润色笔记。
 - 笔记先生成一次润色后的英文，再单独生成一次简体中文；双语笔记只合并两份已保存内容。
 - 如果笔记对应的原字幕已经是中文，则直接复用原字幕作为中文笔记，不再发送中文翻译请求。
+- 对 B 站中文字幕，概览和润色笔记各只进行一次中文 AI 请求，不经过“中文→英文→中文”。
 - 本地笔记，以及最近字幕、概览和翻译的本地缓存。
 - 发布版本的所有 AI 功能都使用 DeepSeek V4 Flash。其他服务需要修改本地代码，不属于发布版本的支持范围。
 
-Shorts、直播、私密视频、受访问限制的视频，以及没有原生字幕的视频可能无法使用。目前没有测试 Firefox、Safari、移动浏览器或其他 Chromium 浏览器。
+Shorts、直播、B 站番剧页、私密或受访问限制的视频、画面硬字幕，以及没有原生字幕轨的视频可能无法使用。目前没有测试 Firefox、Safari、移动浏览器或其他 Chromium 浏览器。
 
-YouTube Digest 强制使用 Supadata 的 `mode=native`，不会在没有原生字幕时请求 AI 生成转录，也不会在本地转录音频。
+YouTube 路径强制使用 Supadata 的 `mode=native`。两个平台都不会在没有原生字幕时请求生成式转录，也不会在本地转录音频或使用 OCR。
 
 ## Supadata 免费额度和请求成本
 
@@ -165,40 +172,41 @@ YouTube Digest 使用原生 HTML、CSS 和 JavaScript，没有构建步骤，很
 YouTube Digest 会直接从扩展向服务商发送请求：
 
 1. 把标准化的 YouTube 视频地址发送给 Supadata，用于获取原生字幕。
-2. 当你使用 AI 功能时，把字幕和相关视频信息发送给 DeepSeek。
-3. 翻译或讲解等功能只发送当前需要的内容，例如选中的文本和上下文，或少量字幕分段。
-4. API Key、设置、笔记和最近缓存保存在 Chrome 本地。
+2. 对 B 站，直接向 B 站请求当前视频元数据和已有字幕轨，复用浏览器当前会话但不读取或保存 Cookie 值。
+3. 当你使用 AI 功能时，把字幕和相关视频信息发送给 DeepSeek。
+4. 翻译或讲解等功能只发送当前需要的内容，例如选中的文本和上下文，或少量字幕分段。
+5. API Key、设置、笔记和最近缓存保存在 Chrome 本地。
 
-YouTube Digest 没有账号系统、广告、分析统计或行为追踪。Supadata 和 DeepSeek 仍会按照各自的条款和隐私政策处理数据。详情请查看 [PRIVACY.md](PRIVACY.md)。
+YouTube Digest 没有账号系统、广告、分析统计或行为追踪。B 站、Supadata 和 DeepSeek 仍会按照各自的条款和隐私政策处理请求。详情请查看 [PRIVACY.md](PRIVACY.md)。
 
 ## 常见问题
 
-### YouTube 视频页面没有显示 Digest 按钮
+### 视频页面没有显示 Digest 按钮
 
-- 在 `chrome://extensions` 中找到 YouTube Digest，点击“重新加载”，然后刷新 YouTube 页面。
-- 确认当前页面是标准 `https://www.youtube.com/watch?...` 页面，而不是 Shorts、嵌入页面或直播页面。
+- 在 `chrome://extensions` 中找到 YouTube Digest，点击“重新加载”，然后刷新视频页面。
+- 确认当前页面是标准 `https://www.youtube.com/watch?...` 或 `https://www.bilibili.com/video/BV...` 页面，而不是 Shorts、嵌入页、直播页或 B 站番剧页。
 - 当前版本会在 YouTube 响应式操作栏变化时自动重新定位按钮。页面加载完成后可以稍等片刻。
 - 如果你使用的是较早下载的版本，可以先横向调整一次 YouTube 窗口宽度让按钮出现，然后下载最新版，这样之后不再需要调整窗口。
 - 如果按钮仍然没有出现，让你的编程 Agent 在这个具体视频页面检查 content script。
 
 ### 侧边栏无法打开
 
-- 确认你打开的是标准 `https://www.youtube.com/watch?...` 页面。
+- 确认你打开的是标准 `https://www.youtube.com/watch?...` 或 `https://www.bilibili.com/video/BV...` 页面。
 - 在 `chrome://extensions` 中确认 YouTube Digest 已启用，并点击“重新加载”。
-- 重新加载扩展后，刷新 YouTube 页面。
+- 重新加载扩展后，刷新视频页面。
 - 如果问题仍然存在，让你的编程 Agent 检查扩展。
 
 ### YouTube Digest 提示需要设置
 
-- 打开 **Settings**，保存 Supadata Key 和 DeepSeek Key。
+- 使用 YouTube 时保存 Supadata Key 和 DeepSeek Key；只使用 B 站时保存 DeepSeek Key，Supadata 可以留空。
 - 发布版本固定使用 DeepSeek V4 Flash，没有需要填写的 Base URL 或 Model 字段。
 - 如果设置提示旧的自定义服务已移除，请重新填写 DeepSeek Key。旧 AI Key 已安全清除，避免被错误用于 DeepSeek。
 
 ### 找不到字幕
 
 - 确认视频是公开的，并且有原生字幕。
-- 检查 Supadata Key、剩余额度、限速和账号状态。
-- 没有字幕的查询和手动重试也可能消耗额度。
+- 使用 YouTube 时，检查 Supadata Key、剩余额度、限速和账号状态；没有字幕的查询和手动重试也可能消耗额度。
+- 使用 B 站时，确认当前分P存在独立字幕轨；若该字幕要求登录，请确认当前 Chrome 已登录 B 站。画面中的硬字幕无法读取。
 
 YouTube Digest 不会自动改用 AI 生成字幕。
 
@@ -221,7 +229,7 @@ npm run check
 npm run package
 ```
 
-Agent 还应该在 Chrome 中重新加载扩展，并测试多个真实 YouTube 视频。自动检查通过，不代表真实服务请求和 YouTube 交互一定正常。
+Agent 还应该在 Chrome 中重新加载扩展，并在每个发生改动的支持平台上测试真实视频。自动检查通过，不代表真实服务请求或页面交互一定正常。
 
 ## 开源许可
 

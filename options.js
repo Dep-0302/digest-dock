@@ -14,7 +14,8 @@ const YTD_OPTIONS = (() => {
       transcriptProvider: "Transcript provider",
       supadataApiKeyLabel: "Supadata API key",
       supadataPlaceholder: "Paste your Supadata key",
-      supadataHelp: "Used to fetch timestamped YouTube subtitles. ",
+      supadataHelp:
+        "Used to fetch timestamped YouTube subtitles. Optional if you only use Bilibili. ",
       supadataLink: "Create a Supadata account and key",
       supadataHelpSuffix:
         ". Supadata generates the key during onboarding.",
@@ -86,7 +87,7 @@ const YTD_OPTIONS = (() => {
       transcriptProvider: "字幕服务",
       supadataApiKeyLabel: "Supadata API 密钥",
       supadataPlaceholder: "粘贴 Supadata 密钥",
-      supadataHelp: "用于获取带时间戳的 YouTube 字幕。",
+      supadataHelp: "用于获取带时间戳的 YouTube 字幕。只使用 B 站时可以留空。",
       supadataLink: "创建 Supadata 账号并获取密钥",
       supadataHelpSuffix: "。Supadata 会在引导流程中生成密钥。",
       aiProvider: "AI 服务",
@@ -460,10 +461,6 @@ const YTD_OPTIONS = (() => {
         supadataApiKey: supadataApiKeyInput.value,
       });
 
-      if (!settings.supadataApiKey) {
-        setStatus(saveStatus, "addSupadataKey");
-        return;
-      }
       if (!settings.aiApiKey) {
         setStatus(saveStatus, "addDeepseekKey");
         return;

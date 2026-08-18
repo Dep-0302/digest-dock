@@ -16,7 +16,19 @@ test("manifest uses minimized install-time permissions", () => {
   assert.equal(packageJson.version, manifest.version);
   assert.equal(manifest.options_ui.page, "options.html");
   assert.ok(!manifest.permissions.includes("activeTab"));
+  assert.ok(!manifest.permissions.includes("cookies"));
   assert.ok(manifest.host_permissions.includes("https://api.deepseek.com/*"));
+  assert.ok(manifest.host_permissions.includes("https://api.bilibili.com/*"));
+  assert.ok(
+    manifest.host_permissions.includes("https://subtitle.bilibili.com/*"),
+  );
+  const bilibiliContentScript = manifest.content_scripts.find((entry) =>
+    entry.matches?.includes("https://www.bilibili.com/video/BV*"),
+  );
+  assert.deepEqual(bilibiliContentScript?.js, [
+    "bilibili.js",
+    "content-bilibili.js",
+  ]);
   assert.equal(Object.hasOwn(manifest, "optional_host_permissions"), false);
   assert.equal(manifest.version, "1.1.5");
 });
@@ -44,6 +56,7 @@ test("release copy documents current scope without em dashes", () => {
     readme,
     /Turn every YouTube video into a resource for deep learning\./,
   );
+  assert.match(readme, /standard `www\.bilibili\.com\/video\/BV\.\.\.` pages/);
   assert.doesNotMatch(readme, /before deciding how much of it to watch/i);
   assert.match(readme, /^## Install with your coding agent$/m);
   assert.match(
@@ -66,6 +79,7 @@ test("release copy documents current scope without em dashes", () => {
   assert.doesNotMatch(readme, /^## Contributing$/m);
   assert.match(chineseReadme, /^# YouTube Digest$/m);
   assert.match(chineseReadme, /把每个 YouTube 视频变成一份可以深入学习的资料/);
+  assert.match(chineseReadme, /标准 `www\.bilibili\.com\/video\/BV\.\.\.` 页面/);
   assert.match(chineseReadme, /^## 让你的编程 Agent 帮你安装$/m);
   assert.match(
     chineseReadme,
@@ -125,10 +139,10 @@ test("release copy documents current scope without em dashes", () => {
   assert.match(chineseReadme, /\$0\.002[^\n]*\$0\.006 USD/);
   assert.match(chineseReadme, /dash\.supadata\.ai\/auth\/sign-up/i);
   assert.match(chineseReadme, /platform\.deepseek\.com\/api_keys/i);
-  assert.match(readme, /^### The Digest button is missing on a YouTube video$/m);
+  assert.match(readme, /^### The Digest button is missing on a video$/m);
   assert.match(
     chineseReadme,
-    /^### YouTube 视频页面没有显示 Digest 按钮$/m,
+    /^### 视频页面没有显示 Digest 按钮$/m,
   );
 
   const optionsPage = read("options.html");
@@ -227,6 +241,8 @@ test("notes filters preserve selected contrast and expose pressed state", () => 
 test("runtime has no source-file credential dependency or retired model", () => {
   const runtime = [
     "background.js",
+    "bilibili.js",
+    "content-bilibili.js",
     "content.js",
     "sidepanel.js",
     "options.js",
@@ -254,9 +270,17 @@ test("retired Remix and reader files are absent", () => {
 
 test("published prompt files contain runtime sections", () => {
   const expectedSections = {
-    "prompts/analysis.md": ["System prompt", "User prompt"],
+    "prompts/analysis.md": [
+      "System prompt",
+      "Chinese system prompt",
+      "User prompt",
+    ],
     "prompts/explain.md": ["System prompt", "User prompt"],
-    "prompts/note-cleanup.md": ["System prompt", "User prompt"],
+    "prompts/note-cleanup.md": [
+      "System prompt",
+      "Chinese system prompt",
+      "User prompt",
+    ],
     "prompts/translation.md": [
       "Shared base rules",
       "Chinese rules",
