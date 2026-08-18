@@ -6,28 +6,27 @@
  */
 
 const DEBUG = false;
-const REQUIRED_RUNTIME_PROTOCOL_VERSION = 3;
+const REQUIRED_RUNTIME_PROTOCOL_VERSION = 4;
 const debugLog = (...args) => {
   if (DEBUG) console.log(...args);
 };
 
 function createSingleFlight() {
-  let active = null;
+  const activeByKey = new Map();
   return (key, task) => {
-    if (active?.key === key) return active.promise;
-    const entry = { key, promise: null };
-    entry.promise = Promise.resolve()
+    if (activeByKey.has(key)) return activeByKey.get(key);
+    let promise;
+    promise = Promise.resolve()
       .then(task)
       .finally(() => {
-        if (active === entry) active = null;
+        if (activeByKey.get(key) === promise) activeByKey.delete(key);
       });
-    active = entry;
-    return entry.promise;
+    activeByKey.set(key, promise);
+    return promise;
   };
 }
 
 const runDigestSingleFlight = createSingleFlight();
-const runTabCheckSingleFlight = createSingleFlight();
 
 // ============================================================
 // STATE
@@ -44,15 +43,18 @@ let currentVideoTitle = "";
 let currentChannelName = "";
 let currentVideoDescription = "";
 let currentVideoDuration = 0;
+let currentVideoSourceLanguage = "";
 let isAnalysisLoading = false; // Track if analysis is in progress
 let youtubeTabId = null; // Store the YouTube tab ID for reliable messaging
 let errorAction = null;
+let tabCheckGeneration = 0;
+let digestGeneration = 0;
 
 // --- Translation state ---
 // The public transcript control intentionally supports only the original
 // subtitles, Chinese, and an aligned source + Chinese view.
 let currentTranscriptMode = "original";
-let currentOverviewMode = "bilingual";
+let currentOverviewMode = "zh";
 let currentNotesMode = "bilingual";
 let currentNotes = [];
 let currentNotesFilterVideoId = null;
@@ -65,6 +67,42 @@ let transcriptScrollObserver = null;
 // Stable keys include the video, source mode, language, and semantic segment ID.
 let transcriptParagraphCache = new Map();
 const TRANSLATION_MESSAGE_TIMEOUT_MS = 130_000;
+const TRANSCRIPT_TRANSLATION_CACHE_VERSION = 2;
+const TRANSCRIPT_SOURCE_POLICY_VERSION = 2;
+
+function normalizeLanguageCode(value) {
+  const language = String(value || "")
+    .trim()
+    .replace(/_/g, "-")
+    .toLowerCase();
+  return language.length <= 35 &&
+    /^[a-z]{2,8}(?:-[a-z0-9]{1,8}){0,3}$/.test(language)
+    ? language
+    : "";
+}
+
+function isChineseLanguage(value) {
+  const primary = normalizeLanguageCode(value).split("-")[0];
+  return [
+    "zh",
+    "zho",
+    "chi",
+    "cmn",
+    "yue",
+    "wuu",
+    "gan",
+    "hak",
+    "nan",
+    "lzh",
+  ].includes(primary);
+}
+
+function languagesSharePrimary(value, otherValue) {
+  if (isChineseLanguage(value) && isChineseLanguage(otherValue)) return true;
+  const primary = normalizeLanguageCode(value).split("-")[0];
+  const otherPrimary = normalizeLanguageCode(otherValue).split("-")[0];
+  return Boolean(primary && primary === otherPrimary);
+}
 
 /**
  * Prevent a stopped service worker or dead message channel from leaving the
@@ -121,6 +159,14 @@ const TRANSCRIPT_SEGMENT_LIMITS = Object.freeze({
   maxChars: 320,
   maxSeconds: 20,
 });
+const COMPACT_CJK_SEGMENT_LIMITS = Object.freeze({
+  minChars: 28,
+  idealChars: 72,
+  maxChars: 120,
+  maxSeconds: 12,
+});
+const SENTENCE_PUNCTUATION_PATTERN = /[.!?;:,。！？；：，]/;
+const COMPACT_CJK_PATTERN = /[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]/g;
 
 function normalizeCaptionText(text) {
   return String(text || "")
@@ -162,6 +208,60 @@ function splitOversizedThought(text, maxChars) {
   return parts;
 }
 
+function transcriptSegmentProfile(text, fallback = TRANSCRIPT_SEGMENT_LIMITS) {
+  const normalized = normalizeCaptionText(text);
+  const visible = normalized.replace(/\s/g, "");
+  const cjkCount = (visible.match(COMPACT_CJK_PATTERN) || []).length;
+  const compactCjk =
+    cjkCount >= 6 &&
+    cjkCount / Math.max(1, visible.length) >= 0.45 &&
+    !SENTENCE_PUNCTUATION_PATTERN.test(normalized);
+  return compactCjk ? COMPACT_CJK_SEGMENT_LIMITS : fallback;
+}
+
+function splitCaptionPiece(text, start, duration, profile) {
+  const normalized = normalizeCaptionText(text);
+  if (!normalized) return [];
+  const compactCjk = profile === COMPACT_CJK_SEGMENT_LIMITS;
+  const countByChars = Math.ceil(
+    normalized.length / (compactCjk ? profile.idealChars : profile.maxChars),
+  );
+  const countByTime = Math.ceil(duration / profile.maxSeconds);
+  const maxReadableParts = Math.max(
+    1,
+    Math.floor(normalized.length / profile.minChars),
+  );
+  const partCount = Math.max(
+    1,
+    countByChars,
+    Math.min(countByTime, maxReadableParts),
+  );
+  const targetChars = Math.min(
+    profile.maxChars,
+    Math.ceil(normalized.length / partCount),
+  );
+  const parts = splitOversizedThought(normalized, targetChars);
+  let consumedChars = 0;
+  return parts.map((part) => {
+    const startRatio = normalized.length
+      ? Math.min(1, consumedChars / normalized.length)
+      : 0;
+    consumedChars += part.length;
+    const endRatio = normalized.length
+      ? Math.min(1, consumedChars / normalized.length)
+      : 1;
+    return {
+      text: part,
+      start: start + duration * startRatio,
+      end: start + duration * endRatio,
+      semanticEnd:
+        /[.!?。！？]["')\]”’）】」』]*$/.test(part) || parts.length > 1,
+      clauseEnd: /[;:,；：，]["')\]”’）】」』]*$/.test(part),
+      compactCjk,
+    };
+  });
+}
+
 /**
  * Reconstructs complete sentences across raw caption boundaries. Each segment
  * keeps the timestamp of the first caption that contributed text. Character
@@ -185,20 +285,20 @@ function groupTranscriptEntries(entries, limits = TRANSCRIPT_SEGMENT_LIMITS) {
     sentenceParts.forEach((sentencePart) => {
       const cleanPart = normalizeCaptionText(sentencePart);
       if (!cleanPart) return;
-      const oversizedParts = splitOversizedThought(cleanPart, limits.maxChars);
-      oversizedParts.forEach((part, partIndex) => {
-        const ratio = text.length ? Math.min(1, consumedChars / text.length) : 0;
-        pieces.push({
-          text: part,
-          start: start + duration * ratio,
-          semanticEnd:
-            /[.!?。！？]["')\]”’）】」』]*$/.test(part) ||
-            oversizedParts.length > 1,
-          clauseEnd: /[;:,；：，]["')\]”’）】」』]*$/.test(part),
-          sourceOrder: `${entryIndex}:${partIndex}`,
-        });
-        consumedChars += part.length + 1;
+      const ratio = text.length ? Math.min(1, consumedChars / text.length) : 0;
+      const sentenceDuration = text.length
+        ? duration * (cleanPart.length / text.length)
+        : duration;
+      const profile = transcriptSegmentProfile(cleanPart, limits);
+      splitCaptionPiece(
+        cleanPart,
+        start + duration * ratio,
+        sentenceDuration,
+        profile,
+      ).forEach((piece, partIndex) => {
+        pieces.push({ ...piece, sourceOrder: `${entryIndex}:${partIndex}` });
       });
+      consumedChars += cleanPart.length;
     });
   });
 
@@ -219,28 +319,39 @@ function groupTranscriptEntries(entries, limits = TRANSCRIPT_SEGMENT_LIMITS) {
   };
 
   pieces.forEach((piece) => {
-    if (!current) current = { start: piece.start, text: "" };
+    if (current) {
+      const candidateText = normalizeCaptionText(`${current.text} ${piece.text}`);
+      const candidateProfile = transcriptSegmentProfile(candidateText, limits);
+      const candidateElapsed = Math.max(0, piece.end - current.start);
+      if (
+        candidateText.length > candidateProfile.maxChars ||
+        candidateElapsed > candidateProfile.maxSeconds
+      ) {
+        flush();
+      }
+    }
+
+    if (!current) current = { start: piece.start, end: piece.end, text: "" };
     current.text = normalizeCaptionText(`${current.text} ${piece.text}`);
-    const elapsed = Math.max(0, piece.start - current.start);
-    const comfortablySized = current.text.length >= limits.minChars;
-    const reachedIdeal = current.text.length >= limits.idealChars;
+    current.end = Math.max(current.end, piece.end);
+    const profile = transcriptSegmentProfile(current.text, limits);
+    const elapsed = Math.max(0, current.end - current.start);
+    const comfortablySized = current.text.length >= profile.minChars;
+    const reachedIdeal = current.text.length >= profile.idealChars;
     const atNaturalBoundary =
       piece.semanticEnd ||
       (piece.clauseEnd &&
         (reachedIdeal ||
-          current.text.length >= limits.maxChars ||
-          elapsed >= limits.maxSeconds));
-    const reachedGuardrail =
-      atNaturalBoundary &&
-      (current.text.length >= limits.maxChars || elapsed >= limits.maxSeconds);
+          current.text.length >= profile.maxChars ||
+          elapsed >= profile.maxSeconds));
     const reachedHardGuardrail =
-      current.text.length >= Math.round(limits.maxChars * 1.2) ||
-      elapsed >= limits.maxSeconds + 5;
+      current.text.length >= profile.maxChars || elapsed >= profile.maxSeconds;
+    const reachedCompactIdeal = piece.compactCjk && reachedIdeal;
 
     if (
       (atNaturalBoundary && (comfortablySized || elapsed >= 8)) ||
       (atNaturalBoundary && reachedIdeal) ||
-      reachedGuardrail ||
+      reachedCompactIdeal ||
       reachedHardGuardrail
     ) {
       flush();
@@ -484,10 +595,21 @@ function setNotesFilter(showAll) {
 // ============================================================
 
 function checkCurrentTab() {
-  return runTabCheckSingleFlight("active-tab", runCheckCurrentTab);
+  const generation = ++tabCheckGeneration;
+  return runCheckCurrentTab(generation);
 }
 
-async function runCheckCurrentTab() {
+function isTransientTabLookupError(error) {
+  const message = String(error?.message || error || "");
+  return (
+    message.includes("No tab with id") ||
+    message.includes("Tab was closed") ||
+    message.includes("Invalid tab ID")
+  );
+}
+
+async function runCheckCurrentTab(generation) {
+  const isLatestCheck = () => generation === tabCheckGeneration;
   try {
     // Try multiple strategies to find the YouTube tab
     let tab = null;
@@ -497,6 +619,7 @@ async function runCheckCurrentTab() {
       active: true,
       lastFocusedWindow: true,
     });
+    if (!isLatestCheck()) return;
     if (tabs[0]?.url?.includes("youtube.com")) {
       tab = tabs[0];
     }
@@ -507,19 +630,21 @@ async function runCheckCurrentTab() {
         url: "https://www.youtube.com/*",
         active: true,
       });
+      if (!isLatestCheck()) return;
       if (tabs[0]) tab = tabs[0];
     }
 
     // Strategy 3: Any YouTube tab (last resort)
     if (!tab) {
       tabs = await chrome.tabs.query({ url: "https://www.youtube.com/*" });
+      if (!isLatestCheck()) return;
       if (tabs[0]) tab = tabs[0];
     }
 
     debugLog("[YouTube Digest Panel] Found tab:", tab?.id, tab?.url);
 
     if (!tab?.url) {
-      showState("welcome");
+      if (isLatestCheck()) showState("welcome");
       return;
     }
 
@@ -529,7 +654,7 @@ async function runCheckCurrentTab() {
     const videoId = extractVideoId(tab.url);
 
     if (videoId) {
-      currentVideoUrl = tab.url;
+      let videoInfo = null;
 
       try {
         // Route through background script for reliable message passing
@@ -537,26 +662,47 @@ async function runCheckCurrentTab() {
           action: "relayToContent",
           payload: { action: "getVideoInfo" },
         });
+        if (!isLatestCheck()) return;
         debugLog("[YouTube Digest Panel] getVideoInfo result:", result);
         if (result.success && result.response) {
-          currentVideoTitle = result.response.title || "";
-          currentChannelName = result.response.channelName || "";
-          currentVideoDescription = result.response.description || "";
-          currentVideoDuration = result.response.duration || 0;
+          videoInfo = result.response;
         }
       } catch (e) {
+        if (!isLatestCheck()) return;
         console.error("[YouTube Digest Panel] getVideoInfo error:", e);
-        currentVideoTitle = "";
-        currentChannelName = "";
-        currentVideoDescription = "";
-        currentVideoDuration = 0;
       }
 
-      await startDigest(videoId, tab.url);
+      // The relay above crosses an async boundary and the YouTube SPA may have
+      // navigated again while it was running. Re-read the exact tab we captured
+      // before applying metadata or starting a digest for this video.
+      const latestTab = await chrome.tabs.get(tab.id);
+      if (!isLatestCheck()) return;
+      const latestUrl = latestTab.url || latestTab.pendingUrl || "";
+      if (extractVideoId(latestUrl) !== videoId) {
+        scheduleDigestRefresh();
+        return;
+      }
+
+      currentVideoUrl = latestUrl;
+      currentVideoTitle = videoInfo?.title || "";
+      currentChannelName = videoInfo?.channelName || "";
+      currentVideoDescription = videoInfo?.description || "";
+      currentVideoDuration = videoInfo?.duration || 0;
+      currentVideoSourceLanguage = normalizeLanguageCode(
+        videoInfo?.sourceLanguage,
+      );
+
+      await startDigest(videoId, latestUrl);
     } else {
-      showState("welcome");
+      if (isLatestCheck()) showState("welcome");
     }
   } catch (error) {
+    if (!isLatestCheck()) return;
+    if (isTransientTabLookupError(error)) {
+      debugLog("[YouTube Digest Panel] Active tab changed during inspection");
+      scheduleDigestRefresh();
+      return;
+    }
     console.error("Tab check error:", error);
     showError(
       "无法打开摘要",
@@ -595,45 +741,125 @@ function extractVideoId(url) {
 // ============================================================
 
 function startDigest(videoId, videoUrl) {
-  return runDigestSingleFlight(videoId, () =>
-    runDigestLoad(videoId, videoUrl),
+  const sourceTrackChanged =
+    videoId === currentVideoId &&
+    currentVideoSourceLanguage &&
+    currentTranscript &&
+    (!currentTranscriptLanguage ||
+      !languagesSharePrimary(
+        currentVideoSourceLanguage,
+        currentTranscriptLanguage,
+      ));
+  const videoChanged = videoId !== currentVideoId || sourceTrackChanged;
+  if (videoChanged) {
+    digestGeneration += 1;
+    translationGeneration += 1;
+    isOverviewTranslationLoading = false;
+    isAnalysisLoading = false;
+    if (transcriptScrollObserver) transcriptScrollObserver.disconnect();
+    transcriptScrollObserver = null;
+    currentVideoId = videoId;
+    currentVideoUrl = videoUrl;
+    currentAnalysis = null;
+    currentTranscript = null;
+    currentTranscriptText = null;
+    currentTranscriptTimestamped = null;
+    currentTranscriptLanguage = null;
+    currentOverviewMode = "zh";
+    setOverviewModeButtons(currentOverviewMode);
+    clearOverviewResults();
+  } else {
+    currentVideoUrl = videoUrl;
+  }
+
+  const generation = digestGeneration;
+  const requestKey = `${generation}:${videoId}`;
+  return runDigestSingleFlight(requestKey, () =>
+    runDigestLoad(videoId, generation, videoChanged),
   );
 }
 
-async function runDigestLoad(videoId, videoUrl) {
+function isCurrentDigest(videoId, generation) {
+  return videoId === currentVideoId && generation === digestGeneration;
+}
+
+function clearOverviewResults() {
+  const chapterList = document.getElementById("chapterList");
+  const quotesList = document.getElementById("quotesList");
+  if (chapterList) chapterList.innerHTML = "";
+  if (quotesList) quotesList.innerHTML = "";
+  setOverviewTranslationStatus();
+  setOverviewTranslationLoading(false);
+}
+
+function refreshOverviewForCurrentVideoIfVisible() {
+  const activeTab = document.querySelector(".tab.active")?.dataset.tab;
+  if (activeTab !== "overview") return;
+  if (!currentAnalysis && currentTranscriptTimestamped && !isAnalysisLoading) {
+    void triggerAnalysis();
+  } else if (currentAnalysis && currentOverviewMode !== "zh") {
+    void ensureOverviewOriginal();
+  }
+}
+
+async function runDigestLoad(
+  videoId,
+  generation,
+  videoChanged,
+) {
+  if (generation !== digestGeneration) return;
+
   // Check if we already have this video loaded in memory
-  if (videoId === currentVideoId && currentAnalysis) {
+  if (!videoChanged && videoId === currentVideoId && currentAnalysis) {
     showState("results");
+    refreshOverviewForCurrentVideoIfVisible();
     return;
   }
 
-  // Every video change invalidates observer work and in-flight translations.
-  if (videoId !== currentVideoId) {
-    translationGeneration += 1;
-    isOverviewTranslationLoading = false;
-    if (transcriptScrollObserver) transcriptScrollObserver.disconnect();
-    transcriptScrollObserver = null;
-  }
-
   // Check cache for this video
-  const cached = await loadFromCache(videoId);
+  let cached = await loadFromCache(videoId);
+  if (!isCurrentDigest(videoId, generation)) return;
+  if (
+    cached &&
+    currentVideoSourceLanguage &&
+    (!cached.transcriptLanguage ||
+      !languagesSharePrimary(
+        currentVideoSourceLanguage,
+        cached.transcriptLanguage,
+      ))
+  ) {
+    cached = null;
+  }
   if (cached) {
     debugLog("Loading from cache:", videoId);
-    currentVideoId = videoId;
-    currentVideoUrl = videoUrl;
-    currentAnalysis = hasUsableEnglishAnalysis(cached.analysis)
+    const cachedTranscriptLanguage = normalizeLanguageCode(
+      cached.transcriptLanguage ||
+        cached.transcript?.find((entry) => entry?.language)?.language,
+    );
+    const cachedAnalysisLanguage = normalizeLanguageCode(
+      cached.analysis?.sourceLanguage,
+    );
+    currentAnalysis =
+      cached.analysisVideoId === videoId &&
+      cached.analysis?.schemaVersion === 3 &&
+      (!cachedTranscriptLanguage ||
+        cachedAnalysisLanguage === cachedTranscriptLanguage) &&
+      hasUsableChineseAnalysis(cached.analysis)
       ? cached.analysis
       : null;
     currentTranscript = cached.transcript;
     currentTranscriptText = cached.transcriptText;
     currentTranscriptTimestamped = cached.transcriptTimestamped;
-    currentTranscriptLanguage = cached.transcriptLanguage || null;
-    isAnalysisLoading = false;
+    currentTranscriptLanguage =
+      cachedTranscriptLanguage || cachedAnalysisLanguage || null;
 
     // Restore semantic-segment translations from persistent storage.
     if (cached.paragraphCache) {
+      const cachePrefix = transcriptTranslationCachePrefix(videoId);
       for (const [key, value] of Object.entries(cached.paragraphCache)) {
-        transcriptParagraphCache.set(key, value);
+        if (key.startsWith(cachePrefix)) {
+          transcriptParagraphCache.set(key, value);
+        }
       }
     }
 
@@ -662,17 +888,15 @@ async function runDigestLoad(videoId, videoUrl) {
     // Setup explain feature
     setupExplainFeature();
     if (currentTranscriptMode !== "original") translateTranscript();
+    refreshOverviewForCurrentVideoIfVisible();
     return;
   }
 
-  currentVideoId = videoId;
-  currentVideoUrl = videoUrl;
   currentAnalysis = null;
   currentTranscript = null;
   currentTranscriptText = null;
   currentTranscriptTimestamped = null;
   currentTranscriptLanguage = null;
-  isAnalysisLoading = false;
 
   if (currentVideoTitle || currentChannelName) {
     const videoInfo = document.getElementById("videoInfo");
@@ -687,7 +911,9 @@ async function runDigestLoad(videoId, videoUrl) {
   const transcriptResult = await chrome.runtime.sendMessage({
     action: "fetchTranscript",
     videoId: videoId,
+    preferredLanguage: currentVideoSourceLanguage,
   });
+  if (!isCurrentDigest(videoId, generation)) return;
 
   if (!transcriptResult.success) {
     if (transcriptResult.error === "NO_SUPADATA_KEY") {
@@ -723,9 +949,12 @@ async function runDigestLoad(videoId, videoUrl) {
 
   // Save transcript to cache (without analysis)
   await saveToCache(videoId);
+  if (!isCurrentDigest(videoId, generation)) return;
 
-  // DON'T run LLM analysis automatically - wait for user to click Overview tab
-  // This saves tokens when user just wants to see the transcript
+  refreshOverviewForCurrentVideoIfVisible();
+
+  // Generate analysis only when Overview is the active tab. Otherwise keep the
+  // original lazy-load behavior so transcript-only use does not spend AI tokens.
 }
 
 // ============================================================
@@ -736,36 +965,38 @@ async function runDigestLoad(videoId, videoUrl) {
  * Renders the analysis results into the Overview tab.
  * Shows chapters and key quotes only.
  */
-function hasUsableEnglishAnalysis(analysis) {
+function hasUsableChineseAnalysis(analysis) {
   return (
-    Array.isArray(analysis.chapters) &&
+    analysis?.schemaVersion === 3 &&
+    analysis?.baseLanguage === "zh-Hans" &&
+    Array.isArray(analysis?.chapters) &&
     analysis.chapters.length > 0 &&
-    analysis.chapters.every(
-      (chapter) =>
-        [chapter?.title, chapter?.summary]
-          .every((value) => typeof value === "string" && value.trim()),
-    ) &&
-    Array.isArray(analysis.keyQuotes) &&
-    analysis.keyQuotes.length > 0 &&
-    analysis.keyQuotes.every(
-      (quote) =>
-        typeof quote?.quote === "string" && quote.quote.trim(),
-    )
-  );
-}
-
-function hasCompleteChineseAnalysis(analysis) {
-  return (
-    hasUsableEnglishAnalysis(analysis) &&
     analysis.chapters.every(
       (chapter) =>
         [chapter?.titleZh, chapter?.summaryZh].every(
           (value) => typeof value === "string" && value.trim(),
-        ),
+        ) && /[\u3400-\u9fff]/.test(chapter.summaryZh),
     ) &&
+    Array.isArray(analysis?.keyQuotes) &&
+    analysis.keyQuotes.length > 0 &&
     analysis.keyQuotes.every(
       (quote) =>
-        typeof quote?.quoteZh === "string" && quote.quoteZh.trim(),
+        [quote?.quoteOriginal, quote?.quoteZh].every(
+          (value) => typeof value === "string" && value.trim(),
+        ) && /[\u3400-\u9fff]/.test(quote.quoteZh),
+    )
+  );
+}
+
+function hasCompleteOriginalAnalysis(analysis) {
+  if (!hasUsableChineseAnalysis(analysis)) return false;
+  if (isChineseLanguage(analysis.sourceLanguage)) return true;
+  return (
+    analysis.chapters.every(
+      (chapter) =>
+        [chapter?.titleOriginal, chapter?.summaryOriginal].every(
+          (value) => typeof value === "string" && value.trim(),
+        ),
     )
   );
 }
@@ -784,57 +1015,73 @@ function setOverviewTranslationLoading(show) {
   spinner?.classList.toggle("visible", show);
 }
 
-function renderChapterLanguageContent(chapter, mode = currentOverviewMode) {
-  const renderBlock = (language, title, summary) => `
-    <span class="overview-language-block overview-language-block--${language}" lang="${language === "zh" ? "zh-CN" : "en"}">
+function renderChapterLanguageContent(
+  chapter,
+  mode = currentOverviewMode,
+  sourceLanguage = currentAnalysis?.sourceLanguage,
+) {
+  const normalizedSourceLanguage = normalizeLanguageCode(sourceLanguage);
+  const chineseSource = isChineseLanguage(normalizedSourceLanguage);
+  const renderBlock = (language, title, summary, lang) => `
+    <span class="overview-language-block overview-language-block--${language}" lang="${lang}">
       <span class="chapter-title">${escapeHtml(title || "")}</span>
       <span class="chapter-summary">${escapeHtml(summary || "")}</span>
     </span>
   `;
 
-  if (mode === "en") {
-    return renderBlock("en", chapter.title, chapter.summary);
-  }
-  const hasChinese =
-    typeof chapter.titleZh === "string" &&
-    chapter.titleZh.trim() &&
-    typeof chapter.summaryZh === "string" &&
-    chapter.summaryZh.trim();
-  if (mode === "bilingual") {
-    return hasChinese
-      ? renderBlock("en", chapter.title, chapter.summary) +
-          renderBlock("zh", chapter.titleZh, chapter.summaryZh)
-      : renderBlock("en", chapter.title, chapter.summary);
-  }
-  return hasChinese
-    ? renderBlock("zh", chapter.titleZh, chapter.summaryZh)
-    : renderBlock("en", chapter.title, chapter.summary);
+  const chinese = renderBlock(
+    "zh",
+    chapter.titleZh,
+    chapter.summaryZh,
+    "zh-CN",
+  );
+  if (mode === "zh" || chineseSource) return chinese;
+  const hasOriginal = [chapter.titleOriginal, chapter.summaryOriginal].every(
+    (value) => typeof value === "string" && value.trim(),
+  );
+  if (!hasOriginal) return chinese;
+  const original = renderBlock(
+    "original",
+    chapter.titleOriginal,
+    chapter.summaryOriginal,
+    normalizedSourceLanguage || "und",
+  );
+  return mode === "bilingual" ? original + chinese : original;
 }
 
-function renderQuoteLanguageContent(quote, mode = currentOverviewMode) {
-  const renderBlock = (language, text) => `
-    <span class="overview-language-block overview-language-block--${language}" lang="${language === "zh" ? "zh-CN" : "en"}">${escapeHtml(text || "")}</span>
+function renderQuoteLanguageContent(
+  quote,
+  mode = currentOverviewMode,
+  sourceLanguage = currentAnalysis?.sourceLanguage,
+) {
+  const normalizedSourceLanguage = normalizeLanguageCode(sourceLanguage);
+  const chineseSource = isChineseLanguage(normalizedSourceLanguage);
+  const renderBlock = (language, text, lang) => `
+    <span class="overview-language-block overview-language-block--${language}" lang="${lang}">${escapeHtml(text || "")}</span>
   `;
 
-  if (mode === "en") return renderBlock("en", quote.quote);
-  const hasChinese =
-    typeof quote.quoteZh === "string" && quote.quoteZh.trim();
-  if (mode === "bilingual") {
-    return hasChinese
-      ? renderBlock("en", quote.quote) + renderBlock("zh", quote.quoteZh)
-      : renderBlock("en", quote.quote);
-  }
-  return hasChinese
-    ? renderBlock("zh", quote.quoteZh)
-    : renderBlock("en", quote.quote);
+  const chinese = renderBlock("zh", quote.quoteZh, "zh-CN");
+  if (mode === "zh" || chineseSource) return chinese;
+  const original = renderBlock(
+    "original",
+    quote.quoteOriginal,
+    normalizedSourceLanguage || "und",
+  );
+  return mode === "bilingual" ? original + chinese : original;
 }
 
-function overviewQuoteCopyText(quote, mode = currentOverviewMode) {
-  if (mode === "en") return quote.quote || "";
-  if (mode === "bilingual") {
-    return [quote.quote, quote.quoteZh].filter(Boolean).join("\n");
+function overviewQuoteCopyText(
+  quote,
+  mode = currentOverviewMode,
+  sourceLanguage = currentAnalysis?.sourceLanguage,
+) {
+  if (mode === "zh" || isChineseLanguage(sourceLanguage)) {
+    return quote.quoteZh || quote.quoteOriginal || "";
   }
-  return quote.quoteZh || quote.quote || "";
+  if (mode === "bilingual") {
+    return [quote.quoteOriginal, quote.quoteZh].filter(Boolean).join("\n");
+  }
+  return quote.quoteOriginal || quote.quoteZh || "";
 }
 
 function setOverviewModeButtons(mode) {
@@ -846,18 +1093,23 @@ function setOverviewModeButtons(mode) {
 }
 
 function handleOverviewModeChange(mode) {
-  if (!["en", "zh", "bilingual"].includes(mode)) return;
+  if (!["original", "zh", "bilingual"].includes(mode)) return;
   if (mode === currentOverviewMode) return;
   currentOverviewMode = mode;
   setOverviewModeButtons(mode);
   if (currentAnalysis) renderAnalysisResults(currentAnalysis);
-  if (mode !== "en") void ensureOverviewChinese();
+  if (mode === "zh") {
+    setOverviewTranslationStatus();
+  } else {
+    void ensureOverviewOriginal();
+  }
 }
 
-async function ensureOverviewChinese() {
+async function ensureOverviewOriginal() {
   if (
     !currentAnalysis ||
-    hasCompleteChineseAnalysis(currentAnalysis) ||
+    isChineseLanguage(currentAnalysis.sourceLanguage) ||
+    hasCompleteOriginalAnalysis(currentAnalysis) ||
     isOverviewTranslationLoading
   ) {
     return;
@@ -865,58 +1117,79 @@ async function ensureOverviewChinese() {
 
   const sourceAnalysis = currentAnalysis;
   const videoId = currentVideoId;
+  const generation = digestGeneration;
+  const sourceLanguage = normalizeLanguageCode(sourceAnalysis.sourceLanguage);
+  const sourcePrimaryLanguage = sourceLanguage.split("-")[0];
+  if (
+    !sourceLanguage ||
+    ["und", "mul", "zxx"].includes(sourcePrimaryLanguage)
+  ) {
+    setOverviewTranslationStatus(
+      "无法确认原字幕语言，已保留中文概览。",
+      true,
+    );
+    return;
+  }
+  let appliedAnalysis = null;
+  const ownsRequest = () =>
+    isCurrentDigest(videoId, generation) &&
+    (currentAnalysis === sourceAnalysis || currentAnalysis === appliedAnalysis);
   setOverviewTranslationLoading(true);
-  setOverviewTranslationStatus("正在生成中文概览…");
+  setOverviewTranslationStatus("正在生成原文概览…");
 
   try {
     const result = await chrome.runtime.sendMessage({
-      action: "translateOverview",
+      action: "translateOverviewOriginal",
       analysis: sourceAnalysis,
       videoTitle: currentVideoTitle,
+      targetLanguage: sourceLanguage,
     });
-    if (videoId !== currentVideoId || currentAnalysis !== sourceAnalysis) return;
+    if (!ownsRequest()) return;
     if (!result) {
-      throw new Error("扩展后台未响应中文翻译请求，请重新加载扩展。");
+      throw new Error("扩展后台未响应原文翻译请求，请重新加载扩展。");
     }
     if (!result?.success) {
-      throw new Error(result?.error || "中文概览生成失败");
+      throw new Error(result?.error || "原文概览生成失败");
     }
 
-    const translated = result.translatedOverview;
+    const translatedById = new Map(
+      (result.originalOverview?.chapters || []).map((chapter) => [
+        chapter.id,
+        chapter,
+      ]),
+    );
     const merged = {
       ...sourceAnalysis,
-      schemaVersion: 2,
       chapters: sourceAnalysis.chapters.map((chapter, index) => ({
         ...chapter,
-        titleZh: translated?.chapters?.[index]?.titleZh || "",
-        summaryZh: translated?.chapters?.[index]?.summaryZh || "",
-      })),
-      keyQuotes: sourceAnalysis.keyQuotes.map((quote, index) => ({
-        ...quote,
-        quoteZh: translated?.keyQuotes?.[index]?.quoteZh || "",
+        titleOriginal:
+          translatedById.get(`chapter-${index}`)?.titleOriginal || "",
+        summaryOriginal:
+          translatedById.get(`chapter-${index}`)?.summaryOriginal || "",
       })),
     };
-    if (!hasCompleteChineseAnalysis(merged)) {
-      throw new Error("中文概览返回不完整，请重试。");
+    if (!hasCompleteOriginalAnalysis(merged)) {
+      throw new Error("原文概览返回不完整，请重试。");
     }
 
+    appliedAnalysis = merged;
     currentAnalysis = merged;
     setOverviewTranslationStatus();
     renderAnalysisResults(currentAnalysis);
-    await saveToCache(currentVideoId);
+    await saveToCache(videoId);
   } catch (error) {
-    if (videoId !== currentVideoId) return;
+    if (!ownsRequest()) return;
     setOverviewTranslationStatus(
-      `中文概览生成失败，已保留英文内容。${error.message || "请稍后重试。"}`,
+      `原文概览生成失败，已保留中文内容。${error.message || "请稍后重试。"}`,
       true,
     );
   } finally {
-    if (videoId === currentVideoId) setOverviewTranslationLoading(false);
+    if (ownsRequest()) setOverviewTranslationLoading(false);
   }
 }
 
 function renderAnalysisResults(analysis) {
-  if (!hasUsableEnglishAnalysis(analysis)) return;
+  if (!hasUsableChineseAnalysis(analysis)) return;
   setOverviewModeButtons(currentOverviewMode);
 
   // Chapters
@@ -929,7 +1202,7 @@ function renderAnalysisResults(analysis) {
     li.innerHTML = `
       <span class="chapter-timestamp">${escapeHtml(chapter.timestamp)}</span>
       <div class="chapter-content">
-        ${renderChapterLanguageContent(chapter)}
+        ${renderChapterLanguageContent(chapter, currentOverviewMode, analysis.sourceLanguage)}
       </div>
     `;
     li.addEventListener("click", () => {
@@ -953,9 +1226,13 @@ function renderAnalysisResults(analysis) {
     const div = document.createElement("div");
     div.className = "quote-item";
     div.dataset.seconds = quote.timestampSeconds;
-    const quoteCopyText = overviewQuoteCopyText(quote);
+    const quoteCopyText = overviewQuoteCopyText(
+      quote,
+      currentOverviewMode,
+      analysis.sourceLanguage,
+    );
     div.innerHTML = `
-      <div class="quote-text">${renderQuoteLanguageContent(quote)}</div>
+      <div class="quote-text">${renderQuoteLanguageContent(quote, currentOverviewMode, analysis.sourceLanguage)}</div>
       <div class="quote-meta">
         <span class="quote-timestamp">${escapeHtml(quote.timestamp)}</span>
         <div class="quote-actions">
@@ -1243,11 +1520,7 @@ function switchTab(tabName) {
 
   // Lazy-load LLM analysis when user switches to Overview tab
   if (tabName === "overview") {
-    if (!currentAnalysis && !isAnalysisLoading) {
-      triggerAnalysis();
-    } else if (currentAnalysis && currentOverviewMode !== "en") {
-      void ensureOverviewChinese();
-    }
+    refreshOverviewForCurrentVideoIfVisible();
   }
 }
 
@@ -1258,6 +1531,17 @@ function switchTab(tabName) {
 async function triggerAnalysis() {
   if (!currentTranscriptTimestamped || isAnalysisLoading || currentAnalysis)
     return;
+
+  const videoId = currentVideoId;
+  const generation = digestGeneration;
+  const transcriptTimestamped = currentTranscriptTimestamped;
+  const videoTitle = currentVideoTitle;
+  const channelName = currentChannelName;
+  const videoDescription = currentVideoDescription;
+  const videoDuration = currentVideoDuration;
+  const ownsRequest = () =>
+    isCurrentDigest(videoId, generation) &&
+    currentTranscriptTimestamped === transcriptTimestamped;
 
   isAnalysisLoading = true;
 
@@ -1275,12 +1559,14 @@ async function triggerAnalysis() {
   try {
     const analysisResult = await chrome.runtime.sendMessage({
       action: "analyzeTranscript",
-      transcriptText: currentTranscriptTimestamped,
-      videoTitle: currentVideoTitle,
-      channelName: currentChannelName,
-      videoDescription: currentVideoDescription,
-      videoDuration: currentVideoDuration,
+      transcriptText: transcriptTimestamped,
+      videoTitle,
+      channelName,
+      videoDescription,
+      videoDuration,
+      sourceLanguage: currentTranscriptLanguage,
     });
+    if (!ownsRequest()) return;
 
     if (!analysisResult.success) {
       const message = escapeHtml(
@@ -1292,21 +1578,22 @@ async function triggerAnalysis() {
       if (quotesList) {
         quotesList.innerHTML = `<div class="quote-item" style="color: var(--accent); border-left-color: var(--border);">关键语句生成失败：${message}</div>`;
       }
-      isAnalysisLoading = false;
       return;
     }
 
-    if (!hasUsableEnglishAnalysis(analysisResult.analysis)) {
-      throw new Error("概览没有返回可用的英文内容，请重试。");
+    if (!hasUsableChineseAnalysis(analysisResult.analysis)) {
+      throw new Error("概览没有返回可用的中文内容，请重试。");
     }
     currentAnalysis = analysisResult.analysis;
     renderAnalysisResults(currentAnalysis);
     highlightMomentsOnPage(currentAnalysis.keyMoments);
 
     // Save to cache now that we have analysis
-    await saveToCache(currentVideoId);
-    if (currentOverviewMode !== "en") void ensureOverviewChinese();
+    await saveToCache(videoId);
+    if (!ownsRequest()) return;
+    if (currentOverviewMode !== "zh") void ensureOverviewOriginal();
   } catch (error) {
+    if (!ownsRequest()) return;
     console.error("[YouTube Digest Panel] Analysis error:", error);
     if (chapterList) {
       chapterList.innerHTML = `<li class="chapter-item" style="color: var(--accent); border: none;">出错了：${escapeHtml(error.message)}</li>`;
@@ -1314,9 +1601,9 @@ async function triggerAnalysis() {
     if (quotesList) {
       quotesList.innerHTML = `<div class="quote-item" style="color: var(--accent); border-left-color: var(--border);">出错了：${escapeHtml(error.message)}</div>`;
     }
+  } finally {
+    if (ownsRequest()) isAnalysisLoading = false;
   }
-
-  isAnalysisLoading = false;
 }
 
 // ============================================================
@@ -1627,19 +1914,21 @@ function getTranscriptContext(selectedText) {
  * Cache expires after 30 days. Oldest entries evicted when > 20 videos cached.
  */
 async function saveToCache(videoId) {
-  if (!videoId || !currentTranscript) return;
+  if (!videoId || videoId !== currentVideoId || !currentTranscript) return;
 
   try {
     // Persist semantic-segment translations for this video.
     const paragraphCacheForVideo = {};
+    const cachePrefix = transcriptTranslationCachePrefix(videoId);
     for (const [key, value] of transcriptParagraphCache.entries()) {
-      if (key.startsWith(`${videoId}:`)) {
+      if (key.startsWith(cachePrefix)) {
         paragraphCacheForVideo[key] = value;
       }
     }
 
     const cacheData = {
       analysis: currentAnalysis, // May be null if not yet analyzed
+      analysisVideoId: currentAnalysis ? videoId : null,
       transcript: currentTranscript,
       transcriptText: currentTranscriptText,
       transcriptTimestamped: currentTranscriptTimestamped,
@@ -1647,6 +1936,8 @@ async function saveToCache(videoId) {
       videoTitle: currentVideoTitle,
       channelName: currentChannelName,
       paragraphCache: paragraphCacheForVideo,
+      transcriptSourcePolicyVersion: TRANSCRIPT_SOURCE_POLICY_VERSION,
+      transcriptRequestedLanguage: currentVideoSourceLanguage || null,
       timestamp: Date.now(),
     };
 
@@ -1718,6 +2009,11 @@ async function loadFromCache(videoId) {
     const cached = result[`digest_${videoId}`];
 
     if (!cached) return null;
+    if (
+      cached.transcriptSourcePolicyVersion !== TRANSCRIPT_SOURCE_POLICY_VERSION
+    ) {
+      return null;
+    }
 
     // Cache expires after 30 days
     const THIRTY_DAYS = 30 * 24 * 60 * 60 * 1000;
@@ -1757,7 +2053,7 @@ function setNotesModeButtons(mode) {
 function noteHasChineseSource(note) {
   const language = String(note?.sourceLanguage || "").trim();
   const rawText = String(note?.rawText || "");
-  if (language) return /^zh(?:[-_]|$)/i.test(language);
+  if (language) return isChineseLanguage(language);
   return /[\u3400-\u9fff]/.test(rawText);
 }
 
@@ -2200,8 +2496,22 @@ function getActiveTranscriptSegments() {
   return groupTranscriptEntries(currentTranscript || []);
 }
 
-function transcriptTranslationCacheKey(segment) {
-  return `${currentVideoId}:zh:semantic:${segment.id}`;
+function transcriptTranslationCachePrefix(videoId) {
+  return `${videoId}:zh:semantic:v${TRANSCRIPT_TRANSLATION_CACHE_VERSION}:`;
+}
+
+function transcriptTextFingerprint(text) {
+  const normalized = normalizeCaptionText(text);
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < normalized.length; index += 1) {
+    hash ^= normalized.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return `${normalized.length}:${(hash >>> 0).toString(36)}`;
+}
+
+function transcriptTranslationCacheKey(videoId, segment) {
+  return `${transcriptTranslationCachePrefix(videoId)}${segment.id}:${transcriptTextFingerprint(segment.text)}`;
 }
 
 function setTranscriptModeButtons(mode) {
@@ -2272,7 +2582,7 @@ function renderTranscriptModeRows(segments, mode) {
   segments.forEach((segment, index) => {
     const div = document.createElement("div");
     const cached = transcriptParagraphCache.get(
-      transcriptTranslationCacheKey(segment),
+      transcriptTranslationCacheKey(currentVideoId, segment),
     );
     div.className = `transcript-entry ${cached ? "translated" : "translating"}`;
     div.dataset.seconds = segment.start;
@@ -2330,7 +2640,7 @@ function updateTranslatedRow(segment, index, alignedItem, generation) {
 
   if (alignedItem.text) {
     transcriptParagraphCache.set(
-      transcriptTranslationCacheKey(segment),
+      transcriptTranslationCacheKey(currentVideoId, segment),
       alignedItem.text,
     );
   }
@@ -2482,7 +2792,7 @@ async function translateTranscript() {
   const enqueue = (index, force = false) => {
     if (!Number.isInteger(index) || !segments[index]) return;
     const cached = transcriptParagraphCache.has(
-      transcriptTranslationCacheKey(segments[index]),
+      transcriptTranslationCacheKey(videoId, segments[index]),
     );
     if ((!force && cached) || queued.has(index)) return;
     queue.push(index);
@@ -2533,8 +2843,11 @@ globalThis.__YTD_TRANSCRIPT_TESTING__ = {
   groupTranscriptEntries,
   splitOversizedThought,
   alignTranslatedSegmentBatch,
-  hasUsableEnglishAnalysis,
-  hasCompleteChineseAnalysis,
+  hasUsableChineseAnalysis,
+  hasCompleteOriginalAnalysis,
+  normalizeLanguageCode,
+  isChineseLanguage,
+  isTransientTabLookupError,
   noteHasChineseSource,
   noteCopyTextForMode,
   renderNoteLanguageContent,
@@ -2543,4 +2856,5 @@ globalThis.__YTD_TRANSCRIPT_TESTING__ = {
   overviewQuoteCopyText,
   renderSubtitleInlineMarkup,
   renderTranscriptSegmentContent,
+  transcriptTranslationCacheKey,
 };

@@ -85,10 +85,14 @@ test("release copy documents current scope without em dashes", () => {
   );
   assert.match(chineseReadme, /不接受上游 Issue 或 Pull Request/);
   assert.match(chineseReadme, /增加更多翻译语言/);
-  assert.match(readme, /choose \*\*English\*\*, \*\*中文\*\*, or \*\*双语\*\*/);
-  assert.match(chineseReadme, /可选择 \*\*英文\*\*、\*\*中文\*\*或\*\*双语\*\*/);
-  assert.match(readme, /without a third generation call/);
-  assert.match(chineseReadme, /不会发起第三次生成/);
+  assert.match(readme, /choose \*\*Original\*\*, \*\*中文\*\*, or \*\*双语\*\*/);
+  assert.match(chineseReadme, /可选择 \*\*原文\*\*、\*\*中文\*\*或\*\*双语\*\*/);
+  assert.match(readme, /generated directly in Simplified Chinese/);
+  assert.match(chineseReadme, /直接生成简体中文底稿/);
+  assert.match(readme, /only when \*\*Original\*\* or \*\*Bilingual\*\* is requested/);
+  assert.match(chineseReadme, /请求\*\*原文\*\*或\*\*双语\*\*时/);
+  assert.match(readme, /Chinese-source overviews reuse Chinese[\s\S]*without an extra translation call/);
+  assert.match(chineseReadme, /中文字幕的三种模式复用同一份中文内容[\s\S]*不发起额外翻译/);
   assert.match(readme, /Notes are polished in English once and translated into Simplified Chinese once/);
   assert.match(chineseReadme, /笔记先生成一次润色后的英文，再单独生成一次简体中文/);
   assert.match(readme, /source subtitle is already Chinese[\s\S]*no Chinese-translation request/);
@@ -261,7 +265,7 @@ test("published prompt files contain runtime sections", () => {
       "Shared base rules",
       "Chinese rules",
       "Transcript batch translation",
-      "Overview translation",
+      "Overview original translation",
       "Notes translation",
     ],
   };

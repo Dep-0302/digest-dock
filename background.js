@@ -16,14 +16,151 @@
 importScripts("settings.js");
 
 const DEBUG = false;
-const ANALYSIS_SCHEMA_VERSION = 2;
-const RUNTIME_PROTOCOL_VERSION = 3;
+const ANALYSIS_SCHEMA_VERSION = 3;
+const RUNTIME_PROTOCOL_VERSION = 4;
+const ANALYSIS_BASE_LANGUAGE = "zh-Hans";
+const TRANSCRIPT_SOURCE_POLICY_VERSION = 2;
 const AI_PROVIDER_IDLE_TIMEOUT_MS = 50_000;
 const AI_PROVIDER_HARD_TIMEOUT_MS = 120_000;
 const AI_PROVIDER_MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 const debugLog = (...args) => {
   if (DEBUG) console.log(...args);
 };
+
+const CHINESE_LANGUAGE_CODES = new Set([
+  "zh",
+  "zho",
+  "chi",
+  "cmn",
+  "yue",
+  "wuu",
+  "gan",
+  "hak",
+  "nan",
+  "lzh",
+]);
+const NON_TRANSLATABLE_LANGUAGE_CODES = new Set(["und", "mul", "zxx"]);
+
+/**
+ * Accept only short, structurally valid BCP-47 language tags before a value is
+ * stored or interpolated into an AI prompt. Supadata's language metadata is
+ * external input, so a free-form value must never become prompt instructions.
+ */
+function normalizeLanguageCode(value) {
+  const raw = typeof value === "string" ? value.trim().replace(/_/g, "-") : "";
+  if (
+    !raw ||
+    raw.length > 35 ||
+    !/^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8}){0,3}$/.test(raw)
+  ) {
+    return "";
+  }
+  try {
+    return Intl.getCanonicalLocales(raw)[0] || "";
+  } catch (error) {
+    return "";
+  }
+}
+
+function isNonTranslatableLanguage(value) {
+  const normalized = normalizeLanguageCode(value);
+  return (
+    !normalized ||
+    NON_TRANSLATABLE_LANGUAGE_CODES.has(
+      normalized.split("-")[0].toLowerCase(),
+    )
+  );
+}
+
+function isChineseLanguage(value) {
+  const normalized = normalizeLanguageCode(value);
+  if (!normalized) return false;
+  return CHINESE_LANGUAGE_CODES.has(normalized.split("-")[0].toLowerCase());
+}
+
+function languagesSharePrimary(value, otherValue) {
+  if (isChineseLanguage(value) && isChineseLanguage(otherValue)) return true;
+  const primary = normalizeLanguageCode(value).split("-")[0].toLowerCase();
+  const otherPrimary = normalizeLanguageCode(otherValue)
+    .split("-")[0]
+    .toLowerCase();
+  return Boolean(primary && primary === otherPrimary);
+}
+
+function looksLikeChineseTranscript(value) {
+  const text = String(value || "");
+  const hanCharacters = text.match(/[\u3400-\u9fff]/g) || [];
+  if (hanCharacters.length < 4) return false;
+  // Japanese transcripts normally contain hiragana or katakana alongside
+  // kanji. Do not treat those shared Han characters as proof of Chinese.
+  return !/[\u3040-\u30ff\u31f0-\u31ff]/.test(text);
+}
+
+function hasUsableChineseOverview(analysis) {
+  return (
+    Array.isArray(analysis?.chapters) &&
+    analysis.chapters.length > 0 &&
+    analysis.chapters.every((chapter) =>
+      /[\u3400-\u9fff]/.test(String(chapter?.summaryZh || "")),
+    ) &&
+    Array.isArray(analysis?.keyQuotes) &&
+    analysis.keyQuotes.length > 0 &&
+    analysis.keyQuotes.every((quote) =>
+      /[\u3400-\u9fff]/.test(String(quote?.quoteZh || "")),
+    )
+  );
+}
+
+function resolveSourceLanguage(value, transcriptText = "") {
+  const normalized = normalizeLanguageCode(value);
+  if (
+    normalized &&
+    !isNonTranslatableLanguage(normalized)
+  ) {
+    return normalized;
+  }
+  if (looksLikeChineseTranscript(transcriptText)) {
+    return ANALYSIS_BASE_LANGUAGE;
+  }
+  return "und";
+}
+
+function getSafeLanguageName(value) {
+  const normalized = normalizeLanguageCode(value);
+  if (
+    !normalized ||
+    isNonTranslatableLanguage(normalized)
+  ) {
+    throw new Error("Overview source language is missing or unsupported");
+  }
+  try {
+    const displayName = new Intl.DisplayNames(["en"], {
+      type: "language",
+      languageDisplay: "standard",
+    }).of(normalized);
+    if (
+      typeof displayName === "string" &&
+      displayName.length <= 100 &&
+      /^[\p{L}\p{M}\p{N} ()'’,./-]+$/u.test(displayName)
+    ) {
+      return displayName;
+    }
+  } catch (error) {
+    // Fall through to the normalized, character-restricted BCP-47 tag.
+  }
+  return `language ${normalized}`;
+}
+
+function getSupadataTrackLanguage(data) {
+  const firstChunkLanguage = Array.isArray(data?.content)
+    ? data.content.find((chunk) => normalizeLanguageCode(chunk?.lang))?.lang
+    : "";
+  return (
+    normalizeLanguageCode(data?.lang) ||
+    normalizeLanguageCode(firstChunkLanguage) ||
+    null
+  );
+}
 
 // Prevent the YouTube content script from reading API keys or cached data.
 // Side panel, options, and service-worker contexts remain trusted.
@@ -345,7 +482,7 @@ chrome.tabs.onActivated.addListener(async ({ tabId }) => {
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   // We need to return true to indicate we'll respond asynchronously
   if (message.action === "fetchTranscript") {
-    handleFetchTranscript(message.videoId)
+    handleFetchTranscript(message.videoId, message.preferredLanguage)
       .then(sendResponse)
       .catch((err) => sendResponse({ error: err.message }));
     return true; // Keep the message channel open for async response
@@ -359,14 +496,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       message.channelName,
       message.videoDescription,
       message.videoDuration,
+      message.sourceLanguage,
     )
       .then(sendResponse)
       .catch((err) => sendResponse({ error: err.message }));
     return true;
   }
 
-  if (message.action === "translateOverview") {
-    handleTranslateOverview(message.analysis, message.videoTitle)
+  if (message.action === "translateOverviewOriginal") {
+    handleTranslateOverviewOriginal(
+      message.analysis,
+      message.videoTitle,
+      message.targetLanguage,
+    )
       .then(sendResponse)
       .catch((err) => sendResponse({ success: false, error: err.message }));
     return true;
@@ -571,6 +713,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 channelName:
                   playerInfo.channelName || response?.channelName || "",
                 duration: playerInfo.duration || response?.duration || 0,
+                sourceLanguage:
+                  playerInfo.sourceLanguage || response?.sourceLanguage || "",
                 description:
                   playerInfo.description || response?.description || "",
               };
@@ -620,13 +764,38 @@ async function getPlayerVideoDetails(tabId) {
       func: () => {
         try {
           const player = document.getElementById("movie_player");
-          const details = player?.getPlayerResponse?.()?.videoDetails;
+          const playerResponse = player?.getPlayerResponse?.();
+          const details = playerResponse?.videoDetails;
           if (!details) return null;
+          const captionRenderer =
+            playerResponse?.captions?.playerCaptionsTracklistRenderer;
+          const captionTracks = Array.isArray(captionRenderer?.captionTracks)
+            ? captionRenderer.captionTracks
+            : [];
+          const audioTracks = Array.isArray(captionRenderer?.audioTracks)
+            ? captionRenderer.audioTracks
+            : [];
+          const defaultAudioTrack =
+            audioTracks[captionRenderer?.defaultAudioTrackIndex] ||
+            audioTracks.find((track) => track?.hasDefaultTrack) ||
+            audioTracks[0];
+          const defaultCaptionIndex =
+            defaultAudioTrack?.defaultCaptionTrackIndex ??
+            defaultAudioTrack?.captionTrackIndices?.[0];
+          const defaultCaptionTrack =
+            captionTracks[defaultCaptionIndex] ||
+            null;
           return {
             title: details.title || "",
             channelName: details.author || "",
             description: details.shortDescription || "",
             duration: Number(details.lengthSeconds) || 0,
+            sourceLanguage:
+              details.defaultAudioLanguage ||
+              playerResponse?.microformat?.playerMicroformatRenderer
+                ?.defaultAudioLanguage ||
+              defaultCaptionTrack?.languageCode ||
+              "",
           };
         } catch (e) {
           return null;
@@ -656,7 +825,7 @@ async function getPlayerVideoDetails(tabId) {
  * @param {string} videoId - The YouTube video ID (e.g., "dQw4w9WgXcQ")
  * @returns {Object} - { success, transcript, transcriptText, language } or { success: false, error }
  */
-async function handleFetchTranscript(videoId) {
+async function handleFetchTranscript(videoId, preferredLanguage) {
   try {
     const settings = await getSettings();
     if (!settings.supadataApiKey) {
@@ -674,7 +843,13 @@ async function handleFetchTranscript(videoId) {
     const apiUrl = new URL("https://api.supadata.ai/v1/transcript");
     apiUrl.searchParams.set("url", canonicalVideoUrl);
     apiUrl.searchParams.set("text", "false"); // Get timestamped chunks, not plain text
-    apiUrl.searchParams.set("lang", "en"); // Prefer English
+    const normalizedPreferredLanguage = normalizeLanguageCode(preferredLanguage);
+    if (
+      normalizedPreferredLanguage &&
+      !isNonTranslatableLanguage(normalizedPreferredLanguage)
+    ) {
+      apiUrl.searchParams.set("lang", normalizedPreferredLanguage);
+    }
     // Caption-only product scope: never fall back to paid AI transcription.
     apiUrl.searchParams.set("mode", "native");
 
@@ -690,7 +865,11 @@ async function handleFetchTranscript(videoId) {
     if (response.status === 202) {
       const jobData = await response.json();
       // Poll for the result
-      return await pollTranscriptJob(jobData.jobId, settings.supadataApiKey);
+      return await pollTranscriptJob(
+        jobData.jobId,
+        settings.supadataApiKey,
+        normalizedPreferredLanguage,
+      );
     }
 
     if (response.status === 206) {
@@ -737,6 +916,18 @@ async function handleFetchTranscript(videoId) {
     const transcript = [];
     let transcriptTextPlain = ""; // Plain text for display/export
     let transcriptTextTimestamped = ""; // Timestamped text for AI analysis
+    const trackLanguage = getSupadataTrackLanguage(data);
+    if (
+      normalizedPreferredLanguage &&
+      (!trackLanguage ||
+        !languagesSharePrimary(normalizedPreferredLanguage, trackLanguage))
+    ) {
+      return {
+        success: false,
+        error: "SOURCE_TRANSCRIPT_UNAVAILABLE",
+        message: "未能取得视频默认语言的原生字幕轨。",
+      };
+    }
 
     if (data.content && Array.isArray(data.content)) {
       for (const chunk of data.content) {
@@ -756,7 +947,7 @@ async function handleFetchTranscript(videoId) {
             text: cleanText,
             start: startSeconds,
             duration: Math.floor((chunk.duration || 0) / 1000),
-            language: chunk.lang || data.lang || null,
+            language: normalizeLanguageCode(chunk.lang) || trackLanguage,
           });
 
           // Plain text without timestamps (for display/export)
@@ -782,7 +973,7 @@ async function handleFetchTranscript(videoId) {
       transcript: transcript,
       transcriptText: transcriptTextPlain.trim(), // For display
       transcriptTextTimestamped: transcriptTextTimestamped.trim(), // For AI
-      language: typeof data.lang === "string" ? data.lang : null,
+      language: trackLanguage,
     };
   } catch (error) {
     console.error("Transcript fetch error:", error);
@@ -800,7 +991,7 @@ async function handleFetchTranscript(videoId) {
  * @param {string} jobId - The job ID returned by the initial request
  * @returns {Object} - Same format as handleFetchTranscript
  */
-async function pollTranscriptJob(jobId, supadataApiKey) {
+async function pollTranscriptJob(jobId, supadataApiKey, preferredLanguage = "") {
   const maxAttempts = 60; // Max 60 seconds of polling
   const pollInterval = 1000; // Poll every 1 second
 
@@ -826,6 +1017,18 @@ async function pollTranscriptJob(jobId, supadataApiKey) {
       const transcript = [];
       let transcriptTextPlain = "";
       let transcriptTextTimestamped = "";
+      const trackLanguage = getSupadataTrackLanguage(data);
+      if (
+        preferredLanguage &&
+        (!trackLanguage ||
+          !languagesSharePrimary(preferredLanguage, trackLanguage))
+      ) {
+        return {
+          success: false,
+          error: "SOURCE_TRANSCRIPT_UNAVAILABLE",
+          message: "未能取得视频默认语言的原生字幕轨。",
+        };
+      }
 
       if (data.content && Array.isArray(data.content)) {
         for (const chunk of data.content) {
@@ -843,10 +1046,10 @@ async function pollTranscriptJob(jobId, supadataApiKey) {
               text: cleanText,
               start: startSeconds,
               duration: Math.floor((chunk.duration || 0) / 1000),
-              language: chunk.lang || data.lang || null,
+              language: normalizeLanguageCode(chunk.lang) || trackLanguage,
             });
             transcriptTextPlain += cleanText + " ";
-            transcriptTextTimestamped += `[${timestamp}] ${chunk.text}\n`;
+            transcriptTextTimestamped += `[${timestamp}] ${cleanText}\n`;
           }
         }
       }
@@ -856,7 +1059,7 @@ async function pollTranscriptJob(jobId, supadataApiKey) {
         transcript: transcript,
         transcriptText: transcriptTextPlain.trim(),
         transcriptTextTimestamped: transcriptTextTimestamped.trim(),
-        language: typeof data.lang === "string" ? data.lang : null,
+        language: trackLanguage,
       };
     }
 
@@ -923,6 +1126,7 @@ function parseLooseJson(text) {
  * @param {string} transcriptText - The full transcript as plain text
  * @param {string} videoTitle - The video title
  * @param {string} channelName - The channel name
+ * @param {string} sourceLanguage - The actual Supadata caption-track language
  * @returns {Object} - { success, analysis } or { success: false, error }
  */
 async function handleAnalyzeTranscript(
@@ -931,6 +1135,7 @@ async function handleAnalyzeTranscript(
   channelName,
   videoDescription,
   videoDuration,
+  sourceLanguage,
 ) {
   try {
     const settings = await getSettings();
@@ -963,6 +1168,10 @@ async function handleAnalyzeTranscript(
     const durationSeconds = Math.floor(effectiveSeconds % 60);
     const durationFormatted = `${durationMinutes}:${String(durationSeconds).padStart(2, "0")}`;
     const maxTimestampSeconds = effectiveSeconds;
+    const normalizedSourceLanguage = resolveSourceLanguage(
+      sourceLanguage,
+      transcriptText,
+    );
 
     // The "last chapter must be after" threshold (75% in) forces the model to
     // cover the WHOLE video instead of front-loading chapters near the start.
@@ -979,6 +1188,7 @@ async function handleAnalyzeTranscript(
       videoTitle: videoTitle || "Unknown",
       channelName: channelName || "Unknown",
       videoDescription: videoDescription || "No description available",
+      sourceLanguage: normalizedSourceLanguage,
       transcriptText,
     };
     const systemPrompt = await loadPromptSection(
@@ -1007,9 +1217,13 @@ async function handleAnalyzeTranscript(
 
     // Treat every model response as untrusted data. Rebuild the supported
     // schema and derive display timestamps from validated numeric seconds.
-    analysis = validateAndFixTimestamps(analysis, maxTimestampSeconds);
-    if (!analysis.chapters.length || !analysis.keyQuotes.length) {
-      throw new Error("DeepSeek 没有返回可用的英文概览，请重试。");
+    analysis = validateAndFixTimestamps(
+      analysis,
+      maxTimestampSeconds,
+      normalizedSourceLanguage,
+    );
+    if (!hasUsableChineseOverview(analysis)) {
+      throw new Error("DeepSeek 没有返回可用的中文概览，请重试。");
     }
 
     return {
@@ -1045,9 +1259,10 @@ async function handleAnalyzeTranscript(
  *
  * @param {Object} analysis - The parsed analysis from DeepSeek
  * @param {number} maxSeconds - Maximum valid timestamp in seconds
- * @returns {Object} - Analysis with validated timestamps
+ * @param {string} sourceLanguage - Trusted source caption language
+ * @returns {Object} - Analysis with validated timestamps and language metadata
  */
-function validateAndFixTimestamps(analysis, maxSeconds) {
+function validateAndFixTimestamps(analysis, maxSeconds, sourceLanguage) {
   const safeMax =
     Number.isFinite(Number(maxSeconds)) && Number(maxSeconds) > 0
       ? Number(maxSeconds)
@@ -1069,22 +1284,30 @@ function validateAndFixTimestamps(analysis, maxSeconds) {
     }
     return Math.floor(seconds);
   };
+  let normalizedSourceLanguage = resolveSourceLanguage(sourceLanguage);
+  const detectedSourceLanguage = normalizeLanguageCode(
+    analysis?.detectedSourceLanguage,
+  );
+  if (
+    normalizedSourceLanguage.toLowerCase() === "und" &&
+    detectedSourceLanguage &&
+    !isNonTranslatableLanguage(detectedSourceLanguage)
+  ) {
+    normalizedSourceLanguage = detectedSourceLanguage;
+  }
+  const sourceIsChinese = isChineseLanguage(normalizedSourceLanguage);
 
   const chapters = (Array.isArray(analysis?.chapters) ? analysis.chapters : [])
     .slice(0, 100)
     .map((chapter) => {
       const seconds = safeSeconds(chapter?.timestampSeconds);
-      const title = safeString(chapter?.title, 300);
       const titleZh = safeString(chapter?.titleZh, 300);
-      const summary = safeString(chapter?.summary, 1500);
       const summaryZh = safeString(chapter?.summaryZh, 1500);
-      if (seconds === null || !title || !summary) {
+      if (seconds === null || !titleZh || !summaryZh) {
         return null;
       }
       return {
-        title,
         titleZh,
-        summary,
         summaryZh,
         timestampSeconds: seconds,
         timestamp: formatTimestamp(seconds),
@@ -1099,12 +1322,13 @@ function validateAndFixTimestamps(analysis, maxSeconds) {
     .slice(0, 50)
     .map((quote) => {
       const seconds = safeSeconds(quote?.timestampSeconds);
-      const text = safeString(quote?.quote, 3000);
-      const textZh = safeString(quote?.quoteZh, 3000);
-      if (seconds === null || !text) return null;
+      const quoteOriginal = safeString(quote?.quoteOriginal, 3000);
+      const proposedQuoteZh = safeString(quote?.quoteZh, 3000);
+      const quoteZh = sourceIsChinese ? quoteOriginal : proposedQuoteZh;
+      if (seconds === null || !quoteOriginal || !quoteZh) return null;
       return {
-        quote: text,
-        quoteZh: textZh,
+        quoteOriginal,
+        quoteZh,
         timestampSeconds: seconds,
         timestamp: formatTimestamp(seconds),
       };
@@ -1121,6 +1345,8 @@ function validateAndFixTimestamps(analysis, maxSeconds) {
 
   return {
     schemaVersion: ANALYSIS_SCHEMA_VERSION,
+    baseLanguage: ANALYSIS_BASE_LANGUAGE,
+    sourceLanguage: normalizedSourceLanguage,
     chapters,
     keyQuotes,
     keyMoments,
@@ -1184,8 +1410,13 @@ async function handleSaveNote(
     let transcript = null;
     try {
       const cached = await chrome.storage.local.get(`digest_${videoId}`);
-      if (cached[`digest_${videoId}`]?.transcript) {
-        transcript = cached[`digest_${videoId}`].transcript;
+      const digest = cached[`digest_${videoId}`];
+      if (
+        digest?.transcriptSourcePolicyVersion ===
+          TRANSCRIPT_SOURCE_POLICY_VERSION &&
+        digest.transcript
+      ) {
+        transcript = digest.transcript;
         debugLog("[YouTube Digest] Using cached transcript for note");
       }
     } catch (e) {
@@ -1529,18 +1760,23 @@ async function handleExplainSelection(
  * Shared base rules that every translation prompt includes.
  * These ensure translations sound natural rather than machine-translated.
  *
- * @param {string} targetLanguage - Must be 'zh'
+ * @param {string} targetLanguage - A safe BCP-47 translation target
  * @returns {Promise<string>} - The base translation rules
  */
 async function getTranslationBaseRules(targetLanguage) {
-  if (targetLanguage !== "zh") {
+  const normalizedTarget = normalizeLanguageCode(targetLanguage);
+  if (
+    !normalizedTarget ||
+    isNonTranslatableLanguage(normalizedTarget)
+  ) {
     throw new Error(`Unsupported translation target: ${targetLanguage}`);
   }
-  const langName = "Simplified Chinese";
-  const langSpecific = await loadPromptSection(
-    "translation.md",
-    "Chinese rules",
-  );
+  const langName = isChineseLanguage(normalizedTarget)
+    ? "Simplified Chinese"
+    : getSafeLanguageName(normalizedTarget);
+  const langSpecific = isChineseLanguage(normalizedTarget)
+    ? await loadPromptSection("translation.md", "Chinese rules")
+    : "";
   return loadPromptSection("translation.md", "Shared base rules", {
     langName,
     langSpecific,
@@ -1616,52 +1852,62 @@ function normalizeTranslatedSegmentBatch(parsed, sourceSegments) {
   };
 }
 
-function validateOverviewTranslationRequest(analysis) {
+function validateOverviewOriginalTranslationRequest(analysis, targetLanguage) {
+  if (
+    analysis?.schemaVersion !== ANALYSIS_SCHEMA_VERSION ||
+    analysis?.baseLanguage !== ANALYSIS_BASE_LANGUAGE ||
+    !hasUsableChineseOverview(analysis)
+  ) {
+    throw new Error("Overview translation requires the current Chinese-base schema");
+  }
+  const sourceLanguage = normalizeLanguageCode(analysis?.sourceLanguage);
+  const normalizedTarget = normalizeLanguageCode(targetLanguage);
+  if (
+    !sourceLanguage ||
+    isNonTranslatableLanguage(sourceLanguage) ||
+    !normalizedTarget ||
+    normalizedTarget !== sourceLanguage
+  ) {
+    throw new Error(
+      "Overview translation target must match the source caption language",
+    );
+  }
+  if (isChineseLanguage(sourceLanguage)) {
+    throw new Error("Chinese source overviews do not require translation");
+  }
+
   const chapters = Array.isArray(analysis?.chapters)
     ? analysis.chapters.slice(0, 100)
     : [];
-  const keyQuotes = Array.isArray(analysis?.keyQuotes)
-    ? analysis.keyQuotes.slice(0, 50)
-    : [];
-  if (!chapters.length || !keyQuotes.length) {
-    throw new Error("Overview translation requires chapters and key quotes");
+  if (!chapters.length) {
+    throw new Error("Overview translation requires chapters");
   }
 
   let totalCharacters = 0;
   const normalizedChapters = chapters.map((chapter, index) => {
-    const title =
-      typeof chapter?.title === "string" ? chapter.title.trim().slice(0, 300) : "";
-    const summary =
-      typeof chapter?.summary === "string"
-        ? chapter.summary.trim().slice(0, 1500)
+    const titleZh =
+      typeof chapter?.titleZh === "string"
+        ? chapter.titleZh.trim().slice(0, 300)
         : "";
-    if (!title || !summary) {
+    const summaryZh =
+      typeof chapter?.summaryZh === "string"
+        ? chapter.summaryZh.trim().slice(0, 1500)
+        : "";
+    if (!titleZh || !summaryZh) {
       throw new Error("Overview chapter text is missing or invalid");
     }
-    totalCharacters += title.length + summary.length;
-    return { id: `chapter-${index}`, title, summary };
-  });
-  const normalizedQuotes = keyQuotes.map((quote, index) => {
-    const text =
-      typeof quote?.quote === "string" ? quote.quote.trim().slice(0, 3000) : "";
-    if (!text) throw new Error("Overview quote text is missing or invalid");
-    totalCharacters += text.length;
-    return { id: `quote-${index}`, quote: text };
+    totalCharacters += titleZh.length + summaryZh.length;
+    return { id: `chapter-${index}`, titleZh, summaryZh };
   });
   if (totalCharacters > 80_000) {
     throw new Error("Overview translation input is too large");
   }
-  return { chapters: normalizedChapters, keyQuotes: normalizedQuotes };
+  return { targetLanguage: sourceLanguage, chapters: normalizedChapters };
 }
 
-function normalizeOverviewTranslation(parsed, source) {
+function normalizeOverviewOriginalTranslation(parsed, source) {
   const chapterCandidates = new Map(
     (Array.isArray(parsed?.chapters) ? parsed.chapters : [])
-      .filter((item) => typeof item?.id === "string")
-      .map((item) => [item.id, item]),
-  );
-  const quoteCandidates = new Map(
-    (Array.isArray(parsed?.keyQuotes) ? parsed.keyQuotes : [])
       .filter((item) => typeof item?.id === "string")
       .map((item) => [item.id, item]),
   );
@@ -1669,48 +1915,59 @@ function normalizeOverviewTranslation(parsed, source) {
   return {
     chapters: source.chapters.map((chapter) => {
       const candidate = chapterCandidates.get(chapter.id);
-      const titleZh =
-        typeof candidate?.titleZh === "string" ? candidate.titleZh.trim() : "";
-      const summaryZh =
-        typeof candidate?.summaryZh === "string"
-          ? candidate.summaryZh.trim()
+      const titleOriginal =
+        typeof candidate?.titleOriginal === "string"
+          ? candidate.titleOriginal.trim().slice(0, 300)
           : "";
+      const summaryOriginal =
+        typeof candidate?.summaryOriginal === "string"
+          ? candidate.summaryOriginal.trim().slice(0, 1500)
+          : "";
+      const targetPrimary = source.targetLanguage.split("-")[0].toLowerCase();
+      const targetPattern =
+        targetPrimary === "en"
+          ? /[A-Za-z]/
+          : targetPrimary === "ja"
+            ? /[\u3040-\u30ff]/
+            : targetPrimary === "ko"
+              ? /[\uac00-\ud7af]/
+              : null;
+      const validSummary =
+        summaryOriginal &&
+        summaryOriginal !== chapter.summaryZh &&
+        (!targetPattern || targetPattern.test(summaryOriginal));
       return {
         id: chapter.id,
-        titleZh: looksLikeChineseTranslation(titleZh, chapter.title)
-          ? titleZh
-          : "",
-        summaryZh: looksLikeChineseTranslation(summaryZh, chapter.summary)
-          ? summaryZh
-          : "",
-      };
-    }),
-    keyQuotes: source.keyQuotes.map((quote) => {
-      const candidate = quoteCandidates.get(quote.id);
-      const quoteZh =
-        typeof candidate?.quoteZh === "string" ? candidate.quoteZh.trim() : "";
-      return {
-        id: quote.id,
-        quoteZh: looksLikeChineseTranslation(quoteZh, quote.quote) ? quoteZh : "",
+        titleOriginal,
+        summaryOriginal: validSummary ? summaryOriginal : "",
       };
     }),
   };
 }
 
-async function handleTranslateOverview(analysis, videoTitle) {
+async function handleTranslateOverviewOriginal(
+  analysis,
+  videoTitle,
+  targetLanguage,
+) {
   try {
     const settings = await getSettings();
     if (!settings.aiApiKey) {
       return { success: false, error: "尚未配置 DeepSeek API 密钥" };
     }
 
-    const source = validateOverviewTranslationRequest(analysis);
-    const baseRules = await getTranslationBaseRules("zh");
+    const source = validateOverviewOriginalTranslationRequest(
+      analysis,
+      targetLanguage,
+    );
+    const langName = getSafeLanguageName(source.targetLanguage);
+    const baseRules = await getTranslationBaseRules(source.targetLanguage);
     const systemPrompt = await loadPromptSection(
       "translation.md",
-      "Overview translation",
+      "Overview original translation",
       {
-        langName: "Simplified Chinese",
+        langName,
+        languageCode: source.targetLanguage,
         videoTitle: videoTitle || "Unknown",
         baseRules,
       },
@@ -1733,27 +1990,26 @@ async function handleTranslateOverview(analysis, videoTitle) {
     }
     if (!result.success) return result;
 
-    const translatedOverview = normalizeOverviewTranslation(
+    const originalOverview = normalizeOverviewOriginalTranslation(
       parseLooseJson(result.text),
       source,
     );
-    const complete =
-      translatedOverview.chapters.every(
-        (chapter) => chapter.titleZh && chapter.summaryZh,
-      ) && translatedOverview.keyQuotes.every((quote) => quote.quoteZh);
+    const complete = originalOverview.chapters.every(
+      (chapter) => chapter.titleOriginal && chapter.summaryOriginal,
+    );
     if (!complete) {
-      return { success: false, error: "中文概览翻译不完整，请重试。" };
+      return { success: false, error: "原文概览翻译不完整，请重试。" };
     }
-    return { success: true, translatedOverview };
+    return { success: true, originalOverview };
   } catch (error) {
-    return { success: false, error: error.message || "中文概览生成失败" };
+    return { success: false, error: error.message || "原文概览生成失败" };
   }
 }
 
 function noteHasChineseSource(note) {
   const language = String(note?.sourceLanguage || "").trim();
   const rawText = String(note?.rawText || "");
-  if (language) return /^zh(?:[-_]|$)/i.test(language);
+  if (language) return isChineseLanguage(language);
   return /[\u3400-\u9fff]/.test(rawText);
 }
 
@@ -2096,19 +2352,28 @@ globalThis.__YTD_TRANSLATION_TESTING__ = {
   requestAiCompletion,
   callAiTranslation,
   handleAnalyzeTranscript,
+  handleFetchTranscript,
   handleGetNotes,
   handleDeleteNote,
-  handleTranslateOverview,
+  handleTranslateOverviewOriginal,
   handleTranslateNotes,
+  hasUsableChineseOverview,
+  getSafeLanguageName,
+  getSupadataTrackLanguage,
+  isChineseLanguage,
+  languagesSharePrimary,
   isMissingContentReceiverError,
   isTransientTabContextError,
+  looksLikeChineseTranscript,
   noteHasChineseSource,
-  normalizeOverviewTranslation,
+  normalizeLanguageCode,
+  normalizeOverviewOriginalTranslation,
   normalizeNoteTranslation,
+  resolveSourceLanguage,
   saveNoteToStorage,
   sendMessageToContentWithRecovery,
   validateAndFixTimestamps,
-  validateOverviewTranslationRequest,
+  validateOverviewOriginalTranslationRequest,
   validateNoteTranslationRequest,
   validateTranscriptBatchRequest,
   normalizeTranslatedSegmentBatch,

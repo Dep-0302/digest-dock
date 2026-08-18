@@ -218,6 +218,14 @@ function createActionRow({ width, height }) {
   return { row, buttonGroup };
 }
 
+test("content script recovery injection is idempotent", () => {
+  const harness = createHarness();
+  assert.equal(harness.context.__YTD_CONTENT_SCRIPT_ACTIVE__, true);
+  assert.doesNotThrow(() => vm.runInContext(contentScript, harness.context));
+  assert.equal(harness.context.__YTD_CONTENT_SCRIPT_ACTIVE__, true);
+  assert.equal(typeof harness.context.injectDigestButton, "function");
+});
+
 test("Digest button skips a hidden responsive toolbar", () => {
   const harness = createHarness();
   const { row: hiddenRow, buttonGroup: hiddenGroup } = createActionRow({

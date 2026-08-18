@@ -1,3 +1,6 @@
+(() => {
+if (globalThis.__YTD_CONTENT_SCRIPT_ACTIVE__) return;
+
 /**
  * CONTENT SCRIPT
  *
@@ -882,3 +885,16 @@ document.addEventListener("yt-navigate-finish", () => {
     tryInjectNoteButton();
   }, 500);
 });
+
+// Keep the runtime implementation scoped so recovery injection can execute the
+// file more than once without redeclaring top-level const/let bindings. These
+// selected helpers stay visible only for the repository's Node regression tests.
+Object.assign(globalThis, {
+  findDigestButtonHost,
+  injectDigestButton,
+  isExtensionContextInvalidatedError,
+  setupButtonObserver,
+  setupDigestButtonResizeListener,
+});
+globalThis.__YTD_CONTENT_SCRIPT_ACTIVE__ = true;
+})();
