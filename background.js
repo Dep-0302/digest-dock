@@ -14,6 +14,7 @@
 // Import safe defaults and validation helpers. Secret keys live in
 // chrome.storage.local and are never part of the extension source.
 importScripts("settings.js");
+importScripts("notes-backup.js");
 
 const DEBUG = false;
 const ANALYSIS_SCHEMA_VERSION = 2;
@@ -21,6 +22,7 @@ const RUNTIME_PROTOCOL_VERSION = 3;
 const AI_PROVIDER_IDLE_TIMEOUT_MS = 50_000;
 const AI_PROVIDER_HARD_TIMEOUT_MS = 120_000;
 const AI_PROVIDER_MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
+const MAX_SAVED_NOTES = 100;
 const debugLog = (...args) => {
   if (DEBUG) console.log(...args);
 };
@@ -417,6 +419,42 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     handleDeleteNote(message.noteId)
       .then(sendResponse)
       .catch((err) => sendResponse({ success: false, error: err.message }));
+    return true;
+  }
+
+  if (message.action === "exportNotesBackup") {
+    handleExportNotesBackup()
+      .then(sendResponse)
+      .catch((err) =>
+        sendResponse({ success: false, code: err.code || "NOTES_EXPORT_FAILED" }),
+      );
+    return true;
+  }
+
+  if (message.action === "importNotesBackup") {
+    handleImportNotesBackup(message.backupText)
+      .then(sendResponse)
+      .catch((err) =>
+        sendResponse({ success: false, code: err.code || "NOTES_IMPORT_FAILED" }),
+      );
+    return true;
+  }
+
+  if (message.action === "clearAllNotes") {
+    handleClearAllNotes()
+      .then(sendResponse)
+      .catch((err) =>
+        sendResponse({ success: false, code: err.code || "NOTES_CLEAR_FAILED" }),
+      );
+    return true;
+  }
+
+  if (message.action === "resetAllExtensionData") {
+    handleResetAllExtensionData(message.preferredLanguage)
+      .then(sendResponse)
+      .catch((err) =>
+        sendResponse({ success: false, code: err.code || "RESET_DATA_FAILED" }),
+      );
     return true;
   }
 
@@ -1173,6 +1211,7 @@ async function handleSaveNote(
   videoTitle,
   channelName,
 ) {
+  const saveGeneration = noteStorageGeneration;
   try {
     const canonicalVideoUrl = YTD_SETTINGS.canonicalYouTubeUrl(videoId);
     const safeTimestamp = Math.max(0, Math.floor(Number(timestamp) || 0));
@@ -1283,30 +1322,45 @@ async function handleSaveNote(
 
     // Create timestamped URL
     const timestampedUrl = `${canonicalVideoUrl}&t=${safeTimestamp}s`;
+    const normalizedNoteText = String(cleanedText || matchedLine.text || "")
+      .trim()
+      .slice(0, 3000);
+    const normalizedVideoTitle =
+      typeof videoTitle === "string" && videoTitle.trim()
+        ? videoTitle.trim().slice(0, 500)
+        : "Untitled Video";
 
     // Create the note object
     const note = {
-      id: `note_${Date.now()}`,
+      id: createNoteId(),
       videoId: videoId,
-      videoTitle:
-        typeof videoTitle === "string"
-          ? videoTitle.slice(0, 500)
-          : "Untitled Video",
+      videoTitle: normalizedVideoTitle,
       channelName:
-        typeof channelName === "string" ? channelName.slice(0, 300) : "",
+        typeof channelName === "string"
+          ? channelName.trim().slice(0, 300)
+          : "",
       timestamp: formattedTimestamp,
       timestampSeconds: safeTimestamp,
       timestampedUrl: timestampedUrl,
-      text: cleanedText,
+      text: normalizedNoteText,
       translatedText: "",
-      rawText: matchedLine.text,
+      rawText: String(matchedLine.text || "").trim().slice(0, 3000),
       sourceLanguage:
-        typeof matchedLine.language === "string" ? matchedLine.language : "",
+        typeof matchedLine.language === "string"
+          ? matchedLine.language.trim().slice(0, 20)
+          : "",
       createdAt: Date.now(),
     };
 
     // Save to storage
-    await saveNoteToStorage(note);
+    const saved = await saveNoteToStorage(note, saveGeneration);
+    if (!saved) {
+      return {
+        success: false,
+        code: "NOTE_SAVE_CANCELED",
+        error: "笔记保存已因清空或重置操作取消。",
+      };
+    }
 
     // Generate the Chinese note separately. Failure never blocks the English
     // note; the Notes tab can retry missing translations later in small batches.
@@ -1409,6 +1463,22 @@ async function cleanupNoteText(
  * Saves a note to chrome.storage.local
  */
 let noteStorageWriteQueue = Promise.resolve();
+let noteStorageGeneration = 0;
+
+function createNoteId({
+  now = Date.now,
+  randomUUID = globalThis.crypto?.randomUUID?.bind(globalThis.crypto),
+  random = Math.random,
+} = {}) {
+  if (typeof randomUUID === "function") {
+    return `note_${randomUUID()}`;
+  }
+  return `note_${now()}_${random().toString(36).slice(2, 12)}`;
+}
+
+function getNoteStorageGeneration() {
+  return noteStorageGeneration;
+}
 
 function withNoteStorageWrite(task) {
   const run = noteStorageWriteQueue.then(task);
@@ -1416,18 +1486,109 @@ function withNoteStorageWrite(task) {
   return run;
 }
 
-function saveNoteToStorage(note) {
+function saveNoteToStorage(note, expectedGeneration = noteStorageGeneration) {
   return withNoteStorageWrite(async () => {
+    if (expectedGeneration !== noteStorageGeneration) return false;
     const result = await chrome.storage.local.get("ytd_notes");
     const notes = Array.isArray(result.ytd_notes) ? result.ytd_notes : [];
     notes.unshift(note); // Add to beginning (newest first)
 
-    // Keep only last 100 notes to prevent storage bloat
-    if (notes.length > 100) {
-      notes.splice(100);
+    // Keep only the newest notes to prevent storage bloat.
+    if (notes.length > MAX_SAVED_NOTES) {
+      notes.splice(MAX_SAVED_NOTES);
     }
 
     await chrome.storage.local.set({ ytd_notes: notes });
+    return true;
+  });
+}
+
+function notesBackupFailure(error, fallbackCode) {
+  return {
+    success: false,
+    code: error?.code || fallbackCode,
+    overBy: Number(error?.details?.overBy) || 0,
+  };
+}
+
+function notifyNotesChanged() {
+  try {
+    const notification = chrome.runtime.sendMessage?.({ action: "notesChanged" });
+    notification?.catch?.(() => {});
+  } catch (_error) {
+    // The next Notes-tab load will still read the current storage state.
+  }
+}
+
+/**
+ * Creates a consistent notes-only snapshot after all earlier note writes finish.
+ */
+function handleExportNotesBackup() {
+  return withNoteStorageWrite(async () => {
+    try {
+      const stored = await chrome.storage.local.get("ytd_notes");
+      const notes = Array.isArray(stored.ytd_notes) ? stored.ytd_notes : [];
+      const extensionVersion = chrome.runtime.getManifest?.().version || "";
+      const backup = YTD_NOTES_BACKUP.createBackup(notes, { extensionVersion });
+      return { success: true, backup, count: backup.notes.length };
+    } catch (error) {
+      return notesBackupFailure(error, "NOTES_EXPORT_FAILED");
+    }
+  });
+}
+
+/**
+ * Validates and atomically merges an uploaded backup through the shared note
+ * storage queue. A failure never partially updates the stored notes.
+ */
+function handleImportNotesBackup(backupText) {
+  return withNoteStorageWrite(async () => {
+    try {
+      const importedNotes = YTD_NOTES_BACKUP.parseBackupText(backupText);
+      const stored = await chrome.storage.local.get("ytd_notes");
+      const existingNotes = Array.isArray(stored.ytd_notes)
+        ? stored.ytd_notes
+        : [];
+      const result = YTD_NOTES_BACKUP.mergeNotes(existingNotes, importedNotes);
+
+      if (result.changed) {
+        await chrome.storage.local.set({ ytd_notes: result.notes });
+        notifyNotesChanged();
+      }
+
+      const { notes: _notes, ...summary } = result;
+      return { success: true, ...summary };
+    } catch (error) {
+      return notesBackupFailure(error, "NOTES_IMPORT_FAILED");
+    }
+  });
+}
+
+function handleClearAllNotes() {
+  return withNoteStorageWrite(async () => {
+    try {
+      noteStorageGeneration += 1;
+      await chrome.storage.local.remove("ytd_notes");
+      notifyNotesChanged();
+      return { success: true };
+    } catch (error) {
+      return notesBackupFailure(error, "NOTES_CLEAR_FAILED");
+    }
+  });
+}
+
+function handleResetAllExtensionData(preferredLanguage) {
+  return withNoteStorageWrite(async () => {
+    try {
+      noteStorageGeneration += 1;
+      const safeLanguage = preferredLanguage === "en" ? "en" : "zh-CN";
+      await chrome.storage.local.clear();
+      await chrome.storage.local.set({ ytd_options_language: safeLanguage });
+      notifyNotesChanged();
+      return { success: true };
+    } catch (error) {
+      return notesBackupFailure(error, "RESET_DATA_FAILED");
+    }
   });
 }
 
@@ -2098,6 +2259,12 @@ globalThis.__YTD_TRANSLATION_TESTING__ = {
   handleAnalyzeTranscript,
   handleGetNotes,
   handleDeleteNote,
+  handleExportNotesBackup,
+  handleImportNotesBackup,
+  handleClearAllNotes,
+  handleResetAllExtensionData,
+  createNoteId,
+  getNoteStorageGeneration,
   handleTranslateOverview,
   handleTranslateNotes,
   isMissingContentReceiverError,

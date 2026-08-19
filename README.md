@@ -96,6 +96,32 @@ Keys and settings are stored in Chrome's local extension storage on your device.
 5. Select transcript text when you want an AI explanation.
 6. Save a note from the player or a key quote, then revisit it from **Notes** in **Original**, **中文**, or **双语** mode.
 
+## Back up and restore notes
+
+The **Notes backup** card in Settings exports a versioned JSON recovery file. Use it before reinstalling the extension, clearing a Chrome profile, or moving your notes to another device.
+
+To create a backup:
+
+1. Open YouTube Digest **Settings**.
+2. Under **Notes backup**, choose **Export notes backup**.
+3. Keep the downloaded `youtube-digest-notes-YYYY-MM-DD.json` file somewhere secure and available to the new device.
+
+To restore on another device or Chrome profile:
+
+1. Install or reload YouTube Digest, then open **Settings**.
+2. Under **Notes backup**, choose **Import notes backup** and select the JSON file.
+3. Wait for the result shown in Settings. Configure API keys and other settings separately; they are not restored from this file.
+
+The JSON file contains backup-format metadata and saved note records only, including their stored original/English and Simplified Chinese content and the video and timestamp details needed to restore them. It does not contain API keys, extension settings, complete transcripts or transcript caches, or overview and summary caches. Source text already saved inside an individual note remains part of that note record. Exporting and importing use only the downloaded file and Chrome's local extension storage; these actions do not send the backup to Supadata, DeepSeek, or any other network service.
+
+Import merges the backup with notes already on the device and skips duplicates. If a matching note is missing stored content, the import may fill that content from the backup. If the same note ID has conflicting content, or the merged result would exceed the 100-note limit, the entire import is rejected. Invalid, unsupported, oversized, or otherwise failed imports do not change the notes already stored on the device.
+
+Backup files are plain, unencrypted JSON and may contain personal notes. Store and share them accordingly. Removing the extension or clearing its local data does not delete a previously downloaded backup file; delete that file separately when you no longer need it.
+
+Treat every imported JSON file as untrusted input, even when its filename looks correct. Import only a backup whose source you understand.
+
+This JSON feature is a recovery format for restoring YouTube Digest notes. Study-oriented exports such as Markdown, CSV, and Anki are separate future ideas and are not provided by the current backup feature.
+
 ## What works today
 
 - Google Chrome 116 or newer, using the Side Panel API.
@@ -105,7 +131,7 @@ Keys and settings are stored in Chrome's local extension storage on your device.
 - English AI overviews with a separate Simplified Chinese translation; bilingual mode combines the two cached results without a third generation call. Selected-text explanations and automatic note polishing are also supported.
 - Notes are polished in English once and translated into Simplified Chinese once; bilingual note mode only combines the two stored versions.
 - When a note's source subtitle is already Chinese, the original subtitle is reused as the Chinese note and no Chinese-translation request is sent.
-- Local notes and a local cache for recent transcript and digest results.
+- Local notes, versioned JSON note backup and restore, and a local cache for recent transcript and digest results.
 - DeepSeek V4 Flash for all published AI features. Other providers require a local code adaptation and are not supported by this published version.
 
 Shorts, live streams, private or access-restricted videos, and videos without an available native transcript may not work. Firefox, Safari, mobile browsers, and other Chromium browsers are not currently tested or supported.
@@ -151,7 +177,7 @@ YouTube Digest uses plain HTML, CSS, and JavaScript with no build step, so it is
 - Add more translation languages and let each person choose a learning language.
 - Create customized summary templates for lectures, interviews, tutorials, reviews, or research talks.
 - Build a vocabulary notebook that saves a word, its sentence, meaning, and video timestamp.
-- Export notes and vocabulary to Markdown, CSV, Anki, or another study tool.
+- Add study-oriented Markdown, CSV, or Anki exports. The current JSON feature is a recovery backup, not a study-tool export.
 - Add personal topic filters that highlight the chapters most relevant to a goal.
 - Add optional local-model support for a different privacy and cost tradeoff.
 - Improve accessibility with keyboard navigation, font controls, and higher-contrast themes.

@@ -293,12 +293,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     updateLoading(message.title, message.subtitle);
     sendResponse({ success: true });
   }
-  if (message.action === "noteSaved") {
-    // Refresh notes list when a new note is saved
+  if (message.action === "noteSaved" || message.action === "notesChanged") {
+    // Refresh after a save, import, clear, or reset. Only a freshly saved note
+    // may retry its missing Chinese version automatically.
     const filterAll = document
       .getElementById("notesFilterAll")
       ?.classList.contains("active");
-    loadNotes(filterAll ? null : currentVideoId);
+    loadNotes(filterAll ? null : currentVideoId, {
+      translateMissing: message.action === "noteSaved",
+    });
     sendResponse({ success: true });
   }
   return false;
@@ -413,7 +416,13 @@ function setupEventListeners() {
       return;
     }
     if (currentVideoId) {
-      startDigest(currentVideoId, currentVideoUrl);
+      void startDigest(currentVideoId, currentVideoUrl).catch((error) => {
+        console.error("[YouTube Digest Panel] Retry error:", error);
+        showError(
+          "无法打开摘要",
+          error?.message || "重新加载当前 YouTube 视频失败，请刷新页面后重试。",
+        );
+      });
     }
   });
 
@@ -737,17 +746,19 @@ async function runDigestLoad(videoId, videoUrl) {
  * Shows chapters and key quotes only.
  */
 function hasUsableEnglishAnalysis(analysis) {
+  const chapters = analysis?.chapters;
+  const keyQuotes = analysis?.keyQuotes;
   return (
-    Array.isArray(analysis.chapters) &&
-    analysis.chapters.length > 0 &&
-    analysis.chapters.every(
+    Array.isArray(chapters) &&
+    chapters.length > 0 &&
+    chapters.every(
       (chapter) =>
         [chapter?.title, chapter?.summary]
           .every((value) => typeof value === "string" && value.trim()),
     ) &&
-    Array.isArray(analysis.keyQuotes) &&
-    analysis.keyQuotes.length > 0 &&
-    analysis.keyQuotes.every(
+    Array.isArray(keyQuotes) &&
+    keyQuotes.length > 0 &&
+    keyQuotes.every(
       (quote) =>
         typeof quote?.quote === "string" && quote.quote.trim(),
     )
@@ -755,15 +766,17 @@ function hasUsableEnglishAnalysis(analysis) {
 }
 
 function hasCompleteChineseAnalysis(analysis) {
+  const chapters = analysis?.chapters;
+  const keyQuotes = analysis?.keyQuotes;
   return (
     hasUsableEnglishAnalysis(analysis) &&
-    analysis.chapters.every(
+    chapters.every(
       (chapter) =>
         [chapter?.titleZh, chapter?.summaryZh].every(
           (value) => typeof value === "string" && value.trim(),
         ),
     ) &&
-    analysis.keyQuotes.every(
+    keyQuotes.every(
       (quote) =>
         typeof quote?.quoteZh === "string" && quote.quoteZh.trim(),
     )
@@ -1897,8 +1910,10 @@ function handleNotesModeChange(mode) {
 /**
  * Loads and renders notes from storage.
  * @param {string|null} videoId - Filter by video ID, or null for all notes
+ * @param {{translateMissing?: boolean}} options - Whether this refresh may
+ * generate missing Chinese note content. Storage-change refreshes stay local.
  */
-async function loadNotes(videoId) {
+async function loadNotes(videoId, { translateMissing = true } = {}) {
   notesTranslationGeneration += 1;
   setNotesTranslationLoading(false);
   try {
@@ -1911,7 +1926,9 @@ async function loadNotes(videoId) {
       currentNotes = Array.isArray(result.notes) ? result.notes : [];
       currentNotesFilterVideoId = videoId;
       renderNotes(currentNotes, videoId);
-      if (currentNotesMode !== "original") void ensureNotesChinese();
+      if (translateMissing && currentNotesMode !== "original") {
+        void ensureNotesChinese();
+      }
     }
   } catch (error) {
     console.error("[YouTube Digest Panel] Load notes error:", error);
@@ -2535,6 +2552,7 @@ globalThis.__YTD_TRANSCRIPT_TESTING__ = {
   alignTranslatedSegmentBatch,
   hasUsableEnglishAnalysis,
   hasCompleteChineseAnalysis,
+  loadNotes,
   noteHasChineseSource,
   noteCopyTextForMode,
   renderNoteLanguageContent,

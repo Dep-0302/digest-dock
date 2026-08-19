@@ -184,6 +184,38 @@
         </div>
       </details>
 
+      <section class="card" id="notesBackupCard">
+        <h2 data-i18n="notesBackup">笔记备份</h2>
+        <p class="help" id="notesBackupHelp" data-i18n="notesBackupHelp">
+          JSON 备份只包含已保存笔记及其原文、中文和时间戳，不包含 API 密钥、设置、完整字幕或摘要缓存。导入会与本机笔记合并，并自动跳过重复项。
+        </p>
+        <div class="data-actions">
+          <button
+            id="exportNotesBtn"
+            type="button"
+            aria-describedby="notesBackupHelp"
+            data-i18n="exportNotes"
+          >
+            导出笔记备份
+          </button>
+          <button
+            id="importNotesBtn"
+            type="button"
+            aria-describedby="notesBackupHelp"
+            data-i18n="importNotes"
+          >
+            导入笔记备份
+          </button>
+          <input
+            id="importNotesFile"
+            type="file"
+            accept=".json,application/json"
+            hidden
+          />
+        </div>
+        <span id="backupStatus" role="status" aria-live="polite"></span>
+      </section>
+
       <section class="card data-card">
         <h2 data-i18n="localData">本地数据</h2>
         <p class="help" data-i18n="localDataHelp">
@@ -215,6 +247,7 @@
     </main>
 
     <script src="settings.js"></script>
+    <script src="notes-backup.js"></script>
     <script src="options.js"></script>
   </body>
 </html>

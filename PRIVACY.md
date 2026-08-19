@@ -1,6 +1,6 @@
 # Privacy
 
-Effective: July 28, 2026
+Effective: August 18, 2026
 
 YouTube Digest is a GitHub-only, bring-your-own-key Chrome extension. It has no YouTube Digest account, developer-operated backend, analytics, advertising, or telemetry.
 
@@ -15,6 +15,8 @@ Depending on the feature you use, YouTube Digest handles:
 - transcript context around a timestamped note;
 - content you ask to translate;
 - notes you save;
+- note backup JSON files you select for import and backup files the extension
+  prepares for download;
 - Supadata and DeepSeek configuration, including API keys; and
 - cached transcript, digest, and translation results.
 
@@ -50,14 +52,31 @@ YouTube Digest uses Chrome's local extension storage, not a YouTube Digest cloud
 - Recent transcript, digest, and per-segment translation cache entries are stored
   locally. The cache is limited to 20 videos, and entries older than 30 days are
   removed when the side panel opens.
+- The Settings page can export saved notes to a versioned JSON recovery file and
+  import that file later. The file contains backup-format metadata and saved
+  note records only, including their stored original/English and Simplified
+  Chinese content and the video and timestamp details needed to restore them. It
+  does not contain API keys, extension settings, complete transcripts or
+  transcript caches, or overview and summary caches. Source text already saved
+  inside an individual note remains part of that note record.
+- Note backup export and import use the downloaded file and Chrome's local
+  extension storage only. They do not send the backup to Supadata, DeepSeek, the
+  developer, or another network service.
+- Import validates and merges the file with existing notes, skips duplicates,
+  and may fill content missing from an existing matching note. A conflicting
+  note ID or a merged total above 100 rejects the entire import. A failed import
+  does not change the notes already stored by the extension.
 
 Chrome extension storage is not a password vault. Anyone with sufficient access to your browser profile or device may be able to recover locally stored keys or content. Use scoped keys where providers support them, set spending limits, and rotate or revoke a key if the device or browser profile is compromised.
+
+Downloaded note backups are plain, unencrypted JSON files outside the extension's storage. Anyone with access to a backup file may be able to read its notes. Removing the extension, deleting all notes, resetting extension data, or clearing the Chrome profile does not delete a backup that was already downloaded. Store it securely and delete the file separately when you no longer need it.
 
 To remove data:
 
 - delete individual saved notes in YouTube Digest;
 - use the Options page to clear cached digests, delete all notes, or reset all extension data;
-- remove the extension or clear its stored data from Chrome to delete all local settings, keys, notes, and cache entries; and
+- remove the extension or clear its stored data from Chrome to delete all local settings, keys, notes, and cache entries;
+- manually delete any downloaded note backup files from the device and other locations where you copied them; and
 - revoke keys in the Supadata or DeepSeek dashboard to stop their future use.
 
 Clearing local data does not delete information already processed or retained by Supadata or DeepSeek. Use each service's controls for service-side requests.

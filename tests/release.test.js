@@ -16,9 +16,31 @@ test("manifest uses minimized install-time permissions", () => {
   assert.equal(packageJson.version, manifest.version);
   assert.equal(manifest.options_ui.page, "options.html");
   assert.ok(!manifest.permissions.includes("activeTab"));
+  assert.ok(!manifest.permissions.includes("downloads"));
   assert.ok(manifest.host_permissions.includes("https://api.deepseek.com/*"));
   assert.equal(Object.hasOwn(manifest, "optional_host_permissions"), false);
   assert.equal(manifest.version, "1.1.5");
+});
+
+test("notes backup runtime dependencies are included in the release surface", () => {
+  const background = read("background.js");
+  const optionsPage = read("options.html");
+  const releaseCheck = read("scripts/check-release.sh");
+
+  assert.match(background, /importScripts\("notes-backup\.js"\)/);
+  assert.ok(
+    optionsPage.indexOf('<script src="notes-backup.js"></script>') <
+      optionsPage.indexOf('<script src="options.js"></script>'),
+    "notes-backup.js must load before options.js",
+  );
+  assert.ok(
+    (releaseCheck.match(/"notes-backup\.js"/g) || []).length >= 2,
+    "notes-backup.js must be both allowlisted and required for release",
+  );
+  assert.doesNotMatch(
+    [background, read("options.js")].join("\n"),
+    /chrome\.downloads\b/,
+  );
 });
 
 test("release copy documents current scope without em dashes", () => {

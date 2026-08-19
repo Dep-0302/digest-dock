@@ -234,8 +234,52 @@ test("Header exposes tab-specific transcript, overview, and notes language modes
   assert.doesNotMatch(js, /English \+ Chinese/);
   assert.match(js, /原文（\$\{language\}）/);
   assert.match(js, /await startDigest\(videoId, tab\.url\)/);
+  assert.match(
+    js,
+    /void startDigest\(currentVideoId, currentVideoUrl\)\.catch\(/,
+  );
   assert.match(js, /runDigestSingleFlight\(videoId/);
   assert.match(js, /runTabCheckSingleFlight\("active-tab"/);
+});
+
+test("notesChanged refreshes imported notes without starting translation", async () => {
+  const messages = [];
+  const helpers = loadSidepanelHelpers({
+    sendMessage: async (message) => {
+      messages.push(message);
+      if (message.action === "getNotes") {
+        return {
+          success: true,
+          notes: [
+            {
+              id: "imported-note",
+              videoId: "video_001",
+              videoTitle: "Imported video",
+              timestamp: "0:05",
+              timestampSeconds: 5,
+              timestampedUrl:
+                "https://www.youtube.com/watch?v=video_001&t=5s",
+              text: "Imported English note without a translation.",
+              translatedText: "",
+            },
+          ],
+        };
+      }
+      throw new Error(`Unexpected background action: ${message.action}`);
+    },
+  });
+
+  await helpers.loadNotes(null, { translateMissing: false });
+  await Promise.resolve();
+
+  assert.deepEqual(
+    messages.map((message) => message.action),
+    ["getNotes"],
+  );
+  assert.match(
+    read("sidepanel.js"),
+    /message\.action === "noteSaved" \|\| message\.action === "notesChanged"[\s\S]*?loadNotes\([\s\S]*?translateMissing: message\.action === "noteSaved"/,
+  );
 });
 
 test("duplicate digest starts for the same video share one in-flight task", async () => {
@@ -308,7 +352,14 @@ test("overview content renders English, Chinese, and aligned bilingual variants"
     keyQuotes: [{ quote: "English quote." }],
   };
   assert.equal(helpers.hasUsableEnglishAnalysis(englishOnlyAnalysis), true);
+  assert.equal(helpers.hasUsableEnglishAnalysis(null), false);
+  assert.equal(helpers.hasUsableEnglishAnalysis(undefined), false);
+  assert.equal(
+    helpers.hasUsableEnglishAnalysis({ chapters: null, keyQuotes: null }),
+    false,
+  );
   assert.equal(helpers.hasCompleteChineseAnalysis(englishOnlyAnalysis), false);
+  assert.equal(helpers.hasCompleteChineseAnalysis(null), false);
   assert.equal(
     helpers.hasCompleteChineseAnalysis({
       ...englishOnlyAnalysis,
@@ -533,7 +584,7 @@ test("notes generate Chinese once from polished English and persist it", async (
   const backgroundSource = read("background.js");
   assert.match(
     backgroundSource,
-    /async function handleSaveNote\([\s\S]*?cleanupNoteText\([\s\S]*?saveNoteToStorage\(note\)[\s\S]*?handleTranslateNotes\(\[note\]\)/,
+    /async function handleSaveNote\([\s\S]*?cleanupNoteText\([\s\S]*?saveNoteToStorage\(note, saveGeneration\)[\s\S]*?handleTranslateNotes\(\[note\]\)/,
   );
   assert.match(
     backgroundSource,
