@@ -125,6 +125,7 @@ function loadBackgroundHelpers({
         onInstalled: listeners,
         onMessage: listeners,
         openOptionsPage() {},
+        sendMessage: () => Promise.resolve(),
         getURL: (resourcePath) => `chrome-extension://test/${resourcePath}`,
       },
       tabs: { onUpdated: listeners, onActivated: listeners },
@@ -379,14 +380,18 @@ test("Header exposes tab-specific transcript, overview, and notes language modes
   assert.match(js, /function ensureOverviewOriginal\(\)/);
   assert.match(js, /action: "translateNotes"/);
   assert.match(js, /function ensureNotesChinese\(\)/);
-  assert.match(js, /const REQUIRED_RUNTIME_PROTOCOL_VERSION = 4/);
+  assert.match(
+    js,
+    /function ensureNotesChinese\(\)[\s\S]*?await sendTranslationMessage\(\{[\s\S]*?action: "translateNotes"/,
+  );
+  assert.match(js, /const REQUIRED_RUNTIME_PROTOCOL_VERSION = 5/);
   assert.match(
     js,
     /runtimeProtocolVersion !== REQUIRED_RUNTIME_PROTOCOL_VERSION[\s\S]*?showRuntimeVersionError\(\)/,
   );
   assert.match(js, /扩展后台未响应原文翻译请求，请重新加载扩展/);
   const backgroundSource = read("background.js");
-  assert.match(backgroundSource, /const RUNTIME_PROTOCOL_VERSION = 4/);
+  assert.match(backgroundSource, /const RUNTIME_PROTOCOL_VERSION = 5/);
   assert.match(
     backgroundSource,
     /runtimeProtocolVersion: RUNTIME_PROTOCOL_VERSION/,
@@ -1181,6 +1186,532 @@ test("notes render and copy original, Chinese, and bilingual variants", () => {
     }),
     false,
   );
+  assert.equal(helpers.noteHasChineseSource({ rawText: "对" }), true);
+  assert.equal(helpers.noteHasChineseSource({ rawText: "“你好”" }), true);
+  assert.equal(helpers.noteHasChineseSource({ rawText: "《中文标题》" }), true);
+  assert.equal(
+    helpers.noteHasChineseSource({
+      rawText: "这段中文引用了《となりのトトロ》。",
+    }),
+    true,
+  );
+  assert.match(
+    helpers.renderNoteLanguageContent(
+      { text: "Good.", translatedText: "好" },
+      "zh",
+    ),
+    /好/,
+  );
+  assert.match(
+    helpers.renderNoteLanguageContent(
+      { text: "Good.", translatedText: "“好。”" },
+      "zh",
+    ),
+    /“好。”/,
+  );
+  assert.doesNotMatch(
+    helpers.renderNoteLanguageContent(
+      {
+        text: "Japanese fallback.",
+        translatedText: "東京で漢字を使います。",
+      },
+      "zh",
+    ),
+    /東京/,
+  );
+  assert.match(
+    helpers.renderNoteLanguageContent(
+      {
+        text: "Miyazaki note.",
+        translatedText: "宫崎骏导演了《となりのトトロ》。",
+      },
+      "zh",
+    ),
+    /となりのトトロ/,
+  );
+  assert.match(
+    helpers.summarizeNoteTranslationFailures([{ code: "RATE_LIMITED" }]),
+    /请求受限/,
+  );
+  assert.match(
+    helpers.summarizeNoteTranslationFailures([
+      { code: "INVALID_TRANSLATION" },
+    ]),
+    /主要为英文/,
+  );
+  assert.match(
+    helpers.summarizeNoteTranslationFailures([{ code: "PROVIDER_ERROR" }]),
+    /请求失败/,
+  );
+  assert.match(
+    helpers.summarizeNoteTranslationFailures([{ code: "EMPTY_RESPONSE" }]),
+    /空内容/,
+  );
+  assert.match(
+    helpers.summarizeNoteTranslationFailures([{ code: "INVALID_JSON" }]),
+    /格式无法解析/,
+  );
+  assert.match(
+    helpers.summarizeNoteTranslationFailures([{ code: "MISSING_ITEM" }]),
+    /漏掉了这条笔记/,
+  );
+  assert.match(
+    helpers.summarizeNoteTranslationFailures([
+      { code: "MULTIPLE_CANDIDATES" },
+    ]),
+    /多个冲突结果/,
+  );
+  assert.match(
+    helpers.summarizeNoteTranslationFailures([{ code: "CONTENT_FILTERED" }]),
+    /未返回这条内容/,
+  );
+});
+
+test("clicking the active Chinese notes mode retries once without duplicate requests", async () => {
+  const runtime = loadSidepanelRuntime();
+  const fixture = runtime.evaluate(`
+    (() => {
+      const elements = new Map();
+      let requests = 0;
+      let resolveTranslation;
+      const element = (id) => {
+        if (!elements.has(id)) {
+          elements.set(id, {
+            hidden: false,
+            textContent: "",
+            classList: { toggle() {} },
+            setAttribute() {},
+          });
+        }
+        return elements.get(id);
+      };
+      document.getElementById = element;
+      document.querySelectorAll = () => [];
+      renderNotes = () => {};
+      currentNotesMode = "zh";
+      currentNotes = [
+        { id: "note_retry", text: "Retry this English note.", videoTitle: "Video" },
+      ];
+      isNotesLoading = false;
+      isNotesTranslationLoading = false;
+      chrome.runtime.sendMessage = (message) => {
+        if (message.action !== "translateNotes") return Promise.resolve({});
+        requests += 1;
+        return new Promise((resolve) => { resolveTranslation = resolve; });
+      };
+      return {
+        click: (mode) => handleNotesModeChange(mode),
+        setMode: (mode) => { currentNotesMode = mode; },
+        resolve: () => resolveTranslation({
+          success: true,
+          translations: [{ id: "note_retry", textZh: "重试后的中文笔记。" }],
+          failures: [],
+        }),
+        snapshot: () => JSON.stringify({
+          requests,
+          loading: isNotesTranslationLoading,
+          translatedText: currentNotes[0].translatedText || "",
+        }),
+      };
+    })()
+  `);
+
+  fixture.click("zh");
+  fixture.click("zh");
+  assert.deepEqual(JSON.parse(fixture.snapshot()), {
+    requests: 1,
+    loading: true,
+    translatedText: "",
+  });
+
+  fixture.resolve();
+  await nextTurn();
+  fixture.click("zh");
+  fixture.setMode("original");
+  fixture.click("original");
+  assert.deepEqual(JSON.parse(fixture.snapshot()), {
+    requests: 1,
+    loading: false,
+    translatedText: "重试后的中文笔记。",
+  });
+});
+
+test("a fast failed same-mode retry is debounced before the second click", async () => {
+  const runtime = loadSidepanelRuntime();
+  const fixture = runtime.evaluate(`
+    (() => {
+      const elements = new Map();
+      let requests = 0;
+      const element = (id) => {
+        if (!elements.has(id)) {
+          elements.set(id, {
+            hidden: false,
+            textContent: "",
+            classList: { toggle() {} },
+          });
+        }
+        return elements.get(id);
+      };
+      document.getElementById = element;
+      document.querySelectorAll = () => [];
+      renderNotes = () => {};
+      currentNotesMode = "zh";
+      currentNotes = [{ id: "note_fast", text: "Fast failed note." }];
+      chrome.runtime.sendMessage = async (message) => {
+        if (message.action !== "translateNotes") return {};
+        requests += 1;
+        return {
+          success: false,
+          translations: [],
+          failures: [{ id: "note_fast", code: "PROVIDER_ERROR" }],
+        };
+      };
+      return {
+        click: () => handleNotesModeChange("zh"),
+        snapshot: () => JSON.stringify({
+          requests,
+          loading: isNotesTranslationLoading,
+          status: element("notesLanguageStatus").textContent,
+        }),
+      };
+    })()
+  `);
+
+  fixture.click();
+  await nextTurn();
+  fixture.click();
+  await nextTurn();
+  const snapshot = JSON.parse(fixture.snapshot());
+  assert.equal(snapshot.requests, 1);
+  assert.equal(snapshot.loading, false);
+  assert.match(snapshot.status, /请求失败/);
+});
+
+test("a stuck notes message exits loading state at the translation watchdog", async () => {
+  const timers = createFakeTimers();
+  const runtime = loadSidepanelRuntime({
+    setTimeoutImpl: timers.setTimeout,
+    clearTimeoutImpl: timers.clearTimeout,
+  });
+  const fixture = runtime.evaluate(`
+    (() => {
+      const elements = new Map();
+      let resolveTranslation;
+      const element = (id) => {
+        if (!elements.has(id)) {
+          elements.set(id, {
+            hidden: false,
+            textContent: "",
+            classList: { toggle() {} },
+          });
+        }
+        return elements.get(id);
+      };
+      document.getElementById = element;
+      document.querySelectorAll = () => [];
+      renderNotes = () => {};
+      currentNotesMode = "zh";
+      currentNotes = [{ id: "note_stuck", text: "A stuck note." }];
+      chrome.runtime.sendMessage = () =>
+        new Promise((resolve) => { resolveTranslation = resolve; });
+      return {
+        run: () => ensureNotesChinese(),
+        resolveLate: () => resolveTranslation({
+          success: true,
+          translations: [{ id: "note_stuck", textZh: "迟到的中文。" }],
+          failures: [],
+        }),
+        snapshot: () => JSON.stringify({
+          loading: isNotesTranslationLoading,
+          status: element("notesLanguageStatus").textContent,
+          translatedText: currentNotes[0].translatedText || "",
+        }),
+      };
+    })()
+  `);
+
+  const request = fixture.run();
+  assert.equal(timers.activeCount(130_000), 1);
+  timers.fireActive(130_000);
+  await request;
+  const timedOut = JSON.parse(fixture.snapshot());
+  assert.equal(timedOut.loading, false);
+  assert.match(timedOut.status, /130 秒后超时/);
+  assert.equal(timedOut.translatedText, "");
+
+  fixture.resolveLate();
+  await nextTurn();
+  assert.deepEqual(JSON.parse(fixture.snapshot()), timedOut);
+});
+
+test("switching notes to original invalidates a pending translation response", async () => {
+  const runtime = loadSidepanelRuntime();
+  const fixture = runtime.evaluate(`
+    (() => {
+      const elements = new Map();
+      let resolveTranslation;
+      const element = (id) => {
+        if (!elements.has(id)) {
+          elements.set(id, {
+            hidden: false,
+            textContent: "",
+            classList: { toggle() {} },
+          });
+        }
+        return elements.get(id);
+      };
+      document.getElementById = element;
+      document.querySelectorAll = () => [];
+      renderNotes = () => {};
+      currentNotesMode = "zh";
+      currentNotes = [{ id: "note_pending", text: "Pending note." }];
+      chrome.runtime.sendMessage = () =>
+        new Promise((resolve) => { resolveTranslation = resolve; });
+      return {
+        start: () => handleNotesModeChange("zh"),
+        showOriginal: () => handleNotesModeChange("original"),
+        resolve: () => resolveTranslation({
+          success: false,
+          translations: [],
+          failures: [{ id: "note_pending", code: "PROVIDER_ERROR" }],
+        }),
+        snapshot: () => JSON.stringify({
+          mode: currentNotesMode,
+          loading: isNotesTranslationLoading,
+          status: element("notesLanguageStatus").textContent,
+          statusHidden: element("notesLanguageStatus").hidden,
+        }),
+      };
+    })()
+  `);
+
+  fixture.start();
+  fixture.showOriginal();
+  fixture.resolve();
+  await nextTurn();
+  assert.deepEqual(JSON.parse(fixture.snapshot()), {
+    mode: "original",
+    loading: false,
+    status: "",
+    statusHidden: true,
+  });
+});
+
+test("one notes retry action sends only one bounded ten-note batch", async () => {
+  const runtime = loadSidepanelRuntime();
+  const fixture = runtime.evaluate(`
+    (() => {
+      const elements = new Map();
+      const requests = [];
+      const element = (id) => {
+        if (!elements.has(id)) {
+          elements.set(id, {
+            hidden: false,
+            textContent: "",
+            classList: { toggle() {} },
+          });
+        }
+        return elements.get(id);
+      };
+      document.getElementById = element;
+      document.querySelectorAll = () => [];
+      renderNotes = () => {};
+      currentNotesMode = "zh";
+      currentNotes = Array.from({ length: 23 }, (_, index) => ({
+        id: "note_" + index,
+        text: "English note " + index + ".",
+      }));
+      chrome.runtime.sendMessage = async (message) => {
+        requests.push(message.notes.map((note) => note.id));
+        return {
+          success: true,
+          translations: message.notes.map((note) => ({
+            id: note.id,
+            textZh: "中文 " + note.id,
+          })),
+          failures: [],
+        };
+      };
+      return {
+        run: () => ensureNotesChinese(),
+        snapshot: () => JSON.stringify({
+          requests,
+          remaining: currentNotes.filter((note) => !noteChineseText(note)).length,
+          status: element("notesLanguageStatus").textContent,
+        }),
+      };
+    })()
+  `);
+
+  await fixture.run();
+  const snapshot = JSON.parse(fixture.snapshot());
+  assert.deepEqual(snapshot.requests, [
+    Array.from({ length: 10 }, (_, index) => `note_${index}`),
+  ]);
+  assert.equal(snapshot.remaining, 13);
+  assert.match(snapshot.status, /13 条中文笔记仍未生成/);
+});
+
+test("content failures rotate behind untried notes on the next bounded retry", async () => {
+  const runtime = loadSidepanelRuntime();
+  const fixture = runtime.evaluate(`
+    (() => {
+      const elements = new Map();
+      const requests = [];
+      const element = (id) => {
+        if (!elements.has(id)) {
+          elements.set(id, {
+            hidden: false,
+            textContent: "",
+            classList: { toggle() {} },
+          });
+        }
+        return elements.get(id);
+      };
+      document.getElementById = element;
+      document.querySelectorAll = () => [];
+      renderNotes = () => {};
+      currentNotesMode = "zh";
+      currentNotes = Array.from({ length: 12 }, (_, index) => ({
+        id: "note_" + index,
+        text: "English note " + index + ".",
+      }));
+      chrome.runtime.sendMessage = async (message) => {
+        const ids = message.notes.map((note) => note.id);
+        requests.push(ids);
+        if (requests.length === 1) {
+          return {
+            success: false,
+            translations: [],
+            failures: ids.map((id) => ({ id, code: "INVALID_TRANSLATION" })),
+          };
+        }
+        return {
+          success: true,
+          translations: ids.map((id) => ({ id, textZh: "中文 " + id })),
+          failures: [],
+        };
+      };
+      return {
+        run: () => ensureNotesChinese(),
+        requests: () => JSON.stringify(requests),
+      };
+    })()
+  `);
+
+  await fixture.run();
+  await fixture.run();
+  const requests = JSON.parse(fixture.requests());
+  assert.deepEqual(requests[0],
+    Array.from({ length: 10 }, (_, index) => `note_${index}`));
+  assert.deepEqual(requests[1].slice(0, 2), ["note_10", "note_11"]);
+});
+
+test("notes loading blocks stale same-mode retries and ignores older filter results", async () => {
+  const runtime = loadSidepanelRuntime();
+  const fixture = runtime.evaluate(`
+    (() => {
+      const pendingLoads = new Map();
+      const translationRequests = [];
+      const elements = new Map();
+      const element = (id) => {
+        if (!elements.has(id)) {
+          elements.set(id, {
+            hidden: false,
+            textContent: "",
+            classList: { toggle() {} },
+            setAttribute() {},
+          });
+        }
+        return elements.get(id);
+      };
+      document.getElementById = element;
+      document.querySelectorAll = () => [];
+      renderNotes = () => {};
+      currentNotesMode = "zh";
+      currentNotes = [{ id: "old_note", text: "Old note." }];
+      chrome.runtime.sendMessage = (message) => {
+        if (message.action === "getNotes") {
+          return new Promise((resolve) => {
+            pendingLoads.set(String(message.videoId), resolve);
+          });
+        }
+        if (message.action === "translateNotes") {
+          translationRequests.push(message.notes.map((note) => note.id));
+          return Promise.resolve({
+            success: true,
+            translations: message.notes.map((note) => ({
+              id: note.id,
+              textZh: "中文 " + note.id,
+            })),
+            failures: [],
+          });
+        }
+        return Promise.resolve({});
+      };
+      return {
+        load: (videoId) => loadNotes(videoId),
+        clickActive: () => handleNotesModeChange("zh"),
+        resolve: (videoId, notes) => pendingLoads.get(String(videoId))({
+          success: true,
+          notes,
+        }),
+        snapshot: () => JSON.stringify({
+          noteIds: currentNotes.map((note) => note.id),
+          translationRequests,
+          isNotesLoading,
+          notesFilterShowAll,
+        }),
+      };
+    })()
+  `);
+
+  const oldLoad = fixture.load("old-video");
+  const latestLoad = fixture.load(null);
+  fixture.clickActive();
+  assert.deepEqual(JSON.parse(fixture.snapshot()).translationRequests, []);
+
+  fixture.resolve(null, [
+    { id: "new_note", text: "New note.", videoTitle: "New video" },
+  ]);
+  await latestLoad;
+  await nextTurn();
+  fixture.resolve("old-video", [
+    { id: "stale_note", text: "Stale note.", videoTitle: "Old video" },
+  ]);
+  await oldLoad;
+  await nextTurn();
+
+  assert.deepEqual(JSON.parse(fixture.snapshot()), {
+    noteIds: ["new_note"],
+    translationRequests: [["new_note"]],
+    isNotesLoading: false,
+    notesFilterShowAll: true,
+  });
+});
+
+test("a failed notes filter load restores the last successful filter state", async () => {
+  const runtime = loadSidepanelRuntime();
+  const fixture = runtime.evaluate(`
+    (() => {
+      currentNotesFilterVideoId = "video-a";
+      notesFilterShowAll = false;
+      chrome.runtime.sendMessage = async () => ({ success: false });
+      return {
+        loadAll: () => loadNotes(null),
+        snapshot: () => JSON.stringify({
+          notesFilterShowAll,
+          currentNotesFilterVideoId,
+        }),
+      };
+    })()
+  `);
+
+  await fixture.loadAll();
+  assert.deepEqual(JSON.parse(fixture.snapshot()), {
+    notesFilterShowAll: false,
+    currentNotesFilterVideoId: "video-a",
+  });
 });
 
 test("overview analysis validation builds the v3 Chinese-base schema", () => {
@@ -1403,12 +1934,18 @@ test("notes generate Chinese once from polished English and persist it", async (
   const backgroundSource = read("background.js");
   assert.match(
     backgroundSource,
-    /async function handleSaveNote\([\s\S]*?cleanupNoteText\([\s\S]*?saveNoteToStorage\(note\)[\s\S]*?handleTranslateNotes\(\[note\]\)/,
+    /async function handleSaveNote\([\s\S]*?cleanupNoteText\([\s\S]*?saveNoteToStorage\(note\)[\s\S]*?action: "noteSaved"/,
   );
+  assert.doesNotMatch(backgroundSource, /handleTranslateNotes\(\[note\]\)/);
   assert.match(
     backgroundSource,
     /sourceLanguage:[\s\S]*?matchedLine\.language/,
   );
+  const saveQuoteSource =
+    read("sidepanel.js").match(
+      /async function saveQuoteAsNote\([\s\S]*?\n}\n\n\/\*\*/,
+    )?.[0] || "";
+  assert.doesNotMatch(saveQuoteSource, /loadNotes\(/);
   const requests = [];
   let storedNotes = [
     {
@@ -1478,6 +2015,970 @@ test("notes generate Chinese once from polished English and persist it", async (
   });
 });
 
+test("technical-only notes accept an explicit unchanged model result", async () => {
+  const technicalText = "OpenAI API GPT Codex Claude Code GitHub Chrome";
+  let storedNotes = [
+    { id: "note_tech", text: technicalText, videoTitle: "Tooling" },
+  ];
+  let apiCalls = 0;
+  const background = loadBackgroundHelpers({
+    storageGetImpl: async (key) => {
+      if (key === "ytd_settings") {
+        return { ytd_settings: { aiApiKey: "test-key" } };
+      }
+      if (key === "ytd_notes") return { ytd_notes: storedNotes };
+      return {};
+    },
+    storageSetImpl: async (items) => {
+      if (items.ytd_notes) storedNotes = items.ytd_notes;
+    },
+    fetchImpl: async (url) => {
+      if (url.startsWith("chrome-extension://")) {
+        return { ok: true, text: async () => read("prompts/translation.md") };
+      }
+      apiCalls += 1;
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  notes: [
+                    {
+                      id: "note_tech",
+                      textZh: technicalText,
+                      unchanged: true,
+                      unchangedKind: "technical",
+                    },
+                  ],
+                }),
+              },
+            },
+          ],
+        }),
+      };
+    },
+  });
+
+  const result = await background.handleTranslateNotes(storedNotes);
+  assert.equal(result.success, true);
+  assert.equal(apiCalls, 1);
+  assert.equal(result.translations[0].textZh, technicalText);
+  assert.equal(storedNotes[0].translatedText, technicalText);
+  assert.equal(
+    background.validateNoteTranslationCandidate(
+      { textZh: technicalText },
+      { text: technicalText },
+    ).textZh,
+    "",
+  );
+  assert.equal(
+    background.validateNoteTranslationCandidate(
+      {
+        textZh: `${technicalText} extra`,
+        unchanged: true,
+        unchangedKind: "technical",
+      },
+      { text: technicalText },
+    ).textZh,
+    "",
+  );
+  assert.equal(
+    background.validateNoteTranslationCandidate(
+      {
+        textZh: "This ordinary English sentence was not translated.",
+        unchanged: true,
+      },
+      { text: "This ordinary English sentence was not translated." },
+    ).textZh,
+    "",
+  );
+  for (const ordinaryText of [
+    "Never Give Up",
+    "Build Better Products",
+    "MOVE FAST",
+    "Stay Hungry",
+  ]) {
+    assert.equal(
+      background.validateNoteTranslationCandidate(
+        {
+          textZh: ordinaryText,
+          unchanged: true,
+          unchangedKind: "technical",
+        },
+        { text: ordinaryText },
+      ).textZh,
+      "",
+    );
+  }
+  assert.equal(
+    background.validateNoteTranslationCandidate(
+      { textZh: "This is still an English note, 中文." },
+      { text: "This source sentence needs translation." },
+    ).textZh,
+    "",
+  );
+  assert.equal(
+    background.validateNoteTranslationCandidate(
+      { textZh: "This is an entirely untranslated English note, 中文翻译。" },
+      { text: "This source sentence needs translation." },
+    ).textZh,
+    "",
+  );
+  assert.equal(
+    background.validateNoteTranslationCandidate(
+      { textZh: "summary 好" },
+      { text: "A summary." },
+    ).textZh,
+    "",
+  );
+  assert.equal(
+    background.validateNoteTranslationCandidate(
+      { textZh: "用 feature flag 做 rollout。" },
+      { text: "Use a feature flag for the rollout." },
+    ).textZh,
+    "用 feature flag 做 rollout。",
+  );
+  assert.equal(
+    background.validateNoteTranslationCandidate(
+      { textZh: "宫崎骏导演了《となりのトトロ》。" },
+      { text: "Hayao Miyazaki directed My Neighbor Totoro." },
+    ).textZh,
+    "宫崎骏导演了《となりのトトロ》。",
+  );
+  assert.equal(
+    background.validateNoteTranslationCandidate(
+      { textZh: "“好。”" },
+      { text: "Good." },
+    ).textZh,
+    "“好。”",
+  );
+  assert.equal(
+    background.validateNoteTranslationCandidate(
+      { textZh: "《这是中文》" },
+      { text: "This is Chinese." },
+    ).textZh,
+    "《这是中文》",
+  );
+  assert.equal(
+    background.validateNoteTranslationCandidate(
+      { textZh: "“This ordinary English sentence was not translated.” 好" },
+      { text: "This ordinary English sentence needs translation." },
+    ).textZh,
+    "",
+  );
+  assert.equal(
+    background.validateNoteTranslationCandidate(
+      {
+        textZh: "Sam Altman",
+        unchanged: true,
+        unchangedKind: "proper_noun",
+      },
+      { text: "Sam Altman", videoTitle: "An interview with Sam Altman" },
+    ).textZh,
+    "Sam Altman",
+  );
+  assert.equal(
+    background.validateNoteTranslationCandidate(
+      {
+        textZh: "Art",
+        unchanged: true,
+        unchangedKind: "proper_noun",
+      },
+      { text: "Art", videoTitle: "Artificial Intelligence" },
+    ).textZh,
+    "",
+  );
+  for (const personName of [
+    "José Álvarez",
+    "Björk",
+    "Jean-Luc Picard",
+    "O'Connor",
+  ]) {
+    assert.equal(
+      background.validateNoteTranslationCandidate(
+        {
+          textZh: personName,
+          unchanged: true,
+          unchangedKind: "proper_noun",
+        },
+        { text: personName, videoTitle: `Interview with ${personName}` },
+      ).textZh,
+      personName,
+    );
+  }
+  assert.equal(
+    background.validateNoteTranslationCandidate(
+      {
+        textZh: "東京で漢字を使います。",
+        unchanged: true,
+        unchangedKind: "technical",
+      },
+      { text: "東京で漢字を使います。", videoTitle: "Japanese lesson" },
+    ).textZh,
+    "",
+  );
+  assert.equal(
+    background.validateNoteTranslationCandidate(
+      {
+        textZh: "東京で漢字を使います。",
+        unchanged: true,
+        unchangedKind: "proper_noun",
+      },
+      {
+        text: "東京で漢字を使います。",
+        videoTitle: "東京で漢字を使います。",
+      },
+    ).textZh,
+    "",
+  );
+  assert.equal(
+    background.validateNoteTranslationCandidate(
+      { textZh: "好" },
+      { text: "Good." },
+    ).textZh,
+    "好",
+  );
+  assert.equal(
+    background.validateNoteTranslationCandidate(
+      { textZh: "東京で漢字を使います。" },
+      { text: "This is Japanese." },
+    ).textZh,
+    "",
+  );
+});
+
+test("a valid one-character stored Chinese note is reused without an API call", async () => {
+  let storedNotes = [
+    { id: "note_short", text: "Good.", translatedText: "好" },
+  ];
+  let apiCalls = 0;
+  const background = loadBackgroundHelpers({
+    storageGetImpl: async (key) =>
+      key === "ytd_notes" ? { ytd_notes: storedNotes } : {},
+    storageSetImpl: async (items) => {
+      if (items.ytd_notes) storedNotes = items.ytd_notes;
+    },
+    fetchImpl: async () => {
+      apiCalls += 1;
+      throw new Error("A valid stored translation must not call the API");
+    },
+  });
+
+  const result = await background.handleTranslateNotes(storedNotes);
+  assert.equal(result.success, true);
+  assert.equal(apiCalls, 0);
+  assert.equal(result.translations[0].textZh, "好");
+  assert.equal(storedNotes[0].translatedValidated, true);
+  assert.equal(storedNotes[0].translatedValidationVersion, 1);
+});
+
+test("a unique singleton retry safely recovers a model-modified note ID", async () => {
+  let storedNotes = [
+    { id: "note_1", text: "First English note.", videoTitle: "Video" },
+    { id: "note_2", text: "Second English note.", videoTitle: "Video" },
+  ];
+  let apiCalls = 0;
+  const background = loadBackgroundHelpers({
+    storageGetImpl: async (key) => {
+      if (key === "ytd_settings") {
+        return { ytd_settings: { aiApiKey: "test-key" } };
+      }
+      if (key === "ytd_notes") return { ytd_notes: storedNotes };
+      return {};
+    },
+    storageSetImpl: async (items) => {
+      if (items.ytd_notes) storedNotes = items.ytd_notes;
+    },
+    fetchImpl: async (url) => {
+      if (url.startsWith("chrome-extension://")) {
+        return { ok: true, text: async () => read("prompts/translation.md") };
+      }
+      apiCalls += 1;
+      const notes =
+        apiCalls === 1
+          ? [
+              { id: "note_1", textZh: "第一条中文笔记。" },
+              { id: "note-2", textZh: "不会按批次位置写入。" },
+            ]
+          : [{ id: "note-2", textZh: "第二条中文笔记。" }];
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [{ message: { content: JSON.stringify({ notes }) } }],
+        }),
+      };
+    },
+  });
+
+  const result = await background.handleTranslateNotes(storedNotes);
+  assert.equal(result.success, true);
+  assert.equal(apiCalls, 2);
+  assert.deepEqual(result.missingIds, []);
+  assert.equal(storedNotes[0].translatedText, "第一条中文笔记。");
+  assert.equal(storedNotes[1].translatedText, "第二条中文笔记。");
+
+  const [ambiguous] = background.normalizeNoteTranslation(
+    {
+      notes: [
+        { id: "wrong-a", textZh: "候选甲。" },
+        { id: "wrong-b", textZh: "候选乙。" },
+      ],
+    },
+    [{ id: "note_2", text: "Second English note." }],
+    { allowSingletonIdRecovery: true },
+  );
+  assert.equal(ambiguous.textZh, "");
+});
+
+test("singleton note recovery accepts safe Flash response variants for the real note", () => {
+  const background = loadBackgroundHelpers();
+  const source = {
+    id: "note_real_047",
+    text: "The complicated part about mimetic desire is that it's not just about the products that you buy. It's about the goals that you chase, the career that you chase, and who you compete with, who you envy, who you sleep with, your values, your dreams, and your lifestyle.",
+    videoTitle: "Why Everyone Is Living The Same Life",
+  };
+  const chinese =
+    "模仿性欲望的复杂之处在于，它不仅关乎你购买的产品，也关乎你追逐的目标和事业、与你竞争或令你羡慕的人、亲密关系，以及你的价值观、梦想和生活方式。";
+  const acceptedResponses = [
+    chinese,
+    JSON.stringify({ id: source.id, textZh: chinese }),
+    JSON.stringify([{ id: source.id, textZh: chinese }]),
+    JSON.stringify({ notes: [{ id: source.id, translation: chinese }] }),
+    JSON.stringify({ translation: chinese }),
+    JSON.stringify({
+      notes: [{ id: source.id, textZh: `English: ${source.text}\n中文：${chinese}` }],
+    }),
+    JSON.stringify(chinese),
+    `\`\`\`text\n${chinese}\n\`\`\``,
+    `English: ${source.text}\n中文：${chinese}`,
+  ];
+  for (const response of acceptedResponses) {
+    assert.equal(
+      background.normalizeSingletonNoteTranslationResponse(response, source)
+        .textZh,
+      chinese,
+    );
+  }
+
+  for (const rejectedResponse of [
+    source.text,
+    `{"translation":"${chinese}"`,
+    JSON.stringify([
+      { translation: chinese },
+      { translation: "第二个冲突候选。" },
+    ]),
+    JSON.stringify({
+      notes: [
+        { id: source.id, textZh: chinese },
+        { id: "another-note", textZh: "另一个候选。" },
+      ],
+    }),
+    JSON.stringify({
+      notes: [
+        { id: source.id, textZh: chinese },
+        { id: source.id, textZh: "冲突的重复候选。" },
+      ],
+    }),
+    JSON.stringify({ translation: chinese, text: "冲突的另一个值。" }),
+    `${source.text}\n${chinese}`,
+  ]) {
+    assert.equal(
+      background.normalizeSingletonNoteTranslationResponse(
+        rejectedResponse,
+        source,
+      ).textZh,
+      "",
+    );
+  }
+
+  const multilineChinese =
+    "第一句中文。\n译文：这里只是在解释一个术语。\n最后一句中文。";
+  assert.equal(
+    background.normalizeSingletonNoteTranslationResponse(
+      JSON.stringify({ notes: [{ id: source.id, textZh: multilineChinese }] }),
+      source,
+    ).textZh,
+    multilineChinese,
+  );
+  const [strictBatchBilingual] = background.normalizeNoteTranslation(
+    {
+      notes: [
+        { id: source.id, textZh: `English: ${source.text}\n中文：${chinese}` },
+      ],
+    },
+    [source],
+  );
+  assert.equal(strictBatchBilingual.textZh, "");
+  const shortOriginalBilingual =
+    "English: Hi\n中文：这是一段明显足够长的中文翻译内容，用来确认批量路径不会保存整段双语。";
+  const [strictShortBatchBilingual] = background.normalizeNoteTranslation(
+    { notes: [{ id: source.id, textZh: shortOriginalBilingual }] },
+    [source],
+  );
+  assert.equal(strictShortBatchBilingual.textZh, "");
+  assert.equal(
+    background.normalizeSingletonNoteTranslationResponse(
+      JSON.stringify({
+        notes: [{ id: source.id, textZh: shortOriginalBilingual }],
+      }),
+      source,
+    ).textZh,
+    "这是一段明显足够长的中文翻译内容，用来确认批量路径不会保存整段双语。",
+  );
+  const [duplicateBatch] = background.normalizeNoteTranslation(
+    {
+      notes: [
+        { id: source.id, textZh: chinese },
+        { id: source.id, textZh: "另一个重复结果。" },
+      ],
+    },
+    [source],
+  );
+  assert.equal(duplicateBatch.textZh, "");
+  assert.equal(duplicateBatch.failureCode, "MULTIPLE_CANDIDATES");
+});
+
+test("plain Chinese from a singleton retry is persisted instead of discarded", async () => {
+  const sourceText =
+    "The complicated part about mimetic desire is that it's not just about the products that you buy. It's about your goals, values, dreams, and lifestyle.";
+  const chinese =
+    "模仿性欲望的复杂之处在于，它不仅关乎购买的产品，也关乎你的目标、价值观、梦想和生活方式。";
+  let storedNotes = [
+    {
+      id: "note_plain",
+      text: sourceText,
+      videoTitle: "Why Everyone Is Living The Same Life",
+    },
+  ];
+  let apiCalls = 0;
+  const background = loadBackgroundHelpers({
+    storageGetImpl: async (key) => {
+      if (key === "ytd_settings") {
+        return { ytd_settings: { aiApiKey: "test-key" } };
+      }
+      if (key === "ytd_notes") return { ytd_notes: storedNotes };
+      return {};
+    },
+    storageSetImpl: async (items) => {
+      if (items.ytd_notes) storedNotes = items.ytd_notes;
+    },
+    fetchImpl: async (url) => {
+      if (url.startsWith("chrome-extension://")) {
+        return { ok: true, text: async () => read("prompts/translation.md") };
+      }
+      apiCalls += 1;
+      const content =
+        apiCalls === 1 ? JSON.stringify({ notes: [] }) : chinese;
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ choices: [{ message: { content } }] }),
+      };
+    },
+  });
+
+  const result = await background.handleTranslateNotes(storedNotes);
+  assert.equal(result.success, true);
+  assert.equal(apiCalls, 2);
+  assert.equal(storedNotes[0].translatedText, chinese);
+});
+
+test("note recovery keeps provider calls bounded for persistently invalid JSON shapes", async () => {
+  let storedNotes = Array.from({ length: 10 }, (_, index) => ({
+    id: `note_${index}`,
+    text: `English note number ${index}.`,
+    videoTitle: "Video",
+  }));
+  let apiCalls = 0;
+  const background = loadBackgroundHelpers({
+    storageGetImpl: async (key) => {
+      if (key === "ytd_settings") {
+        return { ytd_settings: { aiApiKey: "test-key" } };
+      }
+      if (key === "ytd_notes") return { ytd_notes: storedNotes };
+      return {};
+    },
+    storageSetImpl: async (items) => {
+      if (items.ytd_notes) storedNotes = items.ytd_notes;
+    },
+    fetchImpl: async (url) => {
+      if (url.startsWith("chrome-extension://")) {
+        return { ok: true, text: async () => read("prompts/translation.md") };
+      }
+      apiCalls += 1;
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [
+            { message: { content: JSON.stringify({ notes: [] }) } },
+          ],
+        }),
+      };
+    },
+  });
+
+  const result = await background.handleTranslateNotes(storedNotes);
+  assert.equal(result.success, false);
+  assert.equal(apiCalls, 5);
+  assert.equal(result.missingIds.length, 10);
+  assert.ok(
+    result.failures.some(
+      (failure) => failure.code === "RETRY_BUDGET_EXHAUSTED",
+    ),
+  );
+  assert.equal(
+    storedNotes.some((note) => Boolean(note.translatedText)),
+    false,
+  );
+});
+
+test("a rate limit on the final provider-call slot starts cooldown without waiting", async () => {
+  let storedNotes = Array.from({ length: 10 }, (_, index) => ({
+    id: `note_${index}`,
+    text: `English note number ${index}.`,
+    videoTitle: "Video",
+  }));
+  let apiCalls = 0;
+  const waits = [];
+  const background = loadBackgroundHelpers({
+    storageGetImpl: async (key) => {
+      if (key === "ytd_settings") {
+        return { ytd_settings: { aiApiKey: "test-key" } };
+      }
+      if (key === "ytd_notes") return { ytd_notes: storedNotes };
+      return {};
+    },
+    storageSetImpl: async (items) => {
+      if (items.ytd_notes) storedNotes = items.ytd_notes;
+    },
+    fetchImpl: async (url) => {
+      if (url.startsWith("chrome-extension://")) {
+        return { ok: true, text: async () => read("prompts/translation.md") };
+      }
+      apiCalls += 1;
+      if (apiCalls === 5) {
+        return { ok: false, status: 429, json: async () => ({}) };
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [
+            { message: { content: JSON.stringify({ notes: [] }) } },
+          ],
+        }),
+      };
+    },
+  });
+
+  const first = await background.handleTranslateNotes(storedNotes, {
+    wait: async (delay) => waits.push(delay),
+  });
+  assert.equal(apiCalls, 5);
+  assert.deepEqual(waits, []);
+  assert.ok(
+    first.failures.some((failure) => failure.code === "RATE_LIMITED"),
+  );
+
+  const second = await background.handleTranslateNotes(storedNotes, {
+    wait: async (delay) => waits.push(delay),
+  });
+  assert.equal(apiCalls, 5, "cooldown must prevent an immediate provider retry");
+  assert.ok(second.failures.every((failure) => failure.code === "RATE_LIMITED"));
+});
+
+test("a notes deadline includes queue wait and lets the next fresh job continue", async () => {
+  let storedNotes = [
+    { id: "note_1", text: "First note.", videoTitle: "Video" },
+    { id: "note_2", text: "Second note.", videoTitle: "Video" },
+  ];
+  let apiCalls = 0;
+  let releaseFirst;
+  const background = loadBackgroundHelpers({
+    storageGetImpl: async (key) => {
+      if (key === "ytd_settings") {
+        return { ytd_settings: { aiApiKey: "test-key" } };
+      }
+      if (key === "ytd_notes") return { ytd_notes: storedNotes };
+      return {};
+    },
+    storageSetImpl: async (items) => {
+      if (items.ytd_notes) storedNotes = items.ytd_notes;
+    },
+    fetchImpl: async (url, options) => {
+      if (url.startsWith("chrome-extension://")) {
+        return { ok: true, text: async () => read("prompts/translation.md") };
+      }
+      apiCalls += 1;
+      const [{ id }] = JSON.parse(options.body).messages
+        .map((message) => {
+          try {
+            return JSON.parse(message.content).notes || [];
+          } catch (_error) {
+            return [];
+          }
+        })
+        .find((notes) => notes.length);
+      const response = {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  notes: [{ id, textZh: `中文 ${id}` }],
+                }),
+              },
+            },
+          ],
+        }),
+      };
+      if (apiCalls === 1) {
+        return new Promise((resolve) => {
+          releaseFirst = () => resolve(response);
+        });
+      }
+      return response;
+    },
+  });
+
+  const first = background.handleTranslateNotes([storedNotes[0]]);
+  await nextTurn();
+  const expired = background.handleTranslateNotes([storedNotes[1]], {
+    deadlineAt: Date.now() - 1,
+  });
+  releaseFirst();
+  assert.equal((await first).success, true);
+
+  const expiredResult = await expired;
+  assert.equal(expiredResult.success, false);
+  assert.equal(apiCalls, 1);
+  assert.deepEqual(JSON.parse(JSON.stringify(expiredResult.failures)), [
+    { id: "note_2", code: "NOTE_JOB_TIMEOUT" },
+  ]);
+
+  const fresh = await background.handleTranslateNotes([storedNotes[1]]);
+  assert.equal(fresh.success, true);
+  assert.equal(apiCalls, 2);
+});
+
+test("a hung notes storage read times out without permanently blocking the queue", async () => {
+  let ytdNotesReads = 0;
+  let apiCalls = 0;
+  const storedNotes = [
+    { id: "note_storage", text: "Storage note.", videoTitle: "Video" },
+  ];
+  const background = loadBackgroundHelpers({
+    setTimeoutImpl: (callback, delay) => setTimeout(callback, delay),
+    clearTimeoutImpl: (id) => clearTimeout(id),
+    storageGetImpl: async (key) => {
+      if (key === "ytd_notes") {
+        ytdNotesReads += 1;
+        if (ytdNotesReads === 1) return new Promise(() => {});
+        return { ytd_notes: storedNotes };
+      }
+      if (key === "ytd_settings") {
+        return { ytd_settings: { aiApiKey: "test-key" } };
+      }
+      return {};
+    },
+    fetchImpl: async (url, options) => {
+      if (url.startsWith("chrome-extension://")) {
+        return { ok: true, text: async () => read("prompts/translation.md") };
+      }
+      apiCalls += 1;
+      const userPayload = JSON.parse(
+        JSON.parse(options.body).messages.at(-1).content,
+      );
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  notes: [
+                    { id: userPayload.notes[0].id, textZh: "存储恢复后的中文。" },
+                  ],
+                }),
+              },
+            },
+          ],
+        }),
+      };
+    },
+  });
+
+  const timedOut = await background.handleTranslateNotes(storedNotes, {
+    deadlineAt: Date.now() + 15,
+  });
+  assert.deepEqual(JSON.parse(JSON.stringify(timedOut.failures)), [
+    { id: "note_storage", code: "NOTE_JOB_TIMEOUT" },
+  ]);
+
+  const recovered = await background.handleTranslateNotes(storedNotes);
+  assert.equal(recovered.success, true);
+  assert.equal(apiCalls, 1);
+});
+
+test("a timed-out persist read cannot perform a late write or block a fresh save", async () => {
+  let storedNotes = [
+    { id: "note_persist", text: "Persist note.", videoTitle: "Video" },
+  ];
+  let ytdNotesReads = 0;
+  let releasePersistRead;
+  let storageSets = 0;
+  const background = loadBackgroundHelpers({
+    setTimeoutImpl: (callback, delay) => setTimeout(callback, delay),
+    clearTimeoutImpl: (id) => clearTimeout(id),
+    storageGetImpl: async (key) => {
+      if (key === "ytd_notes") {
+        ytdNotesReads += 1;
+        if (ytdNotesReads === 2) {
+          return new Promise((resolve) => {
+            releasePersistRead = () => resolve({ ytd_notes: storedNotes });
+          });
+        }
+        return { ytd_notes: storedNotes };
+      }
+      if (key === "ytd_settings") {
+        return { ytd_settings: { aiApiKey: "test-key" } };
+      }
+      return {};
+    },
+    storageSetImpl: async (items) => {
+      storageSets += 1;
+      if (items.ytd_notes) storedNotes = items.ytd_notes;
+    },
+    fetchImpl: async (url) => {
+      if (url.startsWith("chrome-extension://")) {
+        return { ok: true, text: async () => read("prompts/translation.md") };
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  notes: [{ id: "note_persist", textZh: "持久化中文。" }],
+                }),
+              },
+            },
+          ],
+        }),
+      };
+    },
+  });
+
+  const timedOut = await background.handleTranslateNotes(storedNotes, {
+    deadlineAt: Date.now() + 20,
+  });
+  assert.equal(timedOut.success, false);
+  assert.equal(storageSets, 0);
+
+  releasePersistRead();
+  await nextTurn();
+  assert.equal(storageSets, 0, "a late read must not continue into storage.set");
+
+  await background.saveNoteToStorage({
+    id: "note_after_timeout",
+    text: "Saved after timeout.",
+  });
+  assert.equal(storageSets, 1);
+  assert.equal(storedNotes[0].id, "note_after_timeout");
+});
+
+test("an in-flight storage commit keeps later note jobs behind the write queue", async () => {
+  let storedNotes = [
+    { id: "note_commit", text: "Commit note.", videoTitle: "Video" },
+  ];
+  let apiCalls = 0;
+  let blockedCommit = false;
+  let releaseCommit;
+  let commitStarted;
+  const commitStartedPromise = new Promise((resolve) => {
+    commitStarted = resolve;
+  });
+  const background = loadBackgroundHelpers({
+    storageGetImpl: async (key) => {
+      if (key === "ytd_settings") {
+        return { ytd_settings: { aiApiKey: "test-key" } };
+      }
+      if (key === "ytd_notes") return { ytd_notes: storedNotes };
+      return {};
+    },
+    storageSetImpl: async (items) => {
+      if (items.ytd_notes) storedNotes = items.ytd_notes;
+      if (
+        !blockedCommit &&
+        storedNotes.some((note) => note.translatedText === "提交中的中文。")
+      ) {
+        blockedCommit = true;
+        commitStarted();
+        return new Promise((resolve) => {
+          releaseCommit = resolve;
+        });
+      }
+    },
+    fetchImpl: async (url) => {
+      if (url.startsWith("chrome-extension://")) {
+        return { ok: true, text: async () => read("prompts/translation.md") };
+      }
+      apiCalls += 1;
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  notes: [{ id: "note_commit", textZh: "提交中的中文。" }],
+                }),
+              },
+            },
+          ],
+        }),
+      };
+    },
+  });
+
+  const first = background.handleTranslateNotes(storedNotes);
+  await commitStartedPromise;
+  const queued = background.handleTranslateNotes(storedNotes);
+  await nextTurn();
+  assert.equal(apiCalls, 1);
+
+  releaseCommit();
+  assert.equal((await first).success, true);
+  assert.equal((await queued).success, true);
+  assert.equal(apiCalls, 1, "the queued job must reuse the committed translation");
+});
+
+test("a notes deadline prevents a rate-limit backoff from starting another call", async () => {
+  let storedNotes = [
+    { id: "note_deadline", text: "Deadline note.", videoTitle: "Video" },
+  ];
+  let apiCalls = 0;
+  const waits = [];
+  let now = 1_000;
+  const background = loadBackgroundHelpers({
+    storageGetImpl: async (key) => {
+      if (key === "ytd_settings") {
+        return { ytd_settings: { aiApiKey: "test-key" } };
+      }
+      if (key === "ytd_notes") return { ytd_notes: storedNotes };
+      return {};
+    },
+    storageSetImpl: async (items) => {
+      if (items.ytd_notes) storedNotes = items.ytd_notes;
+    },
+    fetchImpl: async (url) => {
+      if (url.startsWith("chrome-extension://")) {
+        return { ok: true, text: async () => read("prompts/translation.md") };
+      }
+      apiCalls += 1;
+      return { ok: false, status: 429, json: async () => ({}) };
+    },
+  });
+
+  const result = await background.handleTranslateNotes(storedNotes, {
+    now: () => now,
+    deadlineAt: 1_500,
+    wait: async (delay) => {
+      waits.push(delay);
+      now += delay;
+    },
+  });
+  assert.equal(apiCalls, 1);
+  assert.deepEqual(waits, []);
+  assert.deepEqual(JSON.parse(JSON.stringify(result.failures)), [
+    { id: "note_deadline", code: "NOTE_JOB_TIMEOUT" },
+  ]);
+});
+
+test("a notes provider call receives only its remaining hard-timeout budget", async () => {
+  const timerDelays = [];
+  const background = loadBackgroundHelpers({
+    setTimeoutImpl(_callback, delay) {
+      timerDelays.push(delay);
+      return timerDelays.length;
+    },
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        choices: [{ message: { content: "done" } }],
+      }),
+    }),
+  });
+
+  await background.requestAiCompletion({
+    maxTokens: 32,
+    hardTimeoutMs: 750,
+    messages: [{ role: "user", content: "Hello" }],
+  });
+  assert.ok(timerDelays.includes(750));
+  assert.ok(timerDelays.includes(50_000));
+});
+
+test("notes reuse the deadline-bounded settings snapshot before provider fetch", async () => {
+  let storedNotes = [
+    { id: "note_settings", text: "Settings note.", videoTitle: "Video" },
+  ];
+  let settingsReads = 0;
+  let apiCalls = 0;
+  const background = loadBackgroundHelpers({
+    storageGetImpl: async (key) => {
+      if (key === "ytd_notes") return { ytd_notes: storedNotes };
+      if (key === "ytd_settings") {
+        settingsReads += 1;
+        if (settingsReads > 1) return new Promise(() => {});
+        return { ytd_settings: { aiApiKey: "test-key" } };
+      }
+      return {};
+    },
+    storageSetImpl: async (items) => {
+      if (items.ytd_notes) storedNotes = items.ytd_notes;
+    },
+    fetchImpl: async (url) => {
+      if (url.startsWith("chrome-extension://")) {
+        return { ok: true, text: async () => read("prompts/translation.md") };
+      }
+      apiCalls += 1;
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  notes: [{ id: "note_settings", textZh: "设置中文。" }],
+                }),
+              },
+            },
+          ],
+        }),
+      };
+    },
+  });
+
+  const result = await background.handleTranslateNotes(storedNotes);
+  assert.equal(result.success, true);
+  assert.equal(settingsReads, 1);
+  assert.equal(apiCalls, 1);
+});
+
 test("Chinese source notes reuse their raw subtitle without an API call", async () => {
   let storedNotes = [
     {
@@ -1486,6 +2987,12 @@ test("Chinese source notes reuse their raw subtitle without an API call", async 
       rawText: "这条原字幕已经是中文。",
       sourceLanguage: "zh-CN",
       videoTitle: "示例视频",
+    },
+    {
+      id: "note_zh_legacy",
+      text: "Legacy fallback text.",
+      rawText: "这条旧笔记没有语言字段，但原字幕是中文。",
+      videoTitle: "旧视频",
     },
   ];
   let apiCalls = 0;
@@ -1505,8 +3012,37 @@ test("Chinese source notes reuse their raw subtitle without an API call", async 
   assert.equal(result.success, true);
   assert.equal(apiCalls, 0);
   assert.equal(result.translations[0].textZh, "这条原字幕已经是中文。");
+  assert.equal(
+    result.translations[1].textZh,
+    "这条旧笔记没有语言字段，但原字幕是中文。",
+  );
   assert.equal(storedNotes[0].translatedText, "这条原字幕已经是中文。");
+  assert.equal(
+    storedNotes[1].translatedText,
+    "这条旧笔记没有语言字段，但原字幕是中文。",
+  );
   assert.equal(background.noteHasChineseSource(storedNotes[0]), true);
+  assert.equal(background.noteHasChineseSource(storedNotes[1]), true);
+  assert.equal(background.noteHasChineseSource({ rawText: "对" }), true);
+  assert.equal(background.noteHasChineseSource({ rawText: "“你好”" }), true);
+  assert.equal(
+    background.noteHasChineseSource({ rawText: "《中文标题》" }),
+    true,
+  );
+  assert.equal(
+    background.noteHasChineseSource({
+      rawText: "这段中文引用了《となりのトトロ》。",
+    }),
+    true,
+  );
+  assert.equal(
+    background.noteHasChineseSource({ rawText: "東京で漢字を使います。" }),
+    false,
+  );
+  assert.equal(
+    background.noteHasChineseSource({ rawText: "Beijing 北京 is a city." }),
+    false,
+  );
 });
 
 test("missing note translations retry individually instead of discarding the batch", async () => {
@@ -1559,6 +3095,7 @@ test("valid note translations persist even when another item still fails", async
     { id: "note_2", text: "Second English note.", videoTitle: "Video" },
   ];
   let apiCall = 0;
+  const waits = [];
   const background = loadBackgroundHelpers({
     storageGetImpl: async (key) => {
       if (key === "ytd_settings") {
@@ -1596,9 +3133,16 @@ test("valid note translations persist even when another item still fails", async
     },
   });
 
-  const result = await background.handleTranslateNotes(storedNotes);
+  const result = await background.handleTranslateNotes(storedNotes, {
+    wait: async (delay) => waits.push(delay),
+  });
   assert.equal(result.success, true);
+  assert.equal(apiCall, 3);
+  assert.deepEqual(waits, [1000]);
   assert.deepEqual(result.missingIds, ["note_2"]);
+  assert.deepEqual(JSON.parse(JSON.stringify(result.failures)), [
+    { id: "note_2", code: "RATE_LIMITED" },
+  ]);
   assert.equal(storedNotes[0].translatedText, "第一条中文笔记。");
   assert.equal(storedNotes[1].translatedText, undefined);
 });
@@ -2200,6 +3744,44 @@ test("all AI product requests use DeepSeek non-thinking and JSON behavior", asyn
   }
 });
 
+test("non-stop provider finish reasons are rejected even when content looks valid", async () => {
+  let finishReason = "length";
+  const background = loadBackgroundHelpers({
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        choices: [
+          {
+            finish_reason: finishReason,
+            message: { content: '{"notes":[{"id":"note_1","textZh":"中文"}]}' },
+          },
+        ],
+      }),
+    }),
+  });
+  const expectedCodes = {
+    length: "OUTPUT_TRUNCATED",
+    content_filter: "CONTENT_FILTERED",
+    insufficient_system_resource: "PROVIDER_UNAVAILABLE",
+    tool_calls: "UNEXPECTED_FINISH_REASON",
+  };
+
+  for (const [reason, code] of Object.entries(expectedCodes)) {
+    finishReason = reason;
+    await assert.rejects(
+      background.requestAiCompletion({
+        maxTokens: 128,
+        messages: [{ role: "user", content: "Translate" }],
+      }),
+      (error) => {
+        assert.equal(error.code, code);
+        return true;
+      },
+    );
+  }
+});
+
 test("blank-line chunks reset provider idle timeout and valid JSON succeeds", async () => {
   const timers = createFakeTimers();
   const helpers = loadBackgroundHelpers({
@@ -2382,7 +3964,11 @@ test("translation message watchdog rejects, clears its timer, and ignores late r
   });
   assert.equal(timeoutDelay, 130_000);
   timeoutCallback();
-  await assert.rejects(request, /130 秒后超时.*重试/);
+  await assert.rejects(request, (error) => {
+    assert.equal(error.code, "TRANSLATION_MESSAGE_TIMEOUT");
+    assert.match(error.message, /130 秒后超时.*重试/);
+    return true;
+  });
   assert.equal(clearCount, 1);
 
   resolveMessage({ success: true });
@@ -2439,4 +4025,279 @@ test("overview starts from Chinese and keeps original-language translation lazy"
   assert.match(translationPrompt, /^## Notes translation$/m);
   assert.match(translationPrompt, /Translate these polished English video notes/);
   assert.match(translationPrompt, /"textZh":"中文笔记"/);
+  assert.match(translationPrompt, /"unchanged":true/);
+  assert.match(translationPrompt, /"unchangedKind":"technical"/);
+  assert.match(translationPrompt, /"unchangedKind":"proper_noun"/);
+});
+
+test("saving a note from a Chinese caption skips AI cleanup and keeps the original text", async () => {
+  const videoId = "vid_zh";
+  const settings = {
+    provider: "deepseek",
+    aiApiKey: "test-key",
+    aiBaseUrl: "https://api.deepseek.com",
+    aiModel: "deepseek-v4-flash",
+  };
+  const makeDigest = (language) => ({
+    transcriptSourcePolicyVersion: 2,
+    transcript: [
+      { start: 0, text: "开场白。", language },
+      { start: 10, text: "第二句中文字幕内容。", language },
+      { start: 20, text: "结束语。", language },
+    ],
+  });
+
+  const runSave = async (language) => {
+    const digest = makeDigest(language);
+    let savedNote = null;
+    let cleanupCalls = 0;
+    const background = loadBackgroundHelpers({
+      storageGetImpl: async (key) => {
+        if (key === "ytd_settings") return { ytd_settings: settings };
+        if (key === `digest_${videoId}`) {
+          return { [`digest_${videoId}`]: digest };
+        }
+        if (key === "ytd_notes") return { ytd_notes: [] };
+        return {};
+      },
+      storageSetImpl: async (items) => {
+        if (items.ytd_notes) savedNote = items.ytd_notes[0];
+      },
+      fetchImpl: async (url) => {
+        if (url.startsWith("chrome-extension://")) {
+          return { ok: true, text: async () => read("prompts/note-cleanup.md") };
+        }
+        // Only the DeepSeek cleanup endpoint reaches here.
+        cleanupCalls += 1;
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            choices: [
+              {
+                message: { content: JSON.stringify({ quote: "Cleaned English." }) },
+              },
+            ],
+          }),
+        };
+      },
+    });
+    const result = await background.handleSaveNote(videoId, 10, "视频", "频道");
+    return { result, savedNote, cleanupCalls };
+  };
+
+  // Confirmed Chinese caption lines are shown from rawText, so the English
+  // cleanup call is pure waste and must be skipped for both simplified and
+  // traditional tags. The stored note.text stays the original caption text.
+  for (const language of ["zh-CN", "zh-Hans", "zh-SG", "zh-Hant", "zh-TW"]) {
+    const { result, savedNote, cleanupCalls } = await runSave(language);
+    assert.equal(result.success, true, `${language} save should succeed`);
+    assert.equal(cleanupCalls, 0, `${language} must not call DeepSeek cleanup`);
+    assert.equal(savedNote.text, "第二句中文字幕内容。");
+    assert.equal(savedNote.rawText, "第二句中文字幕内容。");
+    assert.equal(savedNote.sourceLanguage, language);
+  }
+
+  // The skip is decided by the language tag, never by "contains Han chars":
+  // an explicit Japanese line and a missing language keep the cleanup path so
+  // Japanese kanji is never misread as Chinese.
+  for (const language of ["en", "ja", ""]) {
+    const { result, savedNote, cleanupCalls } = await runSave(language);
+    assert.equal(result.success, true, `"${language}" save should succeed`);
+    assert.equal(cleanupCalls, 1, `"${language}" must run the DeepSeek cleanup once`);
+    assert.equal(savedNote.text, "Cleaned English.");
+    assert.equal(savedNote.rawText, "第二句中文字幕内容。");
+    assert.equal(savedNote.sourceLanguage, language);
+  }
+});
+
+test("isConfirmedSimplifiedChineseSource matches only explicit Simplified tags", () => {
+  const { isConfirmedSimplifiedChineseSource: isSimplified } =
+    loadSidepanelHelpers();
+  for (const yes of [
+    "zh-Hans",
+    "zh-CN",
+    "zh-SG",
+    "zh-hans",
+    "zh-Hans-CN",
+    "zh-Hans-TW",
+  ]) {
+    assert.equal(isSimplified(yes), true, `${yes} should be confirmed Simplified`);
+  }
+  for (const no of [
+    "zh",
+    "zh-Hant",
+    "zh-Hant-CN",
+    "zh-Hant-SG",
+    "zh-TW",
+    "zh-HK",
+    "zh-MO",
+    "yue",
+    "en",
+    "ja",
+    "",
+    null,
+  ]) {
+    assert.equal(
+      isSimplified(no),
+      false,
+      `${no} must not be confirmed Simplified`,
+    );
+  }
+});
+
+test("a confirmed Simplified-Chinese transcript never requests translation and stays on original", async () => {
+  const runtime = loadSidepanelRuntime();
+  const fixture = runtime.evaluate(`
+    (() => {
+      let translateContentRequests = 0;
+      let renders = 0;
+      const modeButtonCalls = [];
+      chrome.runtime.sendMessage = (message) => {
+        if (message.action === "translateContent") translateContentRequests += 1;
+        return Promise.resolve({
+          success: true,
+          translatedContent: { segments: [] },
+        });
+      };
+      renderTranscript = () => { renders += 1; };
+      setTranscriptModeButtons = (mode) => { modeButtonCalls.push(mode); };
+      currentVideoId = "vid_zh";
+      currentTranscript = [
+        { start: 0, text: "第一段简体中文字幕。" },
+        { start: 8, text: "第二段简体中文字幕内容。" },
+      ];
+      currentTranscriptLanguage = "zh-Hans";
+      currentTranscriptMode = "original";
+      return {
+        changeMode: (mode) => handleTranscriptModeChange(mode),
+        forceTranslate: (mode) => {
+          currentTranscriptMode = mode;
+          return translateTranscript();
+        },
+        snapshot: () => JSON.stringify({
+          translateContentRequests,
+          renders,
+          modeButtonCalls,
+          mode: currentTranscriptMode,
+        }),
+      };
+    })()
+  `);
+
+  // The control layer refuses to switch into zh / bilingual.
+  await fixture.changeMode("bilingual");
+  await fixture.changeMode("zh");
+  let snap = JSON.parse(fixture.snapshot());
+  assert.equal(snap.translateContentRequests, 0);
+  assert.equal(snap.mode, "original", "mode must stay original for a Simplified source");
+
+  // The fail-safe inside translateTranscript also protects the load-time path
+  // (e.g. arriving from an English video still stuck in bilingual mode): it
+  // collapses back to original with no request and no pending/duplicate row.
+  await fixture.forceTranslate("bilingual");
+  snap = JSON.parse(fixture.snapshot());
+  assert.equal(snap.translateContentRequests, 0);
+  assert.equal(snap.mode, "original", "the fail-safe must reset the mode to original");
+  assert.deepEqual(snap.modeButtonCalls, ["original"]);
+  assert.ok(snap.renders >= 1, "the fail-safe re-renders the plain transcript");
+});
+
+test("Traditional and non-Chinese transcripts still enter the translation path", async () => {
+  const runtime = loadSidepanelRuntime();
+  const fixture = runtime.evaluate(`
+    (() => {
+      let translateCalls = 0;
+      translateTranscript = () => { translateCalls += 1; return Promise.resolve(); };
+      setTranscriptModeButtons = () => {};
+      currentTranscript = [{ start: 0, text: "sample" }];
+      currentTranscriptMode = "original";
+      return {
+        setLanguage: (language) => {
+          currentTranscriptLanguage = language;
+          currentTranscriptMode = "original";
+          translateCalls = 0;
+        },
+        changeMode: (mode) => handleTranscriptModeChange(mode),
+        snapshot: () => JSON.stringify({ translateCalls, mode: currentTranscriptMode }),
+      };
+    })()
+  `);
+
+  // Traditional Chinese must keep working — it still needs conversion to zh.
+  fixture.setLanguage("zh-Hant");
+  await fixture.changeMode("zh");
+  assert.deepEqual(JSON.parse(fixture.snapshot()), { translateCalls: 1, mode: "zh" });
+
+  // English is unaffected: bilingual mode still translates.
+  fixture.setLanguage("en");
+  await fixture.changeMode("bilingual");
+  assert.deepEqual(JSON.parse(fixture.snapshot()), {
+    translateCalls: 1,
+    mode: "bilingual",
+  });
+
+  // A bare, ambiguous `zh` is not confirmed Simplified, so it still translates.
+  fixture.setLanguage("zh");
+  await fixture.changeMode("zh");
+  assert.deepEqual(JSON.parse(fixture.snapshot()), { translateCalls: 1, mode: "zh" });
+});
+
+test("Simplified-Chinese videos disable the Chinese and bilingual transcript buttons", () => {
+  const runtime = loadSidepanelRuntime();
+  const fixture = runtime.evaluate(`
+    (() => {
+      const makeButton = (mode) => ({
+        dataset: { transcriptMode: mode },
+        disabled: false,
+        attrs: {},
+        setAttribute(name, value) { this.attrs[name] = value; },
+        removeAttribute(name) { delete this.attrs[name]; },
+      });
+      const buttons = [
+        makeButton("original"),
+        makeButton("zh"),
+        makeButton("bilingual"),
+      ];
+      document.querySelectorAll = (selector) =>
+        selector === ".transcript-mode-btn" ? buttons : [];
+      return {
+        apply: (language) => {
+          currentTranscriptLanguage = language;
+          updateTranscriptModeAvailability();
+        },
+        snapshot: () => JSON.stringify(buttons.map((button) => ({
+          mode: button.dataset.transcriptMode,
+          disabled: button.disabled,
+          ariaDisabled: button.attrs["aria-disabled"] || null,
+          title: button.attrs["title"] || null,
+        }))),
+      };
+    })()
+  `);
+
+  fixture.apply("zh-CN");
+  assert.deepEqual(JSON.parse(fixture.snapshot()), [
+    { mode: "original", disabled: false, ariaDisabled: null, title: null },
+    {
+      mode: "zh",
+      disabled: true,
+      ariaDisabled: "true",
+      title: "字幕已是简体中文，无需翻译。",
+    },
+    {
+      mode: "bilingual",
+      disabled: true,
+      ariaDisabled: "true",
+      title: "字幕已是简体中文，无需翻译。",
+    },
+  ]);
+
+  // Switching to an English (or Traditional) video re-enables every button.
+  fixture.apply("en");
+  assert.deepEqual(JSON.parse(fixture.snapshot()), [
+    { mode: "original", disabled: false, ariaDisabled: null, title: null },
+    { mode: "zh", disabled: false, ariaDisabled: null, title: null },
+    { mode: "bilingual", disabled: false, ariaDisabled: null, title: null },
+  ]);
 });

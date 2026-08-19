@@ -6,7 +6,7 @@
  */
 
 const DEBUG = false;
-const REQUIRED_RUNTIME_PROTOCOL_VERSION = 4;
+const REQUIRED_RUNTIME_PROTOCOL_VERSION = 5;
 const debugLog = (...args) => {
   if (DEBUG) console.log(...args);
 };
@@ -57,16 +57,23 @@ let currentTranscriptMode = "original";
 let currentOverviewMode = "zh";
 let currentNotesMode = "bilingual";
 let currentNotes = [];
-let currentNotesFilterVideoId = null;
+let currentNotesFilterVideoId;
+let notesFilterShowAll = false;
 let isOverviewTranslationLoading = false;
 let isNotesTranslationLoading = false;
+let isNotesLoading = false;
 let notesTranslationGeneration = 0;
+let notesLoadGeneration = 0;
+let lastNotesManualRetryAt = 0;
+let noteTranslationAttemptCountById = new Map();
 let translationGeneration = 0; // Invalidates responses from older UI modes/videos.
 let translationWorkCount = 0;
 let transcriptScrollObserver = null;
 // Stable keys include the video, source mode, language, and semantic segment ID.
 let transcriptParagraphCache = new Map();
 const TRANSLATION_MESSAGE_TIMEOUT_MS = 130_000;
+const NOTES_MANUAL_RETRY_DEBOUNCE_MS = 400;
+const NOTE_TRANSLATION_VALIDATION_VERSION = 1;
 const TRANSCRIPT_TRANSLATION_CACHE_VERSION = 2;
 const TRANSCRIPT_SOURCE_POLICY_VERSION = 2;
 
@@ -106,7 +113,7 @@ function languagesSharePrimary(value, otherValue) {
 
 /**
  * Prevent a stopped service worker or dead message channel from leaving the
- * transcript queue stuck forever. The underlying Chrome message cannot be
+ * translation UI stuck forever. The underlying Chrome message cannot be
  * cancelled, so settled guards deliberately ignore any late response.
  */
 function sendTranslationMessage(message) {
@@ -121,11 +128,13 @@ function sendTranslationMessage(message) {
     };
 
     timeoutId = setTimeout(() => {
+      const timeoutError = new Error(
+        "翻译请求在 130 秒后超时，请重试。",
+      );
+      timeoutError.code = "TRANSLATION_MESSAGE_TIMEOUT";
       finish(
         reject,
-        new Error(
-          "翻译请求在 130 秒后超时，请重试。",
-        ),
+        timeoutError,
       );
     }, TRANSLATION_MESSAGE_TIMEOUT_MS);
 
@@ -406,10 +415,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   if (message.action === "noteSaved") {
     // Refresh notes list when a new note is saved
-    const filterAll = document
-      .getElementById("notesFilterAll")
-      ?.classList.contains("active");
-    loadNotes(filterAll ? null : currentVideoId);
+    loadNotes(notesFilterShowAll ? null : currentVideoId);
     sendResponse({ success: true });
   }
   return false;
@@ -588,6 +594,7 @@ function setupEventListeners() {
 }
 
 function setNotesFilter(showAll) {
+  notesFilterShowAll = showAll;
   const thisVideoButton = document.getElementById("notesFilterThis");
   const allNotesButton = document.getElementById("notesFilterAll");
   thisVideoButton?.classList.toggle("active", !showAll);
@@ -1319,8 +1326,8 @@ async function saveQuoteAsNote(quote, btn) {
         btn.textContent = originalText;
         btn.disabled = false;
       }, 1500);
-      // Refresh notes list if on Notes tab
-      loadNotes(currentVideoId);
+      // The background noteSaved broadcast owns the Notes refresh. Calling
+      // loadNotes here as well can start two translation jobs for one save.
     } else {
       console.error("[YouTube Digest] Save quote as note failed:", result.error);
       btn.textContent = "出错了";
@@ -1419,6 +1426,10 @@ function renderTranscript() {
     );
     transcriptList.appendChild(div);
   });
+
+  // Keep the Chinese / bilingual buttons disabled for confirmed Simplified
+  // sources and re-enabled for every other (incl. Traditional) video.
+  updateTranscriptModeAvailability();
 
   // Start tracking video playback for auto-scroll
   startPlaybackTracking();
@@ -2079,11 +2090,29 @@ function setNotesModeButtons(mode) {
   });
 }
 
+function stripQuotedNonChineseScripts(text) {
+  return String(text || "").replace(
+    /《[^》]*》|「[^」]*」|『[^』]*』|“[^”]*”|"[^"]*"/g,
+    (quoted) =>
+      /[\u3040-\u30ff\uac00-\ud7af]/.test(quoted) ? "" : quoted,
+  );
+}
+
 function noteHasChineseSource(note) {
   const language = String(note?.sourceLanguage || "").trim();
   const rawText = String(note?.rawText || "");
-  if (language) return isChineseLanguage(language);
-  return /[\u3400-\u9fff]/.test(rawText);
+  const primary = normalizeLanguageCode(language).split("-")[0];
+  if (primary && !["und", "mul", "zxx"].includes(primary)) {
+    return isChineseLanguage(language);
+  }
+  const heuristicText = stripQuotedNonChineseScripts(rawText);
+  const cjkCount = (heuristicText.match(/[\u3400-\u9fff]/g) || []).length;
+  const latinCount = (heuristicText.match(/[A-Za-z]/g) || []).length;
+  return (
+    !/[\u3040-\u30ff\uac00-\ud7af]/.test(heuristicText) &&
+    cjkCount >= 1 &&
+    cjkCount * 2 >= latinCount
+  );
 }
 
 function noteOriginalText(note) {
@@ -2093,9 +2122,35 @@ function noteOriginalText(note) {
   return String(note?.text || note?.rawText || "").trim();
 }
 
+function canonicalStoredNoteText(text) {
+  return String(text || "").normalize("NFKC").trim().replace(/\s+/g, " ");
+}
+
+function looksLikeLegacyChineseNote(text) {
+  const value = stripQuotedNonChineseScripts(text);
+  if (/[\u3040-\u30ff\uac00-\ud7af]/.test(value)) return false;
+  const cjkCount = (value.match(/[\u3400-\u9fff]/g) || []).length;
+  const latinCount = (value.match(/[A-Za-z]/g) || []).length;
+  return cjkCount >= 1 && (latinCount === 0 || cjkCount * 2 >= latinCount);
+}
+
 function noteChineseText(note) {
   if (noteHasChineseSource(note)) return noteOriginalText(note);
-  return String(note?.translatedText || "").trim();
+  const translated = String(note?.translatedText || "").trim();
+  if (!translated) return "";
+  if (
+    note?.translatedValidated === true &&
+    note?.translatedValidationVersion === NOTE_TRANSLATION_VALIDATION_VERSION
+  ) {
+    if (note?.translatedUnchanged === true) {
+      return canonicalStoredNoteText(translated) ===
+        canonicalStoredNoteText(noteOriginalText(note))
+        ? translated
+        : "";
+    }
+    return translated;
+  }
+  return looksLikeLegacyChineseNote(translated) ? translated : "";
 }
 
 function renderNoteLanguageContent(note, mode = currentNotesMode) {
@@ -2146,23 +2201,93 @@ function setNotesTranslationLoading(show) {
     ?.classList.toggle("visible", show);
 }
 
-async function ensureNotesChinese() {
-  if (currentNotesMode === "original" || isNotesTranslationLoading) return;
-  const missingNotes = currentNotes.filter(
-    (note) => noteOriginalText(note) && !noteChineseText(note),
+function summarizeNoteTranslationFailures(failures = []) {
+  const codes = new Set(
+    failures
+      .map((failure) => String(failure?.code || ""))
+      .filter(Boolean),
   );
+  if (codes.has("RATE_LIMITED")) {
+    return "DeepSeek 请求受限，请稍后再次点击当前语言重试。";
+  }
+  if (codes.has("PROVIDER_TIMEOUT")) {
+    return "DeepSeek 请求超时，请再次点击当前语言重试。";
+  }
+  if (codes.has("NOTE_JOB_TIMEOUT")) {
+    return "笔记翻译任务等待超时，请再次点击当前语言重试。";
+  }
+  if (codes.has("PROVIDER_ERROR")) {
+    return "DeepSeek 请求失败，请检查网络或稍后再次点击当前语言重试。";
+  }
+  if (codes.has("OUTPUT_TRUNCATED")) {
+    return "DeepSeek 输出被截断，请再次点击当前语言重试。";
+  }
+  if (codes.has("CONTENT_FILTERED")) {
+    return "DeepSeek 未返回这条内容，已保留原文。";
+  }
+  if (codes.has("PROVIDER_UNAVAILABLE")) {
+    return "DeepSeek 暂时不可用，请稍后再次点击当前语言重试。";
+  }
+  if (codes.has("UNEXPECTED_FINISH_REASON")) {
+    return "DeepSeek 未正常完成响应，请再次点击当前语言重试。";
+  }
+  if (codes.has("RETRY_BUDGET_EXHAUSTED")) {
+    return "本轮重试次数已达上限，请再次点击当前语言继续。";
+  }
+  if (codes.has("EMPTY_RESPONSE")) {
+    return "DeepSeek 返回了空内容，请再次点击当前语言重试。";
+  }
+  if (codes.has("INVALID_JSON")) {
+    return "DeepSeek 返回格式无法解析，请再次点击当前语言重试。";
+  }
+  if (codes.has("MISSING_ITEM")) {
+    return "DeepSeek 返回结果漏掉了这条笔记，请再次点击当前语言重试。";
+  }
+  if (codes.has("MULTIPLE_CANDIDATES")) {
+    return "DeepSeek 返回了多个冲突结果，请再次点击当前语言重试。";
+  }
+  if (codes.has("INVALID_TRANSLATION")) {
+    return "返回内容仍主要为英文或含非中文脚本，已保留原文。";
+  }
+  if (codes.size) {
+    return "模型未返回有效中文，请再次点击当前语言重试。";
+  }
+  return "再次点击当前的中文或双语即可重试。";
+}
+
+async function ensureNotesChinese() {
+  if (
+    currentNotesMode === "original" ||
+    isNotesLoading ||
+    isNotesTranslationLoading
+  ) {
+    return;
+  }
+  const missingNotes = currentNotes
+    .map((note, index) => ({ note, index }))
+    .filter(
+      ({ note }) => noteOriginalText(note) && !noteChineseText(note),
+    )
+    .sort(
+      (left, right) =>
+        (noteTranslationAttemptCountById.get(left.note.id) || 0) -
+          (noteTranslationAttemptCountById.get(right.note.id) || 0) ||
+        left.index - right.index,
+    )
+    .map(({ note }) => note);
   if (!missingNotes.length) {
     setNotesTranslationStatus();
     return;
   }
 
-  const generation = notesTranslationGeneration;
+  const generation = ++notesTranslationGeneration;
+  const failureById = new Map();
   setNotesTranslationLoading(true);
   setNotesTranslationStatus(`正在生成 ${missingNotes.length} 条中文笔记…`);
   try {
     for (let index = 0; index < missingNotes.length; index += 10) {
       const batch = missingNotes.slice(index, index + 10);
-      const result = await chrome.runtime.sendMessage({
+      const result = await sendTranslationMessage({
         action: "translateNotes",
         notes: batch.map((note) => ({
           id: note.id,
@@ -2173,25 +2298,77 @@ async function ensureNotesChinese() {
         })),
       });
       if (generation !== notesTranslationGeneration) return;
-      if (!result?.success) {
-        throw new Error(result?.error || "中文笔记生成失败");
-      }
       const translatedById = new Map(
-        (result.translations || []).map((note) => [note.id, note.textZh]),
+        (result.translations || []).map((note) => [note.id, note]),
       );
+      translatedById.forEach((_translation, id) => {
+        noteTranslationAttemptCountById.delete(id);
+      });
+      (result.failures || []).forEach((failure) => {
+        if (typeof failure?.id === "string" && failure.id) {
+          failureById.set(failure.id, failure);
+          if (
+            [
+              "EMPTY_RESPONSE",
+              "INVALID_JSON",
+              "MISSING_ITEM",
+              "MULTIPLE_CANDIDATES",
+              "ID_MISMATCH",
+              "INVALID_TRANSLATION",
+            ].includes(failure.code)
+          ) {
+            noteTranslationAttemptCountById.set(
+              failure.id,
+              (noteTranslationAttemptCountById.get(failure.id) || 0) + 1,
+            );
+          }
+        }
+      });
       currentNotes = currentNotes.map((note) =>
         translatedById.has(note.id)
-          ? { ...note, translatedText: translatedById.get(note.id) }
+          ? {
+              ...note,
+              translatedText: translatedById.get(note.id).textZh,
+              translatedUnchanged:
+                translatedById.get(note.id).unchanged === true,
+              translatedValidated: true,
+              translatedValidationVersion:
+                NOTE_TRANSLATION_VALIDATION_VERSION,
+            }
           : note,
       );
       renderNotes(currentNotes, currentNotesFilterVideoId);
+      if (!result?.success) {
+        if (!result?.failures?.length) {
+          throw new Error(result?.error || "中文笔记生成失败");
+        }
+        break;
+      }
+      if (
+        (result.failures || []).some((failure) =>
+          [
+            "RATE_LIMITED",
+            "PROVIDER_TIMEOUT",
+            "RETRY_BUDGET_EXHAUSTED",
+          ].includes(failure?.code),
+        )
+      ) {
+        break;
+      }
+      // One user action owns one bounded backend job (up to ten notes and five
+      // provider calls). Remaining notes continue only after an explicit
+      // retry, preventing large libraries from multiplying requests silently.
+      break;
     }
-    const remainingCount = currentNotes.filter(
+    const remainingNotes = currentNotes.filter(
       (note) => noteOriginalText(note) && !noteChineseText(note),
-    ).length;
-    if (remainingCount) {
+    );
+    if (remainingNotes.length) {
+      const remainingFailures = remainingNotes
+        .map((note) => failureById.get(note.id))
+        .filter(Boolean);
       setNotesTranslationStatus(
-        `${remainingCount} 条中文笔记仍未生成，已保留原文。切换到中文或双语可再次重试。`,
+        `${remainingNotes.length} 条中文笔记仍未生成，已保留原文。${summarizeNoteTranslationFailures(remainingFailures)}`,
         true,
       );
     } else {
@@ -2210,13 +2387,40 @@ async function ensureNotesChinese() {
   }
 }
 
+function retryMissingNotesFromUser() {
+  if (
+    currentNotesMode === "original" ||
+    isNotesLoading ||
+    isNotesTranslationLoading ||
+    !currentNotes.some(
+      (note) => noteOriginalText(note) && !noteChineseText(note),
+    )
+  ) {
+    return;
+  }
+  const now = Date.now();
+  if (now - lastNotesManualRetryAt < NOTES_MANUAL_RETRY_DEBOUNCE_MS) return;
+  lastNotesManualRetryAt = now;
+  void ensureNotesChinese();
+}
+
 function handleNotesModeChange(mode) {
   if (!["original", "zh", "bilingual"].includes(mode)) return;
-  if (mode === currentNotesMode) return;
+  if (mode === currentNotesMode) {
+    retryMissingNotesFromUser();
+    return;
+  }
   currentNotesMode = mode;
   setNotesModeButtons(mode);
   renderNotes(currentNotes, currentNotesFilterVideoId);
-  if (mode !== "original") void ensureNotesChinese();
+  if (mode === "original") {
+    notesTranslationGeneration += 1;
+    setNotesTranslationLoading(false);
+    setNotesTranslationStatus();
+  } else {
+    lastNotesManualRetryAt = Date.now();
+    void ensureNotesChinese();
+  }
 }
 
 /**
@@ -2224,22 +2428,35 @@ function handleNotesModeChange(mode) {
  * @param {string|null} videoId - Filter by video ID, or null for all notes
  */
 async function loadNotes(videoId) {
+  const loadGeneration = ++notesLoadGeneration;
+  const previousShowAll = currentNotesFilterVideoId === null;
+  setNotesFilter(videoId === null);
   notesTranslationGeneration += 1;
+  isNotesLoading = true;
   setNotesTranslationLoading(false);
+  setNotesTranslationStatus();
   try {
     const result = await chrome.runtime.sendMessage({
       action: "getNotes",
       videoId: videoId,
     });
+    if (loadGeneration !== notesLoadGeneration) return;
 
     if (result.success) {
       currentNotes = Array.isArray(result.notes) ? result.notes : [];
       currentNotesFilterVideoId = videoId;
+      isNotesLoading = false;
       renderNotes(currentNotes, videoId);
       if (currentNotesMode !== "original") void ensureNotesChinese();
+    } else {
+      setNotesFilter(previousShowAll);
     }
   } catch (error) {
+    if (loadGeneration !== notesLoadGeneration) return;
+    setNotesFilter(previousShowAll);
     console.error("[YouTube Digest Panel] Load notes error:", error);
+  } finally {
+    if (loadGeneration === notesLoadGeneration) isNotesLoading = false;
   }
 }
 
@@ -2521,6 +2738,56 @@ function getOriginalTranscriptLabel() {
     : "原文";
 }
 
+/**
+ * True only for a caption track we can positively identify as Simplified
+ * Chinese: a `zh` primary tag paired with an explicit Simplified script/region
+ * subtag (zh-Hans, zh-CN, zh-SG). A bare `zh` and every Traditional tag
+ * (zh-Hant, zh-TW, zh-HK, zh-MO) — plus other varieties like yue — stay
+ * translatable, so Traditional → Simplified conversion keeps working.
+ */
+function isConfirmedSimplifiedChineseSource(value) {
+  const normalized = normalizeLanguageCode(value);
+  if (!normalized) return false;
+  const [primary, ...subtags] = normalized.split("-");
+  if (primary !== "zh") return false;
+
+  // An explicit script is stronger evidence than a region. For example,
+  // zh-Hant-CN is still Traditional even though its region is CN.
+  if (subtags.includes("hant")) return false;
+  if (subtags.includes("hans")) return true;
+  return subtags.includes("cn") || subtags.includes("sg");
+}
+
+function currentVideoIsConfirmedSimplifiedChinese() {
+  return isConfirmedSimplifiedChineseSource(currentTranscriptLanguage);
+}
+
+/**
+ * Reflects whether Chinese / bilingual transcript translation applies to the
+ * current video. A confirmed Simplified-Chinese transcript is already in the
+ * target language, so those buttons are disabled (with an explanatory title)
+ * rather than issuing a redundant, billable translation.
+ */
+function updateTranscriptModeAvailability() {
+  const unavailable = currentVideoIsConfirmedSimplifiedChinese();
+  document.querySelectorAll(".transcript-mode-btn").forEach((button) => {
+    if (button.dataset.transcriptMode === "original") {
+      button.disabled = false;
+      button.removeAttribute("aria-disabled");
+      button.removeAttribute("title");
+      return;
+    }
+    button.disabled = unavailable;
+    if (unavailable) {
+      button.setAttribute("aria-disabled", "true");
+      button.setAttribute("title", "字幕已是简体中文，无需翻译。");
+    } else {
+      button.removeAttribute("aria-disabled");
+      button.removeAttribute("title");
+    }
+  });
+}
+
 function getActiveTranscriptSegments() {
   return groupTranscriptEntries(currentTranscript || []);
 }
@@ -2554,6 +2821,14 @@ function setTranscriptModeButtons(mode) {
 async function handleTranscriptModeChange(mode) {
   if (!["original", "zh", "bilingual"].includes(mode)) return;
   if (mode === currentTranscriptMode) return;
+
+  // A confirmed Simplified-Chinese transcript is already in the target
+  // language: never switch it into a Chinese or bilingual (duplicated) view or
+  // send it for translation. The controls are also disabled, but this guards
+  // the state directly in case a change is triggered another way.
+  if (mode !== "original" && currentVideoIsConfirmedSimplifiedChinese()) {
+    return;
+  }
 
   currentTranscriptMode = mode;
   translationGeneration += 1;
@@ -2784,6 +3059,19 @@ function retryTranslationSegment(index, generation) {
  * remaining rows. Batches are sequential so the provider is never flooded.
  */
 async function translateTranscript() {
+  // Fail-safe: a confirmed Simplified-Chinese transcript needs no translation.
+  // Collapse back to the original view so no entry point (mode change, cache
+  // reload, retry) can emit a redundant translateContent request or leave a
+  // "waiting for translation" / duplicated bilingual row behind.
+  if (currentVideoIsConfirmedSimplifiedChinese()) {
+    if (currentTranscriptMode !== "original") {
+      currentTranscriptMode = "original";
+      setTranscriptModeButtons("original");
+    }
+    renderTranscript();
+    return;
+  }
+
   const segments = getActiveTranscriptSegments();
   if (!segments.length || currentTranscriptMode === "original") return;
 
@@ -2876,9 +3164,11 @@ globalThis.__YTD_TRANSCRIPT_TESTING__ = {
   hasCompleteOriginalAnalysis,
   normalizeLanguageCode,
   isChineseLanguage,
+  isConfirmedSimplifiedChineseSource,
   isTransientTabLookupError,
   noteHasChineseSource,
   noteCopyTextForMode,
+  summarizeNoteTranslationFailures,
   renderNoteLanguageContent,
   renderChapterLanguageContent,
   renderQuoteLanguageContent,

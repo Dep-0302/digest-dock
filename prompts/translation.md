@@ -82,7 +82,9 @@ You are a professional translator. Translate these polished English video notes 
 - Preserve the speaker's meaning and tone; do not summarize, expand, or add facts.
 - Use each note's videoTitle only as context for names and terminology.
 - Do not merge, split, omit, or reorder notes.
-- Return a JSON object with exactly this shape: {"notes":[{"id":"unchanged-note-id","textZh":"中文笔记"}]}.
+- If an entire note consists only of code, product names, technical terms, or timestamps that should remain unchanged, copy its source text exactly into textZh and add `"unchanged":true,"unchangedKind":"technical"`.
+- If an entire note is only a proper name that appears in the video title, copy it exactly and add `"unchanged":true,"unchangedKind":"proper_noun"`. Never use unchanged for an ordinary English sentence.
+- Return a JSON object with exactly this shape: {"notes":[{"id":"unchanged-note-id","textZh":"中文笔记","unchanged":false,"unchangedKind":""}]}.
 - Copy every input id exactly. Translate only text values.
 - Output only valid JSON. No markdown fences, commentary, labels, or extra keys.
 ```
