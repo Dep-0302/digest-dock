@@ -13,6 +13,7 @@ var YTD_NOTES_BACKUP = (() => {
   const MAX_TIMESTAMP_SECONDS = 31_536_000;
   const MAX_LEGACY_NOTE_TEXT_LENGTH = 50_000;
   const MAX_LEGACY_SOURCE_LANGUAGE_LENGTH = 100;
+  const MAX_TRANSLATION_VALIDATION_VERSION = 100;
   const NOTE_ID_PATTERN = /^[A-Za-z0-9:_-]{1,128}$/;
   const VIDEO_ID_PATTERN = /^[A-Za-z0-9_-]{6,20}$/;
   const DISALLOWED_CONTROL_CHARACTERS =
@@ -56,6 +57,26 @@ var YTD_NOTES_BACKUP = (() => {
     return normalized;
   }
 
+  function normalizeBoolean(value, field, defaultValue = false) {
+    if (value === undefined || value === null) return defaultValue;
+    if (typeof value !== "boolean") {
+      fail("INVALID_NOTES_BACKUP", { field });
+    }
+    return value;
+  }
+
+  function normalizeValidationVersion(value) {
+    if (value === undefined || value === null) return 0;
+    if (
+      !Number.isSafeInteger(value) ||
+      value < 0 ||
+      value > MAX_TRANSLATION_VALIDATION_VERSION
+    ) {
+      fail("INVALID_NOTES_BACKUP", { field: "translatedValidationVersion" });
+    }
+    return value;
+  }
+
   function normalizeNote(note, index = 0) {
     if (!isPlainObject(note)) {
       fail("INVALID_NOTES_BACKUP", { index, field: "note" });
@@ -90,6 +111,31 @@ var YTD_NOTES_BACKUP = (() => {
 
     const minutes = Math.floor(timestampSeconds / 60);
     const seconds = timestampSeconds % 60;
+    const translatedText = normalizeString(note.translatedText, "translatedText", {
+      max: MAX_LEGACY_NOTE_TEXT_LENGTH,
+    });
+    const translatedValidated = normalizeBoolean(
+      note.translatedValidated,
+      "translatedValidated",
+    );
+    const translatedValidationVersion = normalizeValidationVersion(
+      note.translatedValidationVersion,
+    );
+    const translatedUnchanged = normalizeBoolean(
+      note.translatedUnchanged,
+      "translatedUnchanged",
+    );
+    if (
+      (!translatedText &&
+        (translatedValidated ||
+          translatedValidationVersion !== 0 ||
+          translatedUnchanged)) ||
+      (translatedValidated && translatedValidationVersion < 1) ||
+      (!translatedValidated &&
+        (translatedValidationVersion !== 0 || translatedUnchanged))
+    ) {
+      fail("INVALID_NOTES_BACKUP", { field: "translatedValidation" });
+    }
 
     return {
       id,
@@ -105,9 +151,10 @@ var YTD_NOTES_BACKUP = (() => {
         max: MAX_LEGACY_NOTE_TEXT_LENGTH,
         required: true,
       }),
-      translatedText: normalizeString(note.translatedText, "translatedText", {
-        max: MAX_LEGACY_NOTE_TEXT_LENGTH,
-      }),
+      translatedText,
+      translatedValidated,
+      translatedValidationVersion,
+      translatedUnchanged,
       rawText: normalizeString(note.rawText, "rawText", {
         max: MAX_LEGACY_NOTE_TEXT_LENGTH,
       }),
@@ -128,6 +175,9 @@ var YTD_NOTES_BACKUP = (() => {
       timestampSeconds: normalized.timestampSeconds,
       text: normalized.text,
       translatedText: normalized.translatedText,
+      translatedValidated: normalized.translatedValidated,
+      translatedValidationVersion: normalized.translatedValidationVersion,
+      translatedUnchanged: normalized.translatedUnchanged,
       rawText: normalized.rawText,
       sourceLanguage: normalized.sourceLanguage,
       createdAt: normalized.createdAt,
@@ -242,17 +292,29 @@ var YTD_NOTES_BACKUP = (() => {
   function fillMissingFields(localNote, importedNote) {
     let changed = false;
     const merged = { ...localNote };
-    for (const field of [
-      "videoTitle",
-      "channelName",
-      "translatedText",
-      "rawText",
-      "sourceLanguage",
-    ]) {
+    for (const field of ["videoTitle", "channelName", "rawText", "sourceLanguage"]) {
       if (!merged[field] && importedNote[field]) {
         merged[field] = importedNote[field];
         changed = true;
       }
+    }
+    if (!merged.translatedText && importedNote.translatedText) {
+      merged.translatedText = importedNote.translatedText;
+      merged.translatedValidated = importedNote.translatedValidated;
+      merged.translatedValidationVersion =
+        importedNote.translatedValidationVersion;
+      merged.translatedUnchanged = importedNote.translatedUnchanged;
+      changed = true;
+    } else if (
+      merged.translatedText === importedNote.translatedText &&
+      merged.translatedValidated !== true &&
+      importedNote.translatedValidated === true
+    ) {
+      merged.translatedValidated = true;
+      merged.translatedValidationVersion =
+        importedNote.translatedValidationVersion;
+      merged.translatedUnchanged = importedNote.translatedUnchanged;
+      changed = true;
     }
     return { note: merged, changed };
   }

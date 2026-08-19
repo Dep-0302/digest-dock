@@ -24,6 +24,9 @@ function makeNote(index, overrides = {}) {
     timestampedUrl: `https://www.youtube.com/watch?v=video_${String(index).padStart(3, "0")}&t=${timestampSeconds}s`,
     text: `Note ${index}`,
     translatedText: `笔记 ${index}`,
+    translatedValidated: true,
+    translatedValidationVersion: 1,
+    translatedUnchanged: false,
     rawText: `Raw note ${index}`,
     sourceLanguage: "en",
     createdAt: 1_700_000_000_000 + index,
@@ -38,7 +41,7 @@ function clone(value) {
 function validBackupObject(notes = [makeNote(1)]) {
   return notesBackup.createBackup(notes, {
     exportedAt: "2026-08-18T12:34:56.000Z",
-    extensionVersion: "1.1.5",
+    extensionVersion: "1.2.1",
   });
 }
 
@@ -57,6 +60,7 @@ function loadBackgroundBackupHelpers({
   setImpl,
   removeImpl,
   clearImpl,
+  fetchImpl = fetch,
 } = {}) {
   let storedValues = clone(initialStorage);
   if (initialNotes.length || !Object.hasOwn(storedValues, "ytd_notes")) {
@@ -107,7 +111,7 @@ function loadBackgroundBackupHelpers({
     TextDecoder,
     TextEncoder,
     AbortController,
-    fetch,
+    fetch: fetchImpl,
     setTimeout,
     clearTimeout,
     importScripts() {},
@@ -140,7 +144,7 @@ function loadBackgroundBackupHelpers({
         onMessage: listeners,
         openOptionsPage() {},
         getURL: (resourcePath) => `chrome-extension://test/${resourcePath}`,
-        getManifest: () => ({ version: "1.1.5" }),
+        getManifest: () => ({ version: "1.2.1" }),
         sendMessage(message) {
           notifications.push(clone(message));
           return Promise.resolve();
@@ -198,6 +202,9 @@ test("notes backups round-trip only the allowed fields and rebuild derived value
     "timestampSeconds",
     "text",
     "translatedText",
+    "translatedValidated",
+    "translatedValidationVersion",
+    "translatedUnchanged",
     "rawText",
     "sourceLanguage",
     "createdAt",
@@ -226,7 +233,23 @@ test("notes backups round-trip only the allowed fields and rebuild derived value
   );
   assert.equal(restored.text, source.text);
   assert.equal(restored.translatedText, source.translatedText);
+  assert.equal(restored.translatedValidated, true);
+  assert.equal(restored.translatedValidationVersion, 1);
+  assert.equal(restored.translatedUnchanged, false);
   assert.equal(restored.rawText, source.rawText);
+});
+
+test("legacy backups without translation validation metadata remain importable", () => {
+  const legacyBackup = validBackupObject([makeNote(8)]);
+  delete legacyBackup.notes[0].translatedValidated;
+  delete legacyBackup.notes[0].translatedValidationVersion;
+  delete legacyBackup.notes[0].translatedUnchanged;
+
+  const [restored] = notesBackup.parseBackupText(JSON.stringify(legacyBackup));
+
+  assert.equal(restored.translatedValidated, false);
+  assert.equal(restored.translatedValidationVersion, 0);
+  assert.equal(restored.translatedUnchanged, false);
 });
 
 test("backup parsing rejects damaged JSON, newer versions, oversized input, and invalid note fields", () => {
@@ -254,6 +277,9 @@ test("backup parsing rejects damaged JSON, newer versions, oversized input, and 
     ["timestampSeconds", -1],
     ["text", "unsafe\u0000text"],
     ["createdAt", -1],
+    ["translatedValidated", "yes"],
+    ["translatedValidationVersion", -1],
+    ["translatedUnchanged", "yes"],
   ];
   for (const [field, value] of invalidCases) {
     const invalid = validBackupObject();
@@ -330,6 +356,9 @@ test("duplicate imports are idempotent and can fill missing optional note fields
   const local = makeNote(10, {
     channelName: "",
     translatedText: "",
+    translatedValidated: false,
+    translatedValidationVersion: 0,
+    translatedUnchanged: false,
     rawText: "",
     sourceLanguage: "",
   });
@@ -349,6 +378,8 @@ test("duplicate imports are idempotent and can fill missing optional note fields
   assert.equal(first.notes[0].id, local.id);
   assert.equal(first.notes[0].channelName, "Restored channel");
   assert.equal(first.notes[0].translatedText, "补全的翻译");
+  assert.equal(first.notes[0].translatedValidated, true);
+  assert.equal(first.notes[0].translatedValidationVersion, 1);
   assert.equal(first.notes[0].rawText, "Restored raw text");
 
   const second = notesBackup.mergeNotes(first.notes, [imported]);
@@ -358,6 +389,38 @@ test("duplicate imports are idempotent and can fill missing optional note fields
   assert.equal(second.totalCount, 1);
   assert.equal(second.changed, false);
   assert.deepEqual(second.notes, first.notes);
+});
+
+test("validated unchanged translations survive backup restore without a provider call", async () => {
+  const source = makeNote(12, {
+    text: "OpenAI",
+    translatedText: "OpenAI",
+    translatedValidated: true,
+    translatedValidationVersion: 1,
+    translatedUnchanged: true,
+  });
+  const backupText = JSON.stringify(validBackupObject([source]));
+  let apiCalls = 0;
+  const state = loadBackgroundBackupHelpers({
+    fetchImpl: async () => {
+      apiCalls += 1;
+      throw new Error("A restored validated note must not call the provider");
+    },
+  });
+
+  const importResult = await state.helpers.handleImportNotesBackup(backupText);
+  assert.equal(importResult.success, true);
+  const [restored] = state.readStoredNotes();
+  assert.equal(restored.translatedText, "OpenAI");
+  assert.equal(restored.translatedValidated, true);
+  assert.equal(restored.translatedValidationVersion, 1);
+  assert.equal(restored.translatedUnchanged, true);
+
+  const translationResult = await state.helpers.handleTranslateNotes([restored]);
+  assert.equal(translationResult.success, true);
+  assert.equal(apiCalls, 0);
+  assert.equal(translationResult.translations[0].textZh, "OpenAI");
+  assert.equal(translationResult.translations[0].unchanged, true);
 });
 
 test("notes with the same semantic content but different IDs are both preserved", () => {
