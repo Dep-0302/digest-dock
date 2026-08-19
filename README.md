@@ -92,7 +92,7 @@ Keys and settings are stored in Chrome's local extension storage on your device.
 1. Open a standard YouTube watch page with captions.
 2. Click the YouTube Digest extension icon to open the side panel.
 3. Read the timestamped transcript, or choose **Original**, **中文**, or **双语**.
-4. Open **Overview** for AI-generated chapters and key quotes, then choose **English**, **中文**, or **双语**.
+4. Open **Overview** for a Chinese-first AI summary, then choose **Original**, **中文**, or **双语**.
 5. Select transcript text when you want an AI explanation.
 6. Save a note from the player or a key quote, then revisit it from **Notes** in **Original**, **中文**, or **双语** mode.
 
@@ -126,9 +126,9 @@ This JSON feature is a recovery format for restoring YouTube Digest notes. Study
 
 - Google Chrome 116 or newer, using the Side Panel API.
 - Standard `youtube.com/watch` video pages.
-- Native subtitle tracks returned by Supadata. YouTube Digest prefers English when available, but may show another native language.
+- One native subtitle track returned by Supadata. When YouTube exposes its default caption language, the extension requests that exact track and rejects a different-language fallback; otherwise the returned native track becomes **Original**.
 - Original, Simplified Chinese, and aligned bilingual transcript views.
-- English AI overviews with a separate Simplified Chinese translation; bilingual mode combines the two cached results without a third generation call. Selected-text explanations and automatic note polishing are also supported.
+- AI overviews are generated directly in Simplified Chinese. For non-Chinese subtitle tracks, source-language chapter titles and summaries are translated only when **Original** or **Bilingual** is requested; key quotes preserve the source wording. Chinese-source overviews reuse Chinese in every mode without an extra translation call.
 - Notes are polished in English once and translated into Simplified Chinese once; bilingual note mode only combines the two stored versions.
 - When a note's source subtitle is already Chinese, the original subtitle is reused as the Chinese note and no Chinese-translation request is sent.
 - Local notes, versioned JSON note backup and restore, and a local cache for recent transcript and digest results.

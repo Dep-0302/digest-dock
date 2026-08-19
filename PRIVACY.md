@@ -33,7 +33,7 @@ The published version sends AI feature content to DeepSeek V4 Flash at `https://
 - transcript plus relevant title, channel, description, or duration for an overview;
 - selected text plus nearby transcript context for an explanation;
 - small semantic transcript batches currently needed for progressive Chinese
-  translation, or requested overview or explanation content;
+  translation, or requested source-language overview or explanation content;
 - nearby transcript context and video metadata when polishing a saved note; and
 - the polished English note and its video title when generating the separately stored Simplified Chinese note.
 
