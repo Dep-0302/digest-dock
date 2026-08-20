@@ -1,21 +1,41 @@
 /**
  * SIDE PANEL LOGIC
  *
- * Handles the UI for YouTube Digest: video detection, transcript analysis,
+ * Handles the UI for DigestDock: supported-video detection, transcript analysis,
  * rendering results, and export features.
  */
 
 const DEBUG = false;
+const REQUIRED_RUNTIME_PROTOCOL_VERSION = 6;
 const debugLog = (...args) => {
   if (DEBUG) console.log(...args);
 };
+
+function createSingleFlight() {
+  const activeByKey = new Map();
+  return (key, task) => {
+    if (activeByKey.has(key)) return activeByKey.get(key);
+    let promise;
+    promise = Promise.resolve()
+      .then(task)
+      .finally(() => {
+        if (activeByKey.get(key) === promise) activeByKey.delete(key);
+      });
+    activeByKey.set(key, promise);
+    return promise;
+  };
+}
+
+const runDigestSingleFlight = createSingleFlight();
 
 // ============================================================
 // STATE
 // ============================================================
 
-let currentVideoId = null;
+let currentVideoId = null; // YouTube video ID or resolved cross-platform mediaKey.
 let currentVideoUrl = null;
+let currentMediaRef = null;
+let currentRouteKey = null;
 let currentAnalysis = null;
 let currentTranscript = null;
 let currentTranscriptText = null; // Plain text (for display/export)
@@ -25,24 +45,78 @@ let currentVideoTitle = "";
 let currentChannelName = "";
 let currentVideoDescription = "";
 let currentVideoDuration = 0;
+let currentVideoSourceLanguage = "";
 let isAnalysisLoading = false; // Track if analysis is in progress
-let youtubeTabId = null; // Store the YouTube tab ID for reliable messaging
+let videoTabId = null; // Exact supported video tab for seek/playback messaging.
+let currentConfigStatus = null;
 let errorAction = null;
+let tabCheckGeneration = 0;
+let digestGeneration = 0;
 
 // --- Translation state ---
 // The public transcript control intentionally supports only the original
 // subtitles, Chinese, and an aligned source + Chinese view.
 let currentTranscriptMode = "original";
+let currentOverviewMode = "zh";
+let currentNotesMode = "bilingual";
+let currentNotes = [];
+let currentNotesFilterVideoId;
+let notesFilterShowAll = false;
+let isOverviewTranslationLoading = false;
+let isNotesTranslationLoading = false;
+let isNotesLoading = false;
+let notesTranslationGeneration = 0;
+let notesLoadGeneration = 0;
+let lastNotesManualRetryAt = 0;
+let noteTranslationAttemptCountById = new Map();
 let translationGeneration = 0; // Invalidates responses from older UI modes/videos.
 let translationWorkCount = 0;
 let transcriptScrollObserver = null;
 // Stable keys include the video, source mode, language, and semantic segment ID.
 let transcriptParagraphCache = new Map();
 const TRANSLATION_MESSAGE_TIMEOUT_MS = 130_000;
+const NOTES_MANUAL_RETRY_DEBOUNCE_MS = 400;
+const NOTE_TRANSLATION_VALIDATION_VERSION = 1;
+const TRANSCRIPT_TRANSLATION_CACHE_VERSION = 2;
+const TRANSCRIPT_SOURCE_POLICY_VERSION = 2;
+
+function normalizeLanguageCode(value) {
+  const language = String(value || "")
+    .trim()
+    .replace(/_/g, "-")
+    .toLowerCase();
+  return language.length <= 35 &&
+    /^[a-z]{2,8}(?:-[a-z0-9]{1,8}){0,3}$/.test(language)
+    ? language
+    : "";
+}
+
+function isChineseLanguage(value) {
+  const primary = normalizeLanguageCode(value).split("-")[0];
+  return [
+    "zh",
+    "zho",
+    "chi",
+    "cmn",
+    "yue",
+    "wuu",
+    "gan",
+    "hak",
+    "nan",
+    "lzh",
+  ].includes(primary);
+}
+
+function languagesSharePrimary(value, otherValue) {
+  if (isChineseLanguage(value) && isChineseLanguage(otherValue)) return true;
+  const primary = normalizeLanguageCode(value).split("-")[0];
+  const otherPrimary = normalizeLanguageCode(otherValue).split("-")[0];
+  return Boolean(primary && primary === otherPrimary);
+}
 
 /**
  * Prevent a stopped service worker or dead message channel from leaving the
- * transcript queue stuck forever. The underlying Chrome message cannot be
+ * translation UI stuck forever. The underlying Chrome message cannot be
  * cancelled, so settled guards deliberately ignore any late response.
  */
 function sendTranslationMessage(message) {
@@ -57,11 +131,13 @@ function sendTranslationMessage(message) {
     };
 
     timeoutId = setTimeout(() => {
+      const timeoutError = new Error(
+        "翻译请求在 130 秒后超时，请重试。",
+      );
+      timeoutError.code = "TRANSLATION_MESSAGE_TIMEOUT";
       finish(
         reject,
-        new Error(
-          "Translation request timed out after 130 seconds. Please Retry.",
-        ),
+        timeoutError,
       );
     }, TRANSLATION_MESSAGE_TIMEOUT_MS);
 
@@ -95,6 +171,14 @@ const TRANSCRIPT_SEGMENT_LIMITS = Object.freeze({
   maxChars: 320,
   maxSeconds: 20,
 });
+const COMPACT_CJK_SEGMENT_LIMITS = Object.freeze({
+  minChars: 28,
+  idealChars: 72,
+  maxChars: 120,
+  maxSeconds: 12,
+});
+const SENTENCE_PUNCTUATION_PATTERN = /[.!?;:,。！？；：，]/;
+const COMPACT_CJK_PATTERN = /[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]/g;
 
 function normalizeCaptionText(text) {
   return String(text || "")
@@ -136,6 +220,60 @@ function splitOversizedThought(text, maxChars) {
   return parts;
 }
 
+function transcriptSegmentProfile(text, fallback = TRANSCRIPT_SEGMENT_LIMITS) {
+  const normalized = normalizeCaptionText(text);
+  const visible = normalized.replace(/\s/g, "");
+  const cjkCount = (visible.match(COMPACT_CJK_PATTERN) || []).length;
+  const compactCjk =
+    cjkCount >= 6 &&
+    cjkCount / Math.max(1, visible.length) >= 0.45 &&
+    !SENTENCE_PUNCTUATION_PATTERN.test(normalized);
+  return compactCjk ? COMPACT_CJK_SEGMENT_LIMITS : fallback;
+}
+
+function splitCaptionPiece(text, start, duration, profile) {
+  const normalized = normalizeCaptionText(text);
+  if (!normalized) return [];
+  const compactCjk = profile === COMPACT_CJK_SEGMENT_LIMITS;
+  const countByChars = Math.ceil(
+    normalized.length / (compactCjk ? profile.idealChars : profile.maxChars),
+  );
+  const countByTime = Math.ceil(duration / profile.maxSeconds);
+  const maxReadableParts = Math.max(
+    1,
+    Math.floor(normalized.length / profile.minChars),
+  );
+  const partCount = Math.max(
+    1,
+    countByChars,
+    Math.min(countByTime, maxReadableParts),
+  );
+  const targetChars = Math.min(
+    profile.maxChars,
+    Math.ceil(normalized.length / partCount),
+  );
+  const parts = splitOversizedThought(normalized, targetChars);
+  let consumedChars = 0;
+  return parts.map((part) => {
+    const startRatio = normalized.length
+      ? Math.min(1, consumedChars / normalized.length)
+      : 0;
+    consumedChars += part.length;
+    const endRatio = normalized.length
+      ? Math.min(1, consumedChars / normalized.length)
+      : 1;
+    return {
+      text: part,
+      start: start + duration * startRatio,
+      end: start + duration * endRatio,
+      semanticEnd:
+        /[.!?。！？]["')\]”’）】」』]*$/.test(part) || parts.length > 1,
+      clauseEnd: /[;:,；：，]["')\]”’）】」』]*$/.test(part),
+      compactCjk,
+    };
+  });
+}
+
 /**
  * Reconstructs complete sentences across raw caption boundaries. Each segment
  * keeps the timestamp of the first caption that contributed text. Character
@@ -159,20 +297,20 @@ function groupTranscriptEntries(entries, limits = TRANSCRIPT_SEGMENT_LIMITS) {
     sentenceParts.forEach((sentencePart) => {
       const cleanPart = normalizeCaptionText(sentencePart);
       if (!cleanPart) return;
-      const oversizedParts = splitOversizedThought(cleanPart, limits.maxChars);
-      oversizedParts.forEach((part, partIndex) => {
-        const ratio = text.length ? Math.min(1, consumedChars / text.length) : 0;
-        pieces.push({
-          text: part,
-          start: start + duration * ratio,
-          semanticEnd:
-            /[.!?。！？]["')\]”’）】」』]*$/.test(part) ||
-            oversizedParts.length > 1,
-          clauseEnd: /[;:,；：，]["')\]”’）】」』]*$/.test(part),
-          sourceOrder: `${entryIndex}:${partIndex}`,
-        });
-        consumedChars += part.length + 1;
+      const ratio = text.length ? Math.min(1, consumedChars / text.length) : 0;
+      const sentenceDuration = text.length
+        ? duration * (cleanPart.length / text.length)
+        : duration;
+      const profile = transcriptSegmentProfile(cleanPart, limits);
+      splitCaptionPiece(
+        cleanPart,
+        start + duration * ratio,
+        sentenceDuration,
+        profile,
+      ).forEach((piece, partIndex) => {
+        pieces.push({ ...piece, sourceOrder: `${entryIndex}:${partIndex}` });
       });
+      consumedChars += cleanPart.length;
     });
   });
 
@@ -193,28 +331,39 @@ function groupTranscriptEntries(entries, limits = TRANSCRIPT_SEGMENT_LIMITS) {
   };
 
   pieces.forEach((piece) => {
-    if (!current) current = { start: piece.start, text: "" };
+    if (current) {
+      const candidateText = normalizeCaptionText(`${current.text} ${piece.text}`);
+      const candidateProfile = transcriptSegmentProfile(candidateText, limits);
+      const candidateElapsed = Math.max(0, piece.end - current.start);
+      if (
+        candidateText.length > candidateProfile.maxChars ||
+        candidateElapsed > candidateProfile.maxSeconds
+      ) {
+        flush();
+      }
+    }
+
+    if (!current) current = { start: piece.start, end: piece.end, text: "" };
     current.text = normalizeCaptionText(`${current.text} ${piece.text}`);
-    const elapsed = Math.max(0, piece.start - current.start);
-    const comfortablySized = current.text.length >= limits.minChars;
-    const reachedIdeal = current.text.length >= limits.idealChars;
+    current.end = Math.max(current.end, piece.end);
+    const profile = transcriptSegmentProfile(current.text, limits);
+    const elapsed = Math.max(0, current.end - current.start);
+    const comfortablySized = current.text.length >= profile.minChars;
+    const reachedIdeal = current.text.length >= profile.idealChars;
     const atNaturalBoundary =
       piece.semanticEnd ||
       (piece.clauseEnd &&
         (reachedIdeal ||
-          current.text.length >= limits.maxChars ||
-          elapsed >= limits.maxSeconds));
-    const reachedGuardrail =
-      atNaturalBoundary &&
-      (current.text.length >= limits.maxChars || elapsed >= limits.maxSeconds);
+          current.text.length >= profile.maxChars ||
+          elapsed >= profile.maxSeconds));
     const reachedHardGuardrail =
-      current.text.length >= Math.round(limits.maxChars * 1.2) ||
-      elapsed >= limits.maxSeconds + 5;
+      current.text.length >= profile.maxChars || elapsed >= profile.maxSeconds;
+    const reachedCompactIdeal = piece.compactCjk && reachedIdeal;
 
     if (
       (atNaturalBoundary && (comfortablySized || elapsed >= 8)) ||
       (atNaturalBoundary && reachedIdeal) ||
-      reachedGuardrail ||
+      reachedCompactIdeal ||
       reachedHardGuardrail
     ) {
       flush();
@@ -233,12 +382,15 @@ document.addEventListener("DOMContentLoaded", async () => {
   setupEventListeners();
   await evictOldCacheEntries(20);
 
-  const configStatus = await chrome.runtime.sendMessage({
+  currentConfigStatus = await chrome.runtime.sendMessage({
     action: "checkConfig",
   });
 
-  if (!configStatus.hasSupadataKey || !configStatus.hasAiKey) {
-    showConfigError(configStatus);
+  if (
+    currentConfigStatus?.runtimeProtocolVersion !==
+    REQUIRED_RUNTIME_PROTOCOL_VERSION
+  ) {
+    showRuntimeVersionError();
     return;
   }
 
@@ -260,12 +412,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     updateLoading(message.title, message.subtitle);
     sendResponse({ success: true });
   }
-  if (message.action === "noteSaved") {
-    // Refresh notes list when a new note is saved
-    const filterAll = document
-      .getElementById("notesFilterAll")
-      ?.classList.contains("active");
-    loadNotes(filterAll ? null : currentVideoId);
+  if (message.action === "noteSaved" || message.action === "notesChanged") {
+    // Refresh after a save, import, clear, or reset. Only a freshly saved note
+    // may retry its missing Chinese version automatically.
+    loadNotes(notesFilterShowAll ? null : currentVideoId, {
+      translateMissing: message.action === "noteSaved",
+    });
     sendResponse({ success: true });
   }
   return false;
@@ -310,30 +462,115 @@ function panelIsShowingResults() {
   return results && results.style.display !== "none";
 }
 
+function extractMediaLocator(url) {
+  try {
+    const parsed = new URL(String(url || ""));
+    if (
+      parsed.protocol === "https:" &&
+      parsed.hostname === "www.youtube.com" &&
+      parsed.pathname === "/watch" &&
+      parsed.searchParams.has("v")
+    ) {
+      const videoId = parsed.searchParams.get("v");
+      return {
+        platform: "youtube",
+        videoId,
+        mediaKey: videoId,
+        routeKey: `youtube:${videoId}`,
+        canonicalUrl: `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}`,
+      };
+    }
+
+    const bili = BILIBILI_ADAPTER.parseBilibiliVideoUrl(parsed.href);
+    return {
+      platform: "bilibili",
+      bvid: bili.bvid,
+      page: bili.page,
+      routeKey: `bilibili:${bili.bvid}:p${bili.page}`,
+      canonicalUrl: bili.canonicalUrl,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function isBilibiliChineseMedia() {
+  return (
+    currentMediaRef?.platform === "bilibili" &&
+    isConfirmedSimplifiedChineseSource(currentTranscriptLanguage)
+  );
+}
+
+function applyMediaLanguageDefaults() {
+  const directChinese = isBilibiliChineseMedia();
+  currentTranscriptMode = "original";
+  // The current product contract is Chinese-first on every platform. Bilibili
+  // Chinese tracks additionally hide controls that would only duplicate the
+  // same text.
+  currentOverviewMode = "zh";
+  currentNotesMode = directChinese ? "zh" : "bilingual";
+  setTranscriptModeButtons(currentTranscriptMode);
+  setOverviewModeButtons(currentOverviewMode);
+  setNotesModeButtons(currentNotesMode);
+
+  document.querySelectorAll(".transcript-mode-btn").forEach((button) => {
+    button.hidden = directChinese && button.dataset.transcriptMode !== "original";
+  });
+  document.querySelectorAll(".overview-mode-btn").forEach((button) => {
+    button.hidden = directChinese && button.dataset.overviewMode !== "zh";
+  });
+  document.querySelectorAll(".notes-mode-btn").forEach((button) => {
+    button.hidden = directChinese && button.dataset.notesMode !== "zh";
+  });
+}
+
+function updateHeaderLanguageControlsVisibility() {
+  const transcriptControl = document.getElementById("transcriptModeControl");
+  const overviewControl = document.getElementById("overviewModeControl");
+  const notesControl = document.getElementById("notesModeControl");
+  const activeTab = document.querySelector(".tab.active")?.dataset.tab;
+  const showingResults = panelIsShowingResults();
+  if (transcriptControl) {
+    transcriptControl.hidden = !(showingResults && activeTab === "transcript");
+  }
+  if (overviewControl) {
+    overviewControl.hidden = !(showingResults && activeTab === "overview");
+  }
+  if (notesControl) {
+    notesControl.hidden = !(showingResults && activeTab === "notes");
+  }
+}
+
 /**
  * Reacts to the URL now in front of the panel: close on non-YouTube,
  * refresh the digest when the video changed.
  */
 function handleFrontTabUrl(url) {
-  if (!(url || "").startsWith("https://www.youtube.com")) {
-    // Panel is a YouTube-only tool — remove itself from non-YouTube tabs.
+  const locator = extractMediaLocator(url);
+  if (!locator) {
     window.close();
     return;
   }
 
-  const newVideoId = extractVideoId(url);
+  const newRouteKey = locator.routeKey;
   // Refresh when the video changed, or when we're not currently showing
   // results (e.g. user went home, then clicked back into the same video).
-  if (newVideoId !== currentVideoId || !panelIsShowingResults()) {
+  if (newRouteKey !== currentRouteKey || !panelIsShowingResults()) {
     scheduleDigestRefresh();
   }
 }
 
 // Fires when a tab's URL changes — including YouTube's no-reload navigation.
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-  if (!changeInfo.url || !tab.active) return;
+  if (!tab.active) return;
   if (panelWindowId !== null && tab.windowId !== panelWindowId) return;
-  handleFrontTabUrl(changeInfo.url);
+  if (changeInfo.url) {
+    handleFrontTabUrl(changeInfo.url);
+    return;
+  }
+  if (changeInfo.status === "complete" && tabId === videoTabId) {
+    scheduleDigestRefresh();
+  }
 });
 
 // Fires when a different tab comes to the front — switching tabs, or a new
@@ -363,7 +600,13 @@ function setupEventListeners() {
       return;
     }
     if (currentVideoId) {
-      startDigest(currentVideoId, currentVideoUrl);
+      void startDigest(currentVideoId, currentVideoUrl).catch((error) => {
+        console.error("[DigestDock Panel] Retry error:", error);
+        showError(
+          "无法打开摘要",
+          error?.message || "重新加载当前 YouTube 视频失败，请刷新页面后重试。",
+        );
+      });
     }
   });
 
@@ -381,6 +624,16 @@ function setupEventListeners() {
   document.querySelectorAll(".transcript-mode-btn").forEach((button) => {
     button.addEventListener("click", () => {
       handleTranscriptModeChange(button.dataset.transcriptMode);
+    });
+  });
+  document.querySelectorAll(".overview-mode-btn").forEach((button) => {
+    button.addEventListener("click", () => {
+      handleOverviewModeChange(button.dataset.overviewMode);
+    });
+  });
+  document.querySelectorAll(".notes-mode-btn").forEach((button) => {
+    button.addEventListener("click", () => {
+      handleNotesModeChange(button.dataset.notesMode);
     });
   });
 
@@ -411,6 +664,7 @@ function setupEventListeners() {
 }
 
 function setNotesFilter(showAll) {
+  notesFilterShowAll = showAll;
   const thisVideoButton = document.getElementById("notesFilterThis");
   const allNotesButton = document.getElementById("notesFilterAll");
   thisVideoButton?.classList.toggle("active", !showAll);
@@ -423,103 +677,183 @@ function setNotesFilter(showAll) {
 // VIDEO DETECTION
 // ============================================================
 
-async function checkCurrentTab() {
-  try {
-    // Try multiple strategies to find the YouTube tab
-    let tab = null;
+function checkCurrentTab() {
+  const generation = ++tabCheckGeneration;
+  return runCheckCurrentTab(generation);
+}
 
-    // Strategy 1: Active tab in last focused window
+function isTransientTabLookupError(error) {
+  const message = String(error?.message || error || "");
+  return (
+    message.includes("No tab with id") ||
+    message.includes("Tab was closed") ||
+    message.includes("Invalid tab ID")
+  );
+}
+
+async function runCheckCurrentTab(generation) {
+  const isLatestCheck = () => generation === tabCheckGeneration;
+  try {
+    let tab = null;
     let tabs = await chrome.tabs.query({
       active: true,
       lastFocusedWindow: true,
     });
-    if (tabs[0]?.url?.includes("youtube.com")) {
-      tab = tabs[0];
-    }
+    if (!isLatestCheck()) return;
+    if (extractMediaLocator(tabs[0]?.url)) tab = tabs[0];
 
-    // Strategy 2: Any active YouTube tab
     if (!tab) {
       tabs = await chrome.tabs.query({
-        url: "https://www.youtube.com/*",
+        url: [
+          "https://www.youtube.com/watch*",
+          "https://www.bilibili.com/video/BV*",
+        ],
         active: true,
       });
+      if (!isLatestCheck()) return;
       if (tabs[0]) tab = tabs[0];
     }
 
-    // Strategy 3: Any YouTube tab (last resort)
     if (!tab) {
-      tabs = await chrome.tabs.query({ url: "https://www.youtube.com/*" });
+      tabs = await chrome.tabs.query({
+        url: [
+          "https://www.youtube.com/watch*",
+          "https://www.bilibili.com/video/BV*",
+        ],
+      });
+      if (!isLatestCheck()) return;
       if (tabs[0]) tab = tabs[0];
     }
 
-    debugLog("[YouTube Digest Panel] Found tab:", tab?.id, tab?.url);
+    debugLog("[DigestDock Panel] Found tab:", tab?.id, tab?.url);
 
     if (!tab?.url) {
+      if (isLatestCheck()) showState("welcome");
+      return;
+    }
+
+    const locator = extractMediaLocator(tab.url);
+    if (!locator) {
       showState("welcome");
       return;
     }
 
-    // Store the tab ID for reliable messaging later
-    youtubeTabId = tab.id;
+    if (
+      !currentConfigStatus?.hasAiKey ||
+      (locator.platform === "youtube" && !currentConfigStatus?.hasSupadataKey)
+    ) {
+      showConfigError(currentConfigStatus || {}, locator.platform === "youtube");
+      return;
+    }
 
-    const videoId = extractVideoId(tab.url);
+    // Capture the exact supported tab before any content relay so a
+    // refresh-required response can reload the tab that actually failed.
+    videoTabId = tab.id;
 
-    if (videoId) {
-      currentVideoUrl = tab.url;
+    let nextMediaRef = locator;
+    let nextVideoUrl = tab.url;
+    let nextVideoTitle = "";
+    let nextChannelName = "";
+    let nextVideoDescription = "";
+    let nextVideoDuration = 0;
+    let nextSourceLanguage = "";
 
+    if (locator.platform === "bilibili") {
+      const resolved = await chrome.runtime.sendMessage({
+        action: "resolveBilibiliMedia",
+        url: tab.url,
+      });
+      if (!isLatestCheck()) return;
+      if (!resolved?.success || !resolved.mediaRef) {
+        showError(
+          "无法读取 B 站视频",
+          resolved?.message || resolved?.error || "媒体解析失败。",
+        );
+        return;
+      }
+      nextMediaRef = resolved.mediaRef;
+      nextVideoTitle = nextMediaRef.title || "";
+      nextChannelName = nextMediaRef.channelName || "";
+      nextVideoDescription = nextMediaRef.description || "";
+      nextVideoDuration = nextMediaRef.duration || 0;
+    } else {
+      let videoInfo = null;
       try {
-        // Route through background script for reliable message passing
         const result = await chrome.runtime.sendMessage({
           action: "relayToContent",
+          tabId: tab.id,
           payload: { action: "getVideoInfo" },
         });
-        debugLog("[YouTube Digest Panel] getVideoInfo result:", result);
+        if (!isLatestCheck()) return;
+        debugLog("[DigestDock Panel] getVideoInfo result:", result);
+        if (
+          result?.error === "PAGE_REFRESH_REQUIRED" ||
+          result?.error === "PAGE_CONTEXT_CHANGED"
+        ) {
+          const refreshError = new Error(
+            result.message ||
+              "DigestDock 已更新，请刷新当前 YouTube 页面后重试。",
+          );
+          refreshError.code = "PAGE_REFRESH_REQUIRED";
+          throw refreshError;
+        }
         if (result.success && result.response) {
-          currentVideoTitle = result.response.title || "";
-          currentChannelName = result.response.channelName || "";
-          currentVideoDescription = result.response.description || "";
-          currentVideoDuration = result.response.duration || 0;
+          videoInfo = result.response;
         }
       } catch (e) {
-        console.error("[YouTube Digest Panel] getVideoInfo error:", e);
-        currentVideoTitle = "";
-        currentChannelName = "";
-        currentVideoDescription = "";
-        currentVideoDuration = 0;
+        if (!isLatestCheck()) return;
+        if (e?.code === "PAGE_REFRESH_REQUIRED") throw e;
+        console.error("[DigestDock Panel] getVideoInfo error:", e);
       }
-
-      startDigest(videoId, tab.url);
-    } else {
-      showState("welcome");
+      nextVideoTitle = videoInfo?.title || "";
+      nextChannelName = videoInfo?.channelName || "";
+      nextVideoDescription = videoInfo?.description || "";
+      nextVideoDuration = videoInfo?.duration || 0;
+      nextSourceLanguage = normalizeLanguageCode(videoInfo?.sourceLanguage);
     }
+
+    // Resolve/relay crosses an async boundary. Re-read the exact tab and apply
+    // state only when it is still on the same BV + part or YouTube video. This
+    // also protects A -> B -> A navigation from a late response owned by the
+    // first A request.
+    const latestTab = await chrome.tabs.get(tab.id);
+    if (!isLatestCheck()) return;
+    nextVideoUrl = latestTab.url || latestTab.pendingUrl || "";
+    const latestLocator = extractMediaLocator(nextVideoUrl);
+    if (!latestLocator || latestLocator.routeKey !== locator.routeKey) {
+      scheduleDigestRefresh();
+      return;
+    }
+
+    currentVideoTitle = nextVideoTitle;
+    currentChannelName = nextChannelName;
+    currentVideoDescription = nextVideoDescription;
+    currentVideoDuration = nextVideoDuration;
+    currentVideoSourceLanguage = nextSourceLanguage;
+
+    await startDigest(
+      nextMediaRef.mediaKey,
+      nextVideoUrl,
+      nextMediaRef,
+      locator.routeKey,
+    );
   } catch (error) {
+    if (!isLatestCheck()) return;
+    if (isTransientTabLookupError(error)) {
+      debugLog("[DigestDock Panel] Active tab changed during inspection");
+      scheduleDigestRefresh();
+      return;
+    }
+    if (error?.code === "PAGE_REFRESH_REQUIRED") {
+      debugLog("[DigestDock Panel] Video page refresh required");
+      showPageRefreshRequired(videoTabId, error.message);
+      return;
+    }
     console.error("Tab check error:", error);
-    showState("welcome");
-  }
-}
-
-function extractVideoId(url) {
-  try {
-    const urlObj = new URL(url);
-
-    if (
-      urlObj.hostname.includes("youtube.com") &&
-      urlObj.searchParams.has("v")
-    ) {
-      return urlObj.searchParams.get("v");
-    }
-
-    if (urlObj.hostname === "youtu.be") {
-      return urlObj.pathname.slice(1);
-    }
-
-    if (urlObj.pathname.startsWith("/embed/")) {
-      return urlObj.pathname.split("/")[2];
-    }
-
-    return null;
-  } catch {
-    return null;
+    showError(
+      "无法打开摘要",
+      error?.message || "读取当前视频失败，请刷新页面后重试。",
+    );
   }
 }
 
@@ -527,37 +861,172 @@ function extractVideoId(url) {
 // DIGEST PIPELINE
 // ============================================================
 
-async function startDigest(videoId, videoUrl) {
+function startDigest(
+  videoId,
+  videoUrl,
+  mediaRef = currentMediaRef,
+  routeKey = currentRouteKey,
+) {
+  const nextMediaRef = mediaRef || currentMediaRef;
+  const nextRouteKey = routeKey || currentRouteKey;
+  const sourceTrackChanged =
+    nextMediaRef?.platform !== "bilibili" &&
+    videoId === currentVideoId &&
+    currentVideoSourceLanguage &&
+    currentTranscript &&
+    (!currentTranscriptLanguage ||
+      !languagesSharePrimary(
+        currentVideoSourceLanguage,
+        currentTranscriptLanguage,
+      ));
+  const videoChanged =
+    videoId !== currentVideoId ||
+    nextRouteKey !== currentRouteKey ||
+    sourceTrackChanged;
+  if (videoChanged) {
+    digestGeneration += 1;
+    translationGeneration += 1;
+    notesLoadGeneration += 1;
+    notesTranslationGeneration += 1;
+    isOverviewTranslationLoading = false;
+    isAnalysisLoading = false;
+    isNotesLoading = false;
+    isNotesTranslationLoading = false;
+    if (transcriptScrollObserver) transcriptScrollObserver.disconnect();
+    transcriptScrollObserver = null;
+    currentVideoId = videoId;
+    currentVideoUrl = videoUrl;
+    currentMediaRef = nextMediaRef;
+    currentRouteKey = nextRouteKey;
+    currentAnalysis = null;
+    currentTranscript = null;
+    currentTranscriptText = null;
+    currentTranscriptTimestamped = null;
+    currentTranscriptLanguage = null;
+    currentOverviewMode = "zh";
+    setOverviewModeButtons(currentOverviewMode);
+    clearOverviewResults();
+  } else {
+    currentVideoUrl = videoUrl;
+    currentMediaRef = nextMediaRef;
+    currentRouteKey = nextRouteKey;
+  }
+
+  const generation = digestGeneration;
+  const requestKey = `${generation}:${videoId}`;
+  return runDigestSingleFlight(requestKey, () =>
+    runDigestLoad(
+      videoId,
+      generation,
+      videoChanged,
+      nextMediaRef,
+      nextRouteKey,
+    ),
+  );
+}
+
+function isCurrentDigest(
+  videoId,
+  generation,
+  routeKey = currentRouteKey,
+) {
+  return (
+    videoId === currentVideoId &&
+    generation === digestGeneration &&
+    routeKey === currentRouteKey
+  );
+}
+
+function clearOverviewResults() {
+  const chapterList = document.getElementById("chapterList");
+  const quotesList = document.getElementById("quotesList");
+  if (chapterList) chapterList.innerHTML = "";
+  if (quotesList) quotesList.innerHTML = "";
+  setOverviewTranslationStatus();
+  setOverviewTranslationLoading(false);
+}
+
+function refreshOverviewForCurrentVideoIfVisible() {
+  const activeTab = document.querySelector(".tab.active")?.dataset.tab;
+  if (activeTab !== "overview") return;
+  if (!currentAnalysis && currentTranscriptTimestamped && !isAnalysisLoading) {
+    void triggerAnalysis();
+  } else if (currentAnalysis && currentOverviewMode !== "zh") {
+    void ensureOverviewOriginal();
+  }
+}
+
+async function runDigestLoad(
+  videoId,
+  generation,
+  videoChanged,
+  mediaRef = currentMediaRef,
+  routeKey = currentRouteKey,
+) {
+  if (!isCurrentDigest(videoId, generation, routeKey)) return;
+
   // Check if we already have this video loaded in memory
-  if (videoId === currentVideoId && currentAnalysis) {
+  if (!videoChanged && videoId === currentVideoId && currentAnalysis) {
     showState("results");
+    refreshOverviewForCurrentVideoIfVisible();
     return;
   }
 
-  // Every video change invalidates observer work and in-flight translations.
-  if (videoId !== currentVideoId) {
-    translationGeneration += 1;
-    if (transcriptScrollObserver) transcriptScrollObserver.disconnect();
-    transcriptScrollObserver = null;
-  }
-
   // Check cache for this video
-  const cached = await loadFromCache(videoId);
+  let cached = await loadFromCache(videoId);
+  if (!isCurrentDigest(videoId, generation, routeKey)) return;
+  if (
+    cached &&
+    ((cached.routeKey && cached.routeKey !== routeKey) ||
+      (cached.mediaRef?.mediaKey && cached.mediaRef.mediaKey !== videoId))
+  ) {
+    cached = null;
+  }
+  if (
+    cached &&
+    mediaRef?.platform === "youtube" &&
+    currentVideoSourceLanguage &&
+    (!cached.transcriptLanguage ||
+      !languagesSharePrimary(
+        currentVideoSourceLanguage,
+        cached.transcriptLanguage,
+      ))
+  ) {
+    cached = null;
+  }
   if (cached) {
     debugLog("Loading from cache:", videoId);
-    currentVideoId = videoId;
-    currentVideoUrl = videoUrl;
-    currentAnalysis = cached.analysis || null;
+    const cachedTranscriptLanguage = normalizeLanguageCode(
+      cached.transcriptLanguage ||
+        cached.transcript?.find((entry) => entry?.language)?.language,
+    );
+    const cachedAnalysisLanguage = normalizeLanguageCode(
+      cached.analysis?.sourceLanguage,
+    );
+    currentAnalysis =
+      cached.analysisVideoId === videoId &&
+      cached.analysis?.schemaVersion === 3 &&
+      (!cachedTranscriptLanguage ||
+        cachedAnalysisLanguage === cachedTranscriptLanguage) &&
+      hasUsableChineseAnalysis(cached.analysis)
+      ? cached.analysis
+      : null;
+    currentMediaRef = cached.mediaRef || mediaRef;
     currentTranscript = cached.transcript;
     currentTranscriptText = cached.transcriptText;
     currentTranscriptTimestamped = cached.transcriptTimestamped;
-    currentTranscriptLanguage = cached.transcriptLanguage || null;
+    currentTranscriptLanguage =
+      cachedTranscriptLanguage || cachedAnalysisLanguage || null;
+    applyMediaLanguageDefaults();
     isAnalysisLoading = false;
 
     // Restore semantic-segment translations from persistent storage.
     if (cached.paragraphCache) {
+      const cachePrefix = transcriptTranslationCachePrefix(videoId);
       for (const [key, value] of Object.entries(cached.paragraphCache)) {
-        transcriptParagraphCache.set(key, value);
+        if (key.startsWith(cachePrefix)) {
+          transcriptParagraphCache.set(key, value);
+        }
       }
     }
 
@@ -586,17 +1055,15 @@ async function startDigest(videoId, videoUrl) {
     // Setup explain feature
     setupExplainFeature();
     if (currentTranscriptMode !== "original") translateTranscript();
+    refreshOverviewForCurrentVideoIfVisible();
     return;
   }
 
-  currentVideoId = videoId;
-  currentVideoUrl = videoUrl;
   currentAnalysis = null;
   currentTranscript = null;
   currentTranscriptText = null;
   currentTranscriptTimestamped = null;
   currentTranscriptLanguage = null;
-  isAnalysisLoading = false;
 
   if (currentVideoTitle || currentChannelName) {
     const videoInfo = document.getElementById("videoInfo");
@@ -606,23 +1073,27 @@ async function startDigest(videoId, videoUrl) {
   }
 
   showState("loading");
-  updateLoading("Fetching transcript", "");
+  updateLoading("正在获取字幕", "");
 
+  const requestMediaRef = currentMediaRef || mediaRef;
   const transcriptResult = await chrome.runtime.sendMessage({
     action: "fetchTranscript",
-    videoId: videoId,
+    videoId: requestMediaRef?.videoId || videoId,
+    mediaRef: requestMediaRef,
+    preferredLanguage: currentVideoSourceLanguage,
   });
+  if (!isCurrentDigest(videoId, generation, routeKey)) return;
 
   if (!transcriptResult.success) {
     if (transcriptResult.error === "NO_SUPADATA_KEY") {
       showError(
-        "API key missing",
-        "Add your Supadata API key in YouTube Digest Settings.",
+        "缺少 API 密钥",
+        "请在 DigestDock 设置中添加 Supadata API 密钥。",
       );
       return;
     }
     showError(
-      "No transcript found",
+      "未找到字幕",
       transcriptResult.message || transcriptResult.error,
     );
     return;
@@ -631,7 +1102,15 @@ async function startDigest(videoId, videoUrl) {
   currentTranscript = transcriptResult.transcript;
   currentTranscriptText = transcriptResult.transcriptText;
   currentTranscriptTimestamped = transcriptResult.transcriptTextTimestamped;
-  currentTranscriptLanguage = transcriptResult.language || null;
+  currentTranscriptLanguage = normalizeLanguageCode(transcriptResult.language) || null;
+  if (transcriptResult.mediaRef) currentMediaRef = transcriptResult.mediaRef;
+  if (
+    currentMediaRef?.platform === "bilibili" &&
+    !currentVideoSourceLanguage
+  ) {
+    currentVideoSourceLanguage = currentTranscriptLanguage || "";
+  }
+  applyMediaLanguageDefaults();
 
   // Render transcript immediately (no LLM needed)
   renderTranscript();
@@ -647,9 +1126,12 @@ async function startDigest(videoId, videoUrl) {
 
   // Save transcript to cache (without analysis)
   await saveToCache(videoId);
+  if (!isCurrentDigest(videoId, generation, routeKey)) return;
 
-  // DON'T run LLM analysis automatically - wait for user to click Overview tab
-  // This saves tokens when user just wants to see the transcript
+  refreshOverviewForCurrentVideoIfVisible();
+
+  // Generate analysis only when Overview is the active tab. Otherwise keep the
+  // original lazy-load behavior so transcript-only use does not spend AI tokens.
 }
 
 // ============================================================
@@ -660,7 +1142,237 @@ async function startDigest(videoId, videoUrl) {
  * Renders the analysis results into the Overview tab.
  * Shows chapters and key quotes only.
  */
+function hasUsableChineseAnalysis(analysis) {
+  return (
+    analysis?.schemaVersion === 3 &&
+    analysis?.baseLanguage === "zh-Hans" &&
+    Array.isArray(analysis?.chapters) &&
+    analysis.chapters.length > 0 &&
+    analysis.chapters.every(
+      (chapter) =>
+        [chapter?.titleZh, chapter?.summaryZh].every(
+          (value) => typeof value === "string" && value.trim(),
+        ) && /[\u3400-\u9fff]/.test(chapter.summaryZh),
+    ) &&
+    Array.isArray(analysis?.keyQuotes) &&
+    analysis.keyQuotes.length > 0 &&
+    analysis.keyQuotes.every(
+      (quote) =>
+        [quote?.quoteOriginal, quote?.quoteZh].every(
+          (value) => typeof value === "string" && value.trim(),
+        ) && /[\u3400-\u9fff]/.test(quote.quoteZh),
+    )
+  );
+}
+
+function hasCompleteOriginalAnalysis(analysis) {
+  if (!hasUsableChineseAnalysis(analysis)) return false;
+  if (isConfirmedSimplifiedChineseSource(analysis.sourceLanguage)) return true;
+  return (
+    analysis.chapters.every(
+      (chapter) =>
+        [chapter?.titleOriginal, chapter?.summaryOriginal].every(
+          (value) => typeof value === "string" && value.trim(),
+        ),
+    )
+  );
+}
+
+function setOverviewTranslationStatus(message = "", isError = false) {
+  const status = document.getElementById("overviewTranslationStatus");
+  if (!status) return;
+  status.textContent = message;
+  status.classList.toggle("error", isError);
+  status.hidden = !message;
+}
+
+function setOverviewTranslationLoading(show) {
+  isOverviewTranslationLoading = show;
+  const spinner = document.getElementById("overviewLangSpinner");
+  spinner?.classList.toggle("visible", show);
+}
+
+function renderChapterLanguageContent(
+  chapter,
+  mode = currentOverviewMode,
+  sourceLanguage = currentAnalysis?.sourceLanguage,
+) {
+  const normalizedSourceLanguage = normalizeLanguageCode(sourceLanguage);
+  const chineseSource = isConfirmedSimplifiedChineseSource(
+    normalizedSourceLanguage,
+  );
+  const renderBlock = (language, title, summary, lang) => `
+    <span class="overview-language-block overview-language-block--${language}" lang="${lang}">
+      <span class="chapter-title">${escapeHtml(title || "")}</span>
+      <span class="chapter-summary">${escapeHtml(summary || "")}</span>
+    </span>
+  `;
+
+  const chinese = renderBlock(
+    "zh",
+    chapter.titleZh,
+    chapter.summaryZh,
+    "zh-CN",
+  );
+  if (mode === "zh" || chineseSource) return chinese;
+  const hasOriginal = [chapter.titleOriginal, chapter.summaryOriginal].every(
+    (value) => typeof value === "string" && value.trim(),
+  );
+  if (!hasOriginal) return chinese;
+  const original = renderBlock(
+    "original",
+    chapter.titleOriginal,
+    chapter.summaryOriginal,
+    normalizedSourceLanguage || "und",
+  );
+  return mode === "bilingual" ? original + chinese : original;
+}
+
+function renderQuoteLanguageContent(
+  quote,
+  mode = currentOverviewMode,
+  sourceLanguage = currentAnalysis?.sourceLanguage,
+) {
+  const normalizedSourceLanguage = normalizeLanguageCode(sourceLanguage);
+  const chineseSource = isConfirmedSimplifiedChineseSource(
+    normalizedSourceLanguage,
+  );
+  const renderBlock = (language, text, lang) => `
+    <span class="overview-language-block overview-language-block--${language}" lang="${lang}">${escapeHtml(text || "")}</span>
+  `;
+
+  const chinese = renderBlock("zh", quote.quoteZh, "zh-CN");
+  if (mode === "zh" || chineseSource) return chinese;
+  const original = renderBlock(
+    "original",
+    quote.quoteOriginal,
+    normalizedSourceLanguage || "und",
+  );
+  return mode === "bilingual" ? original + chinese : original;
+}
+
+function overviewQuoteCopyText(
+  quote,
+  mode = currentOverviewMode,
+  sourceLanguage = currentAnalysis?.sourceLanguage,
+) {
+  if (mode === "zh" || isConfirmedSimplifiedChineseSource(sourceLanguage)) {
+    return quote.quoteZh || quote.quoteOriginal || "";
+  }
+  if (mode === "bilingual") {
+    return [quote.quoteOriginal, quote.quoteZh].filter(Boolean).join("\n");
+  }
+  return quote.quoteOriginal || quote.quoteZh || "";
+}
+
+function setOverviewModeButtons(mode) {
+  document.querySelectorAll(".overview-mode-btn").forEach((button) => {
+    const active = button.dataset.overviewMode === mode;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  });
+}
+
+function handleOverviewModeChange(mode) {
+  if (!["original", "zh", "bilingual"].includes(mode)) return;
+  if (mode === currentOverviewMode) return;
+  currentOverviewMode = mode;
+  setOverviewModeButtons(mode);
+  if (currentAnalysis) renderAnalysisResults(currentAnalysis);
+  if (mode === "zh") {
+    setOverviewTranslationStatus();
+  } else {
+    void ensureOverviewOriginal();
+  }
+}
+
+async function ensureOverviewOriginal() {
+  if (
+    !currentAnalysis ||
+    isConfirmedSimplifiedChineseSource(currentAnalysis.sourceLanguage) ||
+    hasCompleteOriginalAnalysis(currentAnalysis) ||
+    isOverviewTranslationLoading
+  ) {
+    return;
+  }
+
+  const sourceAnalysis = currentAnalysis;
+  const videoId = currentVideoId;
+  const generation = digestGeneration;
+  const sourceLanguage = normalizeLanguageCode(sourceAnalysis.sourceLanguage);
+  const sourcePrimaryLanguage = sourceLanguage.split("-")[0];
+  if (
+    !sourceLanguage ||
+    ["und", "mul", "zxx"].includes(sourcePrimaryLanguage)
+  ) {
+    setOverviewTranslationStatus(
+      "无法确认原字幕语言，已保留中文概览。",
+      true,
+    );
+    return;
+  }
+  let appliedAnalysis = null;
+  const ownsRequest = () =>
+    isCurrentDigest(videoId, generation) &&
+    (currentAnalysis === sourceAnalysis || currentAnalysis === appliedAnalysis);
+  setOverviewTranslationLoading(true);
+  setOverviewTranslationStatus("正在生成原文概览…");
+
+  try {
+    const result = await chrome.runtime.sendMessage({
+      action: "translateOverviewOriginal",
+      analysis: sourceAnalysis,
+      videoTitle: currentVideoTitle,
+      targetLanguage: sourceLanguage,
+    });
+    if (!ownsRequest()) return;
+    if (!result) {
+      throw new Error("扩展后台未响应原文翻译请求，请重新加载扩展。");
+    }
+    if (!result?.success) {
+      throw new Error(result?.error || "原文概览生成失败");
+    }
+
+    const translatedById = new Map(
+      (result.originalOverview?.chapters || []).map((chapter) => [
+        chapter.id,
+        chapter,
+      ]),
+    );
+    const merged = {
+      ...sourceAnalysis,
+      chapters: sourceAnalysis.chapters.map((chapter, index) => ({
+        ...chapter,
+        titleOriginal:
+          translatedById.get(`chapter-${index}`)?.titleOriginal || "",
+        summaryOriginal:
+          translatedById.get(`chapter-${index}`)?.summaryOriginal || "",
+      })),
+    };
+    if (!hasCompleteOriginalAnalysis(merged)) {
+      throw new Error("原文概览返回不完整，请重试。");
+    }
+
+    appliedAnalysis = merged;
+    currentAnalysis = merged;
+    setOverviewTranslationStatus();
+    renderAnalysisResults(currentAnalysis);
+    await saveToCache(videoId);
+  } catch (error) {
+    if (!ownsRequest()) return;
+    setOverviewTranslationStatus(
+      `原文概览生成失败，已保留中文内容。${error.message || "请稍后重试。"}`,
+      true,
+    );
+  } finally {
+    if (ownsRequest()) setOverviewTranslationLoading(false);
+  }
+}
+
 function renderAnalysisResults(analysis) {
+  if (!hasUsableChineseAnalysis(analysis)) return;
+  setOverviewModeButtons(currentOverviewMode);
+
   // Chapters
   const chapterList = document.getElementById("chapterList");
   chapterList.innerHTML = "";
@@ -671,13 +1383,12 @@ function renderAnalysisResults(analysis) {
     li.innerHTML = `
       <span class="chapter-timestamp">${escapeHtml(chapter.timestamp)}</span>
       <div class="chapter-content">
-        <span class="chapter-title">${escapeHtml(chapter.title)}</span>
-        <span class="chapter-summary">${escapeHtml(chapter.summary || "")}</span>
+        ${renderChapterLanguageContent(chapter, currentOverviewMode, analysis.sourceLanguage)}
       </div>
     `;
     li.addEventListener("click", () => {
       debugLog(
-        "[YouTube Digest Panel] Chapter clicked:",
+        "[DigestDock Panel] Chapter clicked:",
         chapter.timestamp,
         chapter.timestampSeconds,
       );
@@ -696,19 +1407,24 @@ function renderAnalysisResults(analysis) {
     const div = document.createElement("div");
     div.className = "quote-item";
     div.dataset.seconds = quote.timestampSeconds;
+    const quoteCopyText = overviewQuoteCopyText(
+      quote,
+      currentOverviewMode,
+      analysis.sourceLanguage,
+    );
     div.innerHTML = `
-      <div class="quote-text">${escapeHtml(quote.quote)}</div>
+      <div class="quote-text">${renderQuoteLanguageContent(quote, currentOverviewMode, analysis.sourceLanguage)}</div>
       <div class="quote-meta">
         <span class="quote-timestamp">${escapeHtml(quote.timestamp)}</span>
         <div class="quote-actions">
-          <button class="quote-save-note-btn" title="Save this quote as a note">📝 Note</button>
-          <button class="quote-copy-btn" title="Copy this quote">⧉ Copy</button>
+          <button class="quote-save-note-btn" title="把这条语句保存为笔记">📝 笔记</button>
+          <button class="quote-copy-btn" title="复制这条语句">⧉ 复制</button>
         </div>
       </div>
     `;
     div.addEventListener("click", () => {
       debugLog(
-        "[YouTube Digest Panel] Quote clicked:",
+        "[DigestDock Panel] Quote clicked:",
         quote.timestamp,
         quote.timestampSeconds,
       );
@@ -719,10 +1435,10 @@ function renderAnalysisResults(analysis) {
     quoteCopyBtn.addEventListener("click", async (e) => {
       e.stopPropagation();
       try {
-        await navigator.clipboard.writeText(quote.quote);
-        quoteCopyBtn.textContent = "✓ Copied";
+        await navigator.clipboard.writeText(quoteCopyText);
+        quoteCopyBtn.textContent = "✓ 已复制";
         setTimeout(() => {
-          quoteCopyBtn.textContent = "⧉ Copy";
+          quoteCopyBtn.textContent = "⧉ 复制";
         }, 1500);
       } catch (err) {
         console.error("Copy failed:", err);
@@ -746,37 +1462,39 @@ async function saveQuoteAsNote(quote, btn) {
   if (!currentVideoId) return;
 
   const originalText = btn.textContent;
-  btn.textContent = "Saving...";
+  btn.textContent = "正在保存…";
   btn.disabled = true;
 
   try {
     const result = await chrome.runtime.sendMessage({
       action: "saveNote",
       videoId: currentVideoId,
+      mediaRef: currentMediaRef,
+      videoUrl: currentMediaRef?.canonicalUrl || currentVideoUrl,
       timestamp: quote.timestampSeconds,
       videoTitle: currentVideoTitle,
       channelName: currentChannelName,
     });
 
     if (result.success) {
-      btn.textContent = "✓ Saved";
+      btn.textContent = "✓ 已保存";
       setTimeout(() => {
         btn.textContent = originalText;
         btn.disabled = false;
       }, 1500);
-      // Refresh notes list if on Notes tab
-      loadNotes(currentVideoId);
+      // The background noteSaved broadcast owns the Notes refresh. Calling
+      // loadNotes here as well can start two translation jobs for one save.
     } else {
-      console.error("[YouTube Digest] Save quote as note failed:", result.error);
-      btn.textContent = "Error";
+      console.error("[DigestDock] Save quote as note failed:", result.error);
+      btn.textContent = "出错了";
       setTimeout(() => {
         btn.textContent = originalText;
         btn.disabled = false;
       }, 1500);
     }
   } catch (error) {
-    console.error("[YouTube Digest] Save quote as note error:", error);
-    btn.textContent = "Error";
+    console.error("[DigestDock] Save quote as note error:", error);
+    btn.textContent = "出错了";
     setTimeout(() => {
       btn.textContent = originalText;
       btn.disabled = false;
@@ -839,7 +1557,7 @@ function renderTranscript() {
   const badge = document.createElement("div");
   badge.id = "transcriptSourceBadge";
   badge.className = "transcript-source-badge";
-  badge.innerHTML = `<span class="source-dot source-dot--subs"></span> From video subtitles · ${escapeHtml(getOriginalTranscriptLabel())}`;
+  badge.innerHTML = `<span class="source-dot source-dot--subs"></span> 来自视频字幕 · ${escapeHtml(getOriginalTranscriptLabel())}`;
   transcriptList.parentElement.insertBefore(badge, transcriptList);
 
   // Group entries using smart sentence-boundary + time-guardrail logic
@@ -865,6 +1583,10 @@ function renderTranscript() {
     transcriptList.appendChild(div);
   });
 
+  // Keep the Chinese / bilingual buttons disabled for confirmed Simplified
+  // sources and re-enabled for every other (incl. Traditional) video.
+  updateTranscriptModeAvailability();
+
   // Start tracking video playback for auto-scroll
   startPlaybackTracking();
 }
@@ -875,24 +1597,25 @@ function copyTranscript() {
 
 function exportTranscript() {
   const transcriptContent = currentTranscriptText || "";
-  const videoUrl = `https://youtube.com/watch?v=${currentVideoId}`;
+  const videoUrl =
+    currentMediaRef?.canonicalUrl || currentVideoUrl || "";
 
   let exportText = "";
-  exportText += `TRANSCRIPT\n`;
+  exportText += `字幕\n`;
   exportText += `${"=".repeat(60)}\n\n`;
-  exportText += `Title: ${currentVideoTitle || "Unknown"}\n`;
-  exportText += `Channel: ${currentChannelName || "Unknown"}\n`;
-  exportText += `URL: ${videoUrl}\n`;
+  exportText += `标题：${currentVideoTitle || "未知"}\n`;
+  exportText += `频道：${currentChannelName || "未知"}\n`;
+  exportText += `网址：${videoUrl}\n`;
   exportText += `\n${"—".repeat(60)}\n\n`;
 
   if (currentVideoDescription) {
-    exportText += `DESCRIPTION:\n${currentVideoDescription}\n`;
+    exportText += `视频简介：\n${currentVideoDescription}\n`;
     exportText += `\n${"—".repeat(60)}\n\n`;
   }
 
-  exportText += `TRANSCRIPT:\n\n${transcriptContent}\n`;
+  exportText += `字幕：\n\n${transcriptContent}\n`;
   exportText += `\n${"—".repeat(60)}\n`;
-  exportText += `Exported by YouTube Digest\n`;
+  exportText += `由 DigestDock 导出\n`;
 
   const filename = `${sanitizeFilename(currentVideoTitle)}-transcript.txt`;
   downloadTextFile(exportText, filename);
@@ -920,6 +1643,7 @@ function showState(state) {
   // which is why the tabs could vanish when re-opening an already-analyzed video.
   document.getElementById("tabsNav").style.display =
     state === "results" ? "flex" : "none";
+  updateHeaderLanguageControlsVisibility();
 
   if (state !== "results") {
     stopPlaybackTracking();
@@ -936,20 +1660,43 @@ function showError(title, message) {
   showState("error");
   document.getElementById("errorTitle").textContent = title;
   document.getElementById("errorMessage").textContent = message;
-  document.getElementById("errorBtn").textContent = "Try Again";
+  document.getElementById("errorBtn").textContent = "重试";
 }
 
-function showConfigError(configStatus) {
+function showPageRefreshRequired(tabId, message) {
+  showError(
+    "请刷新 YouTube 页面",
+    message || "DigestDock 已更新，请刷新当前 YouTube 页面后重试。",
+  );
+  document.getElementById("errorBtn").textContent = "刷新页面";
+  errorAction = () => {
+    if (Number.isInteger(tabId)) return chrome.tabs.reload(tabId);
+    return window.location.reload();
+  };
+}
+
+function showConfigError(configStatus, requiresSupadata = true) {
   const missingKeys = [];
-  if (!configStatus.hasSupadataKey) missingKeys.push("Supadata");
-  if (!configStatus.hasAiKey) missingKeys.push("AI provider");
+  if (requiresSupadata && !configStatus.hasSupadataKey) {
+    missingKeys.push("Supadata");
+  }
+  if (!configStatus.hasAiKey) missingKeys.push("DeepSeek");
 
   showState("error");
-  document.getElementById("errorTitle").textContent = "API Keys Missing";
+  document.getElementById("errorTitle").textContent = "缺少 API 密钥";
   document.getElementById("errorMessage").textContent =
-    `Add your ${missingKeys.join(" and ")} API key${missingKeys.length === 1 ? "" : "s"} in YouTube Digest Settings.`;
-  document.getElementById("errorBtn").textContent = "Open Settings";
+    `请在 DigestDock 设置中添加 ${missingKeys.join(" 和 ")} API 密钥。`;
+  document.getElementById("errorBtn").textContent = "打开设置";
   errorAction = () => chrome.runtime.sendMessage({ action: "openOptions" });
+}
+
+function showRuntimeVersionError() {
+  showState("error");
+  document.getElementById("errorTitle").textContent = "扩展需要重新加载";
+  document.getElementById("errorMessage").textContent =
+    "侧边栏与后台版本不一致。请在 chrome://extensions 中重新加载 DigestDock，然后关闭并重新打开侧边栏。";
+  document.getElementById("errorBtn").textContent = "重新检测";
+  errorAction = () => window.location.reload();
 }
 
 // ============================================================
@@ -964,6 +1711,7 @@ function switchTab(tabName) {
   document.querySelectorAll(".tab-panel").forEach((panel) => {
     panel.classList.toggle("active", panel.dataset.panel === tabName);
   });
+  updateHeaderLanguageControlsVisibility();
 
   // Start/stop playback tracking based on which tab is active
   if (tabName === "transcript") {
@@ -973,8 +1721,8 @@ function switchTab(tabName) {
   }
 
   // Lazy-load LLM analysis when user switches to Overview tab
-  if (tabName === "overview" && !currentAnalysis && !isAnalysisLoading) {
-    triggerAnalysis();
+  if (tabName === "overview") {
+    refreshOverviewForCurrentVideoIfVisible();
   }
 }
 
@@ -986,6 +1734,21 @@ async function triggerAnalysis() {
   if (!currentTranscriptTimestamped || isAnalysisLoading || currentAnalysis)
     return;
 
+  const videoId = currentVideoId;
+  const generation = digestGeneration;
+  const routeKey = currentRouteKey;
+  const mediaRef = currentMediaRef;
+  const transcriptTimestamped = currentTranscriptTimestamped;
+  const sourceLanguage = currentTranscriptLanguage;
+  const videoTitle = currentVideoTitle;
+  const channelName = currentChannelName;
+  const videoDescription = currentVideoDescription;
+  const videoDuration = currentVideoDuration;
+  const ownsRequest = () =>
+    isCurrentDigest(videoId, generation, routeKey) &&
+    currentMediaRef?.mediaKey === mediaRef?.mediaKey &&
+    currentTranscriptTimestamped === transcriptTimestamped;
+
   isAnalysisLoading = true;
 
   // Show loading indicators in the Overview tab
@@ -994,41 +1757,60 @@ async function triggerAnalysis() {
 
   if (chapterList)
     chapterList.innerHTML =
-      '<li class="chapter-item" style="color: var(--text-muted); border: none;">Loading chapters...</li>';
+      '<li class="chapter-item" style="color: var(--text-muted); border: none;">正在生成章节…</li>';
   if (quotesList)
     quotesList.innerHTML =
-      '<div class="quote-item" style="color: var(--text-muted); border-left-color: var(--border);">Loading quotes...</div>';
+      '<div class="quote-item" style="color: var(--text-muted); border-left-color: var(--border);">正在提取关键语句…</div>';
 
   try {
     const analysisResult = await chrome.runtime.sendMessage({
       action: "analyzeTranscript",
-      transcriptText: currentTranscriptTimestamped,
-      videoTitle: currentVideoTitle,
-      channelName: currentChannelName,
-      videoDescription: currentVideoDescription,
-      videoDuration: currentVideoDuration,
+      transcriptText: transcriptTimestamped,
+      videoTitle,
+      channelName,
+      videoDescription,
+      videoDuration,
+      platform: mediaRef?.platform || "youtube",
+      sourceLanguage: sourceLanguage || "",
     });
+    if (!ownsRequest()) return;
 
     if (!analysisResult.success) {
-      if (chapterList)
-        chapterList.innerHTML = `<li class="chapter-item" style="color: var(--accent); border: none;">Analysis failed: ${escapeHtml(analysisResult.error || "Unknown error")}</li>`;
-      isAnalysisLoading = false;
+      const message = escapeHtml(
+        analysisResult.message || analysisResult.error || "未知错误",
+      );
+      if (chapterList) {
+        chapterList.innerHTML = `<li class="chapter-item" style="color: var(--accent); border: none;">分析失败：${message}</li>`;
+      }
+      if (quotesList) {
+        quotesList.innerHTML = `<div class="quote-item" style="color: var(--accent); border-left-color: var(--border);">关键语句生成失败：${message}</div>`;
+      }
       return;
     }
 
+    if (!hasUsableChineseAnalysis(analysisResult.analysis)) {
+      throw new Error("概览没有返回可用的中文内容，请重试。");
+    }
     currentAnalysis = analysisResult.analysis;
     renderAnalysisResults(currentAnalysis);
     highlightMomentsOnPage(currentAnalysis.keyMoments);
 
     // Save to cache now that we have analysis
-    await saveToCache(currentVideoId);
+    await saveToCache(videoId);
+    if (!ownsRequest()) return;
+    if (currentOverviewMode !== "zh") void ensureOverviewOriginal();
   } catch (error) {
-    console.error("[YouTube Digest Panel] Analysis error:", error);
-    if (chapterList)
-      chapterList.innerHTML = `<li class="chapter-item" style="color: var(--accent); border: none;">Error: ${escapeHtml(error.message)}</li>`;
+    if (!ownsRequest()) return;
+    console.error("[DigestDock Panel] Analysis error:", error);
+    if (chapterList) {
+      chapterList.innerHTML = `<li class="chapter-item" style="color: var(--accent); border: none;">出错了：${escapeHtml(error.message)}</li>`;
+    }
+    if (quotesList) {
+      quotesList.innerHTML = `<div class="quote-item" style="color: var(--accent); border-left-color: var(--border);">出错了：${escapeHtml(error.message)}</div>`;
+    }
+  } finally {
+    if (ownsRequest()) isAnalysisLoading = false;
   }
-
-  isAnalysisLoading = false;
 }
 
 // ============================================================
@@ -1036,9 +1818,9 @@ async function triggerAnalysis() {
 // ============================================================
 
 async function seekTo(seconds) {
-  debugLog("[YouTube Digest Panel] seekTo called with:", seconds);
+  debugLog("[DigestDock Panel] seekTo called with:", seconds);
   if (seconds === undefined || seconds === null) {
-    debugLog("[YouTube Digest Panel] seekTo aborted - no seconds value");
+    debugLog("[DigestDock Panel] seekTo aborted - no seconds value");
     return;
   }
 
@@ -1048,15 +1830,15 @@ async function seekTo(seconds) {
   };
 
   try {
-    // Try direct messaging to the stored YouTube tab first (fastest/reliable)
-    if (youtubeTabId) {
+    // Try direct messaging to the stored supported-video tab first.
+    if (videoTabId) {
       try {
-        await chrome.tabs.sendMessage(youtubeTabId, payload);
-        debugLog("[YouTube Digest Panel] seekTo direct success");
+        await chrome.tabs.sendMessage(videoTabId, payload);
+        debugLog("[DigestDock Panel] seekTo direct success");
         return;
       } catch (directErr) {
         debugLog(
-          "[YouTube Digest Panel] Direct seekTo failed, falling back to relay:",
+          "[DigestDock Panel] Direct seekTo failed, falling back to relay:",
           directErr.message,
         );
       }
@@ -1065,11 +1847,12 @@ async function seekTo(seconds) {
     // Fallback: route through background script
     const result = await chrome.runtime.sendMessage({
       action: "relayToContent",
+      tabId: videoTabId,
       payload,
     });
-    debugLog("[YouTube Digest Panel] seekTo relay result:", result);
+    debugLog("[DigestDock Panel] seekTo relay result:", result);
   } catch (error) {
-    console.error("[YouTube Digest Panel] seekTo error:", error);
+    console.error("[DigestDock Panel] seekTo error:", error);
   }
 }
 
@@ -1081,7 +1864,8 @@ async function seekTo(seconds) {
  *   new tab at the right timestamp instead.
  */
 function playNote(note) {
-  if (note.videoId && note.videoId === currentVideoId) {
+  const noteMediaKey = note?.mediaKey || note?.videoId;
+  if (noteMediaKey && noteMediaKey === currentVideoId) {
     seekTo(note.timestampSeconds);
   } else {
     // note.timestampedUrl already includes the &t=<seconds>s anchor
@@ -1096,6 +1880,7 @@ async function highlightMomentsOnPage(moments) {
     // Route through background script for reliable message passing
     await chrome.runtime.sendMessage({
       action: "relayToContent",
+      tabId: videoTabId,
       payload: {
         action: "highlightMoments",
         moments: moments,
@@ -1146,7 +1931,7 @@ async function copyToClipboardWithFeedback(text, buttonId) {
 
   const success = await copyToClipboard(text);
   if (success) {
-    btn.textContent = "✓ Copied";
+    btn.textContent = "✓ 已复制";
     setTimeout(() => {
       btn.textContent = original;
     }, 2000);
@@ -1164,7 +1949,7 @@ function downloadTextFile(text, filename) {
 }
 
 function sanitizeFilename(str) {
-  return (str || "untitled")
+  return (str || "未命名")
     .replace(/[^\w\s-]/g, "")
     .replace(/\s+/g, "-")
     .substring(0, 50)
@@ -1191,7 +1976,7 @@ function setupExplainFeature() {
   const tooltip = document.createElement("div");
   tooltip.id = "explainTooltip";
   tooltip.className = "explain-tooltip";
-  tooltip.innerHTML = `<button class="explain-btn">💡 Explain</button>`;
+  tooltip.innerHTML = `<button class="explain-btn">💡 解释</button>`;
   tooltip.style.display = "none";
   document.body.appendChild(tooltip);
 
@@ -1265,14 +2050,14 @@ async function showExplanation(selectedText) {
   modal.innerHTML = `
     <div class="explain-modal">
       <div class="explain-modal-header">
-        <div class="explain-modal-title">Explain</div>
-        <button class="explain-modal-close" id="closeExplain">✕</button>
+        <div class="explain-modal-title">内容解释</div>
+        <button class="explain-modal-close" id="closeExplain" aria-label="关闭解释">✕</button>
       </div>
       <div class="explain-selected-text">"${escapeHtml(selectedText.substring(0, 200))}${selectedText.length > 200 ? "..." : ""}"</div>
       <div class="explain-modal-content" id="explanationContent">
         <div class="explain-loading">
           <div class="loading-bar"></div>
-          <span>Analyzing...</span>
+          <span>正在分析…</span>
         </div>
       </div>
     </div>
@@ -1304,11 +2089,11 @@ async function showExplanation(selectedText) {
     if (result.success) {
       contentDiv.innerHTML = `<div class="explain-text">${escapeHtml(result.explanation).replace(/\n\n/g, "</p><p>").replace(/\n/g, "<br>")}</div>`;
     } else {
-      contentDiv.innerHTML = `<div class="explain-error">Failed to get explanation: ${escapeHtml(result.error)}</div>`;
+      contentDiv.innerHTML = `<div class="explain-error">无法获取解释：${escapeHtml(result.message || result.error)}</div>`;
     }
   } catch (error) {
     const contentDiv = document.getElementById("explanationContent");
-    contentDiv.innerHTML = `<div class="explain-error">Error: ${escapeHtml(error.message)}</div>`;
+    contentDiv.innerHTML = `<div class="explain-error">出错了：${escapeHtml(error.message)}</div>`;
   }
 }
 
@@ -1339,26 +2124,32 @@ function getTranscriptContext(selectedText) {
  * Cache expires after 30 days. Oldest entries evicted when > 20 videos cached.
  */
 async function saveToCache(videoId) {
-  if (!videoId || !currentTranscript) return;
+  if (!videoId || videoId !== currentVideoId || !currentTranscript) return;
 
   try {
     // Persist semantic-segment translations for this video.
     const paragraphCacheForVideo = {};
+    const cachePrefix = transcriptTranslationCachePrefix(videoId);
     for (const [key, value] of transcriptParagraphCache.entries()) {
-      if (key.startsWith(`${videoId}:`)) {
+      if (key.startsWith(cachePrefix)) {
         paragraphCacheForVideo[key] = value;
       }
     }
 
     const cacheData = {
       analysis: currentAnalysis, // May be null if not yet analyzed
+      analysisVideoId: currentAnalysis ? videoId : null,
       transcript: currentTranscript,
       transcriptText: currentTranscriptText,
       transcriptTimestamped: currentTranscriptTimestamped,
       transcriptLanguage: currentTranscriptLanguage,
+      mediaRef: currentMediaRef,
+      routeKey: currentRouteKey,
       videoTitle: currentVideoTitle,
       channelName: currentChannelName,
       paragraphCache: paragraphCacheForVideo,
+      transcriptSourcePolicyVersion: TRANSCRIPT_SOURCE_POLICY_VERSION,
+      transcriptRequestedLanguage: currentVideoSourceLanguage || null,
       timestamp: Date.now(),
     };
 
@@ -1411,7 +2202,7 @@ async function evictOldCacheEntries(maxEntries) {
       .map((e) => e.key);
     if (toRemove.length > 0) {
       await chrome.storage.local.remove(toRemove);
-      debugLog(`[YouTube Digest] Evicted ${toRemove.length} old cache entries`);
+      debugLog(`[DigestDock] Evicted ${toRemove.length} old cache entries`);
     }
   } catch (error) {
     console.error("Cache eviction error:", error);
@@ -1430,6 +2221,11 @@ async function loadFromCache(videoId) {
     const cached = result[`digest_${videoId}`];
 
     if (!cached) return null;
+    if (
+      cached.transcriptSourcePolicyVersion !== TRANSCRIPT_SOURCE_POLICY_VERSION
+    ) {
+      return null;
+    }
 
     // Cache expires after 30 days
     const THIRTY_DAYS = 30 * 24 * 60 * 60 * 1000;
@@ -1458,22 +2254,412 @@ async function updateCache() {
 // NOTES
 // ============================================================
 
+function setNotesModeButtons(mode) {
+  document.querySelectorAll(".notes-mode-btn").forEach((button) => {
+    const active = button.dataset.notesMode === mode;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  });
+}
+
+function stripQuotedNonChineseScripts(text) {
+  return String(text || "").replace(
+    /《[^》]*》|「[^」]*」|『[^』]*』|“[^”]*”|"[^"]*"/g,
+    (quoted) =>
+      /[\u3040-\u30ff\uac00-\ud7af]/.test(quoted) ? "" : quoted,
+  );
+}
+
+function noteHasChineseSource(note) {
+  if (isChineseLanguage(note?.textLanguage)) {
+    return note?.platform === "bilibili"
+      ? isConfirmedSimplifiedChineseSource(note.textLanguage)
+      : true;
+  }
+  const language = String(note?.sourceLanguage || "").trim();
+  const rawText = String(note?.rawText || "");
+  const primary = normalizeLanguageCode(language).split("-")[0];
+  if (primary && !["und", "mul", "zxx"].includes(primary)) {
+    if (note?.platform === "bilibili" && isChineseLanguage(language)) {
+      return isConfirmedSimplifiedChineseSource(language);
+    }
+    return isChineseLanguage(language);
+  }
+  const heuristicText = stripQuotedNonChineseScripts(rawText);
+  const cjkCount = (heuristicText.match(/[\u3400-\u9fff]/g) || []).length;
+  const latinCount = (heuristicText.match(/[A-Za-z]/g) || []).length;
+  return (
+    !/[\u3040-\u30ff\uac00-\ud7af]/.test(heuristicText) &&
+    cjkCount >= 1 &&
+    cjkCount * 2 >= latinCount
+  );
+}
+
+function noteHasPolishedChineseText(note) {
+  return Boolean(
+    isConfirmedSimplifiedChineseSource(note?.textLanguage) &&
+    typeof note?.text === "string" &&
+    note.text.trim()
+  );
+}
+
+function noteOriginalText(note) {
+  if (noteHasPolishedChineseText(note)) {
+    return note.text.trim();
+  }
+  if (noteHasChineseSource(note)) {
+    return String(note?.rawText || note?.text || "").trim();
+  }
+  return String(note?.text || note?.rawText || "").trim();
+}
+
+function canonicalStoredNoteText(text) {
+  return String(text || "").normalize("NFKC").trim().replace(/\s+/g, " ");
+}
+
+function looksLikeLegacyChineseNote(text) {
+  const value = stripQuotedNonChineseScripts(text);
+  if (/[\u3040-\u30ff\uac00-\ud7af]/.test(value)) return false;
+  const cjkCount = (value.match(/[\u3400-\u9fff]/g) || []).length;
+  const latinCount = (value.match(/[A-Za-z]/g) || []).length;
+  return cjkCount >= 1 && (latinCount === 0 || cjkCount * 2 >= latinCount);
+}
+
+function noteChineseText(note) {
+  if (noteHasPolishedChineseText(note)) return note.text.trim();
+  if (noteHasChineseSource(note)) return noteOriginalText(note);
+  const translated = String(note?.translatedText || "").trim();
+  if (!translated) return "";
+  if (
+    note?.translatedValidated === true &&
+    note?.translatedValidationVersion === NOTE_TRANSLATION_VALIDATION_VERSION
+  ) {
+    if (note?.translatedUnchanged === true) {
+      return canonicalStoredNoteText(translated) ===
+        canonicalStoredNoteText(noteOriginalText(note))
+        ? translated
+        : "";
+    }
+    return translated;
+  }
+  return looksLikeLegacyChineseNote(translated) ? translated : "";
+}
+
+function renderNoteLanguageContent(note, mode = currentNotesMode) {
+  const original = noteOriginalText(note);
+  const chinese = noteChineseText(note);
+  const renderBlock = (language, text) => {
+    const contentLanguage =
+      language === "zh" ||
+      (language === "original" && noteHasChineseSource(note))
+        ? "zh-CN"
+        : "en";
+    return `<span class="note-language-block note-language-block--${language}" lang="${contentLanguage}">“${escapeHtml(text)}”</span>`;
+  };
+
+  if (mode === "original") return renderBlock("original", original);
+  if (mode === "zh") {
+    return chinese
+      ? renderBlock("zh", chinese)
+      : renderBlock("original", original);
+  }
+  if (chinese && chinese === original) return renderBlock("zh", chinese);
+  return chinese
+    ? renderBlock("original", original) + renderBlock("zh", chinese)
+    : renderBlock("original", original);
+}
+
+function noteCopyTextForMode(note, mode = currentNotesMode) {
+  const original = noteOriginalText(note);
+  const chinese = noteChineseText(note);
+  if (mode === "original") return original;
+  if (mode === "zh") return chinese || original;
+  if (chinese && chinese === original) return original;
+  return [original, chinese].filter(Boolean).join("\n");
+}
+
+function setNotesTranslationStatus(message = "", isError = false) {
+  const status = document.getElementById("notesLanguageStatus");
+  if (!status) return;
+  status.textContent = message;
+  status.classList.toggle("error", isError);
+  status.hidden = !message;
+}
+
+function setNotesTranslationLoading(show) {
+  isNotesTranslationLoading = show;
+  document
+    .getElementById("notesLangSpinner")
+    ?.classList.toggle("visible", show);
+}
+
+function summarizeNoteTranslationFailures(failures = []) {
+  const codes = new Set(
+    failures
+      .map((failure) => String(failure?.code || ""))
+      .filter(Boolean),
+  );
+  if (codes.has("RATE_LIMITED")) {
+    return "DeepSeek 请求受限，请稍后再次点击当前语言重试。";
+  }
+  if (codes.has("PROVIDER_TIMEOUT")) {
+    return "DeepSeek 请求超时，请再次点击当前语言重试。";
+  }
+  if (codes.has("NOTE_JOB_TIMEOUT")) {
+    return "笔记翻译任务等待超时，请再次点击当前语言重试。";
+  }
+  if (codes.has("PROVIDER_ERROR")) {
+    return "DeepSeek 请求失败，请检查网络或稍后再次点击当前语言重试。";
+  }
+  if (codes.has("OUTPUT_TRUNCATED")) {
+    return "DeepSeek 输出被截断，请再次点击当前语言重试。";
+  }
+  if (codes.has("CONTENT_FILTERED")) {
+    return "DeepSeek 未返回这条内容，已保留原文。";
+  }
+  if (codes.has("PROVIDER_UNAVAILABLE")) {
+    return "DeepSeek 暂时不可用，请稍后再次点击当前语言重试。";
+  }
+  if (codes.has("UNEXPECTED_FINISH_REASON")) {
+    return "DeepSeek 未正常完成响应，请再次点击当前语言重试。";
+  }
+  if (codes.has("RETRY_BUDGET_EXHAUSTED")) {
+    return "本轮重试次数已达上限，请再次点击当前语言继续。";
+  }
+  if (codes.has("EMPTY_RESPONSE")) {
+    return "DeepSeek 返回了空内容，请再次点击当前语言重试。";
+  }
+  if (codes.has("INVALID_JSON")) {
+    return "DeepSeek 返回格式无法解析，请再次点击当前语言重试。";
+  }
+  if (codes.has("MISSING_ITEM")) {
+    return "DeepSeek 返回结果漏掉了这条笔记，请再次点击当前语言重试。";
+  }
+  if (codes.has("MULTIPLE_CANDIDATES")) {
+    return "DeepSeek 返回了多个冲突结果，请再次点击当前语言重试。";
+  }
+  if (codes.has("INVALID_TRANSLATION")) {
+    return "返回内容仍主要为英文或含非中文脚本，已保留原文。";
+  }
+  if (codes.size) {
+    return "模型未返回有效中文，请再次点击当前语言重试。";
+  }
+  return "再次点击当前的中文或双语即可重试。";
+}
+
+async function ensureNotesChinese() {
+  if (
+    currentNotesMode === "original" ||
+    isNotesLoading ||
+    isNotesTranslationLoading
+  ) {
+    return;
+  }
+  const missingNotes = currentNotes
+    .map((note, index) => ({ note, index }))
+    .filter(
+      ({ note }) => noteOriginalText(note) && !noteChineseText(note),
+    )
+    .sort(
+      (left, right) =>
+        (noteTranslationAttemptCountById.get(left.note.id) || 0) -
+          (noteTranslationAttemptCountById.get(right.note.id) || 0) ||
+        left.index - right.index,
+    )
+    .map(({ note }) => note);
+  if (!missingNotes.length) {
+    setNotesTranslationStatus();
+    return;
+  }
+
+  const generation = ++notesTranslationGeneration;
+  const failureById = new Map();
+  setNotesTranslationLoading(true);
+  setNotesTranslationStatus(`正在生成 ${missingNotes.length} 条中文笔记…`);
+  try {
+    for (let index = 0; index < missingNotes.length; index += 10) {
+      const batch = missingNotes.slice(index, index + 10);
+      const result = await sendTranslationMessage({
+        action: "translateNotes",
+        notes: batch.map((note) => ({
+          id: note.id,
+          text: noteOriginalText(note),
+          videoTitle: note.videoTitle || "",
+          rawText: note.rawText || "",
+          sourceLanguage: note.sourceLanguage || "",
+          platform: note.platform === "bilibili" ? "bilibili" : "youtube",
+          textLanguage: note.textLanguage || "",
+        })),
+      });
+      if (generation !== notesTranslationGeneration) return;
+      const translatedById = new Map(
+        (result.translations || []).map((note) => [note.id, note]),
+      );
+      translatedById.forEach((_translation, id) => {
+        noteTranslationAttemptCountById.delete(id);
+      });
+      (result.failures || []).forEach((failure) => {
+        if (typeof failure?.id === "string" && failure.id) {
+          failureById.set(failure.id, failure);
+          if (
+            [
+              "EMPTY_RESPONSE",
+              "INVALID_JSON",
+              "MISSING_ITEM",
+              "MULTIPLE_CANDIDATES",
+              "ID_MISMATCH",
+              "INVALID_TRANSLATION",
+            ].includes(failure.code)
+          ) {
+            noteTranslationAttemptCountById.set(
+              failure.id,
+              (noteTranslationAttemptCountById.get(failure.id) || 0) + 1,
+            );
+          }
+        }
+      });
+      currentNotes = currentNotes.map((note) =>
+        translatedById.has(note.id)
+          ? {
+              ...note,
+              translatedText: translatedById.get(note.id).textZh,
+              translatedUnchanged:
+                translatedById.get(note.id).unchanged === true,
+              translatedValidated: true,
+              translatedValidationVersion:
+                NOTE_TRANSLATION_VALIDATION_VERSION,
+            }
+          : note,
+      );
+      renderNotes(currentNotes, currentNotesFilterVideoId);
+      if (!result?.success) {
+        if (!result?.failures?.length) {
+          throw new Error(result?.error || "中文笔记生成失败");
+        }
+        break;
+      }
+      if (
+        (result.failures || []).some((failure) =>
+          [
+            "RATE_LIMITED",
+            "PROVIDER_TIMEOUT",
+            "RETRY_BUDGET_EXHAUSTED",
+          ].includes(failure?.code),
+        )
+      ) {
+        break;
+      }
+      // One user action owns one bounded backend job (up to ten notes and five
+      // provider calls). Remaining notes continue only after an explicit
+      // retry, preventing large libraries from multiplying requests silently.
+      break;
+    }
+    const remainingNotes = currentNotes.filter(
+      (note) => noteOriginalText(note) && !noteChineseText(note),
+    );
+    if (remainingNotes.length) {
+      const remainingFailures = remainingNotes
+        .map((note) => failureById.get(note.id))
+        .filter(Boolean);
+      setNotesTranslationStatus(
+        `${remainingNotes.length} 条中文笔记仍未生成，已保留原文。${summarizeNoteTranslationFailures(remainingFailures)}`,
+        true,
+      );
+    } else {
+      setNotesTranslationStatus();
+    }
+  } catch (error) {
+    if (generation !== notesTranslationGeneration) return;
+    setNotesTranslationStatus(
+      `中文笔记生成失败，已保留原文。${error.message || "请稍后重试。"}`,
+      true,
+    );
+  } finally {
+    if (generation === notesTranslationGeneration) {
+      setNotesTranslationLoading(false);
+    }
+  }
+}
+
+function retryMissingNotesFromUser() {
+  if (
+    currentNotesMode === "original" ||
+    isNotesLoading ||
+    isNotesTranslationLoading ||
+    !currentNotes.some(
+      (note) => noteOriginalText(note) && !noteChineseText(note),
+    )
+  ) {
+    return;
+  }
+  const now = Date.now();
+  if (now - lastNotesManualRetryAt < NOTES_MANUAL_RETRY_DEBOUNCE_MS) return;
+  lastNotesManualRetryAt = now;
+  void ensureNotesChinese();
+}
+
+function handleNotesModeChange(mode) {
+  if (!["original", "zh", "bilingual"].includes(mode)) return;
+  if (mode === currentNotesMode) {
+    retryMissingNotesFromUser();
+    return;
+  }
+  currentNotesMode = mode;
+  setNotesModeButtons(mode);
+  renderNotes(currentNotes, currentNotesFilterVideoId);
+  if (mode === "original") {
+    notesTranslationGeneration += 1;
+    setNotesTranslationLoading(false);
+    setNotesTranslationStatus();
+  } else {
+    lastNotesManualRetryAt = Date.now();
+    void ensureNotesChinese();
+  }
+}
+
 /**
  * Loads and renders notes from storage.
  * @param {string|null} videoId - Filter by video ID, or null for all notes
+ * @param {{translateMissing?: boolean}} options - Whether this refresh may
+ * generate missing Chinese note content. Storage-change refreshes stay local.
  */
-async function loadNotes(videoId) {
+async function loadNotes(videoId, { translateMissing = true } = {}) {
+  const loadGeneration = ++notesLoadGeneration;
+  const digestSnapshot = digestGeneration;
+  const previousShowAll = currentNotesFilterVideoId === null;
+  const ownsLoad = () =>
+    loadGeneration === notesLoadGeneration &&
+    (videoId === null ||
+      (digestSnapshot === digestGeneration && videoId === currentVideoId));
+  setNotesFilter(videoId === null);
+  notesTranslationGeneration += 1;
+  isNotesLoading = true;
+  setNotesTranslationLoading(false);
+  setNotesTranslationStatus();
   try {
     const result = await chrome.runtime.sendMessage({
       action: "getNotes",
       videoId: videoId,
     });
+    if (!ownsLoad()) return;
 
     if (result.success) {
-      renderNotes(result.notes, videoId);
+      currentNotes = Array.isArray(result.notes) ? result.notes : [];
+      currentNotesFilterVideoId = videoId;
+      isNotesLoading = false;
+      renderNotes(currentNotes, videoId);
+      if (translateMissing && currentNotesMode !== "original") {
+        void ensureNotesChinese();
+      }
+    } else {
+      setNotesFilter(previousShowAll);
     }
   } catch (error) {
-    console.error("[YouTube Digest Panel] Load notes error:", error);
+    if (!ownsLoad()) return;
+    setNotesFilter(previousShowAll);
+    console.error("[DigestDock Panel] Load notes error:", error);
+  } finally {
+    if (ownsLoad()) isNotesLoading = false;
   }
 }
 
@@ -1483,35 +2669,46 @@ async function loadNotes(videoId) {
 function renderNotes(notes, filteredVideoId) {
   const notesList = document.getElementById("notesList");
   const notesIntro = document.getElementById("notesIntro");
+  const languageStatus = document.getElementById("notesLanguageStatus");
 
   if (!notesList) return;
 
   notesList.innerHTML = "";
+  setNotesModeButtons(currentNotesMode);
 
   if (!notes || notes.length === 0) {
+    setNotesTranslationStatus();
     notesIntro.style.display = "block";
     notesIntro.textContent = filteredVideoId
-      ? "No notes for this video yet. Hover over the video and click 📝 Note to save."
-      : "No notes saved yet. Hover over a video and click 📝 Note to save.";
+      ? "当前视频还没有笔记。将鼠标移到视频上并点击“📝 笔记”即可保存。"
+      : "还没有保存任何笔记。将鼠标移到视频上并点击“📝 笔记”即可保存。";
     return;
   }
 
   notesIntro.style.display = "none";
+  if (languageStatus && !isNotesTranslationLoading) {
+    const missingCount =
+      currentNotesMode === "original"
+        ? 0
+        : notes.filter((note) => !noteChineseText(note)).length;
+    if (!missingCount) setNotesTranslationStatus();
+  }
 
   notes.forEach((note) => {
     const noteEl = document.createElement("div");
     noteEl.className = "note-item";
+    const noteCopyText = noteCopyTextForMode(note);
     noteEl.innerHTML = `
       <div class="note-header">
         <span class="note-timestamp" data-url="${escapeHtml(note.timestampedUrl)}" data-seconds="${Number(note.timestampSeconds) || 0}">${escapeHtml(note.timestamp)}</span>
         ${!filteredVideoId ? `<span class="note-video-title">${escapeHtml(note.videoTitle)}</span>` : ""}
-        <button class="note-delete" data-id="${escapeHtml(note.id)}" title="Delete note">✕</button>
+        <button class="note-delete" data-id="${escapeHtml(note.id)}" title="删除笔记" aria-label="删除笔记">✕</button>
       </div>
-      <div class="note-text">"${escapeHtml(note.text)}"</div>
+      <div class="note-text">${renderNoteLanguageContent(note)}</div>
       <div class="note-actions">
-        <button class="note-action-btn note-copy-text">⧉ Copy text</button>
-        <button class="note-action-btn note-copy-link" data-url="${escapeHtml(note.timestampedUrl)}">🔗 Copy timestamp</button>
-        <button class="note-action-btn note-play" data-seconds="${Number(note.timestampSeconds) || 0}">▶ Play</button>
+        <button class="note-action-btn note-copy-text">⧉ 复制文字</button>
+        <button class="note-action-btn note-copy-link" data-url="${escapeHtml(note.timestampedUrl)}">🔗 复制时间戳</button>
+        <button class="note-action-btn note-play" data-seconds="${Number(note.timestampSeconds) || 0}">▶ 播放</button>
       </div>
     `;
 
@@ -1534,11 +2731,11 @@ function renderNotes(notes, filteredVideoId) {
       .querySelector(".note-copy-text")
       .addEventListener("click", async () => {
         try {
-          await navigator.clipboard.writeText(note.text);
+          await navigator.clipboard.writeText(noteCopyText);
           const btn = noteEl.querySelector(".note-copy-text");
-          btn.textContent = "✓ Copied!";
+          btn.textContent = "✓ 已复制";
           setTimeout(() => {
-            btn.textContent = "⧉ Copy text";
+            btn.textContent = "⧉ 复制文字";
           }, 2000);
         } catch (err) {
           console.error("Copy failed:", err);
@@ -1552,9 +2749,9 @@ function renderNotes(notes, filteredVideoId) {
         try {
           await navigator.clipboard.writeText(note.timestampedUrl);
           const btn = noteEl.querySelector(".note-copy-link");
-          btn.textContent = "✓ Copied!";
+          btn.textContent = "✓ 已复制";
           setTimeout(() => {
-            btn.textContent = "🔗 Copy timestamp";
+            btn.textContent = "🔗 复制时间戳";
           }, 2000);
         } catch (err) {
           console.error("Copy failed:", err);
@@ -1580,7 +2777,7 @@ async function deleteNote(noteId) {
       noteId: noteId,
     });
   } catch (error) {
-    console.error("[YouTube Digest Panel] Delete note error:", error);
+    console.error("[DigestDock Panel] Delete note error:", error);
   }
 }
 
@@ -1643,6 +2840,7 @@ async function playbackTrackingTick() {
   try {
     const result = await chrome.runtime.sendMessage({
       action: "relayToContent",
+      tabId: videoTabId,
       payload: { action: "getCurrentTime" },
     });
 
@@ -1740,16 +2938,80 @@ function onContentAreaScroll() {
 function getOriginalTranscriptLabel() {
   const language = String(currentTranscriptLanguage || "").trim();
   return /^[A-Za-z0-9-]{1,20}$/.test(language)
-    ? `Original (${language})`
-    : "Original";
+    ? `原文（${language}）`
+    : "原文";
+}
+
+/**
+ * True only for a caption track we can positively identify as Simplified
+ * Chinese: a `zh` primary tag paired with an explicit Simplified script/region
+ * subtag (zh-Hans, zh-CN, zh-SG). A bare `zh` and every Traditional tag
+ * (zh-Hant, zh-TW, zh-HK, zh-MO) — plus other varieties like yue — stay
+ * translatable, so Traditional → Simplified conversion keeps working.
+ */
+function isConfirmedSimplifiedChineseSource(value) {
+  const normalized = normalizeLanguageCode(value);
+  if (!normalized) return false;
+  const [primary, ...subtags] = normalized.split("-");
+  if (primary !== "zh") return false;
+
+  // An explicit script is stronger evidence than a region. For example,
+  // zh-Hant-CN is still Traditional even though its region is CN.
+  if (subtags.includes("hant")) return false;
+  if (subtags.includes("hans")) return true;
+  return subtags.includes("cn") || subtags.includes("sg");
+}
+
+function currentVideoIsConfirmedSimplifiedChinese() {
+  return isConfirmedSimplifiedChineseSource(currentTranscriptLanguage);
+}
+
+/**
+ * Reflects whether Chinese / bilingual transcript translation applies to the
+ * current video. A confirmed Simplified-Chinese transcript is already in the
+ * target language, so those buttons are disabled (with an explanatory title)
+ * rather than issuing a redundant, billable translation.
+ */
+function updateTranscriptModeAvailability() {
+  const unavailable = currentVideoIsConfirmedSimplifiedChinese();
+  document.querySelectorAll(".transcript-mode-btn").forEach((button) => {
+    if (button.dataset.transcriptMode === "original") {
+      button.disabled = false;
+      button.removeAttribute("aria-disabled");
+      button.removeAttribute("title");
+      return;
+    }
+    button.disabled = unavailable;
+    if (unavailable) {
+      button.setAttribute("aria-disabled", "true");
+      button.setAttribute("title", "字幕已是简体中文，无需翻译。");
+    } else {
+      button.removeAttribute("aria-disabled");
+      button.removeAttribute("title");
+    }
+  });
 }
 
 function getActiveTranscriptSegments() {
   return groupTranscriptEntries(currentTranscript || []);
 }
 
-function transcriptTranslationCacheKey(segment) {
-  return `${currentVideoId}:zh:semantic:${segment.id}`;
+function transcriptTranslationCachePrefix(videoId) {
+  return `${videoId}:zh:semantic:v${TRANSCRIPT_TRANSLATION_CACHE_VERSION}:`;
+}
+
+function transcriptTextFingerprint(text) {
+  const normalized = normalizeCaptionText(text);
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < normalized.length; index += 1) {
+    hash ^= normalized.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return `${normalized.length}:${(hash >>> 0).toString(36)}`;
+}
+
+function transcriptTranslationCacheKey(videoId, segment) {
+  return `${transcriptTranslationCachePrefix(videoId)}${segment.id}:${transcriptTextFingerprint(segment.text)}`;
 }
 
 function setTranscriptModeButtons(mode) {
@@ -1763,6 +3025,14 @@ function setTranscriptModeButtons(mode) {
 async function handleTranscriptModeChange(mode) {
   if (!["original", "zh", "bilingual"].includes(mode)) return;
   if (mode === currentTranscriptMode) return;
+
+  // A confirmed Simplified-Chinese transcript is already in the target
+  // language: never switch it into a Chinese or bilingual (duplicated) view or
+  // send it for translation. The controls are also disabled, but this guards
+  // the state directly in case a change is triggered another way.
+  if (mode !== "original" && currentVideoIsConfirmedSimplifiedChinese()) {
+    return;
+  }
 
   currentTranscriptMode = mode;
   translationGeneration += 1;
@@ -1786,9 +3056,9 @@ function renderTranscriptSegmentContent(segment, mode, translated, error) {
   if (translated) {
     translationHtml = renderSubtitleInlineMarkup(translated);
   } else if (error) {
-    translationHtml = `${escapeHtml(error)}<button class="translation-retry-btn" type="button">Retry</button>`;
+    translationHtml = `${escapeHtml(error)}<button class="translation-retry-btn" type="button">重试</button>`;
   } else {
-    translationHtml = "Waiting for translation…";
+    translationHtml = "等待翻译…";
   }
 
   if (mode === "bilingual") {
@@ -1812,15 +3082,15 @@ function renderTranscriptModeRows(segments, mode) {
   const modeLabel =
     mode === "bilingual"
       ? `${originalLabel} + 简体中文`
-      : `简体中文 · translated from ${originalLabel}`;
-  badge.innerHTML = `<span class="source-dot source-dot--subs"></span> From video subtitles · ${modeLabel}`;
+      : `简体中文 · 译自${originalLabel}`;
+  badge.innerHTML = `<span class="source-dot source-dot--subs"></span> 来自视频字幕 · ${modeLabel}`;
   transcriptList.parentElement.insertBefore(badge, transcriptList);
 
   const rows = [];
   segments.forEach((segment, index) => {
     const div = document.createElement("div");
     const cached = transcriptParagraphCache.get(
-      transcriptTranslationCacheKey(segment),
+      transcriptTranslationCacheKey(currentVideoId, segment),
     );
     div.className = `transcript-entry ${cached ? "translated" : "translating"}`;
     div.dataset.seconds = segment.start;
@@ -1865,7 +3135,7 @@ function alignTranslatedSegmentBatch(sourceSegments, responseSegments) {
   return sourceSegments.map((segment) => ({
     id: segment.id,
     text: translatedById.get(segment.id) || "",
-    error: translatedById.has(segment.id) ? "" : "Translation unavailable.",
+    error: translatedById.has(segment.id) ? "" : "暂时无法获得翻译。",
   }));
 }
 
@@ -1878,7 +3148,7 @@ function updateTranslatedRow(segment, index, alignedItem, generation) {
 
   if (alignedItem.text) {
     transcriptParagraphCache.set(
-      transcriptTranslationCacheKey(segment),
+      transcriptTranslationCacheKey(currentVideoId, segment),
       alignedItem.text,
     );
   }
@@ -1946,7 +3216,7 @@ async function requestTranscriptTranslationBatch(
     const aligned = alignTranslatedSegmentBatch(sourceBatch, responseSegments);
     aligned.forEach((item, batchIndex) => {
       if (!result?.success) {
-        item.error = result?.error || "Translation failed.";
+        item.error = result?.message || result?.error || "翻译失败。";
       }
       updateTranslatedRow(
         sourceBatch[batchIndex],
@@ -1962,7 +3232,7 @@ async function requestTranscriptTranslationBatch(
       updateTranslatedRow(
         segment,
         indices[batchIndex],
-        { id: segment.id, text: "", error: error.message || "Translation failed." },
+        { id: segment.id, text: "", error: error.message || "翻译失败。" },
         generation,
       );
     });
@@ -1982,7 +3252,7 @@ function retryTranslationSegment(index, generation) {
     const translation = row.querySelector(".transcript-translation");
     if (translation) {
       translation.className = "transcript-translation translation-pending";
-      translation.textContent = "Retrying…";
+      translation.textContent = "正在重试…";
     }
   }
   activeTranslationQueue.enqueue(index, true);
@@ -1993,6 +3263,19 @@ function retryTranslationSegment(index, generation) {
  * remaining rows. Batches are sequential so the provider is never flooded.
  */
 async function translateTranscript() {
+  // Fail-safe: a confirmed Simplified-Chinese transcript needs no translation.
+  // Collapse back to the original view so no entry point (mode change, cache
+  // reload, retry) can emit a redundant translateContent request or leave a
+  // "waiting for translation" / duplicated bilingual row behind.
+  if (currentVideoIsConfirmedSimplifiedChinese()) {
+    if (currentTranscriptMode !== "original") {
+      currentTranscriptMode = "original";
+      setTranscriptModeButtons("original");
+    }
+    renderTranscript();
+    return;
+  }
+
   const segments = getActiveTranscriptSegments();
   if (!segments.length || currentTranscriptMode === "original") return;
 
@@ -2030,7 +3313,7 @@ async function translateTranscript() {
   const enqueue = (index, force = false) => {
     if (!Number.isInteger(index) || !segments[index]) return;
     const cached = transcriptParagraphCache.has(
-      transcriptTranslationCacheKey(segments[index]),
+      transcriptTranslationCacheKey(videoId, segments[index]),
     );
     if ((!force && cached) || queued.has(index)) return;
     queue.push(index);
@@ -2076,10 +3359,30 @@ function setTranslatingSpinner(show) {
 // Pure helpers are exposed for the repository's Node tests. The extension does
 // not read this object at runtime.
 globalThis.__YTD_TRANSCRIPT_TESTING__ = {
+  createSingleFlight,
   sendTranslationMessage,
   groupTranscriptEntries,
   splitOversizedThought,
   alignTranslatedSegmentBatch,
+  loadNotes,
+  hasUsableChineseAnalysis,
+  hasCompleteOriginalAnalysis,
+  normalizeLanguageCode,
+  isChineseLanguage,
+  isConfirmedSimplifiedChineseSource,
+  isTransientTabLookupError,
+  noteHasChineseSource,
+  noteHasPolishedChineseText,
+  noteOriginalText,
+  noteChineseText,
+  noteCopyTextForMode,
+  summarizeNoteTranslationFailures,
+  renderNoteLanguageContent,
+  renderChapterLanguageContent,
+  renderQuoteLanguageContent,
+  overviewQuoteCopyText,
   renderSubtitleInlineMarkup,
   renderTranscriptSegmentContent,
+  extractMediaLocator,
+  transcriptTranslationCacheKey,
 };

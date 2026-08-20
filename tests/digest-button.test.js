@@ -96,7 +96,7 @@ class FakeElement {
   }
 }
 
-function createHarness() {
+function createHarness({ sendMessageImpl } = {}) {
   const actionRows = [];
   const fallbackRows = [];
   const elements = [];
@@ -104,7 +104,10 @@ function createHarness() {
   const windowListeners = {};
   const observers = [];
   const timers = new Map();
+  const intervals = new Map();
   let nextTimerId = 1;
+  let intervalCalls = 0;
+  let playerContainer = null;
 
   const document = {
     readyState: "loading",
@@ -122,7 +125,13 @@ function createHarness() {
       if (selector.includes("top-level-buttons-computed")) return fallbackRows;
       return [];
     },
-    querySelector() {
+    querySelector(selector) {
+      if (
+        playerContainer?.isConnected &&
+        selector.includes("#movie_player")
+      ) {
+        return playerContainer;
+      }
       return null;
     },
     getElementById(id) {
@@ -153,8 +162,10 @@ function createHarness() {
     chrome: {
       runtime: {
         onMessage: { addListener() {} },
-        async sendMessage() {
-          return { success: true };
+        async sendMessage(message) {
+          return sendMessageImpl
+            ? sendMessageImpl(message)
+            : { success: true };
         },
       },
     },
@@ -173,10 +184,15 @@ function createHarness() {
     clearTimeout(id) {
       timers.delete(id);
     },
-    setInterval() {
-      return nextTimerId++;
+    setInterval(callback) {
+      intervalCalls += 1;
+      const id = nextTimerId++;
+      intervals.set(id, callback);
+      return id;
     },
-    clearInterval() {},
+    clearInterval(id) {
+      intervals.delete(id);
+    },
   });
 
   vm.runInContext(contentScript, context);
@@ -189,6 +205,25 @@ function createHarness() {
     documentListeners,
     windowListeners,
     observers,
+    getIntervalCallCount() {
+      return intervalCalls;
+    },
+    fireIntervalTicks(count) {
+      for (let tick = 0; tick < count; tick += 1) {
+        Array.from(intervals.values()).forEach((callback) => callback());
+      }
+    },
+    setPlayerAvailable(available) {
+      if (!available) {
+        playerContainer?.remove();
+        playerContainer = null;
+        return;
+      }
+      if (playerContainer?.isConnected) return;
+      playerContainer = new FakeElement({ id: "movie_player" });
+      elements.push(playerContainer);
+      document.body.appendChild(playerContainer);
+    },
     flushTimers() {
       const callbacks = Array.from(timers.values());
       timers.clear();
@@ -216,6 +251,40 @@ function createActionRow({ width, height }) {
   return { row, buttonGroup };
 }
 
+test("accidental duplicate content-script injection is idempotent", () => {
+  const harness = createHarness();
+  assert.equal(harness.context.__YTD_CONTENT_SCRIPT_ACTIVE__, true);
+  assert.doesNotThrow(() => vm.runInContext(contentScript, harness.context));
+  assert.equal(harness.context.__YTD_CONTENT_SCRIPT_ACTIVE__, true);
+  assert.equal(typeof harness.context.injectDigestButton, "function");
+});
+
+test("watch-page mutations do not restart the note-button retry loop", () => {
+  const harness = createHarness();
+  harness.documentListeners.DOMContentLoaded();
+  assert.equal(harness.getIntervalCallCount(), 1);
+  assert.equal(harness.observers.length, 1);
+
+  for (let index = 0; index < 20; index += 1) {
+    harness.observers[0].callback([]);
+  }
+
+  assert.equal(harness.getIntervalCallCount(), 1);
+});
+
+test("a late player mutation restores the note button without another retry loop", () => {
+  const harness = createHarness();
+  harness.documentListeners.DOMContentLoaded();
+  harness.fireIntervalTicks(29);
+  assert.equal(harness.getIntervalCallCount(), 1);
+
+  harness.setPlayerAvailable(true);
+  harness.observers[0].callback([]);
+
+  assert.ok(harness.context.document.getElementById("ytd-note-button"));
+  assert.equal(harness.getIntervalCallCount(), 1);
+});
+
 test("Digest button skips a hidden responsive toolbar", () => {
   const harness = createHarness();
   const { row: hiddenRow, buttonGroup: hiddenGroup } = createActionRow({
@@ -238,6 +307,34 @@ test("Digest button skips a hidden responsive toolbar", () => {
   assert.equal(visibleGroup.children[1], nativeButton);
   assert.match(visibleGroup.children[0].style.cssText, /flex:\s*0 0 auto/);
   assert.match(visibleGroup.children[0].style.cssText, /width:\s*max-content/);
+});
+
+test("stale extension buttons ask for a page refresh without logging another failure", async () => {
+  const harness = createHarness({
+    async sendMessageImpl() {
+      throw new Error("Extension context invalidated.");
+    },
+  });
+  const { row, buttonGroup } = createActionRow({ width: 389, height: 36 });
+  harness.actionRows.push(row);
+  harness.context.injectDigestButton();
+  const button = buttonGroup.children[0];
+
+  await button.listeners.click({ preventDefault() {}, stopPropagation() {} });
+
+  assert.equal(button.disabled, true);
+  assert.match(button.innerHTML, /请刷新页面/);
+  const notice = harness.context.document.getElementById(
+    "ytd-extension-refresh-notice",
+  );
+  assert.ok(notice);
+  assert.match(notice.textContent, /请刷新当前 YouTube 页面/);
+  assert.equal(
+    harness.context.isExtensionContextInvalidatedError(
+      new Error("Extension context invalidated."),
+    ),
+    true,
+  );
 });
 
 test("Digest button replaces stale instances and removes duplicates", () => {

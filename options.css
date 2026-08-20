@@ -343,7 +343,8 @@ button.danger {
 
 #saveStatus,
 #dataStatus,
-#copyStatus {
+#copyStatus,
+#backupStatus {
   color: var(--muted);
   font-size: 13px;
 }

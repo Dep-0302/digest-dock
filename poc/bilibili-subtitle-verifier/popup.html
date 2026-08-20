@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>B 站字幕验证</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header>
+      <div>
+        <p class="eyebrow">只读 PoC</p>
+        <h1>B 站字幕验证</h1>
+      </div>
+      <button id="runButton" type="button">重新验证</button>
+    </header>
+
+    <p id="status" class="status" role="status">正在读取当前标签页…</p>
+
+    <section id="result" hidden>
+      <dl>
+        <div><dt>视频</dt><dd id="videoTitle"></dd></div>
+        <div><dt>分P</dt><dd id="videoPart"></dd></div>
+        <div><dt>内容键</dt><dd id="mediaKey"></dd></div>
+        <div><dt>字幕轨</dt><dd id="trackSummary"></dd></div>
+        <div><dt>选中轨道</dt><dd id="selectedTrack"></dd></div>
+        <div><dt>有效片段</dt><dd id="segmentCount"></dd></div>
+      </dl>
+
+      <h2>前 8 条样本</h2>
+      <pre id="sample"></pre>
+    </section>
+
+    <p class="privacy-note">
+      不读取或保存 Cookie，不调用 AI，不下载视频；只复用当前 Chrome 的 B 站登录会话读取字幕。
+    </p>
+
+    <script src="verifier.js"></script>
+    <script src="popup.js"></script>
+  </body>
+</html>

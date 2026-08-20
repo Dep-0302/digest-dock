@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-YouTube Digest is a small GitHub-only project. Security fixes are made on the latest code on `main` and, when releases are published, the latest GitHub release. Older snapshots are not supported.
+DigestDock is a small GitHub-only project. Security fixes are made on the latest code on `main` and, when releases are published, the latest GitHub release. Older snapshots are not supported.
 
 ## Report a vulnerability privately
 
@@ -25,10 +25,14 @@ There is no guaranteed response time or bug-bounty program. Please allow a reaso
 Examples include:
 
 - API keys or private content included in source, logs, screenshots, or release ZIPs;
-- requests to network origins outside the documented YouTube, Supadata, and DeepSeek hosts;
+- requests to network origins outside the documented YouTube, Bilibili, Bilibili subtitle-CDN, Supadata, and DeepSeek hosts;
 - script or HTML injection through transcript, metadata, service errors, or model output;
-- access to browsing data outside the documented YouTube scope;
+- access to browsing data outside the documented supported YouTube and Bilibili video-page scope;
 - unintended transmission of notes, transcripts, or credentials;
+- a note backup that unexpectedly includes API keys, settings, complete
+  transcripts, or cached overview and summary data;
+- note-backup validation bypasses, unsafe handling of imported fields, or a
+  backup import that changes existing notes after validation fails;
 - a dependency or release-workflow compromise; and
 - bypasses of local data deletion or DeepSeek configuration controls.
 
@@ -40,5 +44,27 @@ Examples include:
 - Do not reuse keys from production systems.
 - Revoke keys immediately if a device, browser profile, ZIP, log, or screenshot exposes them.
 - Remember that Chrome local extension storage is not an encrypted password vault.
+
+## Notes backup safety
+
+- Treat every imported JSON backup as untrusted input, even if its filename looks
+  like a DigestDock backup. Import only a file whose source you understand,
+  and do not assume that changing a filename makes another JSON file safe.
+- The current importer accepts the stable versioned
+  `youtube-digest-notes-backup` format used before and after the DigestDock
+  rename, validates its size, schema, and note fields before writing, and rebuilds
+  timestamped YouTube or Bilibili URLs from validated platform, media identity,
+  and timestamp fields instead of trusting a URL supplied by the backup.
+- Import merges with local notes and skips duplicates. If the same note ID has
+  conflicting content, or the merged result would exceed 100 notes, the entire
+  import is rejected. Invalid or failed imports leave existing notes unchanged.
+- Export and import are local operations and do not upload the backup. The
+  downloaded file is nevertheless plain, unencrypted JSON, so anyone who obtains
+  it may be able to read the notes it contains.
+- Clearing extension data or removing the extension does not delete a downloaded
+  backup. Delete all copies separately when they are no longer needed.
+- The current JSON file is a recovery backup for DigestDock notes. Markdown,
+  CSV, Anki, and other study-tool formats are separate future export ideas, not
+  formats accepted by this importer.
 
 The release tooling uses an explicit file allowlist and scans public files for common credential patterns, but automated checks cannot detect every secret.

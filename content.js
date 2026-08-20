@@ -1,3 +1,6 @@
+(() => {
+if (globalThis.__YTD_CONTENT_SCRIPT_ACTIVE__) return;
+
 /**
  * CONTENT SCRIPT
  *
@@ -17,6 +20,38 @@ const DEBUG = false;
 const debugLog = (...args) => {
   if (DEBUG) console.log(...args);
 };
+
+function isExtensionContextInvalidatedError(error) {
+  return String(error?.message || error || "").includes(
+    "Extension context invalidated",
+  );
+}
+
+function showExtensionRefreshNotice() {
+  const existing = document.getElementById("ytd-extension-refresh-notice");
+  if (existing) existing.remove();
+  const notice = document.createElement("div");
+  notice.id = "ytd-extension-refresh-notice";
+  notice.textContent =
+    "DigestDock 已更新。请刷新当前 YouTube 页面后再生成摘要。";
+  notice.style.cssText = `
+    position: fixed;
+    top: 18px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 999999;
+    max-width: min(520px, calc(100vw - 32px));
+    padding: 12px 18px;
+    border: 1px solid #e7cfc6;
+    border-radius: 12px;
+    background: #fff8f4;
+    color: #7d3527;
+    box-shadow: 0 8px 24px rgba(50, 42, 32, 0.2);
+    font: 600 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+    text-align: center;
+  `;
+  document.body.appendChild(notice);
+}
 
 // ============================================================
 // GLOBAL STATE
@@ -63,12 +98,7 @@ function init() {
  */
 function tryInjectNoteButton() {
   if (!window.location.pathname.includes("/watch")) return;
-
-  // Clear any existing retry so we don't stack timers
-  if (ytdNoteButtonRetryTimer) {
-    clearInterval(ytdNoteButtonRetryTimer);
-    ytdNoteButtonRetryTimer = null;
-  }
+  if (ytdNoteButton?.isConnected || ytdNoteButtonRetryTimer) return;
 
   let attempts = 0;
   const maxAttempts = 30; // ~3 seconds of retrying
@@ -90,7 +120,7 @@ function tryInjectNoteButton() {
 
     if (attempts >= maxAttempts) {
       debugLog(
-        "[YouTube Digest Content] Player container not found after retries, giving up",
+        "[DigestDock Content] Player container not found after retries, giving up",
       );
       if (ytdNoteButtonRetryTimer) {
         clearInterval(ytdNoteButtonRetryTimer);
@@ -122,12 +152,12 @@ if (document.readyState === "loading") {
  * When they send key moments, we highlight them on the progress bar.
  */
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  debugLog("[YouTube Digest Content] Received message:", message.action, message);
+  debugLog("[DigestDock Content] Received message:", message.action, message);
 
   if (message.action === "getVideoInfo") {
     // Read video title and channel name from the page
     const info = extractVideoInfo();
-    debugLog("[YouTube Digest Content] Returning video info:", info);
+    debugLog("[DigestDock Content] Returning video info:", info);
     sendResponse(info);
     return false; // Synchronous response
   }
@@ -150,7 +180,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message.action === "seekTo") {
     // Jump the video to a specific timestamp
-    debugLog("[YouTube Digest Content] Seeking to:", message.seconds);
+    debugLog("[DigestDock Content] Seeking to:", message.seconds);
     seekToTimestamp(message.seconds);
     sendResponse({ success: true });
     return false;
@@ -164,7 +194,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   // Unknown action - still send a response to prevent hanging
-  debugLog("[YouTube Digest Content] Unknown action:", message.action);
+  debugLog("[DigestDock Content] Unknown action:", message.action);
   sendResponse({ success: false, error: "Unknown action" });
   return false;
 });
@@ -177,7 +207,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
  * Injects a "Digest" button into YouTube's action bar.
  * The button appears next to Share, Save, etc. below the video.
  *
- * When clicked, it opens the YouTube Digest side panel.
+ * When clicked, it opens the DigestDock side panel.
  */
 function isVisibleDigestHost(element) {
   if (!element || !element.isConnected) return false;
@@ -231,10 +261,10 @@ function createDigestButton() {
   const digestButton = document.createElement("button");
   digestButton.id = "ytd-digest-button";
   digestButton.type = "button";
-  digestButton.setAttribute("aria-label", "Open YouTube Digest");
+  digestButton.setAttribute("aria-label", "打开 DigestDock");
   digestButton.innerHTML = `
     <span class="ytd-digest-icon" style="font-size: 11px;">▶</span>
-    <span class="ytd-digest-label">Digest</span>
+    <span class="ytd-digest-label">生成摘要</span>
   `;
 
   // Style the button — rounded pill in our terracotta accent, sized to sit
@@ -280,16 +310,25 @@ function createDigestButton() {
     e.preventDefault();
     e.stopPropagation();
 
-    debugLog("[YouTube Digest] Digest button clicked");
+    debugLog("[DigestDock] Digest button clicked");
 
     // Send message to background script to open side panel
     try {
       const result = await chrome.runtime.sendMessage({
         action: "openSidePanel",
       });
-      debugLog("[YouTube Digest] openSidePanel response:", result);
+      debugLog("[DigestDock] openSidePanel response:", result);
     } catch (err) {
-      console.error("[YouTube Digest] Failed to open side panel:", err);
+      if (isExtensionContextInvalidatedError(err)) {
+        digestButton.disabled = true;
+        digestButton.innerHTML = `
+          <span class="ytd-digest-icon" style="font-size: 11px;">↻</span>
+          <span class="ytd-digest-label">请刷新页面</span>
+        `;
+        showExtensionRefreshNotice();
+        return;
+      }
+      console.error("[DigestDock] Failed to open side panel:", err);
     }
   });
 
@@ -315,7 +354,7 @@ function injectDigestButton() {
 
   const actionsContainer = findDigestButtonHost();
   if (!actionsContainer) {
-    debugLog("[YouTube Digest Content] Visible actions container not found yet");
+    debugLog("[DigestDock Content] Visible actions container not found yet");
     return false;
   }
 
@@ -341,7 +380,7 @@ function injectDigestButton() {
     actionsContainer.insertBefore(digestButton, actionsContainer.firstChild);
   }
 
-  debugLog("[YouTube Digest Content] Digest button reconciled");
+  debugLog("[DigestDock Content] Digest button reconciled");
   return true;
 }
 
@@ -373,11 +412,18 @@ function setupButtonObserver() {
   if (digestButtonObserver) return;
 
   digestButtonObserver = new MutationObserver(() => {
-    // Check if we need to inject the buttons
+    // The note button already has a bounded retry loop and is retried after
+    // yt-navigate-finish. Restarting that loop for every body mutation can
+    // starve YouTube's watch-page renderer while it builds the player DOM.
     if (window.location.pathname.includes("/watch")) {
       scheduleDigestButtonReconciliation();
-      if (!ytdNoteButton || !ytdNoteButton.isConnected) {
-        tryInjectNoteButton();
+      const playerContainer = document.getElementById("movie_player");
+      if (
+        playerContainer &&
+        !ytdNoteButton?.isConnected &&
+        !ytdNoteButtonRetryTimer
+      ) {
+        injectNoteButton();
       }
     }
   });
@@ -423,7 +469,7 @@ function injectNoteButton() {
 
   if (!playerContainer) {
     debugLog(
-      "[YouTube Digest Content] Player container not found yet, will retry",
+      "[DigestDock Content] Player container not found yet, will retry",
     );
     return;
   }
@@ -436,7 +482,7 @@ function injectNoteButton() {
     playerContainer.style.position = "relative";
   }
 
-  debugLog("[YouTube Digest Content] Injecting note button");
+  debugLog("[DigestDock Content] Injecting note button");
 
   // Create the note button — a soft rounded pill that floats over the player
   const noteButton = document.createElement("button");
@@ -446,7 +492,7 @@ function injectNoteButton() {
       <path d="M12 20h9"></path>
       <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path>
     </svg>
-    <span>Note</span>
+    <span>笔记</span>
   `;
 
   // Soft rounded pill in the terracotta accent, with a gentle shadow.
@@ -516,7 +562,7 @@ function injectNoteButton() {
 
   playerContainer.appendChild(noteButton);
 
-  debugLog("[YouTube Digest Content] Note button injected");
+  debugLog("[DigestDock Content] Note button injected");
 }
 
 function showNoteButton() {
@@ -572,11 +618,11 @@ function handleNoteKeyboardShortcut(e) {
  * Captures the current timestamp and saves it as a note.
  */
 async function saveCurrentNote() {
-  debugLog("[YouTube Digest] Saving note");
+  debugLog("[DigestDock] Saving note");
 
   const video = document.querySelector("video.html5-main-video");
   if (!video) {
-    console.error("[YouTube Digest] No video element found");
+    console.error("[DigestDock] No video element found");
     return;
   }
 
@@ -590,7 +636,7 @@ async function saveCurrentNote() {
 
   if (noteButton) {
     noteButton.innerHTML =
-      '<span style="letter-spacing: 0.2px;">SAVING...</span>';
+      '<span style="letter-spacing: 0.2px;">正在保存…</span>';
     noteButton.style.pointerEvents = "none";
   }
 
@@ -606,23 +652,23 @@ async function saveCurrentNote() {
     if (result.success) {
       if (noteButton) {
         noteButton.innerHTML =
-          '<span style="letter-spacing: 0.2px;">SAVED</span>';
+          '<span style="letter-spacing: 0.2px;">已保存</span>';
         noteButton.style.background = "#7c8b6f";
       }
       showNoteSavedToast(result.note);
     } else {
       if (noteButton) {
         noteButton.innerHTML =
-          '<span style="letter-spacing: 0.2px;">ERROR</span>';
+          '<span style="letter-spacing: 0.2px;">出错了</span>';
       }
-      console.error("[YouTube Digest] Save note error:", result.error);
+      console.error("[DigestDock] Save note error:", result.error);
     }
   } catch (err) {
     if (noteButton) {
       noteButton.innerHTML =
-        '<span style="letter-spacing: 0.2px;">ERROR</span>';
+        '<span style="letter-spacing: 0.2px;">出错了</span>';
     }
-    console.error("[YouTube Digest] Save note exception:", err);
+    console.error("[DigestDock] Save note exception:", err);
   }
 
   setTimeout(() => {
@@ -645,11 +691,11 @@ function showNoteSavedToast(note) {
   const toast = document.createElement("div");
   toast.id = "ytd-note-toast";
   toast.innerHTML = `
-    <div style="font-weight: 700; margin-bottom: 6px; color: #c8674f;">📝 Note saved</div>
+    <div style="font-weight: 700; margin-bottom: 6px; color: #c8674f;">📝 笔记已保存</div>
     <div style="font-size: 12px; color: #6b6258; margin-bottom: 8px;">${escapeHtmlForContent(note.timestamp)} — ${escapeHtmlForContent(note.videoTitle)}</div>
     <div style="font-size: 13px; line-height: 1.55; color: #2e2a24;">"${escapeHtmlForContent(note.text)}"</div>
     <div style="margin-top: 10px; font-size: 11px;">
-      <a href="${escapeHtmlForContent(note.timestampedUrl)}" style="color: #c8674f; font-weight: 600; text-decoration: none;">🔗 Copy link</a>
+      <a href="${escapeHtmlForContent(note.timestampedUrl)}" style="color: #c8674f; font-weight: 600; text-decoration: none;">🔗 复制链接</a>
     </div>
   `;
 
@@ -683,7 +729,7 @@ function showNoteSavedToast(note) {
     e.preventDefault();
     try {
       await navigator.clipboard.writeText(note.timestampedUrl);
-      e.target.textContent = "✓ Copied!";
+      e.target.textContent = "✓ 已复制";
     } catch (err) {
       console.error("Copy failed:", err);
     }
@@ -772,11 +818,11 @@ function highlightKeyMoments(moments, videoDuration) {
 function seekToTimestamp(seconds) {
   const video = document.querySelector("video.html5-main-video");
   if (!video) {
-    console.error("[YouTube Digest Content] No video element found for seek");
+    console.error("[DigestDock Content] No video element found for seek");
     return;
   }
 
-  debugLog("[YouTube Digest Content] Seeking to:", seconds);
+  debugLog("[DigestDock Content] Seeking to:", seconds);
   video.currentTime = seconds;
   // Also play the video if it's paused
   if (video.paused) {
@@ -841,3 +887,16 @@ document.addEventListener("yt-navigate-finish", () => {
     tryInjectNoteButton();
   }, 500);
 });
+
+// Keep the runtime implementation scoped so an accidental duplicate injection
+// cannot redeclare top-level const/let bindings. These selected helpers stay
+// visible only for the repository's Node regression tests.
+Object.assign(globalThis, {
+  findDigestButtonHost,
+  injectDigestButton,
+  isExtensionContextInvalidatedError,
+  setupButtonObserver,
+  setupDigestButtonResizeListener,
+});
+globalThis.__YTD_CONTENT_SCRIPT_ACTIVE__ = true;
+})();

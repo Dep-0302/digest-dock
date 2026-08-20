@@ -1,13 +1,15 @@
 # Translation Prompts
 
-Used in `background.js` when the user requests Simplified Chinese content.
+Used in `background.js` for transcript/note translation into Simplified Chinese
+and for on-demand translation of a Chinese overview back into the video's
+non-Chinese source language.
 
 ## Shared base rules
 
 ```
 TRANSLATION RULES (follow strictly):
 - Match the EXACT tone and register of the original (casual stays casual, formal stays formal)
-- Use natural {langName} sentence structures — NOT English syntax translated word-by-word
+- Use natural {langName} sentence structures — NOT source-language syntax translated word-by-word
 - Do NOT translate: proper nouns, brand names, technical terms commonly kept in English (API, AI, etc.), timestamps
 - Preserve ALL formatting: paragraph breaks, bullet points, markdown, timestamps
 {langSpecific}
@@ -43,9 +45,54 @@ The video is titled "{videoTitle}". Use the title and neighboring segments only 
 - Output only valid JSON. No markdown fences, commentary, labels, or extra keys.
 ```
 
+## Overview original translation
+
+Input is a JSON object containing an already-generated Simplified Chinese
+overview. The target is the video's trusted source caption language,
+`{langName}` (`{languageCode}`). Chapter IDs are stable and must be preserved
+exactly. Key quotes are intentionally omitted because the analysis response
+already preserves each quote in the source language.
+
+```
+You are a professional translator. Translate this Simplified Chinese YouTube overview into {langName} (BCP-47: {languageCode}).
+The video is titled "{videoTitle}". Use the title only as context for names and terminology.
+
+{baseRules}
+
+- Translate only every chapter's `titleZh` and `summaryZh` into `titleOriginal` and `summaryOriginal`.
+- Keep titles concise and summaries faithful to the Chinese meaning.
+- Do not add facts, explanations, or commentary.
+- Do not merge, split, omit, or reorder items.
+- Return a JSON object with exactly this shape: {"chapters":[{"id":"chapter-0","titleOriginal":"title in the target source language","summaryOriginal":"summary in the target source language"}]}.
+- Copy every input id exactly. Translate only `titleZh` and `summaryZh`; do not return key quotes or extra fields.
+- Output only valid JSON. No markdown fences, commentary, labels, or extra keys.
+```
+
+## Notes translation
+
+Input is a JSON object containing 1 to 10 polished English notes. Every note has
+a stable `id`, its English `text`, and its `videoTitle` for terminology context.
+
+```
+You are a professional translator. Translate these polished English video notes into {langName}.
+
+{baseRules}
+
+- Translate each note as a complete thought in natural Simplified Chinese.
+- Preserve the speaker's meaning and tone; do not summarize, expand, or add facts.
+- Use each note's videoTitle only as context for names and terminology.
+- Do not merge, split, omit, or reorder notes.
+- If an entire note consists only of code, product names, technical terms, or timestamps that should remain unchanged, copy its source text exactly into textZh and add `"unchanged":true,"unchangedKind":"technical"`.
+- If an entire note is only a proper name that appears in the video title, copy it exactly and add `"unchanged":true,"unchangedKind":"proper_noun"`. Never use unchanged for an ordinary English sentence.
+- Return a JSON object with exactly this shape: {"notes":[{"id":"unchanged-note-id","textZh":"中文笔记","unchanged":false,"unchangedKind":""}]}.
+- Copy every input id exactly. Translate only text values.
+- Output only valid JSON. No markdown fences, commentary, labels, or extra keys.
+```
+
 ## Variables
 
-- `{langName}` — "Simplified Chinese".
+- `{langName}` — a safe display name derived from a normalized BCP-47 code.
+- `{languageCode}` — normalized, character-restricted BCP-47 target code for the overview original-language flow.
 - `{baseRules}` — the shared base rules above.
 - `{langSpecific}` — the Chinese rules inserted into the shared base rules.
 - `{videoTitle}` — video title.

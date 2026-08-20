@@ -30,8 +30,8 @@ function createLocalStorage() {
 }
 
 test("Settings copy covers English and Simplified Chinese", () => {
-  assert.equal(options.translate("en", "pageTitle"), "YouTube Digest Settings");
-  assert.equal(options.translate("zh-CN", "pageTitle"), "YouTube Digest 设置");
+  assert.equal(options.translate("en", "pageTitle"), "DigestDock Settings");
+  assert.equal(options.translate("zh-CN", "pageTitle"), "DigestDock 设置");
   assert.equal(options.translate("en", "saveSettings"), "Save settings");
   assert.equal(options.translate("zh-CN", "saveSettings"), "保存设置");
   assert.equal(
@@ -46,7 +46,7 @@ test("Settings copy covers English and Simplified Chinese", () => {
 
   const html = read("options.html");
   const referencedKeys = [
-    ...html.matchAll(/data-i18n(?:-html|-aria-label)?="([^"]+)"/g),
+    ...html.matchAll(/data-i18n(?:-html|-aria-label|-placeholder)?="([^"]+)"/g),
   ].map((match) => match[1]);
   for (const key of referencedKeys) {
     assert.ok(options.COPY.en[key], `Missing English copy for ${key}`);
@@ -90,22 +90,23 @@ test("non-extension preview safely persists language in localStorage", async () 
 
   const reopenedSession = options.createStorageAdapter(null, localStorage);
   assert.equal(await options.readPreferredLanguage(reopenedSession), "zh-CN");
-  assert.equal(options.normalizeLanguage("unsupported"), "en");
+  assert.equal(options.DEFAULT_LANGUAGE, "zh-CN");
+  assert.equal(options.normalizeLanguage("unsupported"), "zh-CN");
 });
 
 test("language controls expose a labelled group and one pressed button", () => {
   const html = read("options.html");
   assert.match(
     html,
-    /class="language-switch"[\s\S]*role="group"[\s\S]*aria-label="Interface language"/,
+    /class="language-switch"[\s\S]*role="group"[\s\S]*aria-label="界面语言"/,
   );
   assert.match(
     html,
-    /data-language="en"[\s\S]*aria-pressed="true"[\s\S]*English/,
+    /data-language="en"[\s\S]*aria-pressed="false"[\s\S]*English/,
   );
   assert.match(
     html,
-    /data-language="zh-CN"[\s\S]*aria-pressed="false"[\s\S]*中文/,
+    /data-language="zh-CN"[\s\S]*aria-pressed="true"[\s\S]*中文/,
   );
 
   const buttons = ["en", "zh-CN"].map((language) => ({
@@ -119,6 +120,42 @@ test("language controls expose a labelled group and one pressed button", () => {
 
   assert.equal(buttons[0].attributes["aria-pressed"], "false");
   assert.equal(buttons[1].attributes["aria-pressed"], "true");
+});
+
+test("notes backup controls are accessible and explain the notes-only JSON scope", () => {
+  const html = read("options.html");
+  const backupCard = html.match(
+    /<section class="card" id="notesBackupCard">([\s\S]*?)<\/section>/,
+  );
+
+  assert.ok(backupCard, "Expected a dedicated notes backup card");
+  assert.match(backupCard[1], /id="notesBackupHelp"/);
+  assert.match(
+    backupCard[1],
+    /id="exportNotesBtn"[\s\S]*?type="button"[\s\S]*?aria-describedby="notesBackupHelp"/,
+  );
+  assert.match(
+    backupCard[1],
+    /id="importNotesBtn"[\s\S]*?type="button"[\s\S]*?aria-describedby="notesBackupHelp"/,
+  );
+  assert.match(
+    backupCard[1],
+    /id="importNotesFile"[\s\S]*?type="file"[\s\S]*?accept="\.json,application\/json"[\s\S]*?hidden/,
+  );
+  assert.match(
+    backupCard[1],
+    /id="backupStatus"[\s\S]*?role="status"[\s\S]*?aria-live="polite"/,
+  );
+
+  for (const language of ["en", "zh-CN"]) {
+    const help = options.translate(language, "notesBackupHelp");
+    assert.match(help, /JSON/i);
+    assert.match(
+      help,
+      language === "en" ? /contains saved notes/i : /只包含已保存笔记/,
+    );
+    assert.match(help, language === "en" ? /API keys/i : /API 密钥/);
+  }
 });
 
 test("customization guidance is concise and has a visible placeholder reminder", () => {
@@ -137,14 +174,14 @@ test("customization guidance is concise and has a visible placeholder reminder",
   );
   assert.equal(
     options.translate("en", "customizationStepFolder"),
-    "Open the extracted YouTube Digest project folder in your coding agent.",
+    "Open the extracted DigestDock project folder in your coding agent.",
   );
   assert.equal(
     options.translate("zh-CN", "customizationStepFolder"),
-    "在编程 Agent 中打开 YouTube Digest 解压后的项目文件夹。",
+    "在编程 Agent 中打开 DigestDock 解压后的项目文件夹。",
   );
-  assert.doesNotMatch(html, /~\/Documents\/youtube-digest/);
-  assert.doesNotMatch(html, /%USERPROFILE%\\Documents\\youtube-digest/);
+  assert.doesNotMatch(html, /~\/Documents\/(?:youtube-digest|digest-dock)/);
+  assert.doesNotMatch(html, /%USERPROFILE%\\Documents\\(?:youtube-digest|digest-dock)/);
 });
 
 test("customization prompt switches languages and preserves technical values", () => {
@@ -152,12 +189,12 @@ test("customization prompt switches languages and preserves technical values", (
   const englishPrompt = options.translate("en", "customizationPrompt");
   const chinesePrompt = options.translate("zh-CN", "customizationPrompt");
 
-  assert.match(html, /placeholder="Paste your Supadata key"/);
-  assert.match(html, /placeholder="Paste your DeepSeek key"/);
+  assert.match(html, /placeholder="粘贴 Supadata 密钥"/);
+  assert.match(html, /placeholder="粘贴 DeepSeek 密钥"/);
   assert.match(html, /https:\/\/dash\.supadata\.ai\/auth\/sign-up/);
   assert.match(html, /https:\/\/platform\.deepseek\.com\/api_keys/);
-  assert.ok(html.includes(`>${englishPrompt}</textarea>`));
-  assert.match(chinesePrompt, /^请把当前本地 YouTube Digest 工作区改为使用/);
+  assert.ok(html.includes(`>${chinesePrompt}</textarea>`));
+  assert.match(chinesePrompt, /^请把当前本地 DigestDock 工作区改为使用/);
   assert.notEqual(chinesePrompt, englishPrompt);
   assert.match(
     englishPrompt,

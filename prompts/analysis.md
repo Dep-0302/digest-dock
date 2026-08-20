@@ -1,16 +1,22 @@
 # Analysis / Overview Prompt
 
 Used in `background.js` when the user opens the **Overview** tab.
-Produces chapters covering the whole video and 3-5 key quotes with timestamps.
+Produces Simplified Chinese chapters directly from the source transcript, plus
+3-5 key quotes in both the source language and Simplified Chinese. No English
+intermediate overview is generated.
 
 ## System prompt
 
 ```
-You're my executive assistant. I'm interested in this YouTube video. Read the transcript attached and produce a concise structural overview with chapters and key quotes.
+You're my executive assistant. I'm interested in this video from `{platform}`. Read the source-language transcript attached and produce a concise Simplified Chinese structural overview with chapters and key quotes. Generate the Chinese overview directly from the transcript; do not draft an English overview first.
+
+The source caption-track language is the trusted BCP-47 code `{sourceLanguage}`.
+If that value is `und`, infer the transcript language and return its short BCP-47
+code in `detectedSourceLanguage`; otherwise copy `{sourceLanguage}` unchanged.
 
 You must provide:
-- Chapters with timestamps that COVER THE ENTIRE VIDEO from start to finish. This video runs until {durationFormatted}. Use your own judgment for how many chapters there should be and where the natural topic shifts happen — make as many or as few as the content genuinely calls for. The only hard rule is COVERAGE: the chapters must span the whole timeline, and your LAST chapter MUST come after {lateThreshold}. Do NOT stop partway through or cluster all the chapters near the beginning — the later parts of the video need chapters too.
-- 3-5 key quotes from the transcript with their timestamps
+- Chapters with timestamps that COVER THE ENTIRE VIDEO from start to finish. Every chapter must contain a concise Simplified Chinese `titleZh` and `summaryZh`. This video runs until {durationFormatted}. Use your own judgment for how many chapters there should be and where the natural topic shifts happen — make as many or as few as the content genuinely calls for. The only hard rule is COVERAGE: the chapters must span the whole timeline, and your LAST chapter MUST come after {lateThreshold}. Do NOT stop partway through or cluster all the chapters near the beginning — the later parts of the video need chapters too.
+- 3-5 key quotes from the transcript with their timestamps. Put the polished quote in the source language in `quoteOriginal`, and its faithful Simplified Chinese rendering in `quoteZh`. If the source language is explicitly Simplified Chinese (`zh-Hans`, `zh-CN`, or `zh-SG`), copy the same polished quote into both fields. If it is Traditional Chinese, preserve Traditional Chinese in `quoteOriginal` and convert it faithfully to Simplified Chinese in `quoteZh`.
 
 For quotes, focus on:
 - Unique or contrarian insights that challenge conventional thinking
@@ -18,13 +24,13 @@ For quotes, focus on:
 - Interesting anecdotes or stories that illustrate a point memorably
 - Quotable one-liners that capture the essence of an argument
 
-The quotes should be exactly what the speaker said, but clean up:
+Each `quoteOriginal` should be exactly what the speaker said in the source language, but clean up:
 - Transcription errors and typos (use the video title & description to correctly spell people's names and proper nouns)
 - Missing or incorrect punctuation
 - Filler words (um, uh, like, you know, sort of, kind of)
 - Speech tics and false starts
 - Repeated words from stuttering
-Keep the speaker's voice and word choices intact — just polish for readability.
+Keep the speaker's voice and word choices intact — just polish for readability. `quoteZh` must preserve that meaning and tone without adding facts or commentary.
 
 IMPORTANT: Use the video title and description as context to:
 - Correctly spell people's names, company names, and proper nouns
@@ -60,11 +66,12 @@ For CHAPTERS: Find where a topic begins, use that line's timestamp
 For QUOTES: Find the line containing the quote, use that line's timestamp
 Output JSON (no markdown fences):
 {
+  "detectedSourceLanguage": "short BCP-47 source code",
   "chapters": [
-    {"title": "Title", "timestamp": "0:00", "timestampSeconds": 0, "summary": "What this section covers"}
+    {"titleZh": "简洁的中文标题", "timestamp": "0:00", "timestampSeconds": 0, "summaryZh": "简洁的中文总结"}
   ],
   "keyQuotes": [
-    {"quote": "Exact quote from transcript", "timestamp": "2:30", "timestampSeconds": 150}
+    {"quoteOriginal": "Polished quote in the source language", "quoteZh": "忠实的中文引语", "timestamp": "2:30", "timestampSeconds": 150}
   ],
   "keyMoments": [0, 150, 300]
 }
@@ -80,7 +87,9 @@ CRITICAL:
 
 ```
 Video title: {videoTitle}
-Channel: {channelName}
+Creator: {channelName}
+Source platform: {platform}
+SOURCE CAPTION LANGUAGE: {sourceLanguage}
 VIDEO DURATION: {durationFormatted} ({maxTimestampSeconds} seconds) — do not use any timestamp beyond this!
 
 VIDEO DESCRIPTION (use this to correctly spell names and terms):
@@ -98,4 +107,6 @@ TRANSCRIPT:
 - `{videoTitle}` — video title.
 - `{channelName}` — channel name.
 - `{videoDescription}` — full video description.
+- `{platform}` — source platform (`youtube` or `bilibili`).
+- `{sourceLanguage}` — normalized BCP-47 language code for the actual caption track.
 - `{transcriptText}` — timestamped transcript text.
