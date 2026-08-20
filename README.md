@@ -52,7 +52,7 @@ Because this is an unpacked extension, it does not update automatically. After d
 
 Saving Settings requires a **DeepSeek API key** for overviews, explanations, translation, and automatic note polishing. YouTube and Bilibili use the same existing DeepSeek workflow.
 
-YouTube transcript retrieval is local-first: the extension reads caption tracks directly from YouTube before using any third-party transcript provider. A **Supadata API key is optional** and is used only as a failure fallback. Bilibili does not use Supadata.
+YouTube transcript retrieval is local-first: the extension reads caption tracks directly from YouTube before offering any third-party transcript provider. A **Supadata API key is optional**. A saved key is never used automatically: after local retrieval fails, the side panel explains what will be shared and asks whether to use Supadata for that attempt. Without a saved key, it offers the optional Settings entry instead. Bilibili does not use Supadata.
 
 ### Get an optional Supadata API key
 
@@ -134,7 +134,7 @@ This JSON feature is a recovery format for restoring YouTube Digest notes. Study
 - Standard `www.bilibili.com/video/BV...` pages, one current part at a time.
 - Human or AI subtitle tracks exposed by the current Bilibili browser session. Bilibili transcript retrieval does not use Supadata credits.
 - For YouTube, existing caption tracks read from the active page and their `timedtext` responses. If that does not produce a usable transcript, the extension may continue with additional non-WEB YouTube player client profiles before considering Supadata.
-- An optional Supadata native-transcript fallback, used only after local YouTube retrieval fails and only when a Supadata key is saved.
+- An optional Supadata native-transcript fallback, offered only after local YouTube retrieval fails. Even with a saved key, it runs only when the user confirms that attempt in the side panel.
 - Original, Simplified Chinese, and aligned bilingual transcript views.
 - AI overviews are generated directly in Simplified Chinese. For non-Chinese subtitle tracks, source-language chapter titles and summaries are translated only when **Original** or **Bilingual** is requested; key quotes preserve the source wording. Chinese-source overviews reuse Chinese in every mode without an extra translation call.
 - Notes are polished in English once and translated into Simplified Chinese once; bilingual note mode only combines the two stored versions.
@@ -157,7 +157,7 @@ The [Supadata transcript documentation](https://docs.supadata.ai/get-transcript)
 - A generated transcript costs **2 credits per video minute**. YouTube Digest does not use this path because it forces `mode=native`.
 - An unavailable native lookup returned as HTTP `206` still uses **1 credit**.
 
-Successful local YouTube retrieval does not call Supadata or use Supadata credits. When the optional fallback runs, the current native-only behavior means the free tier can cover roughly 100 transcript lookups per month when each request succeeds once; all of those are fallback calls. Retries and unavailable-caption lookups may also consume credits, so actual successful-video coverage can be lower.
+Successful local YouTube retrieval does not call Supadata or use Supadata credits. When the user confirms the optional fallback, the current native-only behavior means the free tier can cover roughly 100 transcript lookups per month when each request succeeds once; all of those are user-approved fallback calls. Retries and unavailable-caption lookups may also consume credits, so actual successful-video coverage can be lower.
 
 DeepSeek usage is separate from Supadata. DeepSeek may apply its own free quota, rate limits, or charges. YouTube Digest does not collect payments or resell access. Set spending limits and monitor each provider account you configure. The estimate below explains the current DeepSeek translation cost.
 
@@ -200,7 +200,7 @@ If you want another AI provider or model, first open the exact YouTube Digest pr
 YouTube Digest makes network requests directly from the extension:
 
 1. For YouTube, it first reads caption-track data from the active page and requests the selected `timedtext` track directly from YouTube. It may also ask YouTube's player endpoint for tracks with additional non-WEB client profiles. These extension-initiated transcript requests use `credentials: "omit"`.
-2. If every local YouTube attempt fails and you saved a Supadata key, it may send the canonical watch URL to Supadata for a native-transcript fallback.
+2. If every local YouTube attempt fails and you saved a Supadata key, the side panel offers a third-party fallback. Only after you click the Supadata action may it send the canonical watch URL to Supadata for that native-transcript request.
 3. For Bilibili, it requests the current video's metadata and existing subtitle track directly from Bilibili while reusing the browser's current session; it does not read or store cookie values.
 4. It sends the transcript and relevant video metadata to DeepSeek when you request AI features. Focused features send only the content they need, such as selected text with context or small transcript batches for translation.
 5. It stores keys, settings, notes, and recent cache entries locally in Chrome. Temporary signed YouTube or Bilibili subtitle URLs are used only for the immediate request and are not stored or logged.

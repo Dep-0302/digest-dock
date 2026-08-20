@@ -52,7 +52,7 @@ YouTube Digest 是一个需要自行提供 API Key 的开源项目，通过 GitH
 
 保存设置时只要求填写 **DeepSeek API Key**，用于生成概览、讲解内容、翻译和自动润色笔记。YouTube 和 B 站继续共用这套 DeepSeek 流程。
 
-YouTube 字幕采用本地优先：扩展会先直接从 YouTube 读取字幕轨，不经过第三方字幕服务。**Supadata API Key 是可选项**，只有本地获取失败时才用于回退。B 站不会使用 Supadata。
+YouTube 字幕采用本地优先：扩展会先直接从 YouTube 读取字幕轨，不经过第三方字幕服务。**Supadata API Key 是可选项**，已保存的 Key 也不会被自动使用。本地获取失败后，侧边栏会说明将发送的数据，并由你决定本次是否使用 Supadata；没有保存 Key 时只提供可选的设置入口。B 站不会使用 Supadata。
 
 ### 获取可选的 Supadata API Key
 
@@ -134,7 +134,7 @@ JSON 文件只包含备份格式信息和已保存的笔记记录，包括其中
 - 标准的 `www.bilibili.com/video/BV...` 视频页面，每次只处理当前分P。
 - 当前 B 站浏览器会话可以访问的人工或 AI 字幕轨。B 站字幕读取不消耗 Supadata 额度。
 - 对 YouTube，先读取当前页面公开的已有字幕轨及其 `timedtext` 响应；如果没有得到可用字幕，扩展还可以继续尝试其他非 WEB YouTube player client，再考虑 Supadata。
-- 可选的 Supadata 原生字幕回退；只有本地 YouTube 获取失败且已经保存 Supadata Key 时才会使用。
+- 可选的 Supadata 原生字幕回退；只有本地 YouTube 获取失败、已经保存 Supadata Key，并且用户在侧边栏确认本次使用时才会运行。
 - 原文、简体中文和双语对照字幕。
 - AI 概览直接生成简体中文底稿。非中文字幕只有在请求**原文**或**双语**时，才翻译章节标题和总结；重点引用会保留源字幕原句。中文字幕的三种模式复用同一份中文内容，不发起额外翻译。
 - 笔记先生成一次润色后的英文，再单独生成一次简体中文；双语笔记只合并两份已保存内容。
@@ -157,7 +157,7 @@ JSON 文件只包含备份格式信息和已保存的笔记记录，包括其中
 - AI 生成字幕每分钟消耗 **2 credits**。YouTube Digest 不会使用这条路径，因为它强制使用 `mode=native`。
 - 如果没有可用原生字幕并返回 HTTP `206`，仍会消耗 **1 credit**。
 
-YouTube 本地获取成功时不会调用 Supadata，也不会消耗 Supadata 额度。可选回退运行后，按照当前只获取原生字幕的方式，如果每次请求都成功，免费版每月大约可以完成 100 次回退查询。重试和没有字幕的查询也可能消耗额度，所以实际成功数量可能更少。
+YouTube 本地获取成功时不会调用 Supadata，也不会消耗 Supadata 额度。用户确认可选回退后，按照当前只获取原生字幕的方式，如果每次请求都成功，免费版每月大约可以完成 100 次经用户确认的回退查询。重试和没有字幕的查询也可能消耗额度，所以实际成功数量可能更少。
 
 DeepSeek 的额度与 Supadata 分开计算。DeepSeek 可能有自己的免费额度、限速或费用。YouTube Digest 不收款，也不转售 API 服务。建议为你实际配置的每个服务商账号设置消费上限并定期查看用量。下方估算说明了当前 DeepSeek 翻译成本。
 
@@ -200,7 +200,7 @@ YouTube Digest 使用原生 HTML、CSS 和 JavaScript，没有构建步骤，很
 YouTube Digest 会直接从扩展发起网络请求：
 
 1. 对 YouTube，先从当前页面读取字幕轨信息，并直接向 YouTube 请求选中的 `timedtext` 字幕；也可能使用其他非 WEB client 向 YouTube player endpoint 查询字幕轨。扩展主动发起的这些字幕请求都使用 `credentials: "omit"`。
-2. 如果所有本地 YouTube 尝试都失败，并且你保存了 Supadata Key，才可能把标准化的视频地址发送给 Supadata，回退获取原生字幕。
+2. 如果所有本地 YouTube 尝试都失败，并且你保存了 Supadata Key，侧边栏会提供第三方回退选项。只有你点击 Supadata 操作后，扩展才可能为本次原生字幕请求发送标准化的视频地址。
 3. 对 B 站，直接向 B 站请求当前视频元数据和已有字幕轨，复用浏览器当前会话但不读取或保存 Cookie 值。
 4. 当你使用 AI 功能时，把字幕和相关视频信息发送给 DeepSeek。翻译或讲解等功能只发送当前需要的内容，例如选中的文本和上下文，或少量字幕分段。
 5. API Key、设置、笔记和最近缓存保存在 Chrome 本地。临时签名的 YouTube 或 B 站字幕 URL 只用于当次请求，不会保存或写入日志。

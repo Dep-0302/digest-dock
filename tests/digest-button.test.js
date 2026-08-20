@@ -429,3 +429,14 @@ test("DOM mutation reconciliation repairs a replaced toolbar", () => {
   assert.equal(newRow.children.length, 1);
   assert.equal(newGroup.children.length, 1);
 });
+
+test("a note that needs third-party transcript consent points the user to the side panel", () => {
+  assert.match(
+    contentScript,
+    /result\.error === "SUPADATA_CONSENT_REQUIRED"[\s\S]*?请在侧栏确认/,
+  );
+  assert.match(
+    contentScript,
+    /result\.error === "SUPADATA_NOT_CONFIGURED"[\s\S]*?可在设置中配置回退/,
+  );
+});

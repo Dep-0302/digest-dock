@@ -957,6 +957,15 @@ body {
   max-width: 280px;
 }
 
+.error-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin-top: 8px;
+}
+
 .error-btn {
   font-family: var(--font-body);
   font-weight: 600;
@@ -969,13 +978,51 @@ body {
   border-radius: var(--r-pill);
   cursor: pointer;
   transition: all 0.18s ease;
-  margin-top: 8px;
   box-shadow: 0 4px 14px rgba(200, 103, 79, 0.3);
 }
 
 .error-btn:hover {
   background: var(--accent-hover);
   transform: translateY(-1px);
+}
+
+.error-btn:disabled,
+.error-secondary-btn:disabled {
+  cursor: wait;
+  opacity: 0.58;
+  transform: none;
+}
+
+.error-secondary-btn {
+  font-family: var(--font-body);
+  font-weight: 600;
+  font-size: 13px;
+  padding: 11px 20px;
+  color: var(--text-secondary);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-pill);
+  cursor: pointer;
+  transition:
+    color 0.18s ease,
+    border-color 0.18s ease,
+    background 0.18s ease;
+}
+
+.error-secondary-btn:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-dim);
+}
+
+.error-btn:focus-visible,
+.error-secondary-btn:focus-visible {
+  outline: 3px solid rgba(200, 103, 79, 0.32);
+  outline-offset: 3px;
+}
+
+.error-secondary-btn[hidden] {
+  display: none;
 }
 
 /* ============================================================

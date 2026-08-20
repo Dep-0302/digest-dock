@@ -50,7 +50,7 @@ Examples include:
 
 - YouTube transcript retrieval is local-first: the extension reads existing page caption tracks and their `timedtext` responses, and may continue with additional non-WEB YouTube player client profiles. These extension-initiated network requests must use `credentials: "omit"`.
 - Temporary signed YouTube and Bilibili subtitle URLs are request-scoped data. Use them only in memory for the immediate subtitle response; never write them to storage, caches, logs, diagnostics, screenshots, or test fixtures.
-- Supadata is an optional failure fallback. It may receive the canonical YouTube URL only after local retrieval fails and only when the user has saved a Supadata key. Saving Settings must not require that optional key.
+- Supadata is an optional failure fallback. It may receive the canonical YouTube URL only after local retrieval fails, the user has saved a Supadata key, and the user explicitly confirms that one attempt in the side panel. Consent must not be persisted or inferred from the saved key. Saving Settings must not require that optional key.
 - Transcript retrieval may read an existing platform-generated automatic caption track, but it must not download audio, perform ASR or other audio transcription, request generated transcription, or use OCR.
 - Bilibili keeps its existing session-aware path: it may use normal credentialed fetch behavior for Bilibili requests, but it must not request Chrome's `cookies` permission, read cookie values, export them, or store them.
 

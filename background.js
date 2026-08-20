@@ -20,7 +20,7 @@ importScripts("notes-backup.js");
 
 const DEBUG = false;
 const ANALYSIS_SCHEMA_VERSION = 3;
-const RUNTIME_PROTOCOL_VERSION = 7;
+const RUNTIME_PROTOCOL_VERSION = 8;
 const ANALYSIS_BASE_LANGUAGE = "zh-Hans";
 const TRANSCRIPT_SOURCE_POLICY_VERSION = 3;
 const AI_PROVIDER_IDLE_TIMEOUT_MS = 50_000;
@@ -623,6 +623,7 @@ async function handleFetchMediaTranscript(
   mediaInput,
   preferredLanguage = "",
   tabId = null,
+  supadataConsent = false,
 ) {
   try {
     const mediaRef = await resolveMediaRef(mediaInput);
@@ -640,6 +641,7 @@ async function handleFetchMediaTranscript(
       mediaRef.videoId,
       preferredLanguage,
       tabId,
+      supadataConsent,
     );
   } catch (error) {
     return {
@@ -687,7 +689,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
 chrome.tabs.onActivated.addListener(async ({ tabId }) => {
   try {
     const tab = await chrome.tabs.get(tabId);
-    updatePanelForTab(tabId, tab.url);
+    updatePanelForTab(tabId, tab.pendingUrl || tab.url);
   } catch (e) {
     // Tab vanished before we could read it — nothing to do.
   }
@@ -720,6 +722,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       message.mediaRef || message.videoId,
       message.preferredLanguage,
       message.tabId ?? sender.tab?.id ?? null,
+      message.supadataConsent === true,
     )
       .then(sendResponse)
       .catch((err) => sendResponse({ success: false, error: err.message }));
@@ -1208,7 +1211,11 @@ async function youtubeTabStillMatches(tabId, expectedVideoId) {
   if (!Number.isInteger(tabId)) return true;
   try {
     const tab = await chrome.tabs.get(tabId);
-    const url = new URL(String(tab?.url || tab?.pendingUrl || ""));
+    // During navigation Chrome can expose the old committed URL together with
+    // the new pending target. Prefer the pending target so a consent granted
+    // for the old video cannot start a third-party request after the user has
+    // already left that page.
+    const url = new URL(String(tab?.pendingUrl || tab?.url || ""));
     return (
       url.protocol === "https:" &&
       url.hostname === "www.youtube.com" &&
@@ -1232,6 +1239,7 @@ async function handleFetchYoutubeTranscriptLocalFirst(
   videoId,
   preferredLanguage = "",
   tabId = null,
+  supadataConsent = false,
 ) {
   let snapshot = null;
   try {
@@ -1272,36 +1280,60 @@ async function handleFetchYoutubeTranscriptLocalFirst(
   }
 
   const settings = await getSettings();
-  if (settings.supadataApiKey) {
-    const fallback = await handleFetchTranscript(videoId, requestedLanguage);
-    // Supadata can take long enough for a YouTube SPA navigation to finish
-    // while the request (or async job) is in flight. Do not accept that old
-    // video's result for the tab's new page or a cache-miss note save.
-    if (!(await youtubeTabStillMatches(tabId, videoId))) {
-      return pageContextChangedResult();
-    }
-    if (fallback.success) {
-      return {
-        ...fallback,
-        source: "supadata",
-        sourceAttempt: "SUPADATA",
-        selectedTrack: null,
-      };
-    }
+  const attempts = Array.isArray(localError?.attempts)
+    ? localError.attempts
+    : [];
+  const localErrorCode = localError?.code || "LOCAL_TRANSCRIPT_FAILED";
+
+  if (!settings.supadataApiKey) {
+    return {
+      success: false,
+      error: "SUPADATA_NOT_CONFIGURED",
+      message:
+        "未能直接读取 YouTube 原生字幕。如要使用 Supadata，可先在设置中配置可选密钥。",
+      localError: localErrorCode,
+      attempts,
+    };
+  }
+
+  // A saved key enables the choice, never an automatic third-party request.
+  // Only the side-panel action shown after local failure may opt this one
+  // attempt into Supadata. Note saves and ordinary transcript loads keep the
+  // default false value and therefore cannot silently use the provider.
+  if (supadataConsent !== true) {
+    return {
+      success: false,
+      error: "SUPADATA_CONSENT_REQUIRED",
+      message:
+        "未能直接读取 YouTube 原生字幕。你可以选择本次使用 Supadata 提取。",
+      localError: localErrorCode,
+      attempts,
+    };
+  }
+
+  const fallback = await handleFetchTranscript(
+    videoId,
+    requestedLanguage,
+    () => youtubeTabStillMatches(tabId, videoId),
+  );
+  // Supadata can take long enough for a YouTube SPA navigation to finish
+  // while the request (or async job) is in flight. Do not accept that old
+  // video's result for the tab's new page or a cache-miss note save.
+  if (!(await youtubeTabStillMatches(tabId, videoId))) {
+    return pageContextChangedResult();
+  }
+  if (fallback.success) {
     return {
       ...fallback,
-      localError: localError?.code || "LOCAL_TRANSCRIPT_FAILED",
+      source: "supadata",
+      sourceAttempt: "SUPADATA",
+      selectedTrack: null,
     };
   }
 
   return {
-    success: false,
-    error: localError?.code || "LOCAL_TRANSCRIPT_FAILED",
-    message:
-      "未能从 YouTube 取得非空原生字幕；未配置 Supadata 可选回退。",
-    attempts: Array.isArray(localError?.attempts)
-      ? localError.attempts
-      : [],
+    ...fallback,
+    localError: localErrorCode,
   };
 }
 
@@ -1321,7 +1353,11 @@ async function handleFetchYoutubeTranscriptLocalFirst(
  * @param {string} videoId - The YouTube video ID (e.g., "dQw4w9WgXcQ")
  * @returns {Object} - { success, transcript, transcriptText, language } or { success: false, error }
  */
-async function handleFetchTranscript(videoId, preferredLanguage) {
+async function handleFetchTranscript(
+  videoId,
+  preferredLanguage,
+  shouldContinue = null,
+) {
   try {
     const settings = await getSettings();
     if (!settings.supadataApiKey) {
@@ -1330,6 +1366,10 @@ async function handleFetchTranscript(videoId, preferredLanguage) {
         error: "NO_SUPADATA_KEY",
         message: "尚未配置 Supadata API 密钥，请打开 YouTube Digest 设置。",
       };
+    }
+
+    if (shouldContinue && !(await shouldContinue())) {
+      return pageContextChangedResult();
     }
 
     // Share only the canonical watch URL. This strips playlist, referral,
@@ -1365,6 +1405,7 @@ async function handleFetchTranscript(videoId, preferredLanguage) {
         jobData.jobId,
         settings.supadataApiKey,
         normalizedPreferredLanguage,
+        shouldContinue,
       );
     }
 
@@ -1487,13 +1528,24 @@ async function handleFetchTranscript(videoId, preferredLanguage) {
  * @param {string} jobId - The job ID returned by the initial request
  * @returns {Object} - Same format as handleFetchTranscript
  */
-async function pollTranscriptJob(jobId, supadataApiKey, preferredLanguage = "") {
+async function pollTranscriptJob(
+  jobId,
+  supadataApiKey,
+  preferredLanguage = "",
+  shouldContinue = null,
+) {
   const maxAttempts = 60; // Max 60 seconds of polling
   const pollInterval = 1000; // Poll every 1 second
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    if (shouldContinue && !(await shouldContinue())) {
+      return pageContextChangedResult();
+    }
     // Wait before polling
     await new Promise((resolve) => setTimeout(resolve, pollInterval));
+    if (shouldContinue && !(await shouldContinue())) {
+      return pageContextChangedResult();
+    }
 
     const response = await fetch(
       `https://api.supadata.ai/v1/transcript/${encodeURIComponent(jobId)}`,

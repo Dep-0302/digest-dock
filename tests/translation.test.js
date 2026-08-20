@@ -244,9 +244,17 @@ function installSidepanelDigestFixture(runtime) {
             hidden: false,
             innerHTML: "",
             textContent: "",
+            disabled: false,
+            focused: false,
+            listeners: {},
             classList: { toggle() {}, contains() { return false; } },
             setAttribute() {},
-            addEventListener() {},
+            addEventListener(type, listener) { this.listeners[type] = listener; },
+            focus() { this.focused = true; },
+            click() {
+              if (this.disabled) return undefined;
+              return this.listeners.click?.();
+            },
           });
         }
         return elements.get(id);
@@ -381,6 +389,17 @@ function installSidepanelDigestFixture(runtime) {
         }),
         events: () => JSON.stringify(events),
         saved: () => JSON.stringify(saved),
+        setupEvents: () => setupEventListeners(),
+        errorSnapshot: () => JSON.stringify({
+          title: element("errorTitle").textContent,
+          message: element("errorMessage").textContent,
+          primaryText: element("errorBtn").textContent,
+          primaryDisabled: element("errorBtn").disabled,
+          secondaryText: element("errorSecondaryBtn").textContent,
+          secondaryHidden: element("errorSecondaryBtn").hidden,
+        }),
+        clickError: () => element("errorBtn").click(),
+        clickErrorSecondary: () => element("errorSecondaryBtn").click(),
         overviewTranslationLoading: () => isOverviewTranslationLoading,
       };
     })()
@@ -438,14 +457,14 @@ test("Header exposes tab-specific transcript, overview, and notes language modes
     js,
     /function ensureNotesChinese\(\)[\s\S]*?await sendTranslationMessage\(\{[\s\S]*?action: "translateNotes"/,
   );
-  assert.match(js, /const REQUIRED_RUNTIME_PROTOCOL_VERSION = 7/);
+  assert.match(js, /const REQUIRED_RUNTIME_PROTOCOL_VERSION = 8/);
   assert.match(
     js,
     /runtimeProtocolVersion\s*!==\s*REQUIRED_RUNTIME_PROTOCOL_VERSION[\s\S]*?showRuntimeVersionError\(\)/,
   );
   assert.match(js, /扩展后台未响应原文翻译请求，请重新加载扩展/);
   const backgroundSource = read("background.js");
-  assert.match(backgroundSource, /const RUNTIME_PROTOCOL_VERSION = 7/);
+  assert.match(backgroundSource, /const RUNTIME_PROTOCOL_VERSION = 8/);
   assert.match(
     backgroundSource,
     /runtimeProtocolVersion: RUNTIME_PROTOCOL_VERSION/,
@@ -455,7 +474,7 @@ test("Header exposes tab-specific transcript, overview, and notes language modes
   assert.match(js, /原文（\$\{language\}）/);
   assert.match(
     js,
-    /void startDigest\(currentVideoId, currentVideoUrl\)\.catch\(/,
+    /return startDigest\(currentVideoId, currentVideoUrl\)\.catch\(/,
   );
   assert.match(
     js,
@@ -567,6 +586,172 @@ test("duplicate digest starts for the same video share one in-flight task", asyn
   assert.equal(await videoB, "b");
   assert.equal(await videoA, "a");
   assert.equal(await duplicateVideoA, "a");
+});
+
+test("Supadata is requested only after the user confirms the third-party action", async () => {
+  const messages = [];
+  const videoId = "abc123DEF45";
+  const runtime = loadSidepanelRuntime({
+    sendMessage: async (message) => {
+      messages.push({ ...message });
+      if (message.action !== "fetchTranscript") {
+        throw new Error(`Unexpected action: ${message.action}`);
+      }
+      if (message.supadataConsent !== true) {
+        return {
+          success: false,
+          error: "SUPADATA_CONSENT_REQUIRED",
+          message: "Choose whether to use Supadata.",
+        };
+      }
+      return {
+        success: true,
+        source: "supadata",
+        sourceAttempt: "SUPADATA",
+        selectedTrack: null,
+        transcript: [
+          { text: "Approved fallback", start: 0, duration: 2, language: "en" },
+        ],
+        transcriptText: "Approved fallback",
+        transcriptTextTimestamped: "[0:00] Approved fallback",
+        language: "en",
+      };
+    },
+  });
+  const fixture = installSidepanelDigestFixture(runtime);
+  fixture.setupEvents();
+
+  const initialLoad = fixture.start(videoId, {
+    videoUrl: `https://www.youtube.com/watch?v=${videoId}`,
+  });
+  await nextTurn();
+  fixture.resolveCache(videoId, null);
+  await initialLoad;
+
+  assert.deepEqual(
+    messages.map((message) => message.supadataConsent),
+    [false],
+  );
+  assert.deepEqual(JSON.parse(fixture.errorSnapshot()), {
+    title: "是否使用第三方字幕服务？",
+    message:
+      "未能直接读取 YouTube 原生字幕。你可以选择本次使用 Supadata 重试；点击后会把此视频的标准 YouTube 链接发送给 Supadata，并可能消耗你的 API 额度。",
+    primaryText: "本次使用 Supadata",
+    primaryDisabled: false,
+    secondaryText: "不使用第三方服务",
+    secondaryHidden: false,
+  });
+
+  const approvedLoad = fixture.clickError();
+  const blockedDoubleClick = fixture.clickError();
+  const duplicateRefresh = fixture.start(videoId);
+  await nextTurn();
+  fixture.resolveCache(videoId, null);
+  await Promise.all([approvedLoad, duplicateRefresh]);
+
+  assert.equal(blockedDoubleClick, undefined);
+  assert.deepEqual(
+    messages.map((message) => message.supadataConsent),
+    [false, true],
+  );
+  assert.equal(JSON.parse(fixture.saved()).at(-1).transcriptText, "Approved fallback");
+});
+
+test("declining Supadata sends no third-party transcript request", async () => {
+  const messages = [];
+  const videoId = "abc123DEF45";
+  const runtime = loadSidepanelRuntime({
+    sendMessage: async (message) => {
+      messages.push({ ...message });
+      return {
+        success: false,
+        error: "SUPADATA_CONSENT_REQUIRED",
+        message: "Choose whether to use Supadata.",
+      };
+    },
+  });
+  const fixture = installSidepanelDigestFixture(runtime);
+  fixture.setupEvents();
+
+  const initialLoad = fixture.start(videoId);
+  await nextTurn();
+  fixture.resolveCache(videoId, null);
+  await initialLoad;
+  fixture.clickErrorSecondary();
+
+  assert.deepEqual(
+    messages.map((message) => message.supadataConsent),
+    [false],
+  );
+  const errorState = JSON.parse(fixture.errorSnapshot());
+  assert.equal(errorState.title, "继续使用 YouTube 原生字幕");
+  assert.match(errorState.message, /没有向 Supadata 发送视频链接/);
+  assert.match(errorState.message, /字幕轨尚未加载/);
+  assert.match(errorState.message, /VPN 或代理/);
+  assert.equal(errorState.primaryText, "重试 YouTube 原生字幕");
+  assert.equal(errorState.secondaryHidden, true);
+
+  const nativeRetry = fixture.clickError();
+  await nextTurn();
+  fixture.resolveCache(videoId, null);
+  await nativeRetry;
+
+  assert.deepEqual(
+    messages.map((message) => message.supadataConsent),
+    [false, false],
+  );
+});
+
+test("a consent click waits for an older local-only refresh and still runs", async () => {
+  const messages = [];
+  const videoId = "abc123DEF45";
+  const runtime = loadSidepanelRuntime({
+    sendMessage: async (message) => {
+      messages.push({ ...message });
+      if (message.supadataConsent !== true) {
+        return {
+          success: false,
+          error: "SUPADATA_CONSENT_REQUIRED",
+          message: "Choose whether to use Supadata.",
+        };
+      }
+      return {
+        success: true,
+        source: "supadata",
+        sourceAttempt: "SUPADATA",
+        selectedTrack: null,
+        transcript: [
+          { text: "Approved fallback", start: 0, duration: 2, language: "en" },
+        ],
+        transcriptText: "Approved fallback",
+        transcriptTextTimestamped: "[0:00] Approved fallback",
+        language: "en",
+      };
+    },
+  });
+  const fixture = installSidepanelDigestFixture(runtime);
+  fixture.setupEvents();
+
+  const initialLoad = fixture.start(videoId);
+  await nextTurn();
+  fixture.resolveCache(videoId, null);
+  await initialLoad;
+
+  const olderLocalRefresh = fixture.start(videoId);
+  await nextTurn();
+  const approvedLoad = fixture.clickError();
+  fixture.resolveCache(videoId, null);
+  await olderLocalRefresh;
+
+  await nextTurn();
+  fixture.resolveCache(videoId, null);
+  await approvedLoad;
+
+  assert.deepEqual(
+    messages.map((message) => message.supadataConsent),
+    [false, false, true],
+  );
+  assert.equal(JSON.parse(fixture.saved()).at(-1).transcriptText, "Approved fallback");
 });
 
 test("media locators separate Bilibili route identity from resolved CID identity", () => {

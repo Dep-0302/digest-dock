@@ -23,6 +23,16 @@ test("DeepSeek defaults use V4 Flash", () => {
   );
 });
 
+test("Supadata remains optional and blank values clear the saved fallback key", () => {
+  const normalized = settings.normalize({
+    aiApiKey: "deepseek-value",
+    supadataApiKey: "   ",
+  });
+
+  assert.equal(normalized.aiApiKey, "deepseek-value");
+  assert.equal(normalized.supadataApiKey, "");
+});
+
 test("legacy custom migration clears only the AI key and is idempotent", () => {
   const legacy = {
     provider: "custom",

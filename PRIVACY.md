@@ -32,7 +32,7 @@ This path reads only caption tracks that YouTube already exposes. It does not do
 
 ### Supadata
 
-Supadata is an optional failure fallback for YouTube. Only after local YouTube transcript attempts fail, and only when you have saved a Supadata API key, YouTube Digest may send the canonical video URL to `https://api.supadata.ai` with that key. The fallback requests a native transcript and timestamps; it does not request generated transcription. A Supadata key is not required to save Settings, try local YouTube retrieval, or use Bilibili.
+Supadata is an optional failure fallback for YouTube. Local failure and a saved key are not sufficient to call it: the side panel explains the third-party request and requires you to confirm that attempt. Only after that click may YouTube Digest send the canonical video URL to `https://api.supadata.ai` with your key. Consent is not stored as a standing preference. The fallback requests a native transcript and timestamps; it does not request generated transcription. A Supadata key is not required to save Settings, try local YouTube retrieval, or use Bilibili.
 
 ### Bilibili
 
@@ -108,7 +108,7 @@ YouTube Digest uses Chrome permissions for these purposes:
 - `scripting`: coordinate the extension's YouTube and Bilibili page controls.
 - YouTube host access: read the active video's URL, metadata, and existing caption tracks; request player and `timedtext` responses with credentials omitted; and provide timestamp controls.
 - Bilibili and Bilibili subtitle-CDN host access: resolve the current part, read an existing subtitle track, and provide timestamp controls without requesting cookie values.
-- Supadata host access: retrieve a native transcript only as the optional fallback after local YouTube retrieval fails.
+- Supadata host access: retrieve a native transcript only after local YouTube retrieval fails and the user explicitly confirms that third-party attempt.
 - DeepSeek host access: provide AI overviews, explanations, translation, and note polishing through DeepSeek V4 Flash.
 
 YouTube Digest does not use these permissions to monitor general browsing activity.

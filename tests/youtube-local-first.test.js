@@ -206,7 +206,35 @@ test("an empty preference uses the page default source language", async () => {
   assert.equal(result.language, "zh-TW");
 });
 
-test("local failure uses Supadata only when the optional key exists", async () => {
+test("explicit consent still prefers a recovered local transcript", async () => {
+  let providerCalls = 0;
+  const { helpers } = loadBackground({
+    settings: { aiApiKey: "test-key", supadataApiKey: "optional-key" },
+    youtubeAdapter: {
+      async fetchTranscript() {
+        return localResult("en");
+      },
+    },
+    executeScript: async () => pageSnapshot(),
+    fetchImpl: async () => {
+      providerCalls += 1;
+      return jsonResponse({});
+    },
+  });
+
+  const result = await helpers.handleFetchYoutubeTranscriptLocalFirst(
+    "jNQXAC9IVRw",
+    "en",
+    42,
+    true,
+  );
+
+  assert.equal(result.success, true);
+  assert.equal(result.source, "youtube-timedtext");
+  assert.equal(providerCalls, 0);
+});
+
+test("local failure requires explicit consent before Supadata is called", async () => {
   let supadataCalls = 0;
   const localError = Object.assign(new Error("empty local captions"), {
     code: "EMPTY_TRANSCRIPT",
@@ -231,17 +259,35 @@ test("local failure uses Supadata only when the optional key exists", async () =
       });
     },
   });
+  const consentRequired =
+    await withFallback.helpers.handleFetchYoutubeTranscriptLocalFirst(
+      "jNQXAC9IVRw",
+      "en",
+      42,
+    );
+  assert.equal(consentRequired.success, false);
+  assert.equal(consentRequired.error, "SUPADATA_CONSENT_REQUIRED");
+  assert.equal(consentRequired.localError, "EMPTY_TRANSCRIPT");
+  assert.equal(supadataCalls, 0);
+
   const fallback = await withFallback.helpers.handleFetchYoutubeTranscriptLocalFirst(
     "jNQXAC9IVRw",
     "en",
     42,
+    true,
   );
   assert.equal(fallback.success, true);
   assert.equal(fallback.source, "supadata");
   assert.equal(fallback.sourceAttempt, "SUPADATA");
   assert.equal(fallback.transcript[0].text, "Fallback line");
   assert.equal(supadataCalls, 1);
+});
 
+test("Supadata stays unused without a configured key even if consent is requested", async () => {
+  let providerCalls = 0;
+  const localError = Object.assign(new Error("empty local captions"), {
+    code: "EMPTY_TRANSCRIPT",
+  });
   const noFallback = loadBackground({
     settings: { aiApiKey: "test-key", supadataApiKey: "" },
     youtubeAdapter: {
@@ -250,15 +296,58 @@ test("local failure uses Supadata only when the optional key exists", async () =
       },
     },
     executeScript: async () => pageSnapshot(),
+    fetchImpl: async () => {
+      providerCalls += 1;
+      return jsonResponse({});
+    },
   });
   const failed = await noFallback.helpers.handleFetchYoutubeTranscriptLocalFirst(
     "jNQXAC9IVRw",
     "en",
     42,
+    true,
   );
   assert.equal(failed.success, false);
-  assert.equal(failed.error, "EMPTY_TRANSCRIPT");
-  assert.match(failed.message, /未配置 Supadata/);
+  assert.equal(failed.error, "SUPADATA_NOT_CONFIGURED");
+  assert.equal(failed.localError, "EMPTY_TRANSCRIPT");
+  assert.match(failed.message, /可选密钥/);
+  assert.equal(providerCalls, 0);
+});
+
+test("only strict boolean consent can authorize the optional provider", async () => {
+  let providerCalls = 0;
+  const localError = Object.assign(new Error("empty local captions"), {
+    code: "EMPTY_TRANSCRIPT",
+  });
+  const { helpers } = loadBackground({
+    settings: { aiApiKey: "test-key", supadataApiKey: "optional-key" },
+    youtubeAdapter: {
+      async fetchTranscript() {
+        throw localError;
+      },
+    },
+    executeScript: async () => pageSnapshot(),
+    fetchImpl: async () => {
+      providerCalls += 1;
+      return jsonResponse({
+        content: [
+          { text: "Fallback line", offset: 0, duration: 1000, lang: "en" },
+        ],
+        lang: "en",
+      });
+    },
+  });
+
+  for (const consent of [undefined, false, "true", 1]) {
+    const result = await helpers.handleFetchYoutubeTranscriptLocalFirst(
+      "jNQXAC9IVRw",
+      "en",
+      42,
+      consent,
+    );
+    assert.equal(result.error, "SUPADATA_CONSENT_REQUIRED");
+  }
+  assert.equal(providerCalls, 0);
 });
 
 test("a stale page video never probes clients or spends Supadata fallback quota", async () => {
@@ -284,10 +373,47 @@ test("a stale page video never probes clients or spends Supadata fallback quota"
     "jNQXAC9IVRw",
     "en",
     42,
+    true,
   );
   assert.equal(result.success, false);
   assert.equal(result.error, "PAGE_CONTEXT_CHANGED");
   assert.equal(adapterCalls, 0);
+  assert.equal(providerCalls, 0);
+});
+
+test("a pending navigation blocks an approved Supadata request for the old video", async () => {
+  let providerCalls = 0;
+  const localError = Object.assign(new Error("empty local captions"), {
+    code: "EMPTY_TRANSCRIPT",
+  });
+  const { helpers } = loadBackground({
+    settings: { aiApiKey: "test-key", supadataApiKey: "optional-key" },
+    youtubeAdapter: {
+      async fetchTranscript() {
+        throw localError;
+      },
+    },
+    executeScript: async () => pageSnapshot(),
+    tabsGet: async (tabId) => ({
+      id: tabId,
+      url: "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+      pendingUrl: "https://www.youtube.com/watch?v=aqz-KE-bpKQ",
+    }),
+    fetchImpl: async () => {
+      providerCalls += 1;
+      return jsonResponse({});
+    },
+  });
+
+  const result = await helpers.handleFetchYoutubeTranscriptLocalFirst(
+    "jNQXAC9IVRw",
+    "en",
+    42,
+    true,
+  );
+
+  assert.equal(result.success, false);
+  assert.equal(result.error, "PAGE_CONTEXT_CHANGED");
   assert.equal(providerCalls, 0);
 });
 
@@ -310,7 +436,7 @@ test("a Supadata result is rejected if the tab navigates while fallback is in fl
       return {
         id: tabId,
         url:
-          tabsGetCalls === 1
+          tabsGetCalls <= 2
             ? "https://www.youtube.com/watch?v=jNQXAC9IVRw"
             : "https://www.youtube.com/watch?v=aqz-KE-bpKQ",
       };
@@ -330,12 +456,13 @@ test("a Supadata result is rejected if the tab navigates while fallback is in fl
     "jNQXAC9IVRw",
     "en",
     42,
+    true,
   );
 
   assert.equal(result.success, false);
   assert.equal(result.error, "PAGE_CONTEXT_CHANGED");
   assert.equal(providerCalls, 1);
-  assert.equal(tabsGetCalls, 2);
+  assert.equal(tabsGetCalls, 3);
 });
 
 test("a completed Supadata async job rejects an empty transcript", async () => {
@@ -359,6 +486,37 @@ test("a completed Supadata async job rejects an empty transcript", async () => {
   assert.equal(result.success, false);
   assert.equal(result.error, "EMPTY_TRANSCRIPT");
   assert.equal(fetchCalls, 2);
+});
+
+test("Supadata async polling stops when the user leaves the video", async () => {
+  let fetchCalls = 0;
+  let contextChecks = 0;
+  const { helpers } = loadBackground({
+    settings: { aiApiKey: "test-key", supadataApiKey: "optional-key" },
+    youtubeAdapter: { async fetchTranscript() {} },
+    setTimeoutImpl(callback) {
+      callback();
+      return 1;
+    },
+    fetchImpl: async () => {
+      fetchCalls += 1;
+      return jsonResponse({ jobId: "job-1" }, 202);
+    },
+  });
+
+  const result = await helpers.handleFetchTranscript(
+    "jNQXAC9IVRw",
+    "en",
+    async () => {
+      contextChecks += 1;
+      return contextChecks === 1;
+    },
+  );
+
+  assert.equal(result.success, false);
+  assert.equal(result.error, "PAGE_CONTEXT_CHANGED");
+  assert.equal(fetchCalls, 1);
+  assert.equal(contextChecks, 2);
 });
 
 test("the media router keeps Bilibili isolated from the YouTube adapter", async () => {
@@ -388,7 +546,12 @@ test("the media router keeps Bilibili isolated from the YouTube adapter", async 
       },
     },
   });
-  const result = await helpers.handleFetchMediaTranscript(mediaRef, "zh-CN", 42);
+  const result = await helpers.handleFetchMediaTranscript(
+    mediaRef,
+    "zh-CN",
+    42,
+    true,
+  );
   assert.equal(result.success, true);
   assert.equal(result.source, "bilibili");
   assert.equal(youtubeCalls, 0);
@@ -441,12 +604,63 @@ test("a cache-miss YouTube note reuses tabId and preferred language for local ex
   assert.equal(savedNotes[0].text, "中文字幕。");
 });
 
+test("a cache-miss note never authorizes Supadata on the user's behalf", async () => {
+  let providerCalls = 0;
+  let savedNotes = [];
+  const localError = Object.assign(new Error("empty local captions"), {
+    code: "EMPTY_TRANSCRIPT",
+  });
+  const { helpers } = loadBackground({
+    settings: { aiApiKey: "test-key", supadataApiKey: "optional-key" },
+    youtubeAdapter: {
+      async fetchTranscript() {
+        throw localError;
+      },
+    },
+    executeScript: async () => pageSnapshot(),
+    fetchImpl: async () => {
+      providerCalls += 1;
+      return jsonResponse({});
+    },
+    storageGet: async (key) => {
+      if (key === "ytd_settings") {
+        return {
+          ytd_settings: {
+            aiApiKey: "test-key",
+            supadataApiKey: "optional-key",
+          },
+        };
+      }
+      if (key === "ytd_notes") return { ytd_notes: savedNotes };
+      return {};
+    },
+    storageSet: async (items) => {
+      if (Array.isArray(items.ytd_notes)) savedNotes = items.ytd_notes;
+    },
+  });
+
+  const result = await helpers.handleSaveNote(
+    "jNQXAC9IVRw",
+    1,
+    "视频",
+    "频道",
+    "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+    42,
+    "en",
+  );
+
+  assert.equal(result.success, false);
+  assert.equal(result.error, "SUPADATA_CONSENT_REQUIRED");
+  assert.equal(providerCalls, 0);
+  assert.equal(savedNotes.length, 0);
+});
+
 test("side panel and note messages thread the exact tab and language through", () => {
   const panel = read("sidepanel.js");
   const background = read("background.js");
   assert.match(
     panel,
-    /action: "fetchTranscript"[\s\S]*?preferredLanguage: currentVideoSourceLanguage,[\s\S]*?tabId: videoTabId/,
+    /action: "fetchTranscript"[\s\S]*?preferredLanguage: currentVideoSourceLanguage,[\s\S]*?tabId: videoTabId,[\s\S]*?supadataConsent: supadataConsent === true/,
   );
   assert.match(
     panel,
@@ -458,8 +672,17 @@ test("side panel and note messages thread the exact tab and language through", (
   );
   assert.match(panel, /const TRANSCRIPT_SOURCE_POLICY_VERSION = 3/);
   assert.match(background, /const TRANSCRIPT_SOURCE_POLICY_VERSION = 3/);
-  assert.match(panel, /const REQUIRED_RUNTIME_PROTOCOL_VERSION = 7/);
-  assert.match(background, /const RUNTIME_PROTOCOL_VERSION = 7/);
+  assert.match(panel, /const REQUIRED_RUNTIME_PROTOCOL_VERSION = 8/);
+  assert.match(background, /const RUNTIME_PROTOCOL_VERSION = 8/);
+  assert.match(background, /message\.supadataConsent === true/);
+  assert.match(background, /tab\?\.pendingUrl \|\| tab\?\.url/);
+  assert.match(panel, /latestTab\.pendingUrl \|\| latestTab\.url/);
+  assert.match(panel, /本次使用 Supadata/);
+  assert.match(panel, /不使用第三方服务/);
+  assert.match(panel, /SUPADATA_CONSENT_REQUIRED/);
+  assert.match(panel, /SUPADATA_NOT_CONFIGURED/);
+  const errorUi = read("sidepanel.html");
+  assert.match(errorUi, /id="errorSecondaryBtn"[\s\S]*?type="button"[\s\S]*?hidden/);
   assert.match(panel, /if \(!currentConfigStatus\?\.hasAiKey\)/);
   assert.doesNotMatch(
     panel,

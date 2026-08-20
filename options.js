@@ -15,7 +15,7 @@ const YTD_OPTIONS = (() => {
       supadataApiKeyLabel: "Supadata API key (optional)",
       supadataPlaceholder: "Paste your Supadata key",
       supadataHelp:
-        "YouTube Digest first reads existing caption tracks directly from YouTube. This key is used only if local retrieval fails; Bilibili does not use it. ",
+        "YouTube Digest first reads existing caption tracks directly from YouTube. If local retrieval fails, Supadata is called only after you confirm that one third-party request in the side panel. Bilibili does not use it. ",
       supadataLink: "Create a Supadata account and key",
       supadataHelpSuffix:
         ". Supadata generates the key during onboarding.",
@@ -121,7 +121,7 @@ const YTD_OPTIONS = (() => {
       supadataApiKeyLabel: "Supadata API 密钥（可选）",
       supadataPlaceholder: "粘贴 Supadata 密钥",
       supadataHelp:
-        "YouTube Digest 会先直接读取 YouTube 已有字幕轨；只有本地获取失败时才使用此密钥，B 站不会使用。",
+        "YouTube Digest 会先直接读取 YouTube 已有字幕轨。本地获取失败后，只有你在侧边栏确认本次使用第三方 Supadata 时才会调用；B 站不会使用。",
       supadataLink: "创建 Supadata 账号并获取密钥",
       supadataHelpSuffix: "。Supadata 会在引导流程中生成密钥。",
       aiProvider: "AI 服务",
