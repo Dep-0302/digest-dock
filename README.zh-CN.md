@@ -2,24 +2,28 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-把每个 YouTube 视频变成一份可以深入学习的资料。YouTube Digest 把字幕、双语翻译、AI 概览、内容讲解和时间戳笔记放进同一个 Chrome 侧边栏，让你可以持续学习视频中的知识和语言，同时不丢失原视频上下文。
+YouTube Digest 是一个基于 Manifest V3 的 Chrome 扩展，用来把带字幕的视频整理成结构化学习资料。把每个 YouTube 视频变成一份可以深入学习的资料。字幕、双语翻译、AI 概览、内容讲解和时间戳笔记都在视频旁边的同一个侧边栏中完成，不需要在多个工具之间来回切换。
 
-当前本地版本也支持带有人工或 AI 字幕轨的标准 `www.bilibili.com/video/BV...` 页面。它只处理当前分P，复用当前浏览器中的 B 站登录会话但不读取或保存 Cookie；中文字幕会直接生成中文概览和润色后的中文笔记。
+此版本也支持带有人工或 AI 字幕轨的标准 `www.bilibili.com/video/BV...` 页面。扩展只处理当前分P，复用当前浏览器中的 B 站登录会话，但不会读取或保存 Cookie 值；对于中文字幕，概览和润色笔记都直接使用中文生成。
 
-- 把零碎字幕变成清晰、可搜索的学习资料。
-- 查看原文、简体中文翻译，或中英双语对照字幕来学习语言。
-- 通过 AI 概览、章节、重点引用和选中文本讲解建立系统理解。
-- 点击字幕、概览或笔记中的时间戳，快速跳转到对应位置。
-- 保存自动润色的时间戳笔记，方便之后复习。
-- 使用自己的 API Key，数据保存在本地 Chrome 中，不包含分析统计或行为追踪。
+核心流程保持精简：
 
-YouTube Digest 是一个需要自行提供 API Key 的开源项目，通过 GitHub 安装。目前没有上架 Chrome 应用商店，不赠送 API 额度，也没有开发者运营的服务器。
+- 阅读和搜索带时间戳的原始字幕。
+- 在原文、简体中文和双语对照视图之间切换。
+- 生成按章节组织的概览，查看重点引用，并讲解选中的字幕。
+- 从字幕、概览或笔记中的时间戳返回视频对应位置。
+- 保存润色后的时间戳笔记，并通过带版本信息的 JSON 备份在设备间迁移。
+- 自行提供 API Key，凭据和项目数据保存在本地 Chrome 中，不包含分析统计或行为追踪。
+
+本仓库是在 [Zara Zhang 原作 YouTube Digest](https://github.com/zarazhangrui/youtube-digest) 基础上的个人衍生版本。它保留了现有 YouTube 流程，并增加 B 站字幕支持和跨平台笔记备份与恢复。原项目以及 B 站整合阶段参考的公开实现统一列在 [致谢与参考项目](#致谢与参考项目) 中。
+
+扩展通过 GitHub 以本地方式安装，目前没有上架 Chrome 应用商店，不赠送 API 额度，也不依赖开发者运营的后端服务。
 
 ## 让你的编程 Agent 帮你安装
 
-你不需要看懂代码，也不需要会使用命令行。把下面这段话发送给你的编程 Agent：
+复制当前正在阅读的仓库页面 URL，然后把下面这段话发送给你的编程 Agent：
 
-> 请把这个项目下载或克隆到我选择的长期保留文件夹，告诉我准确的完整路径，并让 Chrome“加载已解压的扩展程序”使用同一个文件夹。如果我在第一次安装时需要位置建议，可以推荐 macOS 或 Linux 上的 `~/Documents/youtube-digest`，或 Windows 上的 `%USERPROFILE%\Documents\youtube-digest`，但不要假设我一定使用这些路径。请用简单易懂的语言一步一步指导我完成安装和配置。https://github.com/zarazhangrui/youtube-digest
+> 请从 `[在这里粘贴当前仓库 URL]` 下载或克隆项目，把它放到我选择的长期保留文件夹，告诉我准确的完整路径，并让 Chrome“加载已解压的扩展程序”使用同一个文件夹。如果我在第一次安装时需要位置建议，可以推荐 macOS 或 Linux 上的 `~/Documents/youtube-digest`，或 Windows 上的 `%USERPROFILE%\Documents\youtube-digest`，但不要假设我一定使用这些路径。请用清楚的步骤指导我完成安装和配置。
 
 你的 Agent 应该帮你：
 
@@ -35,22 +39,21 @@ YouTube Digest 是一个需要自行提供 API Key 的开源项目，通过 GitH
 
 ## 手动安装
 
-如果你想自己操作：
+如果手动安装：
 
-1. 打开 [github.com/zarazhangrui/youtube-digest](https://github.com/zarazhangrui/youtube-digest)。
-2. 点击 **Code**，再选择 **Download ZIP**。
-3. 选择一个长期保留的文件夹，并把项目解压到这里。可选建议是 macOS 或 Linux 上的 `~/Documents/youtube-digest`，或 Windows 上的 `%USERPROFILE%\Documents\youtube-digest`。你也可以使用其他文件夹。
-4. 在 Chrome 地址栏打开 `chrome://extensions`。
-5. 打开右上角的“开发者模式”。
-6. 点击“加载已解压的扩展程序”。
-7. 选择你刚才确定的那个准确项目文件夹，其中必须包含 `manifest.json`。
-8. 如果需要，可以在 Chrome 扩展菜单中固定 YouTube Digest。
+1. 在当前正在阅读的仓库页面点击 **Code**，再选择 **Download ZIP**。
+2. 选择一个长期保留的文件夹，并把项目解压到这里。可选建议是 macOS 或 Linux 上的 `~/Documents/youtube-digest`，或 Windows 上的 `%USERPROFILE%\Documents\youtube-digest`。你也可以使用其他文件夹。
+3. 在 Chrome 地址栏打开 `chrome://extensions`。
+4. 打开右上角的“开发者模式”。
+5. 点击“加载已解压的扩展程序”。
+6. 选择你刚才确定的那个准确项目文件夹，其中必须包含 `manifest.json`。
+7. 如果需要，可以在 Chrome 扩展菜单中固定 YouTube Digest。
 
 这是一个本地加载的扩展，不会自动更新。下载新版或让 Agent 修改代码后，请在 `chrome://extensions` 中找到 YouTube Digest 并点击“重新加载”，然后刷新已经打开的 YouTube 或 B 站视频页面。如果移动或删除源代码文件夹，Chrome 中加载的扩展会失效，需要从新的位置重新加载。
 
 ## 设置 API Key
 
-使用 YouTube 时需要准备下面两个 Key；如果只使用 B 站，只需要 DeepSeek Key，不需要 Supadata：
+服务访问使用你自己的账号和 Key。YouTube 需要下面两个 Key；如果只使用 B 站，只需要 DeepSeek，不需要 Supadata：
 
 1. **Supadata API Key**，用于获取 YouTube 字幕；只使用 B 站时可不填写。
 2. **DeepSeek API Key**，用于生成概览、讲解内容、翻译和自动润色笔记。
@@ -91,18 +94,20 @@ API Key 和设置保存在你设备上的 Chrome 扩展本地存储中。发布�
 
 ## 使用 YouTube Digest
 
-1. 打开一个有字幕的普通 YouTube 视频页面。
+一次普通的 YouTube 使用流程如下：
+
+1. 打开一个提供原生字幕轨的标准 YouTube 视频页面。
 2. 点击 YouTube Digest 扩展图标，打开侧边栏。
 3. 阅读带时间戳的字幕，或选择 **Original**、**中文**、**双语**。
-4. 打开 **概览**，默认查看中文 AI 总结，并可选择 **原文**、**中文**或**双语**。
-5. 选中字幕，获取 AI 内容讲解。
+4. 打开 **概览** 查看中文优先的章节总结，并可选择 **原文**、**中文**或**双语**。
+5. 选中需要进一步理解的字幕片段，获取针对性讲解。
 6. 从播放器或重点引用中保存笔记，之后可以在 **笔记** 中选择 **原文**、**中文**或**双语**查看。
 
-使用 B 站时，打开一个有字幕的标准 BV 视频。当前分P会作为一份独立学习资料；点击扩展图标或页面中的“生成摘要”，并通过播放器悬浮按钮保存时间戳笔记。
+使用 B 站时，打开一个有字幕的标准 BV 视频。每个分P都作为独立学习资料处理。可以点击扩展图标或页面中的“生成摘要”，并通过播放器悬浮按钮保存时间戳笔记。
 
 ## 备份和恢复笔记
 
-设置页中的 **笔记备份** 卡片可以导出带版本信息的 JSON 恢复文件。重装扩展、清理 Chrome 个人资料或把笔记迁移到另一台设备前，可以先用它备份。
+设置页中的 **笔记备份** 卡片提供带版本信息的 JSON 恢复格式。重装扩展、清理 Chrome 个人资料或把笔记迁移到另一台设备前，建议先导出一份备份。
 
 创建备份：
 
@@ -177,9 +182,9 @@ DeepSeek 说明这些价格可能很快上调，因此使用此估算前必须�
 
 ## 用编程 Agent 改造成自己的版本
 
-这是一个个人 Remix 项目，不接受上游 Issue 或 Pull Request。如果功能出错，或者你想增加新功能，请下载或 Fork 自己的副本，再让你的编程 Agent 帮你修复、改造和个性化。
+本仓库按个人 Remix 项目维护，不接受上游 Issue 或 Pull Request。如果需要不同的行为，请从自己的 Fork 或本地副本继续修改，并让改动范围只作用于对应版本。
 
-YouTube Digest 使用原生 HTML、CSS 和 JavaScript，没有构建步骤，很适合用编程 Agent 做个人项目。你可以尝试：
+YouTube Digest 使用原生 HTML、CSS 和 JavaScript，应用本身没有构建步骤，因此本地修改和 Agent 辅助开发都比较直接。适合继续扩展的方向包括：
 
 - 增加更多翻译语言，并让每个人选择自己的学习语言。
 - 为课程、访谈、教程、测评或研究视频增加自定义总结模板。
@@ -189,7 +194,7 @@ YouTube Digest 使用原生 HTML、CSS 和 JavaScript，没有构建步骤，很
 - 增加本地模型选项，获得不同的隐私和成本方案。
 - 改善键盘操作、字体大小和高对比度等无障碍体验。
 
-请让 Agent 保留用户自带 API Key 的模式，不要把秘密写入源代码，并运行下方检查。分享自己的版本前，也要在真实视频上测试。
+继续开发时应保留用户自带 API Key 的模式，不要把秘密写入源代码，并运行下方检查。分享自己的版本前，也要在真实视频上测试受影响的平台路径。
 
 如果想使用其他 AI 服务或模型，请先在编程 Agent 中打开 Chrome 通过“加载已解压的扩展程序”使用的那个准确的 YouTube Digest 项目文件夹。然后打开 YouTube Digest 设置并点击 **Copy customization prompt**。发送前替换 `[PROVIDER]` 和 `[MODEL]`，但不要加入任何 API Key。Agent 完成本地代码修改后，请你自己在它指出的设置位置填写 Key。
 
@@ -257,6 +262,20 @@ npm run package
 
 Agent 还应该在 Chrome 中重新加载扩展，并在每个发生改动的支持平台上测试真实视频。自动检查通过，不代表真实服务请求或页面交互一定正常。
 
+## 致谢与参考项目
+
+本仓库基于 [Zara Zhang](https://github.com/zarazhangrui) 创建并以 MIT 许可证发布的原项目 [YouTube Digest](https://github.com/zarazhangrui/youtube-digest) 继续开发。感谢 Zara 公开原始侧边栏工作流，让这个项目能够被阅读、修改和扩展。
+
+本仓库内实现了 B 站数据链路。开发过程中，下面这些公开项目用于理解和交叉验证 B 站页面元数据、当前分P身份、登录态可见字幕轨和字幕正文归一化等行为；它们不是本扩展的运行时依赖，列在这里也不表示其源代码被打包进本扩展：
+
+- [Bili Clipper](https://github.com/echore/bili-clipper)
+- [Bilibili-Evolved](https://github.com/the1812/Bilibili-Evolved)
+- [ChatGPTBox](https://github.com/ChatGPTBox-dev/chatGPTBox)
+- [BiliNote](https://github.com/JefferyHcool/BiliNote)
+- [yt-dlp](https://github.com/yt-dlp/yt-dlp)
+
+感谢这些项目的作者和维护者公开实现与文档，为浏览器集成中较难验证的行为提供了可靠参考。各项目仍适用其各自的许可证和版权声明；B 站网页内部接口也可能随平台更新而变化。
+
 ## 开源许可
 
-MIT，详见 [LICENSE](LICENSE)。
+MIT，详见 [LICENSE](LICENSE)。原始版权声明继续保留。

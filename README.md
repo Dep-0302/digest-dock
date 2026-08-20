@@ -2,24 +2,28 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-Turn every YouTube video into a resource for deep learning. YouTube Digest brings transcripts, bilingual translation, AI overviews, explanations, and timestamped notes into one Chrome side panel, so you can study ideas and language without losing your place.
+YouTube Digest is a Manifest V3 Chrome extension for working with captioned video as structured study material. Turn every YouTube video into a resource for deep learning. The side panel keeps the transcript, bilingual translation, AI overview, explanations, and timestamped notes next to the video instead of splitting the workflow across several tools.
 
-The current local version also supports standard `www.bilibili.com/video/BV...` pages with an existing human or AI subtitle track. It reads only the current part, reuses the current Bilibili browser session without reading or storing cookies, and generates Chinese overviews and polished Chinese notes directly from Chinese subtitles.
+This version also supports standard `www.bilibili.com/video/BV...` pages with an existing human or AI subtitle track. It reads only the current part, reuses the active Bilibili browser session without reading or storing cookie values, and generates Chinese overviews and polished Chinese notes directly from Chinese subtitles.
 
-- Turn captions into a readable, searchable learning resource.
-- Learn languages with the original transcript, a Simplified Chinese translation, or an aligned bilingual view.
-- Build understanding with an AI overview, chapters, key quotes, and selected-text explanations.
-- Navigate long videos by clicking timestamps in the transcript, overview, or notes.
-- Save polished timestamped notes for later study.
-- Keep control of your data with your own API keys, local Chrome storage, and no analytics or telemetry.
+The main workflow is intentionally small:
 
-YouTube Digest is a bring-your-own-key project installed locally from GitHub. It is not available through the Chrome Web Store, does not include API credits, and does not run a developer-operated server.
+- Read and search the timestamped source transcript.
+- Switch between the original transcript, Simplified Chinese, and an aligned bilingual view.
+- Generate a chapter-based overview, inspect key quotes, and explain selected text.
+- Jump back to the video from transcript rows, overview chapters, or saved notes.
+- Save polished timestamped notes and move them between devices with a versioned JSON backup.
+- Keep credentials and project data under your control with bring-your-own API keys, local Chrome storage, and no analytics or telemetry.
+
+This repository is a personal derivative of [Zara Zhang's original YouTube Digest](https://github.com/zarazhangrui/youtube-digest). It keeps the existing YouTube workflow intact while adding Bilibili subtitle support and cross-platform note backup and restore. The original project and the public implementations used for Bilibili integration research are credited in [Acknowledgements and references](#acknowledgements-and-references).
+
+The extension is installed locally from GitHub. It is not distributed through the Chrome Web Store, does not include API credits, and does not use a developer-operated backend.
 
 ## Install with your coding agent
 
-You do not need to understand the code or use the command line. Send this message to your coding agent:
+Copy the URL of the repository page you are reading, then send this message to your coding agent:
 
-> Download or clone this project into a permanent folder I choose, tell me its exact full path, and use that same folder for Chrome's Load unpacked step. If I need a suggestion during this first installation, offer `~/Documents/youtube-digest` on macOS or Linux, or `%USERPROFILE%\Documents\youtube-digest` on Windows, but do not assume either path. Walk me through installation and setup in simple terms. https://github.com/zarazhangrui/youtube-digest
+> Download or clone the repository at `[PASTE THIS REPOSITORY URL HERE]` into a permanent folder I choose, tell me its exact full path, and use that same folder for Chrome's Load unpacked step. If I need a suggestion during this first installation, offer `~/Documents/youtube-digest` on macOS or Linux, or `%USERPROFILE%\Documents\youtube-digest` on Windows, but do not assume either path. Walk me through installation and setup in simple terms.
 
 Your agent should:
 
@@ -35,22 +39,21 @@ Never paste an API key into an AI chat, source file, screenshot, or public messa
 
 ## Install manually
 
-If you prefer to do it yourself:
+For a manual installation:
 
-1. Open [github.com/zarazhangrui/youtube-digest](https://github.com/zarazhangrui/youtube-digest).
-2. Choose **Code**, then **Download ZIP**.
-3. Choose a permanent folder and unzip the project there. Optional suggestions are `~/Documents/youtube-digest` on macOS or Linux, or `%USERPROFILE%\Documents\youtube-digest` on Windows. You may use a different folder.
-4. In Chrome, open `chrome://extensions`.
-5. Turn on **Developer mode**.
-6. Click **Load unpacked**.
-7. Select the exact project folder you chose, which must contain `manifest.json`.
-8. Pin YouTube Digest from Chrome's Extensions menu if you want quick access.
+1. On the repository page you are reading, choose **Code**, then **Download ZIP**.
+2. Choose a permanent folder and unzip the project there. Optional suggestions are `~/Documents/youtube-digest` on macOS or Linux, or `%USERPROFILE%\Documents\youtube-digest` on Windows. You may use a different folder.
+3. In Chrome, open `chrome://extensions`.
+4. Turn on **Developer mode**.
+5. Click **Load unpacked**.
+6. Select the exact project folder you chose, which must contain `manifest.json`.
+7. Pin YouTube Digest from Chrome's Extensions menu if you want quick access.
 
 Because this is an unpacked extension, it does not update automatically. After downloading an update or changing local files, click **Reload** on the YouTube Digest card at `chrome://extensions`, then refresh open YouTube or Bilibili video tabs. Moving or deleting the source folder breaks the unpacked extension until you load it again from the new location.
 
 ## Set up your API keys
 
-For YouTube, YouTube Digest uses two keys under your own provider accounts. Bilibili-only use needs the DeepSeek key but not Supadata:
+Provider access is configured with your own accounts. YouTube needs both keys below; Bilibili-only use needs DeepSeek but does not require Supadata:
 
 1. A **Supadata API key** to retrieve YouTube transcripts; optional for Bilibili-only use.
 2. A **DeepSeek API key** for overviews, explanations, translation, and automatic note polishing.
@@ -91,18 +94,20 @@ Keys and settings are stored in Chrome's local extension storage on your device.
 
 ## Use YouTube Digest
 
-1. Open a standard YouTube watch page with captions.
+A normal YouTube session follows this path:
+
+1. Open a standard YouTube watch page that exposes a native caption track.
 2. Click the YouTube Digest extension icon to open the side panel.
 3. Read the timestamped transcript, or choose **Original**, **中文**, or **双语**.
-4. Open **Overview** for a Chinese-first AI summary, then choose **Original**, **中文**, or **双语**.
-5. Select transcript text when you want an AI explanation.
-6. Save a note from the player or a key quote, then revisit it from **Notes** in **Original**, **中文**, or **双语** mode.
+4. Open **Overview** for the Chinese-first chapter summary, then choose **Original**, **中文**, or **双语**.
+5. Select a transcript range when you need a focused AI explanation.
+6. Save a note from the player or a key quote, then review it from **Notes** in **Original**, **中文**, or **双语** mode.
 
-For Bilibili, open a standard BV video with subtitles. The current part is treated as one independent learning resource; click the extension icon or the injected **生成摘要** button, and use the player overlay to save a timestamped note.
+On Bilibili, open a standard BV video with subtitles. Each part is treated as an independent learning resource. Open the extension or use the injected **生成摘要** button, then use the player overlay when you want to save a timestamped note.
 
 ## Back up and restore notes
 
-The **Notes backup** card in Settings exports a versioned JSON recovery file. Use it before reinstalling the extension, clearing a Chrome profile, or moving your notes to another device.
+The **Notes backup** card in Settings provides a versioned JSON recovery format. Export a copy before reinstalling the extension, clearing a Chrome profile, or moving notes to another device.
 
 To create a backup:
 
@@ -177,9 +182,9 @@ Translation is lazy and progressive. Cached segments are reused, and only rows y
 
 ## Remix it with your coding agent
 
-This is a personal remix project. Upstream issues and pull requests are not accepted. If something breaks or you want a new feature, download or fork your own copy and ask your coding agent to fix, remix, or personalize it for you.
+This repository is maintained as a personal remix project. Upstream issues and pull requests are not accepted. If you need a different behavior, work from your own fork or local copy and keep the change set scoped to that version.
 
-YouTube Digest uses plain HTML, CSS, and JavaScript with no build step, so it is a friendly starting point for agent-assisted projects. Ideas to try:
+YouTube Digest uses plain HTML, CSS, and JavaScript with no application build step. That keeps local customization straightforward, including agent-assisted changes. Useful extensions include:
 
 - Add more translation languages and let each person choose a learning language.
 - Create customized summary templates for lectures, interviews, tutorials, reviews, or research talks.
@@ -189,7 +194,7 @@ YouTube Digest uses plain HTML, CSS, and JavaScript with no build step, so it is
 - Add optional local-model support for a different privacy and cost tradeoff.
 - Improve accessibility with keyboard navigation, font controls, and higher-contrast themes.
 
-Ask your agent to preserve the bring-your-own-key model, keep secrets out of source files, run the checks below, and test the remix on real videos.
+Preserve the bring-your-own-key model, keep secrets out of source files, run the checks below, and test the changed platform paths against real videos.
 
 If you want another AI provider or model, first open the exact YouTube Digest project folder that Chrome loaded through **Load unpacked** in your coding agent. Then open YouTube Digest Settings and use **Copy customization prompt**. Replace the `[PROVIDER]` and `[MODEL]` placeholders before sending it. Do not include any API key in the prompt or chat. After the agent updates your local copy, enter the key yourself in the Settings field it identifies.
 
@@ -257,6 +262,20 @@ npm run package
 
 The agent should also reload the unpacked extension in Chrome and test real videos on every supported platform it changed. Automated checks do not prove that live provider requests or page interactions work.
 
+## Acknowledgements and references
+
+This repository builds on [YouTube Digest](https://github.com/zarazhangrui/youtube-digest), originally created by [Zara Zhang](https://github.com/zarazhangrui) and released under the MIT License. Thank you to Zara for publishing the original side-panel workflow and making it practical to study, modify, and extend.
+
+The Bilibili data path is implemented in this repository. The following public projects were used as engineering references for understanding and cross-checking page metadata, current-part identity, session-visible subtitle tracks, and subtitle normalization. They are not runtime dependencies, and their inclusion here does not mean their source code is bundled into this extension:
+
+- [Bili Clipper](https://github.com/echore/bili-clipper)
+- [Bilibili-Evolved](https://github.com/the1812/Bilibili-Evolved)
+- [ChatGPTBox](https://github.com/ChatGPTBox-dev/chatGPTBox)
+- [BiliNote](https://github.com/JefferyHcool/BiliNote)
+- [yt-dlp](https://github.com/yt-dlp/yt-dlp)
+
+Thanks to the authors and maintainers of these projects for documenting behavior that is otherwise difficult to validate from a browser integration alone. Each project remains governed by its own license and copyright notices. Bilibili's internal web interfaces may also change over time.
+
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE). The original copyright notice is retained.
