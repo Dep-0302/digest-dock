@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-YouTube Digest is a small GitHub-only project. Security fixes are made on the latest code on `main` and, when releases are published, the latest GitHub release. Older snapshots are not supported.
+DigestDock is a small GitHub-only project. Security fixes are made on the latest code on `main` and, when releases are published, the latest GitHub release. Older snapshots are not supported.
 
 ## Report a vulnerability privately
 
@@ -57,10 +57,11 @@ Examples include:
 ## Notes backup safety
 
 - Treat every imported JSON backup as untrusted input, even if its filename looks
-  like a YouTube Digest backup. Import only a file whose source you understand,
+  like a DigestDock backup. Import only a file whose source you understand,
   and do not assume that changing a filename makes another JSON file safe.
-- The current importer accepts the versioned YouTube Digest notes-backup format,
-  validates its size, schema, and note fields before writing, and rebuilds
+- The current importer accepts the stable versioned
+  `youtube-digest-notes-backup` format used before and after the DigestDock
+  rename, validates its size, schema, and note fields before writing, and rebuilds
   timestamped YouTube or Bilibili URLs from validated platform, media identity,
   and timestamp fields instead of trusting a URL supplied by the backup.
 - Import merges with local notes and skips duplicates. If the same note ID has
@@ -71,7 +72,7 @@ Examples include:
   it may be able to read the notes it contains.
 - Clearing extension data or removing the extension does not delete a downloaded
   backup. Delete all copies separately when they are no longer needed.
-- The current JSON file is a recovery backup for YouTube Digest notes. Markdown,
+- The current JSON file is a recovery backup for DigestDock notes. Markdown,
   CSV, Anki, and other study-tool formats are separate future export ideas, not
   formats accepted by this importer.
 

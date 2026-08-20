@@ -182,7 +182,7 @@ function getSupadataTrackLanguage(data) {
 chrome.storage.local
   .setAccessLevel({ accessLevel: "TRUSTED_CONTEXTS" })
   .catch((error) =>
-    console.warn("[YouTube Digest] Could not restrict storage access:", error),
+    console.warn("[DigestDock] Could not restrict storage access:", error),
   );
 
 async function getSettings() {
@@ -242,7 +242,7 @@ async function sendMessageToContentWithRecovery(
       // those retries still find no live receiver.
       const pageLabel = isBilibiliVideoUrl(targetUrl) ? "B 站" : "YouTube";
       const refreshError = new Error(
-        `YouTube Digest 已更新，请刷新当前 ${pageLabel} 页面后重试。`,
+        `DigestDock 已更新，请刷新当前 ${pageLabel} 页面后重试。`,
       );
       refreshError.code = "PAGE_REFRESH_REQUIRED";
       throw refreshError;
@@ -297,7 +297,7 @@ async function requestAiCompletion({
   const settings = settingsOverride || (await getSettings());
   if (!settings.aiApiKey) {
     const error = new Error(
-      "尚未配置 DeepSeek API 密钥，请打开 YouTube Digest 设置。",
+      "尚未配置 DeepSeek API 密钥，请打开 DigestDock 设置。",
     );
     error.code = "NO_AI_KEY";
     throw error;
@@ -884,7 +884,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message.action === "openSidePanel") {
     const tabId = sender.tab?.id;
-    debugLog("[YouTube Digest BG] openSidePanel requested from tab:", tabId);
+    debugLog("[DigestDock BG] openSidePanel requested from tab:", tabId);
 
     // Re-enable the panel (it may have been disabled by auto-close) and open it.
     // IMPORTANT: we call setOptions + open synchronously (no await between them)
@@ -907,7 +907,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           }, 300);
         })
         .catch((err) => {
-          console.error("[YouTube Digest BG] openSidePanel error:", err);
+          console.error("[DigestDock BG] openSidePanel error:", err);
         });
     } else {
       // Fallback: find the active tab
@@ -922,7 +922,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             });
             chrome.sidePanel.open({ tabId: tabs[0].id }).catch((err) => {
               console.error(
-                "[YouTube Digest BG] openSidePanel fallback error:",
+                "[DigestDock BG] openSidePanel fallback error:",
                 err,
               );
             });
@@ -936,7 +936,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   // Relay messages from side panel to content script
   if (message.action === "relayToContent") {
-    debugLog("[YouTube Digest BG] Relay request:", message.payload?.action);
+    debugLog("[DigestDock BG] Relay request:", message.payload?.action);
     (async () => {
       try {
         let tab = null;
@@ -961,7 +961,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               lastFocusedWindow: true,
             });
         debugLog(
-          "[YouTube Digest BG] Active tab in last focused window:",
+          "[DigestDock BG] Active tab in last focused window:",
           tabs.length,
           tabs[0]?.url,
         );
@@ -971,17 +971,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             url: SUPPORTED_VIDEO_TAB_PATTERNS,
             active: true,
           });
-          debugLog("[YouTube Digest BG] Active supported tabs:", tabs.length);
+          debugLog("[DigestDock BG] Active supported tabs:", tabs.length);
         }
 
         if (!tabs[0]) {
           tabs = await chrome.tabs.query({ url: SUPPORTED_VIDEO_TAB_PATTERNS });
-          debugLog("[YouTube Digest BG] Any supported tabs:", tabs.length);
+          debugLog("[DigestDock BG] Any supported tabs:", tabs.length);
         }
 
         if (tabs[0]) {
           debugLog(
-            "[YouTube Digest BG] Sending to tab:",
+            "[DigestDock BG] Sending to tab:",
             tabs[0].id,
             "URL:",
             tabs[0].url,
@@ -1020,29 +1020,29 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             }
           }
 
-          debugLog("[YouTube Digest BG] Got response from content:", response);
+          debugLog("[DigestDock BG] Got response from content:", response);
           sendResponse({ success: true, response });
         } else {
-          debugLog("[YouTube Digest BG] No supported video tab found");
+          debugLog("[DigestDock BG] No supported video tab found");
           sendResponse({ success: false, error: "No supported video tab found" });
         }
       } catch (err) {
         if (isPageRefreshRequiredError(err)) {
-          debugLog("[YouTube Digest BG] Page refresh required after reload");
+          debugLog("[DigestDock BG] Page refresh required after reload");
           sendResponse({
             success: false,
             error: "PAGE_REFRESH_REQUIRED",
             message: err.message,
           });
         } else if (isTransientTabContextError(err)) {
-          debugLog("[YouTube Digest BG] Video tab context changed during relay");
+          debugLog("[DigestDock BG] Video tab context changed during relay");
           sendResponse({
             success: false,
             error: "PAGE_CONTEXT_CHANGED",
             message: "视频页面正在刷新，请稍后重试。",
           });
         } else {
-          console.error("[YouTube Digest BG] Relay error:", err.message);
+          console.error("[DigestDock BG] Relay error:", err.message);
           sendResponse({ success: false, error: err.message });
         }
       }
@@ -1110,7 +1110,7 @@ async function getPlayerVideoDetails(tabId) {
     });
     return results?.[0]?.result || null;
   } catch (e) {
-    console.warn("[YouTube Digest BG] Player details unavailable:", e.message);
+    console.warn("[DigestDock BG] Player details unavailable:", e.message);
     return null;
   }
 }
@@ -1200,7 +1200,7 @@ async function readYouTubeCaptionSnapshot(tabId, expectedVideoId) {
   } catch (error) {
     if (error?.code === "PAGE_CONTEXT_CHANGED") throw error;
     debugLog(
-      "[YouTube Digest] Page caption snapshot unavailable:",
+      "[DigestDock] Page caption snapshot unavailable:",
       error?.message,
     );
     return null;
@@ -1364,7 +1364,7 @@ async function handleFetchTranscript(
       return {
         success: false,
         error: "NO_SUPADATA_KEY",
-        message: "尚未配置 Supadata API 密钥，请打开 YouTube Digest 设置。",
+        message: "尚未配置 Supadata API 密钥，请打开 DigestDock 设置。",
       };
     }
 
@@ -1423,7 +1423,7 @@ async function handleFetchTranscript(
         return {
           success: false,
           error: "INVALID_SUPADATA_KEY",
-          message: "Supadata API 密钥无效，请打开 YouTube Digest 设置。",
+          message: "Supadata API 密钥无效，请打开 DigestDock 设置。",
         };
       }
       if (response.status === 404) {
@@ -1708,7 +1708,7 @@ async function handleAnalyzeTranscript(
       return {
         success: false,
         error: "NO_AI_KEY",
-        message: "尚未配置 DeepSeek API 密钥，请打开 YouTube Digest 设置。",
+        message: "尚未配置 DeepSeek API 密钥，请打开 DigestDock 设置。",
       };
     }
 
@@ -1770,7 +1770,7 @@ async function handleAnalyzeTranscript(
     );
 
     debugLog(
-      "[YouTube Digest] Requesting video analysis",
+      "[DigestDock] Requesting video analysis",
       normalizedPlatform,
       settings.aiModel,
     );
@@ -2001,10 +2001,10 @@ async function handleSaveNote(
           TRANSCRIPT_SOURCE_POLICY_VERSION
       ) {
         transcript = digest.transcript;
-        debugLog("[YouTube Digest] Using cached transcript for note");
+        debugLog("[DigestDock] Using cached transcript for note");
       }
     } catch (e) {
-      debugLog("[YouTube Digest] No cached transcript, fetching...");
+      debugLog("[DigestDock] No cached transcript, fetching...");
     }
 
     // If no cached transcript, fetch it
@@ -2206,7 +2206,7 @@ async function handleSaveNote(
 
     return { success: true, note };
   } catch (error) {
-    console.error("[YouTube Digest] Save note error:", error);
+    console.error("[DigestDock] Save note error:", error);
     return { success: false, error: error.message };
   }
 }
@@ -2231,7 +2231,7 @@ async function cleanupNoteText(
   }
 
   try {
-    debugLog("[YouTube Digest] Requesting note cleanup");
+    debugLog("[DigestDock] Requesting note cleanup");
     const variables = {
       videoTitle: videoTitle || "Unknown",
       fullContext,
@@ -2272,7 +2272,7 @@ async function cleanupNoteText(
       }
     } catch (parseError) {
       console.warn(
-        "[YouTube Digest] JSON parse failed for note, stripping preambles:",
+        "[DigestDock] JSON parse failed for note, stripping preambles:",
         parseError,
       );
       result = result.replace(
@@ -2290,7 +2290,7 @@ async function cleanupNoteText(
 
     return result.slice(0, 3000);
   } catch (e) {
-    console.error("[YouTube Digest] Cleanup error:", e);
+    console.error("[DigestDock] Cleanup error:", e);
   }
 
   // Return combined raw text if cleanup fails
@@ -2497,7 +2497,7 @@ async function handleExplainSelection(
       variables,
     );
 
-    debugLog("[YouTube Digest] Requesting selection explanation");
+    debugLog("[DigestDock] Requesting selection explanation");
     const { text: explanation } = await requestAiCompletion({
       maxTokens: 1024,
       messages: [
@@ -3899,7 +3899,7 @@ async function handleTranslateContent(
     }
     return { success: true, translatedContent: aligned };
   } catch (error) {
-    console.error("[YouTube Digest] Translation error:", error);
+    console.error("[DigestDock] Translation error:", error);
     return { success: false, error: error.message || "翻译失败" };
   }
 }

@@ -2,11 +2,11 @@
 
 Effective: August 19, 2026
 
-YouTube Digest is a GitHub-only, bring-your-own-key Chrome extension. It has no YouTube Digest account, developer-operated backend, analytics, advertising, or telemetry.
+DigestDock is a GitHub-only, bring-your-own-key Chrome extension. It has no DigestDock account, developer-operated backend, analytics, advertising, or telemetry.
 
 ## Data the extension handles
 
-Depending on the feature you use, YouTube Digest handles:
+Depending on the feature you use, DigestDock handles:
 
 - the canonical URL and media identity of the active YouTube or Bilibili video;
 - transcript text and timestamps;
@@ -32,7 +32,7 @@ This path reads only caption tracks that YouTube already exposes. It does not do
 
 ### Supadata
 
-Supadata is an optional failure fallback for YouTube. Local failure and a saved key are not sufficient to call it: the side panel explains the third-party request and requires you to confirm that attempt. Only after that click may YouTube Digest send the canonical video URL to `https://api.supadata.ai` with your key. Consent is not stored as a standing preference. The fallback requests a native transcript and timestamps; it does not request generated transcription. A Supadata key is not required to save Settings, try local YouTube retrieval, or use Bilibili.
+Supadata is an optional failure fallback for YouTube. Local failure and a saved key are not sufficient to call it: the side panel explains the third-party request and requires you to confirm that attempt. Only after that click may DigestDock send the canonical video URL to `https://api.supadata.ai` with your key. Consent is not stored as a standing preference. The fallback requests a native transcript and timestamps; it does not request generated transcription. A Supadata key is not required to save Settings, try local YouTube retrieval, or use Bilibili.
 
 ### Bilibili
 
@@ -52,13 +52,13 @@ The published version sends AI feature content to DeepSeek V4 Flash at `https://
 
 The endpoint and `deepseek-v4-flash` model are fixed in the published Settings page. You provide one DeepSeek API key. To use another provider or model, you must adapt your own local source copy and its permissions. The Settings page provides a coding-agent prompt for that purpose and warns you never to include an API key in the prompt or chat.
 
-Requests go directly from the extension to YouTube, Bilibili, optional Supadata, or DeepSeek. Supadata and DeepSeek are authenticated with the keys you supply; extension-initiated YouTube transcript requests omit credentials, while Bilibili uses the browser's current Bilibili session. YouTube Digest's developer does not proxy or receive these requests.
+Requests go directly from the extension to YouTube, Bilibili, optional Supadata, or DeepSeek. Supadata and DeepSeek are authenticated with the keys you supply; extension-initiated YouTube transcript requests omit credentials, while Bilibili uses the browser's current Bilibili session. DigestDock's developer does not proxy or receive these requests.
 
 YouTube, Bilibili, Supadata, and DeepSeek process data under their own terms, privacy policies, retention practices, and account settings. Do not send confidential, personal, or regulated content unless their terms and your obligations permit it.
 
 ## Local storage and retention
 
-YouTube Digest uses Chrome's local extension storage, not a YouTube Digest cloud service.
+DigestDock uses Chrome's local extension storage, not a DigestDock cloud service.
 
 - The optional Supadata fallback key and DeepSeek settings and key remain on the device in Chrome's extension storage.
 - Saved notes remain until you delete them or remove/clear the extension's data. The extension keeps up to 100 notes.
@@ -90,7 +90,7 @@ Downloaded note backups are plain, unencrypted JSON files outside the extension'
 
 To remove data:
 
-- delete individual saved notes in YouTube Digest;
+- delete individual saved notes in DigestDock;
 - use the Options page to clear cached digests, delete all notes, or reset all extension data;
 - remove the extension or clear its stored data from Chrome to delete all local settings, keys, notes, and cache entries;
 - manually delete any downloaded note backup files from the device and other locations where you copied them; and
@@ -100,9 +100,9 @@ Clearing local data does not delete information already processed or retained by
 
 ## Permissions
 
-YouTube Digest uses Chrome permissions for these purposes:
+DigestDock uses Chrome permissions for these purposes:
 
-- `sidePanel`: display the YouTube Digest interface beside a supported video page.
+- `sidePanel`: display the DigestDock interface beside a supported video page.
 - `storage`: store settings, keys, notes, and cached results locally.
 - `tabs`: identify and interact with the active supported video tab.
 - `scripting`: coordinate the extension's YouTube and Bilibili page controls.
@@ -111,11 +111,11 @@ YouTube Digest uses Chrome permissions for these purposes:
 - Supadata host access: retrieve a native transcript only after local YouTube retrieval fails and the user explicitly confirms that third-party attempt.
 - DeepSeek host access: provide AI overviews, explanations, translation, and note polishing through DeepSeek V4 Flash.
 
-YouTube Digest does not use these permissions to monitor general browsing activity.
+DigestDock does not use these permissions to monitor general browsing activity.
 
 ## No sale or advertising use
 
-YouTube Digest does not sell personal information, build advertising profiles, or share data with data brokers. It does not include analytics SDKs.
+DigestDock does not sell personal information, build advertising profiles, or share data with data brokers. It does not include analytics SDKs.
 
 ## Changes
 

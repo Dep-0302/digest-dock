@@ -1,7 +1,7 @@
 /**
  * SIDE PANEL LOGIC
  *
- * Handles the UI for YouTube Digest: supported-video detection, transcript analysis,
+ * Handles the UI for DigestDock: supported-video detection, transcript analysis,
  * rendering results, and export features.
  */
 
@@ -631,7 +631,7 @@ function setupEventListeners() {
     }
     if (currentVideoId) {
       return startDigest(currentVideoId, currentVideoUrl).catch((error) => {
-        console.error("[YouTube Digest Panel] Retry error:", error);
+        console.error("[DigestDock Panel] Retry error:", error);
         showError(
           "无法打开摘要",
           error?.message || "重新加载当前 YouTube 视频失败，请刷新页面后重试。",
@@ -760,7 +760,7 @@ async function runCheckCurrentTab(generation) {
       if (tabs[0]) tab = tabs[0];
     }
 
-    debugLog("[YouTube Digest Panel] Found tab:", tab?.id, tab?.url);
+    debugLog("[DigestDock Panel] Found tab:", tab?.id, tab?.url);
 
     if (!tab?.url) {
       if (isLatestCheck()) showState("welcome");
@@ -817,14 +817,14 @@ async function runCheckCurrentTab(generation) {
           payload: { action: "getVideoInfo" },
         });
         if (!isLatestCheck()) return;
-        debugLog("[YouTube Digest Panel] getVideoInfo result:", result);
+        debugLog("[DigestDock Panel] getVideoInfo result:", result);
         if (
           result?.error === "PAGE_REFRESH_REQUIRED" ||
           result?.error === "PAGE_CONTEXT_CHANGED"
         ) {
           const refreshError = new Error(
             result.message ||
-              "YouTube Digest 已更新，请刷新当前 YouTube 页面后重试。",
+              "DigestDock 已更新，请刷新当前 YouTube 页面后重试。",
           );
           refreshError.code = "PAGE_REFRESH_REQUIRED";
           throw refreshError;
@@ -835,7 +835,7 @@ async function runCheckCurrentTab(generation) {
       } catch (e) {
         if (!isLatestCheck()) return;
         if (e?.code === "PAGE_REFRESH_REQUIRED") throw e;
-        console.error("[YouTube Digest Panel] getVideoInfo error:", e);
+        console.error("[DigestDock Panel] getVideoInfo error:", e);
       }
       nextVideoTitle = videoInfo?.title || "";
       nextChannelName = videoInfo?.channelName || "";
@@ -872,12 +872,12 @@ async function runCheckCurrentTab(generation) {
   } catch (error) {
     if (!isLatestCheck()) return;
     if (isTransientTabLookupError(error)) {
-      debugLog("[YouTube Digest Panel] Active tab changed during inspection");
+      debugLog("[DigestDock Panel] Active tab changed during inspection");
       scheduleDigestRefresh();
       return;
     }
     if (error?.code === "PAGE_REFRESH_REQUIRED") {
-      debugLog("[YouTube Digest Panel] Video page refresh required");
+      debugLog("[DigestDock Panel] Video page refresh required");
       showPageRefreshRequired(videoTabId, error.message);
       return;
     }
@@ -1470,7 +1470,7 @@ function renderAnalysisResults(analysis) {
     `;
     li.addEventListener("click", () => {
       debugLog(
-        "[YouTube Digest Panel] Chapter clicked:",
+        "[DigestDock Panel] Chapter clicked:",
         chapter.timestamp,
         chapter.timestampSeconds,
       );
@@ -1506,7 +1506,7 @@ function renderAnalysisResults(analysis) {
     `;
     div.addEventListener("click", () => {
       debugLog(
-        "[YouTube Digest Panel] Quote clicked:",
+        "[DigestDock Panel] Quote clicked:",
         quote.timestamp,
         quote.timestampSeconds,
       );
@@ -1570,7 +1570,7 @@ async function saveQuoteAsNote(quote, btn) {
       // The background noteSaved broadcast owns the Notes refresh. Calling
       // loadNotes here as well can start two translation jobs for one save.
     } else {
-      console.error("[YouTube Digest] Save quote as note failed:", result.error);
+      console.error("[DigestDock] Save quote as note failed:", result.error);
       btn.textContent = "出错了";
       setTimeout(() => {
         btn.textContent = originalText;
@@ -1578,7 +1578,7 @@ async function saveQuoteAsNote(quote, btn) {
       }, 1500);
     }
   } catch (error) {
-    console.error("[YouTube Digest] Save quote as note error:", error);
+    console.error("[DigestDock] Save quote as note error:", error);
     btn.textContent = "出错了";
     setTimeout(() => {
       btn.textContent = originalText;
@@ -1700,7 +1700,7 @@ function exportTranscript() {
 
   exportText += `字幕：\n\n${transcriptContent}\n`;
   exportText += `\n${"—".repeat(60)}\n`;
-  exportText += `由 YouTube Digest 导出\n`;
+  exportText += `由 DigestDock 导出\n`;
 
   const filename = `${sanitizeFilename(currentVideoTitle)}-transcript.txt`;
   downloadTextFile(exportText, filename);
@@ -1821,7 +1821,7 @@ function showSupadataNotConfigured(message) {
 function showPageRefreshRequired(tabId, message) {
   showError(
     "请刷新 YouTube 页面",
-    message || "YouTube Digest 已更新，请刷新当前 YouTube 页面后重试。",
+    message || "DigestDock 已更新，请刷新当前 YouTube 页面后重试。",
   );
   document.getElementById("errorBtn").textContent = "刷新页面";
   errorAction = () => {
@@ -1836,7 +1836,7 @@ function showConfigError(configStatus) {
 
   showError(
     "缺少 API 密钥",
-    `请在 YouTube Digest 设置中添加 ${missingKeys.join(" 和 ")} API 密钥。`,
+    `请在 DigestDock 设置中添加 ${missingKeys.join(" 和 ")} API 密钥。`,
   );
   document.getElementById("errorBtn").textContent = "打开设置";
   errorAction = () => chrome.runtime.sendMessage({ action: "openOptions" });
@@ -1845,7 +1845,7 @@ function showConfigError(configStatus) {
 function showRuntimeVersionError() {
   showError(
     "扩展需要重新加载",
-    "侧边栏与后台版本不一致。请在 chrome://extensions 中重新加载 YouTube Digest，然后关闭并重新打开侧边栏。",
+    "侧边栏与后台版本不一致。请在 chrome://extensions 中重新加载 DigestDock，然后关闭并重新打开侧边栏。",
   );
   document.getElementById("errorBtn").textContent = "重新检测";
   errorAction = () => window.location.reload();
@@ -1953,7 +1953,7 @@ async function triggerAnalysis() {
     if (currentOverviewMode !== "zh") void ensureOverviewOriginal();
   } catch (error) {
     if (!ownsRequest()) return;
-    console.error("[YouTube Digest Panel] Analysis error:", error);
+    console.error("[DigestDock Panel] Analysis error:", error);
     if (chapterList) {
       chapterList.innerHTML = `<li class="chapter-item" style="color: var(--accent); border: none;">出错了：${escapeHtml(error.message)}</li>`;
     }
@@ -1970,9 +1970,9 @@ async function triggerAnalysis() {
 // ============================================================
 
 async function seekTo(seconds) {
-  debugLog("[YouTube Digest Panel] seekTo called with:", seconds);
+  debugLog("[DigestDock Panel] seekTo called with:", seconds);
   if (seconds === undefined || seconds === null) {
-    debugLog("[YouTube Digest Panel] seekTo aborted - no seconds value");
+    debugLog("[DigestDock Panel] seekTo aborted - no seconds value");
     return;
   }
 
@@ -1986,11 +1986,11 @@ async function seekTo(seconds) {
     if (videoTabId) {
       try {
         await chrome.tabs.sendMessage(videoTabId, payload);
-        debugLog("[YouTube Digest Panel] seekTo direct success");
+        debugLog("[DigestDock Panel] seekTo direct success");
         return;
       } catch (directErr) {
         debugLog(
-          "[YouTube Digest Panel] Direct seekTo failed, falling back to relay:",
+          "[DigestDock Panel] Direct seekTo failed, falling back to relay:",
           directErr.message,
         );
       }
@@ -2002,9 +2002,9 @@ async function seekTo(seconds) {
       tabId: videoTabId,
       payload,
     });
-    debugLog("[YouTube Digest Panel] seekTo relay result:", result);
+    debugLog("[DigestDock Panel] seekTo relay result:", result);
   } catch (error) {
-    console.error("[YouTube Digest Panel] seekTo error:", error);
+    console.error("[DigestDock Panel] seekTo error:", error);
   }
 }
 
@@ -2359,7 +2359,7 @@ async function evictOldCacheEntries(maxEntries) {
       .map((e) => e.key);
     if (toRemove.length > 0) {
       await chrome.storage.local.remove(toRemove);
-      debugLog(`[YouTube Digest] Evicted ${toRemove.length} old cache entries`);
+      debugLog(`[DigestDock] Evicted ${toRemove.length} old cache entries`);
     }
   } catch (error) {
     console.error("Cache eviction error:", error);
@@ -2814,7 +2814,7 @@ async function loadNotes(videoId, { translateMissing = true } = {}) {
   } catch (error) {
     if (!ownsLoad()) return;
     setNotesFilter(previousShowAll);
-    console.error("[YouTube Digest Panel] Load notes error:", error);
+    console.error("[DigestDock Panel] Load notes error:", error);
   } finally {
     if (ownsLoad()) isNotesLoading = false;
   }
@@ -2934,7 +2934,7 @@ async function deleteNote(noteId) {
       noteId: noteId,
     });
   } catch (error) {
-    console.error("[YouTube Digest Panel] Delete note error:", error);
+    console.error("[DigestDock Panel] Delete note error:", error);
   }
 }
 

@@ -995,7 +995,7 @@ test("a missing content receiver prompts a page refresh without starting a diges
       chrome.runtime.sendMessage = async () => ({
         success: false,
         error: "PAGE_REFRESH_REQUIRED",
-        message: "YouTube Digest 已更新，请刷新当前 YouTube 页面后重试。",
+        message: "DigestDock 已更新，请刷新当前 YouTube 页面后重试。",
       });
       startDigest = async () => { digestStarts += 1; };
       showPageRefreshRequired = (tabId, message) => {
@@ -1018,7 +1018,7 @@ test("a missing content receiver prompts a page refresh without starting a diges
     digestStarts: 0,
     refreshPrompt: {
       tabId: 91,
-      message: "YouTube Digest 已更新，请刷新当前 YouTube 页面后重试。",
+      message: "DigestDock 已更新，请刷新当前 YouTube 页面后重试。",
     },
   });
 });

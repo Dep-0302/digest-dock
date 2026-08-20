@@ -30,8 +30,8 @@ function createLocalStorage() {
 }
 
 test("Settings copy covers English and Simplified Chinese", () => {
-  assert.equal(options.translate("en", "pageTitle"), "YouTube Digest Settings");
-  assert.equal(options.translate("zh-CN", "pageTitle"), "YouTube Digest 设置");
+  assert.equal(options.translate("en", "pageTitle"), "DigestDock Settings");
+  assert.equal(options.translate("zh-CN", "pageTitle"), "DigestDock 设置");
   assert.equal(options.translate("en", "saveSettings"), "Save settings");
   assert.equal(options.translate("zh-CN", "saveSettings"), "保存设置");
   assert.equal(
@@ -174,14 +174,14 @@ test("customization guidance is concise and has a visible placeholder reminder",
   );
   assert.equal(
     options.translate("en", "customizationStepFolder"),
-    "Open the extracted YouTube Digest project folder in your coding agent.",
+    "Open the extracted DigestDock project folder in your coding agent.",
   );
   assert.equal(
     options.translate("zh-CN", "customizationStepFolder"),
-    "在编程 Agent 中打开 YouTube Digest 解压后的项目文件夹。",
+    "在编程 Agent 中打开 DigestDock 解压后的项目文件夹。",
   );
-  assert.doesNotMatch(html, /~\/Documents\/youtube-digest/);
-  assert.doesNotMatch(html, /%USERPROFILE%\\Documents\\youtube-digest/);
+  assert.doesNotMatch(html, /~\/Documents\/(?:youtube-digest|digest-dock)/);
+  assert.doesNotMatch(html, /%USERPROFILE%\\Documents\\(?:youtube-digest|digest-dock)/);
 });
 
 test("customization prompt switches languages and preserves technical values", () => {
@@ -200,6 +200,8 @@ test("customization prompt switches languages and preserves technical values", (
   assert.match(options.translate("zh-CN", "supadataApiKeyLabel"), /可选/);
   assert.match(options.translate("en", "supadataHelp"), /confirm[\s\S]*third-party/i);
   assert.match(options.translate("zh-CN", "supadataHelp"), /确认[\s\S]*第三方/);
+  assert.doesNotMatch(options.translate("en", "supadataHelp"), /YouTube Digest/);
+  assert.doesNotMatch(options.translate("zh-CN", "supadataHelp"), /YouTube Digest/);
   const saveSettings = read("options.js").match(
     /async function saveSettings\(event\)[\s\S]*?\n    }/,
   )?.[0];
@@ -207,7 +209,7 @@ test("customization prompt switches languages and preserves technical values", (
   assert.match(saveSettings, /if \(!settings\.aiApiKey\)/);
   assert.doesNotMatch(saveSettings, /!settings\.supadataApiKey/);
   assert.ok(html.includes(`>${chinesePrompt}</textarea>`));
-  assert.match(chinesePrompt, /^请把当前本地 YouTube Digest 工作区改为使用/);
+  assert.match(chinesePrompt, /^请把当前本地 DigestDock 工作区改为使用/);
   assert.notEqual(chinesePrompt, englishPrompt);
   assert.match(
     englishPrompt,

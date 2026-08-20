@@ -6,6 +6,8 @@
  * fields rather than trusted from the file.
  */
 var YTD_NOTES_BACKUP = (() => {
+  // Stable compatibility identifier. Existing YouTube Digest backups must
+  // remain importable after the product rename to DigestDock.
   const FORMAT = "youtube-digest-notes-backup";
   const SCHEMA_VERSION = 2;
   const LEGACY_SCHEMA_VERSION = 1;
@@ -575,7 +577,7 @@ var YTD_NOTES_BACKUP = (() => {
 
   function notesBackupFilename(date = new Date()) {
     const isoDate = date.toISOString().slice(0, 10);
-    return `youtube-digest-notes-${isoDate}.json`;
+    return `digest-dock-notes-${isoDate}.json`;
   }
 
   return {
