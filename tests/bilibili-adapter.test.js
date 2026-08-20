@@ -191,11 +191,19 @@ test("Chinese language detection handles native and AI Bilibili language labels"
   assert.equal(bilibili.isChineseLanguage("English"), false);
   assert.equal(
     bilibili.normalizedTrackLanguage({ lan: "ai-zh", lan_doc: "中文（AI）" }),
-    "zh",
+    "zh-CN",
   );
   assert.equal(
     bilibili.normalizedTrackLanguage({ lan: "zh-CN", lan_doc: "中文" }),
     "zh-CN",
+  );
+  assert.equal(
+    bilibili.normalizedTrackLanguage({ lan: "zh-TW", lan_doc: "繁體中文" }),
+    "zh-TW",
+  );
+  assert.equal(
+    bilibili.normalizedTrackLanguage({ lan: "zh", lan_doc: "繁體中文" }),
+    "zh-Hant",
   );
 });
 

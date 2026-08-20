@@ -15,6 +15,8 @@ Depending on the feature you use, YouTube Digest handles:
 - transcript context around a timestamped note;
 - content you ask to translate;
 - notes you save;
+- note backup JSON files you select for import and backup files the extension
+  prepares for download;
 - Supadata and DeepSeek configuration, including API keys; and
 - cached transcript, digest, and translation results.
 
@@ -35,9 +37,9 @@ The published version sends AI feature content to DeepSeek V4 Flash at `https://
 - transcript plus relevant title, channel, description, or duration for an overview;
 - selected text plus nearby transcript context for an explanation;
 - small semantic transcript batches currently needed for progressive Chinese
-  translation, or requested overview or explanation content;
+  translation, or requested source-language overview or explanation content;
 - nearby transcript context and video metadata when polishing a saved note; and
-- the polished English note and its video title when generating the separately stored Simplified Chinese note.
+- the polished English note and its video title when generating the separately stored Simplified Chinese note; and
 - for a Bilibili Chinese source, the timestamped Chinese transcript context used to generate one Chinese overview or one polished Chinese note directly.
 
 The endpoint and `deepseek-v4-flash` model are fixed in the published Settings page. You provide one DeepSeek API key. To use another provider or model, you must adapt your own local source copy and its permissions. The Settings page provides a coding-agent prompt for that purpose and warns you never to include an API key in the prompt or chat.
@@ -55,14 +57,35 @@ YouTube Digest uses Chrome's local extension storage, not a YouTube Digest cloud
 - Recent transcript, digest, and per-segment translation cache entries are stored
   locally. The cache is limited to 20 videos, and entries older than 30 days are
   removed when the side panel opens.
+- The Settings page can export saved notes to a versioned JSON recovery file and
+  import that file later. The file contains backup-format metadata and saved
+  note records only, including their stored original/English and Simplified
+  Chinese content and the validated YouTube or Bilibili media identity and
+  timestamp details needed to restore them. It
+  does not contain API keys, extension settings, complete transcripts or
+  transcript caches, or overview and summary caches. Source text already saved
+  inside an individual note remains part of that note record.
+- Note backup export and import use the downloaded file and Chrome's local
+  extension storage only. They do not send the backup to Supadata, DeepSeek, the
+  developer, or another network service.
+- Import validates and merges the file with existing notes, skips duplicates,
+  and may fill content missing from an existing matching note. A conflicting
+  note ID or a merged total above 100 rejects the entire import. A failed import
+  does not change the notes already stored by the extension.
+- Imported timestamp URLs are rebuilt from validated YouTube or Bilibili media
+  fields. A URL supplied by the backup file is not trusted as the source of
+  media identity.
 
 Chrome extension storage is not a password vault. Anyone with sufficient access to your browser profile or device may be able to recover locally stored keys or content. Use scoped keys where providers support them, set spending limits, and rotate or revoke a key if the device or browser profile is compromised.
+
+Downloaded note backups are plain, unencrypted JSON files outside the extension's storage. Anyone with access to a backup file may be able to read its notes. Removing the extension, deleting all notes, resetting extension data, or clearing the Chrome profile does not delete a backup that was already downloaded. Store it securely and delete the file separately when you no longer need it.
 
 To remove data:
 
 - delete individual saved notes in YouTube Digest;
 - use the Options page to clear cached digests, delete all notes, or reset all extension data;
-- remove the extension or clear its stored data from Chrome to delete all local settings, keys, notes, and cache entries; and
+- remove the extension or clear its stored data from Chrome to delete all local settings, keys, notes, and cache entries;
+- manually delete any downloaded note backup files from the device and other locations where you copied them; and
 - revoke keys in the Supadata or DeepSeek dashboard to stop their future use.
 
 Clearing local data does not delete information already processed or retained by Bilibili, Supadata, or DeepSeek. Use each service's controls for service-side requests.

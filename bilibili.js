@@ -202,7 +202,23 @@ var BILIBILI_ADAPTER = (() => {
   function normalizedTrackLanguage(track) {
     const raw = String(track?.lan || "").trim();
     if (!isChineseLanguage(track)) return raw || null;
-    return /^zh(?:[-_]|$)/i.test(raw) ? raw : "zh";
+    const normalizedRaw = raw.replace(/_/g, "-");
+    const marker = languageMarker(track);
+    if (
+      /^zh-(?:hant|tw|hk|mo)(?:-|$)/i.test(normalizedRaw) ||
+      /繁体|繁體/.test(marker)
+    ) {
+      return /^zh-(?:hant|tw|hk|mo)(?:-|$)/i.test(normalizedRaw)
+        ? normalizedRaw
+        : "zh-Hant";
+    }
+    if (/^zh-(?:hans|cn|sg)(?:-|$)/i.test(normalizedRaw)) {
+      return normalizedRaw;
+    }
+    // Bilibili's generic `zh` and `ai-zh` tracks are Simplified Chinese.
+    // Emit an explicit tag so the shared transcript UI can distinguish them
+    // from Traditional tracks instead of treating a bare `zh` as conclusive.
+    return "zh-CN";
   }
 
   function chooseSubtitleTrack(tracks) {

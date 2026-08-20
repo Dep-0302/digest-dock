@@ -122,6 +122,42 @@ test("language controls expose a labelled group and one pressed button", () => {
   assert.equal(buttons[1].attributes["aria-pressed"], "true");
 });
 
+test("notes backup controls are accessible and explain the notes-only JSON scope", () => {
+  const html = read("options.html");
+  const backupCard = html.match(
+    /<section class="card" id="notesBackupCard">([\s\S]*?)<\/section>/,
+  );
+
+  assert.ok(backupCard, "Expected a dedicated notes backup card");
+  assert.match(backupCard[1], /id="notesBackupHelp"/);
+  assert.match(
+    backupCard[1],
+    /id="exportNotesBtn"[\s\S]*?type="button"[\s\S]*?aria-describedby="notesBackupHelp"/,
+  );
+  assert.match(
+    backupCard[1],
+    /id="importNotesBtn"[\s\S]*?type="button"[\s\S]*?aria-describedby="notesBackupHelp"/,
+  );
+  assert.match(
+    backupCard[1],
+    /id="importNotesFile"[\s\S]*?type="file"[\s\S]*?accept="\.json,application\/json"[\s\S]*?hidden/,
+  );
+  assert.match(
+    backupCard[1],
+    /id="backupStatus"[\s\S]*?role="status"[\s\S]*?aria-live="polite"/,
+  );
+
+  for (const language of ["en", "zh-CN"]) {
+    const help = options.translate(language, "notesBackupHelp");
+    assert.match(help, /JSON/i);
+    assert.match(
+      help,
+      language === "en" ? /contains saved notes/i : /只包含已保存笔记/,
+    );
+    assert.match(help, language === "en" ? /API keys/i : /API 密钥/);
+  }
+});
+
 test("customization guidance is concise and has a visible placeholder reminder", () => {
   const html = read("options.html");
   const steps = html.match(

@@ -50,6 +50,11 @@ const YTD_OPTIONS = (() => {
       customizationPrompt:
         "Customize this local YouTube Digest workspace to use [PROVIDER] with [MODEL]. Work only in the current workspace. Before editing, verify that it contains manifest.json and that the manifest name is YouTube Digest. If verification fails, stop and ask me to open the extracted YouTube Digest project folder in my coding agent. Do not search other folders, edit a guessed copy, assume an installation path, or claim Chrome can reveal the absolute OS source path. Update the provider's API endpoint, request format, and minimum Chrome host permissions. Preserve bring-your-own-key and local Chrome storage. Never put API keys in source code, commits, logs, screenshots, this prompt, or chat; after the code is ready, tell me where to enter the key myself. Keep DeepSeek-only request fields and retry behavior isolated to DeepSeek. Handle provider-specific rules separately so one provider does not affect another. Update README.md, README.zh-CN.md, PRIVACY.md, SECURITY.md, and tests. Run npm test, npm run check, and npm run package. Then explain how to reload the unpacked extension and test it on a real YouTube video.",
       copyCustomizationPrompt: "Copy edited prompt",
+      notesBackup: "Notes backup",
+      notesBackupHelp:
+        "The JSON backup contains saved notes, stored language versions, and validated YouTube or Bilibili media identity and timestamps. It never includes API keys, settings, full transcripts, or digest caches. Import rebuilds safe timestamp links, merges with local notes, and skips duplicates.",
+      exportNotes: "Export notes backup",
+      importNotes: "Import notes backup",
       localData: "Local data",
       localDataHelp:
         "Digests, translations, and notes are stored only in this Chrome profile. You can remove them at any time.",
@@ -69,12 +74,40 @@ const YTD_OPTIONS = (() => {
       promptCopied: "Edited prompt copied.",
       copyFailed:
         "Could not copy the prompt. Select the prompt text and copy it manually.",
+      exportingNotes: "Preparing notes backup…",
+      notesExported: ({ count }) =>
+        `Exported ${count} saved note${count === 1 ? "" : "s"}.`,
+      noNotesToExport: "There are no saved notes to export.",
+      notesExportFailed: "Could not export the saved notes. Nothing was downloaded.",
+      importingNotes: "Checking and importing the notes backup…",
+      notesImported: ({ imported, duplicates, enriched, total }) => {
+        const details = [`Restored ${imported} new note${imported === 1 ? "" : "s"}.`];
+        if (duplicates) details.push(`Matched ${duplicates} duplicate${duplicates === 1 ? "" : "s"}.`);
+        if (enriched) details.push(`Completed ${enriched} existing note${enriched === 1 ? "" : "s"} with missing content.`);
+        details.push(`${total} note${total === 1 ? " is" : "s are"} now saved.`);
+        return details.join(" ");
+      },
+      notesImportNoChanges: ({ duplicates, total }) =>
+        duplicates
+          ? `No new notes were added. ${duplicates} duplicate${duplicates === 1 ? " was" : "s were"} already present. ${total} note${total === 1 ? " is" : "s are"} still saved.`
+          : "The backup did not contain any notes. Local notes were not changed.",
+      notesBackupTooLarge: "This backup is larger than 5 MiB and was not imported.",
+      notesBackupInvalid: "This is not a valid YouTube Digest notes backup. No notes were changed.",
+      notesBackupUnsupported:
+        "This backup was created by a newer unsupported format. Update YouTube Digest before importing it.",
+      notesBackupConflict:
+        "The backup conflicts with an existing note that has the same ID. No notes were changed.",
+      notesBackupCapacity: ({ overBy }) =>
+        `Import would exceed the 100-note limit by ${overBy}. Delete unneeded notes and try again. No notes were changed.`,
+      notesImportFailed: "Could not import the notes backup. No notes were changed.",
       clearedDigests: ({ count }) =>
         `Cleared ${count} cached digest${count === 1 ? "" : "s"}.`,
       notesDeleted: "Deleted all saved notes.",
+      notesDeleteFailed: "Could not delete the saved notes. Please try again.",
       resetConfirm:
         "Delete API keys, cached digests, translations, and saved notes from this Chrome profile?",
       allDataDeleted: "All YouTube Digest data was deleted.",
+      resetFailed: "Could not reset the extension data. Please try again.",
       settingsLoadFailed:
         "Could not load saved settings. You can still preview this page.",
     },
@@ -120,6 +153,11 @@ const YTD_OPTIONS = (() => {
       customizationPrompt:
         "请把当前本地 YouTube Digest 工作区改为使用 [PROVIDER] 提供的 [MODEL]。只在当前工作区中操作。编辑前，先确认其中包含 manifest.json，且 manifest 中的 name 是 YouTube Digest。如果验证失败，请停止，并让我在编程 Agent 中打开 YouTube Digest 解压后的项目文件夹。不要搜索其他文件夹，不要编辑猜测的副本，不要假设安装路径，也不要声称 Chrome 可以显示操作系统中的绝对源码路径。更新该服务的 API endpoint、请求格式和最少的 Chrome host permissions。保留用户自带密钥模式和 Chrome 本地存储。不要把 API 密钥写入源代码、提交记录、日志、截图、这段提示词或聊天；代码准备好后，请告诉我应该在哪里自行填写密钥。DeepSeek 专用的请求参数和重试逻辑继续只用于 DeepSeek。新服务的专属规则请单独处理，避免相互影响。更新 README.md、README.zh-CN.md、PRIVACY.md、SECURITY.md 和测试。运行 npm test、npm run check 和 npm run package。最后，说明如何重新加载已解压的扩展，并在真实 YouTube 视频上测试。",
       copyCustomizationPrompt: "复制编辑后的提示词",
+      notesBackup: "笔记备份",
+      notesBackupHelp:
+        "JSON 备份只包含已保存笔记、语言版本和经过校验的 YouTube 或 B 站媒体身份与时间戳，不包含 API 密钥、设置、完整字幕或摘要缓存。导入会重建安全时间戳链接，与本机笔记合并，并自动跳过重复项。",
+      exportNotes: "导出笔记备份",
+      importNotes: "导入笔记备份",
       localData: "本地数据",
       localDataHelp:
         "摘要、翻译和笔记仅保存在当前 Chrome 个人资料中。你可以随时删除。",
@@ -138,11 +176,36 @@ const YTD_OPTIONS = (() => {
       copying: "正在复制…",
       promptCopied: "已复制编辑后的提示词。",
       copyFailed: "无法复制提示词。请选中提示词文本并手动复制。",
+      exportingNotes: "正在准备笔记备份…",
+      notesExported: ({ count }) => `已导出 ${count} 条笔记。`,
+      noNotesToExport: "当前没有可导出的笔记。",
+      notesExportFailed: "无法导出笔记，未生成下载文件。",
+      importingNotes: "正在校验并导入笔记备份…",
+      notesImported: ({ imported, duplicates, enriched, total }) => {
+        const details = [`已恢复 ${imported} 条新笔记。`];
+        if (duplicates) details.push(`匹配到 ${duplicates} 条重复笔记。`);
+        if (enriched) details.push(`补全了 ${enriched} 条已有笔记的缺失内容。`);
+        details.push(`当前共保存 ${total} 条笔记。`);
+        return details.join("");
+      },
+      notesImportNoChanges: ({ duplicates, total }) =>
+        duplicates
+          ? `没有新增笔记；${duplicates} 条均已存在。当前仍保存 ${total} 条笔记。`
+          : "备份中没有笔记，本机笔记未改变。",
+      notesBackupTooLarge: "备份文件超过 5 MiB，未执行导入。",
+      notesBackupInvalid: "这不是有效的 YouTube Digest 笔记备份，现有笔记未改变。",
+      notesBackupUnsupported: "该备份使用了当前版本不支持的新格式，请更新 YouTube Digest 后再导入。",
+      notesBackupConflict: "备份与本机具有相同 ID 的笔记内容冲突，现有笔记未改变。",
+      notesBackupCapacity: ({ overBy }) =>
+        `导入后将超过 100 条上限，多出 ${overBy} 条。请先删除不需要的笔记后重试，现有笔记未改变。`,
+      notesImportFailed: "无法导入笔记备份，现有笔记未改变。",
       clearedDigests: ({ count }) => `已清除 ${count} 条缓存摘要。`,
       notesDeleted: "已删除全部已保存的笔记。",
+      notesDeleteFailed: "无法删除已保存的笔记，请重试。",
       resetConfirm:
         "要从当前 Chrome 个人资料中删除 API 密钥、缓存摘要、翻译和已保存的笔记吗？",
       allDataDeleted: "已删除全部 YouTube Digest 数据。",
+      resetFailed: "无法重置扩展数据，请重试。",
       settingsLoadFailed: "无法加载已保存的设置，但你仍可预览此页面。",
     },
   };
@@ -336,6 +399,42 @@ const YTD_OPTIONS = (() => {
     await clipboard.writeText(value);
   }
 
+  function triggerNotesBackupDownload(root, backup, date = new Date()) {
+    const text = `${JSON.stringify(backup, null, 2)}\n`;
+    const blob = new root.Blob([text], { type: "application/json" });
+    const url = root.URL.createObjectURL(blob);
+    const link = root.document.createElement("a");
+    link.href = url;
+    link.download = root.YTD_NOTES_BACKUP.notesBackupFilename(date);
+    link.hidden = true;
+    root.document.body.appendChild(link);
+    try {
+      link.click();
+    } finally {
+      link.remove();
+      root.URL.revokeObjectURL(url);
+    }
+    return { filename: link.download, text };
+  }
+
+  function notesBackupErrorKey(code) {
+    switch (code) {
+      case "NOTES_BACKUP_TOO_LARGE":
+        return "notesBackupTooLarge";
+      case "UNSUPPORTED_NOTES_BACKUP_VERSION":
+        return "notesBackupUnsupported";
+      case "NOTES_BACKUP_CONFLICT":
+        return "notesBackupConflict";
+      case "NOTES_CAPACITY_EXCEEDED":
+        return "notesBackupCapacity";
+      case "INVALID_NOTES_BACKUP":
+      case "INVALID_STORED_NOTES":
+        return "notesBackupInvalid";
+      default:
+        return "notesImportFailed";
+    }
+  }
+
   function getSafeLocalStorage(root) {
     try {
       return root.localStorage;
@@ -363,6 +462,10 @@ const YTD_OPTIONS = (() => {
     const copyStatus = doc.getElementById("copyStatus");
     const saveStatus = doc.getElementById("saveStatus");
     const dataStatus = doc.getElementById("dataStatus");
+    const backupStatus = doc.getElementById("backupStatus");
+    const exportNotesBtn = doc.getElementById("exportNotesBtn");
+    const importNotesBtn = doc.getElementById("importNotesBtn");
+    const importNotesFile = doc.getElementById("importNotesFile");
     const languageButtons = [...doc.querySelectorAll("[data-language]")];
     const statusStates = new Map();
     const promptDrafts = createPromptDrafts();
@@ -487,6 +590,82 @@ const YTD_OPTIONS = (() => {
       }
     }
 
+    async function exportNotes() {
+      setStatus(backupStatus, "exportingNotes");
+      exportNotesBtn.disabled = true;
+      try {
+        const result = await root.chrome.runtime.sendMessage({
+          action: "exportNotesBackup",
+        });
+        if (!result?.success) throw new Error(result?.code || "NOTES_EXPORT_FAILED");
+        if (!result.count) {
+          setStatus(backupStatus, "noNotesToExport");
+          return;
+        }
+        triggerNotesBackupDownload(root, result.backup);
+        setStatus(backupStatus, "notesExported", { count: result.count });
+      } catch (_error) {
+        setStatus(backupStatus, "notesExportFailed");
+      } finally {
+        exportNotesBtn.disabled = false;
+      }
+    }
+
+    function openNotesImportPicker() {
+      importNotesFile.value = "";
+      importNotesFile.click();
+    }
+
+    async function importNotes(event) {
+      const file = event.target.files?.[0];
+      if (!file) return;
+
+      importNotesBtn.disabled = true;
+      setStatus(backupStatus, "importingNotes");
+      try {
+        if (file.size > root.YTD_NOTES_BACKUP.MAX_BACKUP_BYTES) {
+          setStatus(backupStatus, "notesBackupTooLarge");
+          return;
+        }
+        const backupText = await file.text();
+        if (
+          root.YTD_NOTES_BACKUP.byteLength(backupText) >
+          root.YTD_NOTES_BACKUP.MAX_BACKUP_BYTES
+        ) {
+          setStatus(backupStatus, "notesBackupTooLarge");
+          return;
+        }
+        const result = await root.chrome.runtime.sendMessage({
+          action: "importNotesBackup",
+          backupText,
+        });
+        if (!result?.success) {
+          setStatus(backupStatus, notesBackupErrorKey(result?.code), {
+            overBy: result?.overBy || 0,
+          });
+          return;
+        }
+        if (!result.changed) {
+          setStatus(backupStatus, "notesImportNoChanges", {
+            duplicates: result.duplicateCount,
+            total: result.totalCount,
+          });
+          return;
+        }
+        setStatus(backupStatus, "notesImported", {
+          imported: result.importedCount,
+          duplicates: result.duplicateCount,
+          enriched: result.enrichedCount,
+          total: result.totalCount,
+        });
+      } catch (_error) {
+        setStatus(backupStatus, "notesImportFailed");
+      } finally {
+        importNotesBtn.disabled = false;
+        importNotesFile.value = "";
+      }
+    }
+
     async function clearCachedDigests() {
       const all = await storage.get(null);
       const keys = Object.keys(all).filter((key) => key.startsWith("digest_"));
@@ -495,8 +674,17 @@ const YTD_OPTIONS = (() => {
     }
 
     async function clearNotes() {
-      await storage.remove("ytd_notes");
-      setStatus(dataStatus, "notesDeleted");
+      try {
+        const result = await root.chrome.runtime.sendMessage({
+          action: "clearAllNotes",
+        });
+        setStatus(
+          dataStatus,
+          result?.success ? "notesDeleted" : "notesDeleteFailed",
+        );
+      } catch (_error) {
+        setStatus(dataStatus, "notesDeleteFailed");
+      }
     }
 
     async function resetAllData() {
@@ -505,10 +693,20 @@ const YTD_OPTIONS = (() => {
       );
       if (!confirmed) return;
 
-      await storage.clear();
-      await persistPreferredLanguage(storage, currentLanguage);
-      await loadSettings();
-      setStatus(dataStatus, "allDataDeleted");
+      try {
+        const result = await root.chrome.runtime.sendMessage({
+          action: "resetAllExtensionData",
+          preferredLanguage: currentLanguage,
+        });
+        if (!result?.success) {
+          setStatus(dataStatus, "resetFailed");
+          return;
+        }
+        await loadSettings();
+        setStatus(dataStatus, "allDataDeleted");
+      } catch (_error) {
+        setStatus(dataStatus, "resetFailed");
+      }
     }
 
     form.addEventListener("submit", saveSettings);
@@ -516,6 +714,9 @@ const YTD_OPTIONS = (() => {
       "click",
       copyCustomizationPrompt,
     );
+    exportNotesBtn.addEventListener("click", exportNotes);
+    importNotesBtn.addEventListener("click", openNotesImportPicker);
+    importNotesFile.addEventListener("change", importNotes);
     doc
       .getElementById("clearCacheBtn")
       .addEventListener("click", clearCachedDigests);
@@ -546,6 +747,8 @@ const YTD_OPTIONS = (() => {
     normalizeLanguage,
     persistPreferredLanguage,
     readPreferredLanguage,
+    notesBackupErrorKey,
+    triggerNotesBackupDownload,
     translate,
     updateLanguageButtonState,
     updateLocalizedPrompt,

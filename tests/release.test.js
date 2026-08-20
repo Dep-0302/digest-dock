@@ -17,10 +17,19 @@ test("manifest uses minimized install-time permissions", () => {
   assert.equal(manifest.options_ui.page, "options.html");
   assert.ok(!manifest.permissions.includes("activeTab"));
   assert.ok(!manifest.permissions.includes("cookies"));
-  assert.ok(manifest.host_permissions.includes("https://api.deepseek.com/*"));
-  assert.ok(manifest.host_permissions.includes("https://api.bilibili.com/*"));
-  assert.ok(
-    manifest.host_permissions.includes("https://subtitle.bilibili.com/*"),
+  assert.ok(!manifest.permissions.includes("downloads"));
+  assert.deepEqual(
+    [...manifest.host_permissions].sort(),
+    [
+      "https://*.bilivideo.com/*",
+      "https://*.hdslb.com/*",
+      "https://api.bilibili.com/*",
+      "https://api.deepseek.com/*",
+      "https://api.supadata.ai/*",
+      "https://subtitle.bilibili.com/*",
+      "https://www.bilibili.com/*",
+      "https://www.youtube.com/*",
+    ].sort(),
   );
   const bilibiliContentScript = manifest.content_scripts.find((entry) =>
     entry.matches?.includes("https://www.bilibili.com/video/BV*"),
@@ -29,8 +38,44 @@ test("manifest uses minimized install-time permissions", () => {
     "bilibili.js",
     "content-bilibili.js",
   ]);
+  assert.deepEqual(bilibiliContentScript?.matches, [
+    "https://www.bilibili.com/video/BV*",
+  ]);
   assert.equal(Object.hasOwn(manifest, "optional_host_permissions"), false);
-  assert.equal(manifest.version, "1.1.5");
+  assert.equal(manifest.version, "1.3.0");
+});
+
+test("cross-platform runtime dependencies are included in the release surface", () => {
+  const background = read("background.js");
+  const optionsPage = read("options.html");
+  const releaseCheck = read("scripts/check-release.sh");
+
+  assert.match(background, /importScripts\("notes-backup\.js"\)/);
+  assert.ok(
+    optionsPage.indexOf('<script src="notes-backup.js"></script>') <
+      optionsPage.indexOf('<script src="options.js"></script>'),
+    "notes-backup.js must load before options.js",
+  );
+  assert.ok(
+    (releaseCheck.match(/"notes-backup\.js"/g) || []).length >= 2,
+    "notes-backup.js must be both allowlisted and required for release",
+  );
+  for (const file of ["bilibili.js", "content-bilibili.js"]) {
+    assert.ok(
+      (releaseCheck.match(new RegExp(`"${file.replace(".", "\\.")}"`, "g")) || [])
+        .length >= 2,
+      `${file} must be both allowlisted and required for release`,
+    );
+  }
+  const publicAllowlist = releaseCheck.match(
+    /public_allowlist=\(([\s\S]*?)\n\)/,
+  )?.[1];
+  assert.ok(publicAllowlist, "public release allowlist must be present");
+  assert.doesNotMatch(publicAllowlist, /"(?:poc|tests)\//);
+  assert.doesNotMatch(
+    [background, read("options.js")].join("\n"),
+    /chrome\.downloads\b/,
+  );
 });
 
 test("release copy documents current scope without em dashes", () => {
@@ -99,10 +144,14 @@ test("release copy documents current scope without em dashes", () => {
   );
   assert.match(chineseReadme, /不接受上游 Issue 或 Pull Request/);
   assert.match(chineseReadme, /增加更多翻译语言/);
-  assert.match(readme, /choose \*\*English\*\*, \*\*中文\*\*, or \*\*双语\*\*/);
-  assert.match(chineseReadme, /可选择 \*\*英文\*\*、\*\*中文\*\*或\*\*双语\*\*/);
-  assert.match(readme, /without a third generation call/);
-  assert.match(chineseReadme, /不会发起第三次生成/);
+  assert.match(readme, /choose \*\*Original\*\*, \*\*中文\*\*, or \*\*双语\*\*/);
+  assert.match(chineseReadme, /可选择 \*\*原文\*\*、\*\*中文\*\*或\*\*双语\*\*/);
+  assert.match(readme, /generated directly in Simplified Chinese/);
+  assert.match(chineseReadme, /直接生成简体中文底稿/);
+  assert.match(readme, /only when \*\*Original\*\* or \*\*Bilingual\*\* is requested/);
+  assert.match(chineseReadme, /请求\*\*原文\*\*或\*\*双语\*\*时/);
+  assert.match(readme, /Chinese-source overviews reuse Chinese[\s\S]*without an extra translation call/);
+  assert.match(chineseReadme, /中文字幕的三种模式复用同一份中文内容[\s\S]*不发起额外翻译/);
   assert.match(readme, /Notes are polished in English once and translated into Simplified Chinese once/);
   assert.match(chineseReadme, /笔记先生成一次润色后的英文，再单独生成一次简体中文/);
   assert.match(readme, /source subtitle is already Chinese[\s\S]*no Chinese-translation request/);
@@ -270,11 +319,7 @@ test("retired Remix and reader files are absent", () => {
 
 test("published prompt files contain runtime sections", () => {
   const expectedSections = {
-    "prompts/analysis.md": [
-      "System prompt",
-      "Chinese system prompt",
-      "User prompt",
-    ],
+    "prompts/analysis.md": ["System prompt", "User prompt"],
     "prompts/explain.md": ["System prompt", "User prompt"],
     "prompts/note-cleanup.md": [
       "System prompt",
@@ -285,7 +330,7 @@ test("published prompt files contain runtime sections", () => {
       "Shared base rules",
       "Chinese rules",
       "Transcript batch translation",
-      "Overview translation",
+      "Overview original translation",
       "Notes translation",
     ],
   };
@@ -295,5 +340,18 @@ test("published prompt files contain runtime sections", () => {
     for (const section of sections) {
       assert.match(markdown, new RegExp(`^## ${section}$`, "m"));
     }
+  }
+
+  const analysisPrompt = read("prompts/analysis.md");
+  assert.doesNotMatch(analysisPrompt, /^## Chinese system prompt$/m);
+  assert.match(read("background.js"), /ANALYSIS_SCHEMA_VERSION\s*=\s*3/);
+  for (const field of [
+    "detectedSourceLanguage",
+    "titleZh",
+    "summaryZh",
+    "quoteOriginal",
+    "quoteZh",
+  ]) {
+    assert.match(analysisPrompt, new RegExp(`\\b${field}\\b`));
   }
 });

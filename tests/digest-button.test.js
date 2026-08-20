@@ -104,7 +104,10 @@ function createHarness({ sendMessageImpl } = {}) {
   const windowListeners = {};
   const observers = [];
   const timers = new Map();
+  const intervals = new Map();
   let nextTimerId = 1;
+  let intervalCalls = 0;
+  let playerContainer = null;
 
   const document = {
     readyState: "loading",
@@ -122,7 +125,13 @@ function createHarness({ sendMessageImpl } = {}) {
       if (selector.includes("top-level-buttons-computed")) return fallbackRows;
       return [];
     },
-    querySelector() {
+    querySelector(selector) {
+      if (
+        playerContainer?.isConnected &&
+        selector.includes("#movie_player")
+      ) {
+        return playerContainer;
+      }
       return null;
     },
     getElementById(id) {
@@ -175,10 +184,15 @@ function createHarness({ sendMessageImpl } = {}) {
     clearTimeout(id) {
       timers.delete(id);
     },
-    setInterval() {
-      return nextTimerId++;
+    setInterval(callback) {
+      intervalCalls += 1;
+      const id = nextTimerId++;
+      intervals.set(id, callback);
+      return id;
     },
-    clearInterval() {},
+    clearInterval(id) {
+      intervals.delete(id);
+    },
   });
 
   vm.runInContext(contentScript, context);
@@ -191,6 +205,25 @@ function createHarness({ sendMessageImpl } = {}) {
     documentListeners,
     windowListeners,
     observers,
+    getIntervalCallCount() {
+      return intervalCalls;
+    },
+    fireIntervalTicks(count) {
+      for (let tick = 0; tick < count; tick += 1) {
+        Array.from(intervals.values()).forEach((callback) => callback());
+      }
+    },
+    setPlayerAvailable(available) {
+      if (!available) {
+        playerContainer?.remove();
+        playerContainer = null;
+        return;
+      }
+      if (playerContainer?.isConnected) return;
+      playerContainer = new FakeElement({ id: "movie_player" });
+      elements.push(playerContainer);
+      document.body.appendChild(playerContainer);
+    },
     flushTimers() {
       const callbacks = Array.from(timers.values());
       timers.clear();
@@ -217,6 +250,40 @@ function createActionRow({ width, height }) {
   row.appendChild(buttonGroup);
   return { row, buttonGroup };
 }
+
+test("accidental duplicate content-script injection is idempotent", () => {
+  const harness = createHarness();
+  assert.equal(harness.context.__YTD_CONTENT_SCRIPT_ACTIVE__, true);
+  assert.doesNotThrow(() => vm.runInContext(contentScript, harness.context));
+  assert.equal(harness.context.__YTD_CONTENT_SCRIPT_ACTIVE__, true);
+  assert.equal(typeof harness.context.injectDigestButton, "function");
+});
+
+test("watch-page mutations do not restart the note-button retry loop", () => {
+  const harness = createHarness();
+  harness.documentListeners.DOMContentLoaded();
+  assert.equal(harness.getIntervalCallCount(), 1);
+  assert.equal(harness.observers.length, 1);
+
+  for (let index = 0; index < 20; index += 1) {
+    harness.observers[0].callback([]);
+  }
+
+  assert.equal(harness.getIntervalCallCount(), 1);
+});
+
+test("a late player mutation restores the note button without another retry loop", () => {
+  const harness = createHarness();
+  harness.documentListeners.DOMContentLoaded();
+  harness.fireIntervalTicks(29);
+  assert.equal(harness.getIntervalCallCount(), 1);
+
+  harness.setPlayerAvailable(true);
+  harness.observers[0].callback([]);
+
+  assert.ok(harness.context.document.getElementById("ytd-note-button"));
+  assert.equal(harness.getIntervalCallCount(), 1);
+});
 
 test("Digest button skips a hidden responsive toolbar", () => {
   const harness = createHarness();
