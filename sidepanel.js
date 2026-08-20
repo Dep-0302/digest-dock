@@ -6,7 +6,7 @@
  */
 
 const DEBUG = false;
-const REQUIRED_RUNTIME_PROTOCOL_VERSION = 6;
+const REQUIRED_RUNTIME_PROTOCOL_VERSION = 7;
 const debugLog = (...args) => {
   if (DEBUG) console.log(...args);
 };
@@ -41,6 +41,9 @@ let currentTranscript = null;
 let currentTranscriptText = null; // Plain text (for display/export)
 let currentTranscriptTimestamped = null; // With timestamps for AI analysis
 let currentTranscriptLanguage = null;
+let currentTranscriptSource = "";
+let currentTranscriptSelectedTrack = null;
+let currentTranscriptSourceAttempt = "";
 let currentVideoTitle = "";
 let currentChannelName = "";
 let currentVideoDescription = "";
@@ -78,7 +81,34 @@ const TRANSLATION_MESSAGE_TIMEOUT_MS = 130_000;
 const NOTES_MANUAL_RETRY_DEBOUNCE_MS = 400;
 const NOTE_TRANSLATION_VALIDATION_VERSION = 1;
 const TRANSCRIPT_TRANSLATION_CACHE_VERSION = 2;
-const TRANSCRIPT_SOURCE_POLICY_VERSION = 2;
+const TRANSCRIPT_SOURCE_POLICY_VERSION = 3;
+
+function sanitizeTranscriptSelectedTrack(track) {
+  if (!track || typeof track !== "object") return null;
+  const language = normalizeLanguageCode(
+    track.language || track.languageCode,
+  );
+  const kind = track.kind === "asr" ? "asr" : "manual";
+  return {
+    ...(Number.isInteger(track.index) ? { index: track.index } : {}),
+    language: language || null,
+    kind,
+    isGenerated: kind === "asr" || track.isGenerated === true,
+    label:
+      typeof track.label === "string"
+        ? track.label.trim().slice(0, 100)
+        : null,
+  };
+}
+
+function transcriptSourceLabel() {
+  if (currentTranscriptSource === "supadata") return "Supadata 兜底字幕";
+  if (currentTranscriptSource === "youtube-timedtext") {
+    return "YouTube 本地字幕";
+  }
+  if (currentTranscriptSource === "bilibili") return "B 站视频字幕";
+  return "来自视频字幕";
+}
 
 function normalizeLanguageCode(value) {
   const language = String(value || "")
@@ -738,11 +768,8 @@ async function runCheckCurrentTab(generation) {
       return;
     }
 
-    if (
-      !currentConfigStatus?.hasAiKey ||
-      (locator.platform === "youtube" && !currentConfigStatus?.hasSupadataKey)
-    ) {
-      showConfigError(currentConfigStatus || {}, locator.platform === "youtube");
+    if (!currentConfigStatus?.hasAiKey) {
+      showConfigError(currentConfigStatus || {});
       return;
     }
 
@@ -1017,6 +1044,13 @@ async function runDigestLoad(
     currentTranscriptTimestamped = cached.transcriptTimestamped;
     currentTranscriptLanguage =
       cachedTranscriptLanguage || cachedAnalysisLanguage || null;
+    currentTranscriptSource = String(cached.transcriptSource || "");
+    currentTranscriptSelectedTrack = sanitizeTranscriptSelectedTrack(
+      cached.transcriptSelectedTrack,
+    );
+    currentTranscriptSourceAttempt = String(
+      cached.transcriptSourceAttempt || "",
+    ).slice(0, 40);
     applyMediaLanguageDefaults();
     isAnalysisLoading = false;
 
@@ -1064,6 +1098,9 @@ async function runDigestLoad(
   currentTranscriptText = null;
   currentTranscriptTimestamped = null;
   currentTranscriptLanguage = null;
+  currentTranscriptSource = "";
+  currentTranscriptSelectedTrack = null;
+  currentTranscriptSourceAttempt = "";
 
   if (currentVideoTitle || currentChannelName) {
     const videoInfo = document.getElementById("videoInfo");
@@ -1081,17 +1118,11 @@ async function runDigestLoad(
     videoId: requestMediaRef?.videoId || videoId,
     mediaRef: requestMediaRef,
     preferredLanguage: currentVideoSourceLanguage,
+    tabId: videoTabId,
   });
   if (!isCurrentDigest(videoId, generation, routeKey)) return;
 
   if (!transcriptResult.success) {
-    if (transcriptResult.error === "NO_SUPADATA_KEY") {
-      showError(
-        "缺少 API 密钥",
-        "请在 YouTube Digest 设置中添加 Supadata API 密钥。",
-      );
-      return;
-    }
     showError(
       "未找到字幕",
       transcriptResult.message || transcriptResult.error,
@@ -1103,6 +1134,13 @@ async function runDigestLoad(
   currentTranscriptText = transcriptResult.transcriptText;
   currentTranscriptTimestamped = transcriptResult.transcriptTextTimestamped;
   currentTranscriptLanguage = normalizeLanguageCode(transcriptResult.language) || null;
+  currentTranscriptSource = String(transcriptResult.source || "");
+  currentTranscriptSelectedTrack = sanitizeTranscriptSelectedTrack(
+    transcriptResult.selectedTrack,
+  );
+  currentTranscriptSourceAttempt = String(
+    transcriptResult.sourceAttempt || "",
+  ).slice(0, 40);
   if (transcriptResult.mediaRef) currentMediaRef = transcriptResult.mediaRef;
   if (
     currentMediaRef?.platform === "bilibili" &&
@@ -1474,6 +1512,9 @@ async function saveQuoteAsNote(quote, btn) {
       timestamp: quote.timestampSeconds,
       videoTitle: currentVideoTitle,
       channelName: currentChannelName,
+      tabId: videoTabId,
+      preferredLanguage:
+        currentVideoSourceLanguage || currentTranscriptLanguage || "",
     });
 
     if (result.success) {
@@ -1557,7 +1598,7 @@ function renderTranscript() {
   const badge = document.createElement("div");
   badge.id = "transcriptSourceBadge";
   badge.className = "transcript-source-badge";
-  badge.innerHTML = `<span class="source-dot source-dot--subs"></span> 来自视频字幕 · ${escapeHtml(getOriginalTranscriptLabel())}`;
+  badge.innerHTML = `<span class="source-dot source-dot--subs"></span> ${escapeHtml(transcriptSourceLabel())} · ${escapeHtml(getOriginalTranscriptLabel())}`;
   transcriptList.parentElement.insertBefore(badge, transcriptList);
 
   // Group entries using smart sentence-boundary + time-guardrail logic
@@ -1675,11 +1716,8 @@ function showPageRefreshRequired(tabId, message) {
   };
 }
 
-function showConfigError(configStatus, requiresSupadata = true) {
+function showConfigError(configStatus) {
   const missingKeys = [];
-  if (requiresSupadata && !configStatus.hasSupadataKey) {
-    missingKeys.push("Supadata");
-  }
   if (!configStatus.hasAiKey) missingKeys.push("DeepSeek");
 
   showState("error");
@@ -2143,6 +2181,11 @@ async function saveToCache(videoId) {
       transcriptText: currentTranscriptText,
       transcriptTimestamped: currentTranscriptTimestamped,
       transcriptLanguage: currentTranscriptLanguage,
+      transcriptSource: currentTranscriptSource,
+      transcriptSelectedTrack: sanitizeTranscriptSelectedTrack(
+        currentTranscriptSelectedTrack,
+      ),
+      transcriptSourceAttempt: currentTranscriptSourceAttempt,
       mediaRef: currentMediaRef,
       routeKey: currentRouteKey,
       videoTitle: currentVideoTitle,
@@ -3083,7 +3126,7 @@ function renderTranscriptModeRows(segments, mode) {
     mode === "bilingual"
       ? `${originalLabel} + 简体中文`
       : `简体中文 · 译自${originalLabel}`;
-  badge.innerHTML = `<span class="source-dot source-dot--subs"></span> 来自视频字幕 · ${modeLabel}`;
+  badge.innerHTML = `<span class="source-dot source-dot--subs"></span> ${escapeHtml(transcriptSourceLabel())} · ${modeLabel}`;
   transcriptList.parentElement.insertBefore(badge, transcriptList);
 
   const rows = [];

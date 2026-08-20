@@ -27,6 +27,7 @@ fail() {
 public_allowlist=(
   "manifest.json"
   "background.js"
+  "youtube-transcript.js"
   "settings.js"
   "notes-backup.js"
   "content.js"
@@ -55,6 +56,7 @@ public_allowlist=(
 required_public_files=(
   "manifest.json"
   "background.js"
+  "youtube-transcript.js"
   "settings.js"
   "notes-backup.js"
   "content.js"

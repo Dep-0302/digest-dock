@@ -7,6 +7,7 @@ const vm = require("node:vm");
 const root = path.resolve(__dirname, "..");
 const read = (file) => fs.readFileSync(path.join(root, file), "utf8");
 const bilibiliAdapter = require("../bilibili.js");
+const youtubeTranscriptAdapter = require("../youtube-transcript.js");
 
 function loadSidepanelRuntime({
   sendMessage = () => Promise.resolve({}),
@@ -98,6 +99,7 @@ function loadBackgroundHelpers({
   storageSetImpl = async () => {},
   tabsImpl = {},
   bilibiliAdapterImpl = bilibiliAdapter,
+  youtubeTranscriptAdapterImpl = youtubeTranscriptAdapter,
 } = {}) {
   const listeners = { addListener() {} };
   const runtimeMessageListeners = [];
@@ -147,6 +149,7 @@ function loadBackgroundHelpers({
         `https://www.youtube.com/watch?v=${videoId}`,
     },
     BILIBILI_ADAPTER: bilibiliAdapterImpl,
+    YOUTUBE_TRANSCRIPT_ADAPTER: youtubeTranscriptAdapterImpl,
   };
   sandbox.globalThis = sandbox;
   vm.runInNewContext(read("background.js"), sandbox);
@@ -435,14 +438,14 @@ test("Header exposes tab-specific transcript, overview, and notes language modes
     js,
     /function ensureNotesChinese\(\)[\s\S]*?await sendTranslationMessage\(\{[\s\S]*?action: "translateNotes"/,
   );
-  assert.match(js, /const REQUIRED_RUNTIME_PROTOCOL_VERSION = 6/);
+  assert.match(js, /const REQUIRED_RUNTIME_PROTOCOL_VERSION = 7/);
   assert.match(
     js,
     /runtimeProtocolVersion\s*!==\s*REQUIRED_RUNTIME_PROTOCOL_VERSION[\s\S]*?showRuntimeVersionError\(\)/,
   );
   assert.match(js, /扩展后台未响应原文翻译请求，请重新加载扩展/);
   const backgroundSource = read("background.js");
-  assert.match(backgroundSource, /const RUNTIME_PROTOCOL_VERSION = 6/);
+  assert.match(backgroundSource, /const RUNTIME_PROTOCOL_VERSION = 7/);
   assert.match(
     backgroundSource,
     /runtimeProtocolVersion: RUNTIME_PROTOCOL_VERSION/,
@@ -465,7 +468,7 @@ test("Header exposes tab-specific transcript, overview, and notes language modes
   assert.match(js, /cached\.analysisVideoId === videoId/);
   assert.match(js, /videoId !== currentVideoId \|\| !currentTranscript/);
   assert.match(js, /preferredLanguage: currentVideoSourceLanguage/);
-  assert.match(js, /const TRANSCRIPT_SOURCE_POLICY_VERSION = 2/);
+  assert.match(js, /const TRANSCRIPT_SOURCE_POLICY_VERSION = 3/);
   assert.match(
     js,
     /cached\.transcriptSourcePolicyVersion !== TRANSCRIPT_SOURCE_POLICY_VERSION/,
@@ -2448,7 +2451,7 @@ test("Bilibili timestamp note saves polished Chinese once without translation", 
       if (key === `digest_${mediaRef.mediaKey}`) {
         return {
           [`digest_${mediaRef.mediaKey}`]: {
-            transcriptSourcePolicyVersion: 2,
+            transcriptSourcePolicyVersion: 3,
             mediaRef,
             transcriptLanguage: "zh-CN",
             transcript: [
@@ -2534,7 +2537,7 @@ test("a note saved before the first caption uses the first line instead of the l
       if (key === `digest_${mediaRef.mediaKey}`) {
         return {
           [`digest_${mediaRef.mediaKey}`]: {
-            transcriptSourcePolicyVersion: 2,
+            transcriptSourcePolicyVersion: 3,
             mediaRef,
             transcriptLanguage: "zh-CN",
             transcript: [
@@ -4851,7 +4854,7 @@ test("saving a note from a Chinese caption skips AI cleanup and keeps the origin
     aiModel: "deepseek-v4-flash",
   };
   const makeDigest = (language) => ({
-    transcriptSourcePolicyVersion: 2,
+    transcriptSourcePolicyVersion: 3,
     transcript: [
       { start: 0, text: "开场白。", language },
       { start: 10, text: "第二句中文字幕内容。", language },

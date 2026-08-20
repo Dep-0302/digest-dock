@@ -50,6 +50,7 @@ test("cross-platform runtime dependencies are included in the release surface", 
   const optionsPage = read("options.html");
   const releaseCheck = read("scripts/check-release.sh");
 
+  assert.match(background, /importScripts\("youtube-transcript\.js"\)/);
   assert.match(background, /importScripts\("notes-backup\.js"\)/);
   assert.ok(
     optionsPage.indexOf('<script src="notes-backup.js"></script>') <
@@ -60,7 +61,11 @@ test("cross-platform runtime dependencies are included in the release surface", 
     (releaseCheck.match(/"notes-backup\.js"/g) || []).length >= 2,
     "notes-backup.js must be both allowlisted and required for release",
   );
-  for (const file of ["bilibili.js", "content-bilibili.js"]) {
+  for (const file of [
+    "youtube-transcript.js",
+    "bilibili.js",
+    "content-bilibili.js",
+  ]) {
     assert.ok(
       (releaseCheck.match(new RegExp(`"${file.replace(".", "\\.")}"`, "g")) || [])
         .length >= 2,
@@ -290,6 +295,7 @@ test("notes filters preserve selected contrast and expose pressed state", () => 
 test("runtime has no source-file credential dependency or retired model", () => {
   const runtime = [
     "background.js",
+    "youtube-transcript.js",
     "bilibili.js",
     "content-bilibili.js",
     "content.js",
