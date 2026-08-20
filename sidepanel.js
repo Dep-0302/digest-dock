@@ -6,7 +6,7 @@
  */
 
 const DEBUG = false;
-const REQUIRED_RUNTIME_PROTOCOL_VERSION = 6;
+const REQUIRED_RUNTIME_PROTOCOL_VERSION = 8;
 const debugLog = (...args) => {
   if (DEBUG) console.log(...args);
 };
@@ -41,6 +41,9 @@ let currentTranscript = null;
 let currentTranscriptText = null; // Plain text (for display/export)
 let currentTranscriptTimestamped = null; // With timestamps for AI analysis
 let currentTranscriptLanguage = null;
+let currentTranscriptSource = "";
+let currentTranscriptSelectedTrack = null;
+let currentTranscriptSourceAttempt = "";
 let currentVideoTitle = "";
 let currentChannelName = "";
 let currentVideoDescription = "";
@@ -50,6 +53,7 @@ let isAnalysisLoading = false; // Track if analysis is in progress
 let videoTabId = null; // Exact supported video tab for seek/playback messaging.
 let currentConfigStatus = null;
 let errorAction = null;
+let errorSecondaryAction = null;
 let tabCheckGeneration = 0;
 let digestGeneration = 0;
 
@@ -78,7 +82,34 @@ const TRANSLATION_MESSAGE_TIMEOUT_MS = 130_000;
 const NOTES_MANUAL_RETRY_DEBOUNCE_MS = 400;
 const NOTE_TRANSLATION_VALIDATION_VERSION = 1;
 const TRANSCRIPT_TRANSLATION_CACHE_VERSION = 2;
-const TRANSCRIPT_SOURCE_POLICY_VERSION = 2;
+const TRANSCRIPT_SOURCE_POLICY_VERSION = 3;
+
+function sanitizeTranscriptSelectedTrack(track) {
+  if (!track || typeof track !== "object") return null;
+  const language = normalizeLanguageCode(
+    track.language || track.languageCode,
+  );
+  const kind = track.kind === "asr" ? "asr" : "manual";
+  return {
+    ...(Number.isInteger(track.index) ? { index: track.index } : {}),
+    language: language || null,
+    kind,
+    isGenerated: kind === "asr" || track.isGenerated === true,
+    label:
+      typeof track.label === "string"
+        ? track.label.trim().slice(0, 100)
+        : null,
+  };
+}
+
+function transcriptSourceLabel() {
+  if (currentTranscriptSource === "supadata") return "Supadata 兜底字幕";
+  if (currentTranscriptSource === "youtube-timedtext") {
+    return "YouTube 本地字幕";
+  }
+  if (currentTranscriptSource === "bilibili") return "B 站视频字幕";
+  return "来自视频字幕";
+}
 
 function normalizeLanguageCode(value) {
   const language = String(value || "")
@@ -581,7 +612,7 @@ chrome.tabs.onActivated.addListener(async ({ tabId, windowId }) => {
     const tab = await chrome.tabs.get(tabId);
     // Brand-new tabs may not have committed their URL yet — fall back to
     // the pending one so we judge where the tab is actually going.
-    handleFrontTabUrl(tab.url || tab.pendingUrl || "");
+    handleFrontTabUrl(tab.pendingUrl || tab.url || "");
   } catch (e) {
     // Tab closed before we could read it — nothing to do.
   }
@@ -596,11 +627,10 @@ function setupEventListeners() {
   // Error retry
   document.getElementById("errorBtn").addEventListener("click", () => {
     if (errorAction) {
-      errorAction();
-      return;
+      return errorAction();
     }
     if (currentVideoId) {
-      void startDigest(currentVideoId, currentVideoUrl).catch((error) => {
+      return startDigest(currentVideoId, currentVideoUrl).catch((error) => {
         console.error("[DigestDock Panel] Retry error:", error);
         showError(
           "无法打开摘要",
@@ -609,6 +639,11 @@ function setupEventListeners() {
       });
     }
   });
+  document
+    .getElementById("errorSecondaryBtn")
+    ?.addEventListener("click", () => {
+      if (errorSecondaryAction) return errorSecondaryAction();
+    });
 
   document.getElementById("settingsBtn")?.addEventListener("click", () => {
     chrome.runtime.sendMessage({ action: "openOptions" });
@@ -738,11 +773,8 @@ async function runCheckCurrentTab(generation) {
       return;
     }
 
-    if (
-      !currentConfigStatus?.hasAiKey ||
-      (locator.platform === "youtube" && !currentConfigStatus?.hasSupadataKey)
-    ) {
-      showConfigError(currentConfigStatus || {}, locator.platform === "youtube");
+    if (!currentConfigStatus?.hasAiKey) {
+      showConfigError(currentConfigStatus || {});
       return;
     }
 
@@ -818,7 +850,7 @@ async function runCheckCurrentTab(generation) {
     // first A request.
     const latestTab = await chrome.tabs.get(tab.id);
     if (!isLatestCheck()) return;
-    nextVideoUrl = latestTab.url || latestTab.pendingUrl || "";
+    nextVideoUrl = latestTab.pendingUrl || latestTab.url || "";
     const latestLocator = extractMediaLocator(nextVideoUrl);
     if (!latestLocator || latestLocator.routeKey !== locator.routeKey) {
       scheduleDigestRefresh();
@@ -962,6 +994,7 @@ async function runDigestLoad(
   videoChanged,
   mediaRef = currentMediaRef,
   routeKey = currentRouteKey,
+  supadataConsent = false,
 ) {
   if (!isCurrentDigest(videoId, generation, routeKey)) return;
 
@@ -1017,6 +1050,13 @@ async function runDigestLoad(
     currentTranscriptTimestamped = cached.transcriptTimestamped;
     currentTranscriptLanguage =
       cachedTranscriptLanguage || cachedAnalysisLanguage || null;
+    currentTranscriptSource = String(cached.transcriptSource || "");
+    currentTranscriptSelectedTrack = sanitizeTranscriptSelectedTrack(
+      cached.transcriptSelectedTrack,
+    );
+    currentTranscriptSourceAttempt = String(
+      cached.transcriptSourceAttempt || "",
+    ).slice(0, 40);
     applyMediaLanguageDefaults();
     isAnalysisLoading = false;
 
@@ -1064,6 +1104,9 @@ async function runDigestLoad(
   currentTranscriptText = null;
   currentTranscriptTimestamped = null;
   currentTranscriptLanguage = null;
+  currentTranscriptSource = "";
+  currentTranscriptSelectedTrack = null;
+  currentTranscriptSourceAttempt = "";
 
   if (currentVideoTitle || currentChannelName) {
     const videoInfo = document.getElementById("videoInfo");
@@ -1081,14 +1124,46 @@ async function runDigestLoad(
     videoId: requestMediaRef?.videoId || videoId,
     mediaRef: requestMediaRef,
     preferredLanguage: currentVideoSourceLanguage,
+    tabId: videoTabId,
+    supadataConsent: supadataConsent === true,
   });
   if (!isCurrentDigest(videoId, generation, routeKey)) return;
 
   if (!transcriptResult.success) {
-    if (transcriptResult.error === "NO_SUPADATA_KEY") {
-      showError(
-        "缺少 API 密钥",
-        "请在 DigestDock 设置中添加 Supadata API 密钥。",
+    if (
+      transcriptResult.error === "SUPADATA_CONSENT_REQUIRED" &&
+      supadataConsent !== true
+    ) {
+      showSupadataConsent(async () => {
+        if (!isCurrentDigest(videoId, generation, routeKey)) return;
+        const requestKey = `${generation}:${videoId}`;
+        // A same-video refresh may already own the ordinary local-only
+        // single-flight. Wait for it to finish, then start a fresh consented
+        // attempt. This preserves ordering without running local-only and
+        // Supadata-authorized requests in parallel or swallowing the click.
+        await runDigestSingleFlight(
+          requestKey,
+          async () => undefined,
+        );
+        if (!isCurrentDigest(videoId, generation, routeKey)) return;
+        await runDigestSingleFlight(
+          requestKey,
+          () =>
+            runDigestLoad(
+              videoId,
+              generation,
+              false,
+              requestMediaRef,
+              routeKey,
+              true,
+            ),
+        );
+      });
+      return;
+    }
+    if (transcriptResult.error === "SUPADATA_NOT_CONFIGURED") {
+      showSupadataNotConfigured(
+        transcriptResult.message || "未能直接读取 YouTube 原生字幕。",
       );
       return;
     }
@@ -1103,6 +1178,13 @@ async function runDigestLoad(
   currentTranscriptText = transcriptResult.transcriptText;
   currentTranscriptTimestamped = transcriptResult.transcriptTextTimestamped;
   currentTranscriptLanguage = normalizeLanguageCode(transcriptResult.language) || null;
+  currentTranscriptSource = String(transcriptResult.source || "");
+  currentTranscriptSelectedTrack = sanitizeTranscriptSelectedTrack(
+    transcriptResult.selectedTrack,
+  );
+  currentTranscriptSourceAttempt = String(
+    transcriptResult.sourceAttempt || "",
+  ).slice(0, 40);
   if (transcriptResult.mediaRef) currentMediaRef = transcriptResult.mediaRef;
   if (
     currentMediaRef?.platform === "bilibili" &&
@@ -1474,6 +1556,9 @@ async function saveQuoteAsNote(quote, btn) {
       timestamp: quote.timestampSeconds,
       videoTitle: currentVideoTitle,
       channelName: currentChannelName,
+      tabId: videoTabId,
+      preferredLanguage:
+        currentVideoSourceLanguage || currentTranscriptLanguage || "",
     });
 
     if (result.success) {
@@ -1557,7 +1642,7 @@ function renderTranscript() {
   const badge = document.createElement("div");
   badge.id = "transcriptSourceBadge";
   badge.className = "transcript-source-badge";
-  badge.innerHTML = `<span class="source-dot source-dot--subs"></span> 来自视频字幕 · ${escapeHtml(getOriginalTranscriptLabel())}`;
+  badge.innerHTML = `<span class="source-dot source-dot--subs"></span> ${escapeHtml(transcriptSourceLabel())} · ${escapeHtml(getOriginalTranscriptLabel())}`;
   transcriptList.parentElement.insertBefore(badge, transcriptList);
 
   // Group entries using smart sentence-boundary + time-guardrail logic
@@ -1657,10 +1742,80 @@ function updateLoading(title, subtitle) {
 
 function showError(title, message) {
   errorAction = null;
+  errorSecondaryAction = null;
   showState("error");
   document.getElementById("errorTitle").textContent = title;
   document.getElementById("errorMessage").textContent = message;
-  document.getElementById("errorBtn").textContent = "重试";
+  const primaryButton = document.getElementById("errorBtn");
+  const secondaryButton = document.getElementById("errorSecondaryBtn");
+  primaryButton.textContent = "重试";
+  primaryButton.disabled = false;
+  if (secondaryButton) {
+    secondaryButton.textContent = "不使用";
+    secondaryButton.disabled = false;
+    secondaryButton.hidden = true;
+  }
+}
+
+function showSupadataConsent(onConfirm) {
+  showError(
+    "是否使用第三方字幕服务？",
+    "未能直接读取 YouTube 原生字幕。你可以选择本次使用 Supadata 重试；点击后会把此视频的标准 YouTube 链接发送给 Supadata，并可能消耗你的 API 额度。",
+  );
+  const primaryButton = document.getElementById("errorBtn");
+  const secondaryButton = document.getElementById("errorSecondaryBtn");
+  primaryButton.textContent = "本次使用 Supadata";
+  if (secondaryButton) {
+    secondaryButton.textContent = "不使用第三方服务";
+    secondaryButton.hidden = false;
+  }
+
+  errorAction = async () => {
+    primaryButton.disabled = true;
+    if (secondaryButton) secondaryButton.disabled = true;
+    showState("loading");
+    updateLoading(
+      "正在通过 Supadata 提取字幕",
+      "本次请求会使用你的 Supadata API 额度…",
+    );
+    try {
+      await onConfirm();
+    } catch (error) {
+      showError(
+        "Supadata 提取失败",
+        error?.message || "第三方字幕请求未能完成，请稍后重试。",
+      );
+    }
+  };
+  errorSecondaryAction = () => {
+    showNativeTranscriptRetry(
+      "继续使用 YouTube 原生字幕",
+      "没有向 Supadata 发送视频链接。",
+    );
+  };
+  primaryButton.focus();
+}
+
+function showNativeTranscriptRetry(title, lead) {
+  showError(
+    title,
+    `${lead} 你可以重试原生字幕读取。失败可能来自字幕轨尚未加载、YouTube 临时返回空响应、视频本身没有字幕，或当前网络与地区限制。可先刷新页面；若正在使用 VPN 或代理，可切换节点或暂时关闭后再试。`,
+  );
+  document.getElementById("errorBtn").textContent =
+    "重试 YouTube 原生字幕";
+}
+
+function showSupadataNotConfigured(message) {
+  showNativeTranscriptRetry("未能直接读取字幕", message);
+  const primaryButton = document.getElementById("errorBtn");
+  const secondaryButton = document.getElementById("errorSecondaryBtn");
+  primaryButton.textContent = "重试 YouTube 原生字幕";
+  if (secondaryButton) {
+    secondaryButton.textContent = "配置可选 Supadata 回退";
+    secondaryButton.hidden = false;
+  }
+  errorSecondaryAction = () =>
+    chrome.runtime.sendMessage({ action: "openOptions" });
 }
 
 function showPageRefreshRequired(tabId, message) {
@@ -1675,26 +1830,23 @@ function showPageRefreshRequired(tabId, message) {
   };
 }
 
-function showConfigError(configStatus, requiresSupadata = true) {
+function showConfigError(configStatus) {
   const missingKeys = [];
-  if (requiresSupadata && !configStatus.hasSupadataKey) {
-    missingKeys.push("Supadata");
-  }
   if (!configStatus.hasAiKey) missingKeys.push("DeepSeek");
 
-  showState("error");
-  document.getElementById("errorTitle").textContent = "缺少 API 密钥";
-  document.getElementById("errorMessage").textContent =
-    `请在 DigestDock 设置中添加 ${missingKeys.join(" 和 ")} API 密钥。`;
+  showError(
+    "缺少 API 密钥",
+    `请在 DigestDock 设置中添加 ${missingKeys.join(" 和 ")} API 密钥。`,
+  );
   document.getElementById("errorBtn").textContent = "打开设置";
   errorAction = () => chrome.runtime.sendMessage({ action: "openOptions" });
 }
 
 function showRuntimeVersionError() {
-  showState("error");
-  document.getElementById("errorTitle").textContent = "扩展需要重新加载";
-  document.getElementById("errorMessage").textContent =
-    "侧边栏与后台版本不一致。请在 chrome://extensions 中重新加载 DigestDock，然后关闭并重新打开侧边栏。";
+  showError(
+    "扩展需要重新加载",
+    "侧边栏与后台版本不一致。请在 chrome://extensions 中重新加载 DigestDock，然后关闭并重新打开侧边栏。",
+  );
   document.getElementById("errorBtn").textContent = "重新检测";
   errorAction = () => window.location.reload();
 }
@@ -2143,6 +2295,11 @@ async function saveToCache(videoId) {
       transcriptText: currentTranscriptText,
       transcriptTimestamped: currentTranscriptTimestamped,
       transcriptLanguage: currentTranscriptLanguage,
+      transcriptSource: currentTranscriptSource,
+      transcriptSelectedTrack: sanitizeTranscriptSelectedTrack(
+        currentTranscriptSelectedTrack,
+      ),
+      transcriptSourceAttempt: currentTranscriptSourceAttempt,
       mediaRef: currentMediaRef,
       routeKey: currentRouteKey,
       videoTitle: currentVideoTitle,
@@ -3083,7 +3240,7 @@ function renderTranscriptModeRows(segments, mode) {
     mode === "bilingual"
       ? `${originalLabel} + 简体中文`
       : `简体中文 · 译自${originalLabel}`;
-  badge.innerHTML = `<span class="source-dot source-dot--subs"></span> 来自视频字幕 · ${modeLabel}`;
+  badge.innerHTML = `<span class="source-dot source-dot--subs"></span> ${escapeHtml(transcriptSourceLabel())} · ${modeLabel}`;
   transcriptList.parentElement.insertBefore(badge, transcriptList);
 
   const rows = [];

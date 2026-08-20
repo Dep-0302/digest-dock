@@ -42,7 +42,7 @@ test("manifest uses minimized install-time permissions", () => {
     "https://www.bilibili.com/video/BV*",
   ]);
   assert.equal(Object.hasOwn(manifest, "optional_host_permissions"), false);
-  assert.equal(manifest.version, "1.3.0");
+  assert.equal(manifest.version, "1.4.0");
 });
 
 test("cross-platform runtime dependencies are included in the release surface", () => {
@@ -50,6 +50,7 @@ test("cross-platform runtime dependencies are included in the release surface", 
   const optionsPage = read("options.html");
   const releaseCheck = read("scripts/check-release.sh");
 
+  assert.match(background, /importScripts\("youtube-transcript\.js"\)/);
   assert.match(background, /importScripts\("notes-backup\.js"\)/);
   assert.ok(
     optionsPage.indexOf('<script src="notes-backup.js"></script>') <
@@ -60,7 +61,11 @@ test("cross-platform runtime dependencies are included in the release surface", 
     (releaseCheck.match(/"notes-backup\.js"/g) || []).length >= 2,
     "notes-backup.js must be both allowlisted and required for release",
   );
-  for (const file of ["bilibili.js", "content-bilibili.js"]) {
+  for (const file of [
+    "youtube-transcript.js",
+    "bilibili.js",
+    "content-bilibili.js",
+  ]) {
     assert.ok(
       (releaseCheck.match(new RegExp(`"${file.replace(".", "\\.")}"`, "g")) || [])
         .length >= 2,
@@ -170,6 +175,8 @@ test("release copy documents current scope without em dashes", () => {
   assert.match(readme, /supadata\.ai\/pricing/i);
   assert.match(readme, /docs\.supadata\.ai\/get-transcript/i);
   assert.match(readme, /dash\.supadata\.ai\/auth\/sign-up/i);
+  assert.match(readme, /saved key is never used automatically/i);
+  assert.match(readme, /user confirms that attempt/i);
   assert.match(readme, /platform\.deepseek\.com\/api_keys/i);
   assert.match(readme, /api-docs\.deepseek\.com/i);
   assert.match(readme, /api-docs\.deepseek\.com\/quick_start\/pricing/i);
@@ -187,6 +194,8 @@ test("release copy documents current scope without em dashes", () => {
   assert.match(chineseReadme, /\u7ea6 32,600 \u4e2a\u8f93\u5165 token/);
   assert.match(chineseReadme, /\$0\.002[^\n]*\$0\.006 USD/);
   assert.match(chineseReadme, /dash\.supadata\.ai\/auth\/sign-up/i);
+  assert.match(chineseReadme, /已保存的 Key 也不会被自动使用/);
+  assert.match(chineseReadme, /用户在侧边栏确认本次使用/);
   assert.match(chineseReadme, /platform\.deepseek\.com\/api_keys/i);
   assert.match(readme, /^### The Digest button is missing on a video$/m);
   assert.match(
@@ -197,6 +206,8 @@ test("release copy documents current scope without em dashes", () => {
   const optionsPage = read("options.html");
   const optionsStyles = read("options.css");
   const optionsScript = read("options.js");
+  assert.match(optionsScript, /only after you confirm that one third-party request/i);
+  assert.match(optionsScript, /确认本次使用第三方 Supadata/);
   assert.match(optionsPage, /dash\.supadata\.ai\/auth\/sign-up/i);
   assert.match(optionsPage, /platform\.deepseek\.com\/api_keys/i);
   assert.doesNotMatch(optionsPage, /<select\b/i);
@@ -314,6 +325,7 @@ test("notes filters preserve selected contrast and expose pressed state", () => 
 test("runtime has no source-file credential dependency or retired model", () => {
   const runtime = [
     "background.js",
+    "youtube-transcript.js",
     "bilibili.js",
     "content-bilibili.js",
     "content.js",

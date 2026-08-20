@@ -28,9 +28,9 @@ DigestDock 是在 [Zara Zhang 原作 YouTube Digest](https://github.com/zarazhan
 你的 Agent 应该帮你：
 
 1. 先询问你想把项目长期保存在哪里，再下载或克隆到那里，并告诉你准确的完整路径。如果你需要建议，可以推荐 macOS 或 Linux 上的 `~/Documents/digest-dock`，或 Windows 上的 `%USERPROFILE%\Documents\digest-dock`。
-2. 打开下方 Supadata 和 DeepSeek 官方页面，指导你创建自己的账号。
+2. 打开下方 DeepSeek 官方页面；如果你需要字幕回退，再打开可选的 Supadata 页面，并指导你创建相应账号。
 3. 指导你在 Chrome 中通过“加载已解压的扩展程序”选择你刚才确定的那个准确项目文件夹。
-4. 告诉你应该在扩展的“设置”页面哪个位置填写 API Key。
+4. 告诉你应该在扩展的“设置”页面哪个位置填写必需的 DeepSeek Key 和可选的 Supadata 回退 Key。
 5. 打开一个带字幕的 YouTube 视频，确认字幕和翻译功能可以使用。
 
 安装后请让这个文件夹留在原位。如果移动或删除它，Chrome 中加载的本地扩展会失效，需要从新的长期存放位置重新加载。
@@ -55,12 +55,13 @@ DigestDock 是在 [Zara Zhang 原作 YouTube Digest](https://github.com/zarazhan
 
 ## 设置 API Key
 
-服务访问使用你自己的账号和 Key。YouTube 需要下面两个 Key；如果只使用 B 站，只需要 DeepSeek，不需要 Supadata：
+服务访问使用你自己的账号和 Key。保存设置时只要求填写 **DeepSeek API Key**，用于生成概览、讲解内容、翻译和自动润色笔记。YouTube 和 B 站共用这套 DeepSeek 流程；Supadata 回退 Key 是可选项。
 
-1. **Supadata API Key**，用于获取 YouTube 字幕；只使用 B 站时可不填写。
-2. **DeepSeek API Key**，用于生成概览、讲解内容、翻译和自动润色笔记。
+YouTube 字幕采用本地优先：扩展会先直接从 YouTube 读取字幕轨，不经过第三方字幕服务。**Supadata API Key 是可选项**，已保存的 Key 也不会被自动使用。本地获取失败后，侧边栏会说明将发送的数据，并由你决定本次是否使用 Supadata；没有保存 Key 时只提供可选的设置入口。B 站不会使用 Supadata。
 
-### 获取 Supadata API Key
+### 获取可选的 Supadata API Key
+
+如果不需要回退，可以跳过这一节。本地获取 YouTube 字幕和读取 B 站字幕都不要求 Supadata Key。
 
 1. 打开 Supadata 官方[注册页面](https://dash.supadata.ai/auth/sign-up)。
 2. 创建账号并完成简短的新手引导。
@@ -141,7 +142,8 @@ JSON 文件只包含备份格式信息和已保存的笔记记录，包括其中
 - 标准的 `youtube.com/watch` 视频页面。
 - 标准的 `www.bilibili.com/video/BV...` 视频页面，每次只处理当前分P。
 - 当前 B 站浏览器会话可以访问的人工或 AI 字幕轨。B 站字幕读取不消耗 Supadata 额度。
-- Supadata 返回的一条原生字幕轨。YouTube 能提供默认字幕语言时，扩展会请求该语言并拒绝其他语言的回退结果；无法取得该提示时，才把实际返回的原生字幕轨视为**原文**。
+- 对 YouTube，先读取当前页面公开的已有字幕轨及其 `timedtext` 响应；如果没有得到可用字幕，扩展还可以继续尝试其他非 WEB YouTube player client，再考虑 Supadata。
+- 可选的 Supadata 原生字幕回退；只有本地 YouTube 获取失败、已经保存 Supadata Key，并且用户在侧边栏确认本次使用时才会运行。
 - 原文、简体中文和双语对照字幕。
 - AI 概览直接生成简体中文底稿。非中文字幕只有在请求**原文**或**双语**时，才翻译章节标题和总结；重点引用会保留源字幕原句。中文字幕的三种模式复用同一份中文内容，不发起额外翻译。
 - 笔记先生成一次润色后的英文，再单独生成一次简体中文；双语笔记只合并两份已保存内容。
@@ -150,11 +152,11 @@ JSON 文件只包含备份格式信息和已保存的笔记记录，包括其中
 - 本地笔记、带版本信息的 JSON 笔记备份与恢复，以及最近字幕、概览和翻译的本地缓存。
 - 发布版本的所有 AI 功能都使用 DeepSeek V4 Flash。其他服务需要修改本地代码，不属于发布版本的支持范围。
 
-Shorts、直播、B 站番剧页、私密或受访问限制的视频、画面硬字幕，以及没有原生字幕轨的视频可能无法使用。目前没有测试 Firefox、Safari、移动浏览器或其他 Chromium 浏览器。
+本地 YouTube 路径不能保证覆盖每一个带字幕的视频。Shorts、直播、B 站番剧页、私密或受访问限制的视频、画面硬字幕，以及没有原生字幕轨的视频可能无法使用。目前没有测试 Firefox、Safari、移动浏览器或其他 Chromium 浏览器。
 
-YouTube 路径强制使用 Supadata 的 `mode=native`。两个平台都不会在没有原生字幕时请求生成式转录，也不会在本地转录音频或使用 OCR。
+可选 Supadata 回退运行时会强制使用 `mode=native`。两个平台都只读取已经存在的字幕轨；可以读取平台已有的自动字幕轨，但不会下载音频、执行 ASR 或其他音频转录、请求生成式转录，也不会使用 OCR。
 
-## Supadata 免费额度和请求成本
+## 可选 Supadata 回退的费用
 
 截至 2026 年 8 月 9 日，[Supadata 价格页面](https://supadata.ai/pricing)显示免费版每月提供 **100 credits**，不需要信用卡，未使用的额度不会结转。价格可能变化，使用前请查看最新页面。
 
@@ -164,9 +166,9 @@ YouTube 路径强制使用 Supadata 的 `mode=native`。两个平台都不会在
 - AI 生成字幕每分钟消耗 **2 credits**。DigestDock 不会使用这条路径，因为它强制使用 `mode=native`。
 - 如果没有可用原生字幕并返回 HTTP `206`，仍会消耗 **1 credit**。
 
-按照当前只获取原生字幕的方式，如果每次请求都成功，免费版每月大约可以查询 100 个视频。重试和没有字幕的查询也会消耗额度，所以实际成功数量可能更少。
+YouTube 本地获取成功时不会调用 Supadata，也不会消耗 Supadata 额度。用户确认可选回退后，按照当前只获取原生字幕的方式，如果每次请求都成功，免费版每月大约可以完成 100 次经用户确认的回退查询。重试和没有字幕的查询也可能消耗额度，所以实际成功数量可能更少。
 
-DeepSeek 的额度与 Supadata 分开计算。DeepSeek 可能有自己的免费额度、限速或费用。DigestDock 不收款，也不转售 API 服务。建议为两个账号设置消费上限并定期查看用量。下方估算说明了当前 DeepSeek 翻译成本。
+DeepSeek 的额度与 Supadata 分开计算。DeepSeek 可能有自己的免费额度、限速或费用。DigestDock 不收款，也不转售 API 服务。建议为你实际配置的每个服务商账号设置消费上限并定期查看用量。下方估算说明了当前 DeepSeek 翻译成本。
 
 ## DeepSeek V4 Flash 翻译成本估算
 
@@ -204,15 +206,15 @@ DigestDock 使用原生 HTML、CSS 和 JavaScript，应用本身没有构建步�
 
 ## 隐私和数据流向
 
-DigestDock 会直接从扩展向服务商发送请求：
+DigestDock 会直接从扩展发起网络请求：
 
-1. 把标准化的 YouTube 视频地址发送给 Supadata，用于获取原生字幕。
-2. 对 B 站，直接向 B 站请求当前视频元数据和已有字幕轨，复用浏览器当前会话但不读取或保存 Cookie 值。
-3. 当你使用 AI 功能时，把字幕和相关视频信息发送给 DeepSeek。
-4. 翻译或讲解等功能只发送当前需要的内容，例如选中的文本和上下文，或少量字幕分段。
-5. API Key、设置、笔记和最近缓存保存在 Chrome 本地。
+1. 对 YouTube，先从当前页面读取字幕轨信息，并直接向 YouTube 请求选中的 `timedtext` 字幕；也可能使用其他非 WEB client 向 YouTube player endpoint 查询字幕轨。扩展主动发起的这些字幕请求都使用 `credentials: "omit"`。
+2. 如果所有本地 YouTube 尝试都失败，并且你保存了 Supadata Key，侧边栏会提供第三方回退选项。只有你点击 Supadata 操作后，扩展才可能为本次原生字幕请求发送标准化的视频地址。
+3. 对 B 站，直接向 B 站请求当前视频元数据和已有字幕轨，复用浏览器当前会话但不读取或保存 Cookie 值。
+4. 当你使用 AI 功能时，把字幕和相关视频信息发送给 DeepSeek。翻译或讲解等功能只发送当前需要的内容，例如选中的文本和上下文，或少量字幕分段。
+5. API Key、设置、笔记和最近缓存保存在 Chrome 本地。临时签名的 YouTube 或 B 站字幕 URL 只用于当次请求，不会保存或写入日志。
 
-DigestDock 没有账号系统、广告、分析统计或行为追踪。B 站、Supadata 和 DeepSeek 仍会按照各自的条款和隐私政策处理请求。详情请查看 [PRIVACY.md](PRIVACY.md)。
+DigestDock 没有账号系统、广告、分析统计或行为追踪。YouTube、B 站、可选的 Supadata 和 DeepSeek 仍会按照各自的条款和隐私政策处理请求。详情请查看 [PRIVACY.md](PRIVACY.md)。
 
 ## 常见问题
 
@@ -233,17 +235,18 @@ DigestDock 没有账号系统、广告、分析统计或行为追踪。B 站、S
 
 ### DigestDock 提示需要设置
 
-- 使用 YouTube 时保存 Supadata Key 和 DeepSeek Key；只使用 B 站时保存 DeepSeek Key，Supadata 可以留空。
+- 保存 DeepSeek Key 即可。Supadata Key 只是可选的 YouTube 回退，无论使用 YouTube 还是 B 站都可以留空。
 - 发布版本固定使用 DeepSeek V4 Flash，没有需要填写的 Base URL 或 Model 字段。
 - 如果设置提示旧的自定义服务已移除，请重新填写 DeepSeek Key。旧 AI Key 已安全清除，避免被错误用于 DeepSeek。
 
 ### 找不到字幕
 
 - 确认视频是公开的，并且有原生字幕。
-- 使用 YouTube 时，检查 Supadata Key、剩余额度、限速和账号状态；没有字幕的查询和手动重试也可能消耗额度。
+- 使用 YouTube 时，先刷新视频页，并确认 YouTube 确实公开了字幕轨。本地直接获取会优先尝试，但不能覆盖每一个视频。
+- 如果配置了可选 Supadata 回退，再检查 Key、剩余额度、限速和账号状态；回退查询和手动重试可能消耗额度。
 - 使用 B 站时，确认当前分P存在独立字幕轨；若该字幕要求登录，请确认当前 Chrome 已登录 B 站。画面中的硬字幕无法读取。
 
-DigestDock 不会自动改用 AI 生成字幕。
+DigestDock 不会自动改用 AI 生成字幕，也不会执行音频 ASR。
 
 ### AI 请求失败
 

@@ -193,6 +193,21 @@ test("customization prompt switches languages and preserves technical values", (
   assert.match(html, /placeholder="粘贴 DeepSeek 密钥"/);
   assert.match(html, /https:\/\/dash\.supadata\.ai\/auth\/sign-up/);
   assert.match(html, /https:\/\/platform\.deepseek\.com\/api_keys/);
+  const supadataInput = html.match(/<input[\s\S]*?id="supadataApiKey"[\s\S]*?>/)?.[0];
+  assert.ok(supadataInput, "Expected the optional Supadata input");
+  assert.doesNotMatch(supadataInput, /\srequired(?:\s|=|>)/i);
+  assert.match(options.translate("en", "supadataApiKeyLabel"), /optional/i);
+  assert.match(options.translate("zh-CN", "supadataApiKeyLabel"), /可选/);
+  assert.match(options.translate("en", "supadataHelp"), /confirm[\s\S]*third-party/i);
+  assert.match(options.translate("zh-CN", "supadataHelp"), /确认[\s\S]*第三方/);
+  assert.doesNotMatch(options.translate("en", "supadataHelp"), /YouTube Digest/);
+  assert.doesNotMatch(options.translate("zh-CN", "supadataHelp"), /YouTube Digest/);
+  const saveSettings = read("options.js").match(
+    /async function saveSettings\(event\)[\s\S]*?\n    }/,
+  )?.[0];
+  assert.ok(saveSettings, "Expected the Settings save handler");
+  assert.match(saveSettings, /if \(!settings\.aiApiKey\)/);
+  assert.doesNotMatch(saveSettings, /!settings\.supadataApiKey/);
   assert.ok(html.includes(`>${chinesePrompt}</textarea>`));
   assert.match(chinesePrompt, /^请把当前本地 DigestDock 工作区改为使用/);
   assert.notEqual(chinesePrompt, englishPrompt);

@@ -658,8 +658,14 @@ async function saveCurrentNote() {
       showNoteSavedToast(result.note);
     } else {
       if (noteButton) {
+        const label =
+          result.error === "SUPADATA_CONSENT_REQUIRED"
+            ? "请在侧栏确认"
+            : result.error === "SUPADATA_NOT_CONFIGURED"
+              ? "可在设置中配置回退"
+              : "出错了";
         noteButton.innerHTML =
-          '<span style="letter-spacing: 0.2px;">出错了</span>';
+          `<span style="letter-spacing: 0.2px;">${label}</span>`;
       }
       console.error("[DigestDock] Save note error:", result.error);
     }

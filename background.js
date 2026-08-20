@@ -3,7 +3,7 @@
  *
  * This is the "brain" of the extension. It runs in the background and handles:
  * 1. Opening the side panel when the user clicks the extension icon
- * 2. Fetching YouTube transcripts via Supadata and Bilibili caption tracks directly
+ * 2. Fetching YouTube and Bilibili caption tracks locally, with optional Supadata fallback
  * 3. Calling DeepSeek to analyze the transcript
  * 4. Sending results back to the side panel
  *
@@ -14,14 +14,15 @@
 // Import safe defaults and validation helpers. Secret keys live in
 // chrome.storage.local and are never part of the extension source.
 importScripts("settings.js");
+importScripts("youtube-transcript.js");
 importScripts("bilibili.js");
 importScripts("notes-backup.js");
 
 const DEBUG = false;
 const ANALYSIS_SCHEMA_VERSION = 3;
-const RUNTIME_PROTOCOL_VERSION = 6;
+const RUNTIME_PROTOCOL_VERSION = 8;
 const ANALYSIS_BASE_LANGUAGE = "zh-Hans";
-const TRANSCRIPT_SOURCE_POLICY_VERSION = 2;
+const TRANSCRIPT_SOURCE_POLICY_VERSION = 3;
 const AI_PROVIDER_IDLE_TIMEOUT_MS = 50_000;
 const AI_PROVIDER_HARD_TIMEOUT_MS = 120_000;
 const AI_PROVIDER_MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
@@ -618,16 +619,36 @@ async function resolveMediaRef(mediaInput, sourceUrl = "") {
   return youtubeMediaRef(videoId);
 }
 
-async function handleFetchMediaTranscript(mediaInput, preferredLanguage = "") {
+async function handleFetchMediaTranscript(
+  mediaInput,
+  preferredLanguage = "",
+  tabId = null,
+  supadataConsent = false,
+) {
   try {
     const mediaRef = await resolveMediaRef(mediaInput);
     if (mediaRef.platform === "bilibili") {
       const result = await BILIBILI_ADAPTER.fetchTranscript(mediaRef);
-      return { success: true, mediaRef, ...result };
+      return {
+        success: true,
+        mediaRef,
+        ...result,
+        source: "bilibili",
+        sourceAttempt: "BILIBILI",
+      };
     }
-    return handleFetchTranscript(mediaRef.videoId, preferredLanguage);
+    return handleFetchYoutubeTranscriptLocalFirst(
+      mediaRef.videoId,
+      preferredLanguage,
+      tabId,
+      supadataConsent,
+    );
   } catch (error) {
-    return bilibiliFailure(error);
+    return {
+      success: false,
+      error: error?.code || "TRANSCRIPT_ERROR",
+      message: error?.message || "读取视频字幕失败。",
+    };
   }
 }
 
@@ -668,7 +689,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
 chrome.tabs.onActivated.addListener(async ({ tabId }) => {
   try {
     const tab = await chrome.tabs.get(tabId);
-    updatePanelForTab(tabId, tab.url);
+    updatePanelForTab(tabId, tab.pendingUrl || tab.url);
   } catch (e) {
     // Tab vanished before we could read it — nothing to do.
   }
@@ -700,6 +721,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     handleFetchMediaTranscript(
       message.mediaRef || message.videoId,
       message.preferredLanguage,
+      message.tabId ?? sender.tab?.id ?? null,
+      message.supadataConsent === true,
     )
       .then(sendResponse)
       .catch((err) => sendResponse({ success: false, error: err.message }));
@@ -760,6 +783,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       message.videoTitle,
       message.channelName,
       message.videoUrl || sender.tab?.url || "",
+      message.tabId ?? sender.tab?.id ?? null,
+      message.preferredLanguage || "",
     )
       .then(sendResponse)
       .catch((err) => sendResponse({ success: false, error: err.message }));
@@ -1090,6 +1115,228 @@ async function getPlayerVideoDetails(tabId) {
   }
 }
 
+/**
+ * Reads only the current video's caption-track metadata in YouTube's MAIN
+ * world. Signed URLs stay in the service worker and are passed directly to the
+ * bounded adapter; they are never logged, cached, or returned to the UI.
+ */
+async function readYouTubeCaptionSnapshot(tabId, expectedVideoId) {
+  if (!Number.isInteger(tabId)) return null;
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      world: "MAIN",
+      args: [expectedVideoId],
+      func: (expectedId) => {
+        try {
+          const player = document.getElementById("movie_player");
+          const response =
+            player?.getPlayerResponse?.() || window.ytInitialPlayerResponse;
+          const actualVideoId = response?.videoDetails?.videoId || "";
+          if (!actualVideoId) {
+            return { ok: false, error: "PAGE_CONTEXT_UNAVAILABLE" };
+          }
+          if (actualVideoId !== expectedId) {
+            return { ok: false, error: "PAGE_CONTEXT_CHANGED" };
+          }
+          const renderer =
+            response?.captions?.playerCaptionsTracklistRenderer;
+          const rawTracks = Array.isArray(renderer?.captionTracks)
+            ? renderer.captionTracks
+            : [];
+          const audioTracks = Array.isArray(renderer?.audioTracks)
+            ? renderer.audioTracks
+            : [];
+          const defaultAudio =
+            audioTracks[renderer?.defaultAudioTrackIndex] ||
+            audioTracks.find((track) => track?.hasDefaultTrack) ||
+            audioTracks[0];
+          const defaultCaptionIndex =
+            defaultAudio?.defaultCaptionTrackIndex ??
+            defaultAudio?.captionTrackIndices?.[0];
+          const sourceLanguage =
+            response?.videoDetails?.defaultAudioLanguage ||
+            response?.microformat?.playerMicroformatRenderer
+              ?.defaultAudioLanguage ||
+            rawTracks[defaultCaptionIndex]?.languageCode ||
+            "";
+          const readLabel = (name) =>
+            String(
+              name?.simpleText ||
+                name?.runs?.map((run) => run?.text || "").join("") ||
+                "",
+            ).slice(0, 160);
+          return {
+            ok: true,
+            videoId: actualVideoId,
+            sourceLanguage,
+            tracks: rawTracks
+              .filter(
+                (track) =>
+                  typeof track?.baseUrl === "string" &&
+                  track.baseUrl.trim(),
+              )
+              .map((track, index) => ({
+                baseUrl: track.baseUrl,
+                languageCode: String(track.languageCode || ""),
+                kind: track.kind === "asr" ? "asr" : undefined,
+                vssId: String(track.vssId || ""),
+                name: { simpleText: readLabel(track.name) },
+                isDefault: index === defaultCaptionIndex,
+              })),
+          };
+        } catch (_error) {
+          return { ok: false, error: "PAGE_CONTEXT_UNAVAILABLE" };
+        }
+      },
+    });
+    const snapshot = results?.[0]?.result || null;
+    if (snapshot?.error === "PAGE_CONTEXT_CHANGED") {
+      const error = new Error("YouTube 页面已切换到其他视频，请重试。");
+      error.code = "PAGE_CONTEXT_CHANGED";
+      throw error;
+    }
+    return snapshot?.ok ? snapshot : null;
+  } catch (error) {
+    if (error?.code === "PAGE_CONTEXT_CHANGED") throw error;
+    debugLog(
+      "[DigestDock] Page caption snapshot unavailable:",
+      error?.message,
+    );
+    return null;
+  }
+}
+
+async function youtubeTabStillMatches(tabId, expectedVideoId) {
+  if (!Number.isInteger(tabId)) return true;
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    // During navigation Chrome can expose the old committed URL together with
+    // the new pending target. Prefer the pending target so a consent granted
+    // for the old video cannot start a third-party request after the user has
+    // already left that page.
+    const url = new URL(String(tab?.pendingUrl || tab?.url || ""));
+    return (
+      url.protocol === "https:" &&
+      url.hostname === "www.youtube.com" &&
+      url.pathname === "/watch" &&
+      url.searchParams.get("v") === expectedVideoId
+    );
+  } catch (_error) {
+    return false;
+  }
+}
+
+function pageContextChangedResult() {
+  return {
+    success: false,
+    error: "PAGE_CONTEXT_CHANGED",
+    message: "YouTube 页面已切换到其他视频，请重试。",
+  };
+}
+
+async function handleFetchYoutubeTranscriptLocalFirst(
+  videoId,
+  preferredLanguage = "",
+  tabId = null,
+  supadataConsent = false,
+) {
+  let snapshot = null;
+  try {
+    snapshot = await readYouTubeCaptionSnapshot(tabId, videoId);
+  } catch (error) {
+    if (error?.code === "PAGE_CONTEXT_CHANGED") {
+      return pageContextChangedResult();
+    }
+  }
+
+  const requestedLanguage =
+    normalizeLanguageCode(preferredLanguage) ||
+    normalizeLanguageCode(snapshot?.sourceLanguage);
+  let localError = null;
+  try {
+    const localInput = {
+      videoId,
+      preferredLanguage: requestedLanguage,
+      kind: "manual-first",
+    };
+    if (snapshot) localInput.captionTracks = snapshot.tracks || [];
+    const local = await YOUTUBE_TRANSCRIPT_ADAPTER.fetchTranscript(localInput);
+    if (!(await youtubeTabStillMatches(tabId, videoId))) {
+      return pageContextChangedResult();
+    }
+    return {
+      success: true,
+      source: "youtube-timedtext",
+      ...local,
+    };
+  } catch (error) {
+    localError = error;
+  }
+
+  // Never spend fallback quota for a video the user has already left.
+  if (!(await youtubeTabStillMatches(tabId, videoId))) {
+    return pageContextChangedResult();
+  }
+
+  const settings = await getSettings();
+  const attempts = Array.isArray(localError?.attempts)
+    ? localError.attempts
+    : [];
+  const localErrorCode = localError?.code || "LOCAL_TRANSCRIPT_FAILED";
+
+  if (!settings.supadataApiKey) {
+    return {
+      success: false,
+      error: "SUPADATA_NOT_CONFIGURED",
+      message:
+        "未能直接读取 YouTube 原生字幕。如要使用 Supadata，可先在设置中配置可选密钥。",
+      localError: localErrorCode,
+      attempts,
+    };
+  }
+
+  // A saved key enables the choice, never an automatic third-party request.
+  // Only the side-panel action shown after local failure may opt this one
+  // attempt into Supadata. Note saves and ordinary transcript loads keep the
+  // default false value and therefore cannot silently use the provider.
+  if (supadataConsent !== true) {
+    return {
+      success: false,
+      error: "SUPADATA_CONSENT_REQUIRED",
+      message:
+        "未能直接读取 YouTube 原生字幕。你可以选择本次使用 Supadata 提取。",
+      localError: localErrorCode,
+      attempts,
+    };
+  }
+
+  const fallback = await handleFetchTranscript(
+    videoId,
+    requestedLanguage,
+    () => youtubeTabStillMatches(tabId, videoId),
+  );
+  // Supadata can take long enough for a YouTube SPA navigation to finish
+  // while the request (or async job) is in flight. Do not accept that old
+  // video's result for the tab's new page or a cache-miss note save.
+  if (!(await youtubeTabStillMatches(tabId, videoId))) {
+    return pageContextChangedResult();
+  }
+  if (fallback.success) {
+    return {
+      ...fallback,
+      source: "supadata",
+      sourceAttempt: "SUPADATA",
+      selectedTrack: null,
+    };
+  }
+
+  return {
+    ...fallback,
+    localError: localErrorCode,
+  };
+}
+
 // ============================================================
 // TRANSCRIPT FETCHING VIA SUPADATA API
 // ============================================================
@@ -1106,7 +1353,11 @@ async function getPlayerVideoDetails(tabId) {
  * @param {string} videoId - The YouTube video ID (e.g., "dQw4w9WgXcQ")
  * @returns {Object} - { success, transcript, transcriptText, language } or { success: false, error }
  */
-async function handleFetchTranscript(videoId, preferredLanguage) {
+async function handleFetchTranscript(
+  videoId,
+  preferredLanguage,
+  shouldContinue = null,
+) {
   try {
     const settings = await getSettings();
     if (!settings.supadataApiKey) {
@@ -1115,6 +1366,10 @@ async function handleFetchTranscript(videoId, preferredLanguage) {
         error: "NO_SUPADATA_KEY",
         message: "尚未配置 Supadata API 密钥，请打开 DigestDock 设置。",
       };
+    }
+
+    if (shouldContinue && !(await shouldContinue())) {
+      return pageContextChangedResult();
     }
 
     // Share only the canonical watch URL. This strips playlist, referral,
@@ -1150,6 +1405,7 @@ async function handleFetchTranscript(videoId, preferredLanguage) {
         jobData.jobId,
         settings.supadataApiKey,
         normalizedPreferredLanguage,
+        shouldContinue,
       );
     }
 
@@ -1272,13 +1528,24 @@ async function handleFetchTranscript(videoId, preferredLanguage) {
  * @param {string} jobId - The job ID returned by the initial request
  * @returns {Object} - Same format as handleFetchTranscript
  */
-async function pollTranscriptJob(jobId, supadataApiKey, preferredLanguage = "") {
+async function pollTranscriptJob(
+  jobId,
+  supadataApiKey,
+  preferredLanguage = "",
+  shouldContinue = null,
+) {
   const maxAttempts = 60; // Max 60 seconds of polling
   const pollInterval = 1000; // Poll every 1 second
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    if (shouldContinue && !(await shouldContinue())) {
+      return pageContextChangedResult();
+    }
     // Wait before polling
     await new Promise((resolve) => setTimeout(resolve, pollInterval));
+    if (shouldContinue && !(await shouldContinue())) {
+      return pageContextChangedResult();
+    }
 
     const response = await fetch(
       `https://api.supadata.ai/v1/transcript/${encodeURIComponent(jobId)}`,
@@ -1333,6 +1600,14 @@ async function pollTranscriptJob(jobId, supadataApiKey, preferredLanguage = "") 
             transcriptTextTimestamped += `[${timestamp}] ${cleanText}\n`;
           }
         }
+      }
+
+      if (transcript.length === 0) {
+        return {
+          success: false,
+          error: "EMPTY_TRANSCRIPT",
+          message: "Supadata 返回了空字幕。",
+        };
       }
 
       return {
@@ -1699,6 +1974,8 @@ async function handleSaveNote(
   videoTitle,
   channelName,
   sourceUrl = "",
+  tabId = null,
+  preferredLanguage = "",
 ) {
   const saveGeneration = noteStorageGeneration;
   try {
@@ -1732,7 +2009,22 @@ async function handleSaveNote(
 
     // If no cached transcript, fetch it
     if (!transcript) {
-      const transcriptResult = await handleFetchMediaTranscript(mediaRef);
+      let resolvedPreferredLanguage = normalizeLanguageCode(preferredLanguage);
+      if (
+        mediaRef.platform === "youtube" &&
+        !resolvedPreferredLanguage &&
+        Number.isInteger(tabId)
+      ) {
+        const playerDetails = await getPlayerVideoDetails(tabId);
+        resolvedPreferredLanguage = normalizeLanguageCode(
+          playerDetails?.sourceLanguage,
+        );
+      }
+      const transcriptResult = await handleFetchMediaTranscript(
+        mediaRef,
+        resolvedPreferredLanguage,
+        tabId,
+      );
       if (!transcriptResult.success) {
         return {
           success: false,
@@ -3702,6 +3994,9 @@ globalThis.__YTD_TRANSLATION_TESTING__ = {
   normalizeTranslatedSegmentBatch,
   handleTranslateContent,
   isSupportedVideoUrl,
+  readYouTubeCaptionSnapshot,
+  youtubeTabStillMatches,
+  handleFetchYoutubeTranscriptLocalFirst,
   normalizeBilibiliMediaRef,
   resolveMediaRef,
   handleFetchMediaTranscript,

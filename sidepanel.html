@@ -155,13 +155,23 @@
 
       <!-- ERROR STATE -->
       <div id="errorState" style="display: none">
-        <div class="error-container">
+        <div class="error-container" role="status" aria-live="polite">
           <div class="error-icon">&#9888;</div>
           <div class="error-title" id="errorTitle">出错了</div>
           <div class="error-message" id="errorMessage">
             操作未能完成。
           </div>
-          <button class="error-btn" id="errorBtn">重试</button>
+          <div class="error-actions">
+            <button class="error-btn" id="errorBtn" type="button">重试</button>
+            <button
+              class="error-secondary-btn"
+              id="errorSecondaryBtn"
+              type="button"
+              hidden
+            >
+              不使用
+            </button>
+          </div>
         </div>
       </div>
 

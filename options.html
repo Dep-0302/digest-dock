@@ -37,16 +37,16 @@
         </div>
         <h1 data-i18n="heading">使用你自己的 API 密钥</h1>
         <p class="lede" data-i18n="lede">
-          密钥仅保存在当前 Chrome 个人资料中，只会发送给 Supadata 和
-          DeepSeek。本开源扩展没有开发者服务器，也不使用分析服务。
+          密钥仅保存在当前 Chrome 个人资料中。DeepSeek 用于 AI 功能，Supadata
+          仅作为可选的 YouTube 字幕回退。本开源扩展没有开发者服务器，也不使用分析服务。
         </p>
       </header>
 
       <form id="settingsForm">
         <section class="card">
-          <h2 data-i18n="transcriptProvider">字幕服务</h2>
+          <h2 data-i18n="transcriptProvider">YouTube 字幕回退</h2>
           <label for="supadataApiKey" data-i18n="supadataApiKeyLabel"
-            >Supadata API 密钥</label
+            >Supadata API 密钥（可选）</label
           >
           <input
             id="supadataApiKey"
@@ -59,7 +59,7 @@
           />
           <p class="help">
             <span data-i18n="supadataHelp"
-              >用于获取带时间戳的 YouTube 字幕。只使用 B 站时可以留空。</span
+              >DigestDock 会先直接读取 YouTube 已有字幕轨。本地获取失败后，只有你在侧边栏确认本次使用第三方 Supadata 时才会调用；B 站不会使用。</span
             >
             <a
               href="https://dash.supadata.ai/auth/sign-up"
