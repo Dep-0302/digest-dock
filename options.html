@@ -3,14 +3,14 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>YouTube Digest 设置</title>
+    <title>DigestDock 设置</title>
     <link rel="stylesheet" href="options.css" />
   </head>
   <body>
     <main class="settings-shell">
       <header>
         <div class="settings-heading-row">
-          <div class="eyebrow">YouTube Digest</div>
+          <div class="eyebrow">DigestDock</div>
           <div
             class="language-switch"
             role="group"
@@ -100,7 +100,7 @@
           />
           <p class="help">
             <span data-i18n="deepseekHelp"
-              >YouTube Digest 使用 DeepSeek V4 Flash 生成概览、解释内容、翻译字幕和润色笔记。</span
+              >DigestDock 使用 DeepSeek V4 Flash 生成概览、解释内容、翻译字幕和润色笔记。</span
             >
             <a
               href="https://platform.deepseek.com/api_keys"
@@ -147,7 +147,7 @@
           </p>
           <ol class="customization-steps">
             <li data-i18n="customizationStepFolder">
-              在编程 Agent 中打开 YouTube Digest 解压后的项目文件夹。
+              在编程 Agent 中打开 DigestDock 解压后的项目文件夹。
             </li>
             <li data-i18n="customizationStepReplace">
               把 [PROVIDER] 和 [MODEL] 替换成你想使用的服务和模型。
@@ -170,7 +170,7 @@
               >复制前，请先把 [PROVIDER] 和 [MODEL] 替换成你想使用的服务和模型。</span
             >
           </div>
-          <textarea id="customizationPrompt" rows="12" aria-describedby="customizationPromptReminder">请把当前本地 YouTube Digest 工作区改为使用 [PROVIDER] 提供的 [MODEL]。只在当前工作区中操作。编辑前，先确认其中包含 manifest.json，且 manifest 中的 name 是 YouTube Digest。如果验证失败，请停止，并让我在编程 Agent 中打开 YouTube Digest 解压后的项目文件夹。不要搜索其他文件夹，不要编辑猜测的副本，不要假设安装路径，也不要声称 Chrome 可以显示操作系统中的绝对源码路径。更新该服务的 API endpoint、请求格式和最少的 Chrome host permissions。保留用户自带密钥模式和 Chrome 本地存储。不要把 API 密钥写入源代码、提交记录、日志、截图、这段提示词或聊天；代码准备好后，请告诉我应该在哪里自行填写密钥。DeepSeek 专用的请求参数和重试逻辑继续只用于 DeepSeek。新服务的专属规则请单独处理，避免相互影响。更新 README.md、README.zh-CN.md、PRIVACY.md、SECURITY.md 和测试。运行 npm test、npm run check 和 npm run package。最后，说明如何重新加载已解压的扩展，并在真实 YouTube 视频上测试。</textarea>
+          <textarea id="customizationPrompt" rows="12" aria-describedby="customizationPromptReminder">请把当前本地 DigestDock 工作区改为使用 [PROVIDER] 提供的 [MODEL]。只在当前工作区中操作。编辑前，先确认其中包含 manifest.json，且 manifest 中的 name 是 DigestDock。如果验证失败，请停止，并让我在编程 Agent 中打开 DigestDock 解压后的项目文件夹。不要搜索其他文件夹，不要编辑猜测的副本，不要假设安装路径，也不要声称 Chrome 可以显示操作系统中的绝对源码路径。更新该服务的 API endpoint、请求格式和最少的 Chrome host permissions。保留用户自带密钥模式和 Chrome 本地存储。不要把 API 密钥写入源代码、提交记录、日志、截图、这段提示词或聊天；代码准备好后，请告诉我应该在哪里自行填写密钥。DeepSeek 专用的请求参数和重试逻辑继续只用于 DeepSeek。新服务的专属规则请单独处理，避免相互影响。更新 README.md、README.zh-CN.md、PRIVACY.md、SECURITY.md 和测试。运行 npm test、npm run check 和 npm run package。最后，说明如何重新加载已解压的扩展，并在真实 YouTube 视频上测试。</textarea>
           <div class="copy-actions">
             <button
               id="copyCustomizationPromptBtn"

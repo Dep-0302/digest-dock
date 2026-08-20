@@ -146,7 +146,7 @@ function biliCreateDigestButton() {
     id: BILI_DIGEST_BUTTON_ID,
   });
   button.type = "button";
-  button.setAttribute("aria-label", "打开 YouTube Digest");
+  button.setAttribute("aria-label", "打开 DigestDock");
   button.style.cssText = `
     display: inline-flex;
     align-items: center;
@@ -190,7 +190,7 @@ function biliCreateDigestButton() {
         button.disabled = true;
         button.textContent = "请刷新页面";
       } else {
-        console.error("[YouTube Digest/Bilibili] 无法打开侧边栏", error);
+        console.error("[DigestDock/Bilibili] 无法打开侧边栏", error);
       }
     }
   });
@@ -418,7 +418,7 @@ async function biliSaveCurrentNote() {
   } catch (error) {
     result = { success: false, error: error?.message || String(error) };
     if (biliNoteButton) biliNoteButton.textContent = "出错了";
-    console.error("[YouTube Digest/Bilibili] 保存笔记失败", error);
+    console.error("[DigestDock/Bilibili] 保存笔记失败", error);
   }
 
   setTimeout(() => {

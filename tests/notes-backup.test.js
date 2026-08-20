@@ -294,6 +294,17 @@ test("schema v1 YouTube backups remain importable and rebuild safe YouTube URLs"
   );
 });
 
+test("DigestDock keeps accepting the literal legacy backup format for schema v1 and v2", () => {
+  const backups = [validV1BackupObject([makeNote(8)]), validBackupObject([makeNote(9)])];
+
+  for (const backup of backups) {
+    backup.format = "youtube-digest-notes-backup";
+    const [restored] = notesBackup.parseBackupText(JSON.stringify(backup));
+    assert.equal(restored.platform, "youtube");
+    assert.ok(restored.videoId);
+  }
+});
+
 test("schema v2 Bilibili notes round-trip strict media identity and rebuild timestamp URLs", () => {
   const source = makeBilibiliNote(4, {
     timestamp: "99:99",
@@ -872,7 +883,7 @@ test("the JSON download helper uses an object URL and cleans it up", () => {
     new Date("2026-08-18T23:59:59.000Z"),
   );
 
-  assert.equal(result.filename, "youtube-digest-notes-2026-08-18.json");
+  assert.equal(result.filename, "digest-dock-notes-2026-08-18.json");
   assert.equal(link.download, result.filename);
   assert.equal(link.href, "blob:notes-backup");
   assert.equal(link.hidden, true);

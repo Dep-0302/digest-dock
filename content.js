@@ -33,7 +33,7 @@ function showExtensionRefreshNotice() {
   const notice = document.createElement("div");
   notice.id = "ytd-extension-refresh-notice";
   notice.textContent =
-    "YouTube Digest 已更新。请刷新当前 YouTube 页面后再生成摘要。";
+    "DigestDock 已更新。请刷新当前 YouTube 页面后再生成摘要。";
   notice.style.cssText = `
     position: fixed;
     top: 18px;
@@ -120,7 +120,7 @@ function tryInjectNoteButton() {
 
     if (attempts >= maxAttempts) {
       debugLog(
-        "[YouTube Digest Content] Player container not found after retries, giving up",
+        "[DigestDock Content] Player container not found after retries, giving up",
       );
       if (ytdNoteButtonRetryTimer) {
         clearInterval(ytdNoteButtonRetryTimer);
@@ -152,12 +152,12 @@ if (document.readyState === "loading") {
  * When they send key moments, we highlight them on the progress bar.
  */
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  debugLog("[YouTube Digest Content] Received message:", message.action, message);
+  debugLog("[DigestDock Content] Received message:", message.action, message);
 
   if (message.action === "getVideoInfo") {
     // Read video title and channel name from the page
     const info = extractVideoInfo();
-    debugLog("[YouTube Digest Content] Returning video info:", info);
+    debugLog("[DigestDock Content] Returning video info:", info);
     sendResponse(info);
     return false; // Synchronous response
   }
@@ -180,7 +180,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message.action === "seekTo") {
     // Jump the video to a specific timestamp
-    debugLog("[YouTube Digest Content] Seeking to:", message.seconds);
+    debugLog("[DigestDock Content] Seeking to:", message.seconds);
     seekToTimestamp(message.seconds);
     sendResponse({ success: true });
     return false;
@@ -194,7 +194,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   // Unknown action - still send a response to prevent hanging
-  debugLog("[YouTube Digest Content] Unknown action:", message.action);
+  debugLog("[DigestDock Content] Unknown action:", message.action);
   sendResponse({ success: false, error: "Unknown action" });
   return false;
 });
@@ -207,7 +207,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
  * Injects a "Digest" button into YouTube's action bar.
  * The button appears next to Share, Save, etc. below the video.
  *
- * When clicked, it opens the YouTube Digest side panel.
+ * When clicked, it opens the DigestDock side panel.
  */
 function isVisibleDigestHost(element) {
   if (!element || !element.isConnected) return false;
@@ -261,7 +261,7 @@ function createDigestButton() {
   const digestButton = document.createElement("button");
   digestButton.id = "ytd-digest-button";
   digestButton.type = "button";
-  digestButton.setAttribute("aria-label", "打开 YouTube Digest");
+  digestButton.setAttribute("aria-label", "打开 DigestDock");
   digestButton.innerHTML = `
     <span class="ytd-digest-icon" style="font-size: 11px;">▶</span>
     <span class="ytd-digest-label">生成摘要</span>
@@ -310,14 +310,14 @@ function createDigestButton() {
     e.preventDefault();
     e.stopPropagation();
 
-    debugLog("[YouTube Digest] Digest button clicked");
+    debugLog("[DigestDock] Digest button clicked");
 
     // Send message to background script to open side panel
     try {
       const result = await chrome.runtime.sendMessage({
         action: "openSidePanel",
       });
-      debugLog("[YouTube Digest] openSidePanel response:", result);
+      debugLog("[DigestDock] openSidePanel response:", result);
     } catch (err) {
       if (isExtensionContextInvalidatedError(err)) {
         digestButton.disabled = true;
@@ -328,7 +328,7 @@ function createDigestButton() {
         showExtensionRefreshNotice();
         return;
       }
-      console.error("[YouTube Digest] Failed to open side panel:", err);
+      console.error("[DigestDock] Failed to open side panel:", err);
     }
   });
 
@@ -354,7 +354,7 @@ function injectDigestButton() {
 
   const actionsContainer = findDigestButtonHost();
   if (!actionsContainer) {
-    debugLog("[YouTube Digest Content] Visible actions container not found yet");
+    debugLog("[DigestDock Content] Visible actions container not found yet");
     return false;
   }
 
@@ -380,7 +380,7 @@ function injectDigestButton() {
     actionsContainer.insertBefore(digestButton, actionsContainer.firstChild);
   }
 
-  debugLog("[YouTube Digest Content] Digest button reconciled");
+  debugLog("[DigestDock Content] Digest button reconciled");
   return true;
 }
 
@@ -469,7 +469,7 @@ function injectNoteButton() {
 
   if (!playerContainer) {
     debugLog(
-      "[YouTube Digest Content] Player container not found yet, will retry",
+      "[DigestDock Content] Player container not found yet, will retry",
     );
     return;
   }
@@ -482,7 +482,7 @@ function injectNoteButton() {
     playerContainer.style.position = "relative";
   }
 
-  debugLog("[YouTube Digest Content] Injecting note button");
+  debugLog("[DigestDock Content] Injecting note button");
 
   // Create the note button — a soft rounded pill that floats over the player
   const noteButton = document.createElement("button");
@@ -562,7 +562,7 @@ function injectNoteButton() {
 
   playerContainer.appendChild(noteButton);
 
-  debugLog("[YouTube Digest Content] Note button injected");
+  debugLog("[DigestDock Content] Note button injected");
 }
 
 function showNoteButton() {
@@ -618,11 +618,11 @@ function handleNoteKeyboardShortcut(e) {
  * Captures the current timestamp and saves it as a note.
  */
 async function saveCurrentNote() {
-  debugLog("[YouTube Digest] Saving note");
+  debugLog("[DigestDock] Saving note");
 
   const video = document.querySelector("video.html5-main-video");
   if (!video) {
-    console.error("[YouTube Digest] No video element found");
+    console.error("[DigestDock] No video element found");
     return;
   }
 
@@ -661,14 +661,14 @@ async function saveCurrentNote() {
         noteButton.innerHTML =
           '<span style="letter-spacing: 0.2px;">出错了</span>';
       }
-      console.error("[YouTube Digest] Save note error:", result.error);
+      console.error("[DigestDock] Save note error:", result.error);
     }
   } catch (err) {
     if (noteButton) {
       noteButton.innerHTML =
         '<span style="letter-spacing: 0.2px;">出错了</span>';
     }
-    console.error("[YouTube Digest] Save note exception:", err);
+    console.error("[DigestDock] Save note exception:", err);
   }
 
   setTimeout(() => {
@@ -818,11 +818,11 @@ function highlightKeyMoments(moments, videoDuration) {
 function seekToTimestamp(seconds) {
   const video = document.querySelector("video.html5-main-video");
   if (!video) {
-    console.error("[YouTube Digest Content] No video element found for seek");
+    console.error("[DigestDock Content] No video element found for seek");
     return;
   }
 
-  debugLog("[YouTube Digest Content] Seeking to:", seconds);
+  debugLog("[DigestDock Content] Seeking to:", seconds);
   video.currentTime = seconds;
   // Also play the video if it's paused
   if (video.paused) {
