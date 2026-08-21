@@ -4,7 +4,7 @@
  * Time-indexed reading + notes. The visual system answers three questions:
  * which segment am I on, when does it happen, what can I do next.
  *
- * Cool-gray/white workbench, graphite ink, restrained coral state color. Depth
+ * Cool-gray/white workbench, graphite ink, restrained blue-cyan state color. Depth
  * comes from grouping, a small offset and a neutral shadow — never big
  * gradients, glass, or full-bleed pills. Time codes use a locally bundled
  * Barlow Condensed with tabular numerals so 3:02:58 never crowds the body.
@@ -54,19 +54,31 @@
   --text-secondary: #53616d;
   --text-muted: #89949d;
 
-  /* State / accent */
-  --accent: #e9654b; /* UI coral — current state & primary action */
-  --accent-hover: #d2543a;
-  --accent-dim: rgba(233, 101, 75, 0.1);
-  --active-surface: #f8eae2; /* current subtitle / selected chapter fill */
-  --selection-blue: #3f72e8; /* native selection / info only */
+  /* State / accent — solid values serve text and hairlines; gradients serve
+     compact action surfaces where white text remains AA-compliant. */
+  --accent: #076dd1;
+  --accent-hover: #0558b5;
+  --accent-dim: rgba(7, 109, 209, 0.1);
+  --accent-divider: rgba(7, 109, 209, 0.25);
+  --accent-gradient:
+    linear-gradient(135deg, rgba(3, 43, 106, 0.16) 0%, rgba(3, 48, 98, 0.22) 52%, rgba(3, 54, 76, 0.45) 100%),
+    linear-gradient(135deg, #0a5fe9 0%, #087fe8 52%, #04b7d2 100%);
+  --accent-gradient-hover:
+    linear-gradient(135deg, rgba(3, 43, 106, 0.26) 0%, rgba(3, 48, 98, 0.32) 52%, rgba(3, 54, 76, 0.52) 100%),
+    linear-gradient(135deg, #0a5fe9 0%, #087fe8 52%, #04b7d2 100%);
+  --active-surface: #eaf6fc; /* current subtitle / selected chapter fill */
+  --selection-blue: #076dd1;
   --success: #2c8a65;
   --success-dim: rgba(44, 138, 101, 0.12);
-  --highlight: #d99a5b;
+  --highlight: #0899c4;
+  --danger: #c23b49;
+  --danger-hover: #9f2f3c;
+  --danger-dim: rgba(194, 59, 73, 0.1);
 
   /* Brand mark */
-  --brand-graphite: #1f2933;
-  --brand-marker: #f26a4f;
+  --brand-gradient: linear-gradient(135deg, #0a5fe9 0%, #087fe8 46%, #04b7d2 100%);
+  --accent-icon-gradient: var(--brand-gradient);
+  --brand-marker: #d8f7ff;
 
   /* Neutral state shadow (never a colored glow) */
   --shadow-sm: 0 1px 2px rgba(23, 33, 42, 0.05);
@@ -124,7 +136,7 @@ body {
 }
 
 ::selection {
-  background: rgba(63, 114, 232, 0.18);
+  background: rgba(7, 109, 209, 0.18);
   color: var(--text);
 }
 
@@ -313,7 +325,7 @@ body {
 }
 
 /* ============================================================
-   TAB NAVIGATION — text labels with a short coral underline
+   TAB NAVIGATION — text labels with a short blue-cyan underline
    ============================================================ */
 .tabs {
   display: flex;
@@ -346,7 +358,7 @@ body {
   color: var(--text);
 }
 
-/* Short coral underline centered under the active label (not a full pill) */
+/* Short gradient underline centered under the active label (not a full pill) */
 .tab.active::after {
   content: "";
   position: absolute;
@@ -356,7 +368,7 @@ body {
   width: 22px;
   height: 2px;
   border-radius: var(--r-pill);
-  background: var(--accent);
+  background: var(--accent-icon-gradient);
 }
 
 .tab:focus-visible {
@@ -520,16 +532,16 @@ body {
   border-color: var(--success);
 }
 
-/* Coral primary icon button — the "play from here" action */
+/* Blue-cyan primary icon button — the "play from here" action */
 .icon-btn.primary {
-  background: var(--accent);
-  border-color: var(--accent);
+  background: var(--accent-icon-gradient);
+  border-color: transparent;
   color: #fff;
 }
 
 .icon-btn.primary:hover:not(:disabled) {
-  background: var(--accent-hover);
-  border-color: var(--accent-hover);
+  background: var(--accent-gradient-hover);
+  border-color: transparent;
   color: #fff;
 }
 
@@ -670,7 +682,7 @@ body {
 }
 
 .translation-error {
-  color: var(--accent);
+  color: var(--danger);
 }
 
 .translation-retry-btn {
@@ -701,7 +713,7 @@ body {
   width: 40px;
   height: 2px;
   border-radius: var(--r-pill);
-  background: var(--accent);
+  background: var(--accent-icon-gradient);
   opacity: 0.4;
   animation: paraPulse 1.2s ease-in-out infinite;
 }
@@ -722,9 +734,8 @@ body {
   }
 }
 
-/* Current playback card — warm fill, short coral accent, neutral shadow,
-   shifted right 6px with its width reduced so it never overflows. No blue
-   selected row and no full coral outline. */
+/* Current playback card — cool tint, short blue-cyan accent, neutral shadow,
+   shifted right 6px with its width reduced so it never overflows. */
 .transcript-entry.active-playback,
 .chapter-item.active-chapter {
   position: relative;
@@ -745,13 +756,13 @@ body {
   width: 3px;
   height: 56%;
   border-radius: var(--r-pill);
-  background: var(--accent);
+  background: var(--accent-icon-gradient);
 }
 
 .transcript-entry.active-playback .transcript-time {
   color: var(--accent);
   font-weight: 500;
-  border-right-color: rgba(233, 101, 75, 0.28);
+  border-right-color: var(--accent-divider);
   background: transparent;
 }
 
@@ -760,7 +771,7 @@ body {
 }
 
 /* ============================================================
-   FOLLOW PLAYBACK — floating pill with the full formatted time
+   FOLLOW PLAYBACK — compact blue-cyan action that restores auto-follow
    ============================================================ */
 .follow-playback-btn {
   position: fixed;
@@ -770,42 +781,27 @@ body {
   z-index: 100;
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  background: var(--surface);
-  color: var(--text);
-  border: 1px solid var(--border);
-  padding: 8px 16px;
+  gap: 0;
+  background: var(--accent-gradient);
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.24);
+  padding: 9px 18px;
   border-radius: var(--r-pill);
   font-family: var(--font-body);
   font-weight: 600;
-  font-size: 12px;
+  font-size: 12.5px;
   cursor: pointer;
   transition:
     background 0.16s ease,
     transform 0.16s ease,
     box-shadow 0.16s ease;
-  box-shadow: var(--state-shadow);
-}
-
-.follow-playback-btn::before {
-  content: "";
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--accent);
-}
-
-.follow-playback-btn .follow-time {
-  font-family: var(--font-time);
-  font-variant-numeric: tabular-nums;
-  letter-spacing: 0.02em;
-  font-weight: 500;
-  color: var(--accent);
+  box-shadow: 0 8px 18px rgba(4, 73, 139, 0.24);
 }
 
 .follow-playback-btn:hover {
-  background: var(--surface-raised);
+  background: var(--accent-gradient-hover);
   transform: translateX(-50%) translateY(-1px);
+  box-shadow: 0 10px 22px rgba(4, 73, 139, 0.28);
 }
 
 .follow-playback-btn:focus-visible {
@@ -864,7 +860,7 @@ body {
 .chapter-item.active-chapter .chapter-timestamp {
   color: var(--accent);
   font-weight: 500;
-  border-right-color: rgba(233, 101, 75, 0.28);
+  border-right-color: var(--accent-divider);
 }
 
 .chapter-content {
@@ -986,7 +982,7 @@ body {
   width: 60%;
   height: 100%;
   border-radius: var(--r-pill);
-  background: var(--accent);
+  background: var(--accent-icon-gradient);
   animation: loading 1.5s ease-in-out infinite;
 }
 
@@ -1030,7 +1026,7 @@ body {
 
 .error-icon {
   font-size: 40px;
-  color: var(--accent);
+  color: var(--danger);
   line-height: 1;
 }
 
@@ -1064,7 +1060,7 @@ body {
   font-weight: 600;
   font-size: 13px;
   padding: 11px 26px;
-  background: var(--accent);
+  background: var(--accent-gradient);
   color: white;
   border: none;
   border-radius: var(--r-sm);
@@ -1075,7 +1071,7 @@ body {
 }
 
 .error-btn:hover {
-  background: var(--accent-hover);
+  background: var(--accent-gradient-hover);
 }
 
 .error-btn:active {
@@ -1139,7 +1135,7 @@ body {
   width: 76px;
   height: 76px;
   border-radius: 20px;
-  background: var(--brand-graphite);
+  background: var(--brand-gradient);
   box-shadow: var(--state-shadow);
   display: flex;
   align-items: center;
@@ -1185,9 +1181,9 @@ body {
 
 .overview-translation-status.error,
 .notes-language-status.error {
-  background: var(--accent-dim);
+  background: var(--danger-dim);
   border-color: transparent;
-  color: var(--accent-hover);
+  color: var(--danger-hover);
 }
 
 .overview-translation-status[hidden],
@@ -1210,7 +1206,7 @@ body {
   font-weight: 600;
   font-size: 11.5px;
   padding: 8px 15px;
-  background: var(--accent);
+  background: var(--accent-gradient);
   color: white;
   border: none;
   border-radius: var(--r-sm);
@@ -1222,7 +1218,7 @@ body {
 }
 
 .explain-btn:hover {
-  background: var(--accent-hover);
+  background: var(--accent-gradient-hover);
 }
 
 .explain-modal-overlay {
@@ -1327,10 +1323,10 @@ body {
 .explain-error {
   font-family: var(--font-body);
   font-size: 12.5px;
-  color: var(--accent);
+  color: var(--danger);
   padding: 14px;
   border-radius: var(--r-sm);
-  background: var(--accent-dim);
+  background: var(--danger-dim);
 }
 
 /* ============================================================
@@ -1365,18 +1361,20 @@ body {
 }
 
 .notes-filter .enhance-btn.active {
-  background: var(--accent);
+  background: var(--accent-icon-gradient);
   color: white;
   box-shadow: var(--shadow-sm);
+  text-shadow: 0 1px 2px rgba(3, 43, 106, 0.38);
 }
 
 .notes-filter .enhance-btn.active:hover:not(:disabled) {
-  background: var(--accent-hover);
+  background: var(--accent-icon-gradient);
   color: white;
+  filter: brightness(0.94);
 }
 
 .notes-filter .enhance-btn.active:focus-visible {
-  background: var(--accent);
+  background: var(--accent-icon-gradient);
   color: white;
 }
 
@@ -1519,12 +1517,12 @@ body {
 }
 
 .note-menu-item.danger {
-  color: var(--accent);
+  color: var(--danger);
 }
 
 .note-menu-item.danger:hover {
-  background: var(--accent-dim);
-  color: var(--accent-hover);
+  background: var(--danger-dim);
+  color: var(--danger-hover);
 }
 
 .note-menu-item:focus-visible {
@@ -1591,8 +1589,8 @@ body {
 }
 
 .note-delete:hover {
-  color: var(--accent);
-  background: var(--accent-dim);
+  color: var(--danger);
+  background: var(--danger-dim);
 }
 
 /* ============================================================

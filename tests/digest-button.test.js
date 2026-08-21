@@ -313,15 +313,20 @@ test("Digest button skips a hidden responsive toolbar", () => {
   assert.equal(hiddenGroup.children.length, 0);
   assert.equal(visibleRow.children.length, 1);
   assert.equal(visibleGroup.children[0].id, DIGEST_BUTTON_ID);
-  // Icon-only brand opener: an inline SVG (with the coral time marker), an
-  // accessible name via aria-label, and no restored long brand-text label.
+  // Compact icon + DDK opener with the full name kept in the accessible label.
   assert.match(visibleGroup.children[0].innerHTML, /<svg/);
-  assert.match(visibleGroup.children[0].innerHTML, /#F26A4F/);
+  assert.match(visibleGroup.children[0].innerHTML, /#0A5FE9/);
+  assert.match(visibleGroup.children[0].innerHTML, /#04B7D2/);
+  assert.match(visibleGroup.children[0].innerHTML, /#D8F7FF/);
+  assert.match(visibleGroup.children[0].innerHTML, /width="26" height="26"/);
+  assert.doesNotMatch(visibleGroup.children[0].innerHTML, /#F26A4F/);
   assert.equal(visibleGroup.children[0]["aria-label"], "打开 DigestDock");
+  assert.equal(visibleGroup.children[0].children[0].textContent, "DDK");
   assert.doesNotMatch(visibleGroup.children[0].innerHTML, /DigestDock<\/span>/);
   assert.equal(visibleGroup.children[1], nativeButton);
   assert.match(visibleGroup.children[0].style.cssText, /flex:\s*0 0 auto/);
   assert.match(visibleGroup.children[0].style.cssText, /width:\s*max-content/);
+  assert.match(visibleGroup.children[0].style.cssText, /font:\s*700 12\.5px/);
 });
 
 test("stale extension buttons ask for a page refresh without logging another failure", async () => {
@@ -511,27 +516,37 @@ test("DOM mutation reconciliation repairs a replaced toolbar", () => {
   assert.equal(newGroup.children.length, 1);
 });
 
-test("the player note button uses the neutral graphite bookmark control, not a coral pill", () => {
+test("the player note button uses exact 20/50 default and 100 hover opacity", () => {
   const harness = createHarness();
   harness.setPlayerAvailable(true);
   harness.documentListeners.DOMContentLoaded();
 
   const noteButton = harness.context.document.getElementById(NOTE_BUTTON_ID);
   assert.ok(noteButton);
-  // Deep graphite surface with a ~10px radius and a restrained neutral shadow.
-  assert.match(noteButton.style.cssText, /background:\s*#1f2933/i);
-  assert.match(noteButton.style.cssText, /border-radius:\s*10px/);
-  assert.match(noteButton.style.cssText, /box-shadow:\s*0 4px 12px rgba\(23, 33, 42/);
-  // The old coral circle/pill is gone.
-  assert.doesNotMatch(noteButton.style.cssText, /border-radius:\s*999px/);
-  assert.doesNotMatch(noteButton.style.cssText, /#c8674f/i);
-  // Still an icon-only, text-free bookmark control with an accessible name.
-  assert.match(noteButton.innerHTML, /<svg/);
-  assert.doesNotMatch(noteButton.innerHTML, /DigestDock/);
-  assert.equal(
-    noteButton["aria-label"],
-    "用 DigestDock 保存当前时刻的笔记（快捷键 N）",
+  assert.match(noteButton.style.cssText, /background:\s*linear-gradient\(/i);
+  assert.match(noteButton.style.cssText, /rgba\(10, 95, 233, 0\.2\)/i);
+  assert.match(noteButton.style.cssText, /rgba\(8, 127, 232, 0\.2\)/i);
+  assert.match(noteButton.style.cssText, /rgba\(4, 183, 210, 0\.2\)/i);
+  assert.match(
+    noteButton.style.cssText,
+    /color:\s*rgba\(255, 255, 255, 0\.5\)/i,
   );
+  assert.match(noteButton.style.cssText, /backdrop-filter:\s*blur\(6px\)/i);
+  assert.match(noteButton.style.cssText, /min-width:\s*128px/);
+  assert.match(noteButton.style.cssText, /border-radius:\s*10px/);
+  assert.match(noteButton.style.cssText, /box-shadow:\s*0 8px 18px rgba\(4, 73, 139/);
+  // Icon + exact visible label, with the same text exposed accessibly.
+  assert.match(noteButton.innerHTML, /<svg/);
+  assert.equal(noteButton.children[0].textContent, "金句速记 (N)");
+  assert.equal(noteButton["aria-label"], "金句速记 (N)");
+
+  noteButton.listeners.mouseenter();
+  assert.match(noteButton.style.background, /#0a5fe9/i);
+  assert.match(noteButton.style.background, /#04b7d2/i);
+  assert.equal(noteButton.style.color, "#ffffff");
+  noteButton.listeners.mouseleave();
+  assert.match(noteButton.style.background, /rgba\(10, 95, 233, 0\.2\)/i);
+  assert.equal(noteButton.style.color, "rgba(255, 255, 255, 0.5)");
 });
 
 test("a note that needs third-party transcript consent points the user to the side panel", () => {

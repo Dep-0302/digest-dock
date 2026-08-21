@@ -12,14 +12,26 @@
         <div class="settings-brand">
           <span class="settings-brand-mark" aria-hidden="true">
             <svg width="26" height="26" viewBox="0 0 128 128" fill="none">
-              <rect width="128" height="128" rx="32" fill="#1F2933"></rect>
+              <defs>
+                <linearGradient id="settingsBrandBase" x1="12" y1="8" x2="116" y2="120" gradientUnits="userSpaceOnUse">
+                  <stop offset="0" stop-color="#0A5FE9"></stop>
+                  <stop offset="0.46" stop-color="#087FE8"></stop>
+                  <stop offset="1" stop-color="#04B7D2"></stop>
+                </linearGradient>
+                <radialGradient id="settingsBrandGlow" cx="0" cy="0" r="1" gradientTransform="translate(86 88) rotate(-132) scale(72 68)" gradientUnits="userSpaceOnUse">
+                  <stop stop-color="#30CFE5" stop-opacity="0.72"></stop>
+                  <stop offset="1" stop-color="#0B80E8" stop-opacity="0"></stop>
+                </radialGradient>
+              </defs>
+              <rect width="128" height="128" rx="32" fill="url(#settingsBrandBase)"></rect>
+              <rect width="128" height="128" rx="32" fill="url(#settingsBrandGlow)"></rect>
               <rect x="24" y="32" width="80" height="16" rx="8" fill="#FFFFFF"></rect>
-              <circle cx="32" cy="64" r="8" fill="#F26A4F"></circle>
+              <circle cx="32" cy="64" r="8" fill="#D8F7FF"></circle>
               <rect x="48" y="56" width="56" height="16" rx="8" fill="#FFFFFF"></rect>
               <rect x="40" y="80" width="56" height="16" rx="8" fill="#FFFFFF"></rect>
             </svg>
           </span>
-          <span class="settings-brand-name">DigestDock</span>
+          <span class="settings-brand-name"><span class="brand-word" aria-label="DigestDock"><span aria-hidden="true"><strong class="brand-letter">D</strong>igest<strong class="brand-letter">D</strong>oc<strong class="brand-letter">K</strong></span></span></span>
         </div>
 
         <nav
@@ -49,13 +61,13 @@
           >
         </nav>
 
-        <p class="settings-version">DigestDock 1.4.1</p>
+        <p class="settings-version">DigestDock 1.4.2</p>
       </aside>
 
       <main class="settings-content">
         <header class="settings-topbar">
           <div class="settings-topbar-heading">
-            <p class="eyebrow">DigestDock</p>
+            <p class="eyebrow">DIGESTDOCK</p>
             <h1 data-i18n="heading">使用你自己的 API 密钥</h1>
           </div>
           <div
