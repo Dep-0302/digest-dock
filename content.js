@@ -21,6 +21,68 @@ const debugLog = (...args) => {
   if (DEBUG) console.log(...args);
 };
 
+// Every unpacked copy has its own chrome.runtime.id. Include that identity in
+// page-owned DOM so a stable release and a development worktree can remain
+// enabled without deleting each other's controls or routing a click to the
+// wrong service worker.
+const DIGESTDOCK_YOUTUBE_DOM_PREFIX = `digestdock-${chrome.runtime.id}-youtube`;
+const DIGESTDOCK_YOUTUBE_DOM_IDS = Object.freeze({
+  digestButton: `${DIGESTDOCK_YOUTUBE_DOM_PREFIX}-digest-button`,
+  noteButton: `${DIGESTDOCK_YOUTUBE_DOM_PREFIX}-note-button`,
+  noteToast: `${DIGESTDOCK_YOUTUBE_DOM_PREFIX}-note-toast`,
+  refreshNotice: `${DIGESTDOCK_YOUTUBE_DOM_PREFIX}-refresh-notice`,
+});
+const DIGESTDOCK_YOUTUBE_MARKER_CLASS =
+  `${DIGESTDOCK_YOUTUBE_DOM_PREFIX}-key-moment-markers`;
+const DIGESTDOCK_YOUTUBE_TOAST_ANIMATION =
+  `${DIGESTDOCK_YOUTUBE_DOM_PREFIX}-slide-in`;
+const LEGACY_YOUTUBE_DIGEST_BUTTON_ID = "ytd-digest-button";
+const LEGACY_YOUTUBE_NOTE_BUTTON_ID = "ytd-note-button";
+
+// Self-contained inline brand icon for the page opener. Geometry and colors
+// match icons/digestdock-icon-solid.svg (graphite rounded square, three white
+// chapter lines, one coral time marker). It renders icon-only; the button
+// carries the accessible name via aria-label/title, so the SVG stays decorative
+// (aria-hidden) to avoid a duplicated announcement.
+const DIGESTDOCK_BRAND_ICON_SVG = `
+  <svg class="digestdock-brand-icon" width="22" height="22" viewBox="0 0 128 128" fill="none" aria-hidden="true" focusable="false">
+    <rect width="128" height="128" rx="32" fill="#1F2933"></rect>
+    <rect x="24" y="32" width="80" height="16" rx="8" fill="#FFFFFF"></rect>
+    <circle cx="32" cy="64" r="8" fill="#F26A4F"></circle>
+    <rect x="48" y="56" width="56" height="16" rx="8" fill="#FFFFFF"></rect>
+    <rect x="40" y="80" width="56" height="16" rx="8" fill="#FFFFFF"></rect>
+  </svg>
+`;
+
+// Linear bookmark-plus icon for the "save current moment" control. Stroke uses
+// currentColor and matches the sidebar UI_ICONS.bookmarkPlus. No emoji, no long
+// text; the button provides the accessible name.
+const DIGESTDOCK_BOOKMARK_ICON_SVG = `
+  <svg class="digestdock-note-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+    <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h6"></path>
+    <line x1="18" y1="3" x2="18" y2="9"></line>
+    <line x1="15" y1="6" x2="21" y2="6"></line>
+  </svg>
+`;
+
+// Short check icon used only as transient "saved" feedback on the icon button.
+const DIGESTDOCK_CHECK_ICON_SVG = `
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+    <polyline points="20 6 9 17 4 12"></polyline>
+  </svg>
+`;
+
+// Neutral graphite styling for the player note control, matching
+// docs/design/final-icons-and-entry.jpg: a deep graphite surface, white
+// bookmark icon, ~10px radius (not a full pill/circle), and a restrained
+// neutral shadow. Hover/pressed feedback stays subtle; the transient "saved"
+// success color reuses the shared success green before restoring graphite.
+const DIGESTDOCK_NOTE_BG = "#1f2933";
+const DIGESTDOCK_NOTE_BG_HOVER = "#2b3947";
+const DIGESTDOCK_NOTE_SUCCESS_BG = "#2c8a65";
+const DIGESTDOCK_NOTE_SHADOW = "0 4px 12px rgba(23, 33, 42, 0.24)";
+const DIGESTDOCK_NOTE_SHADOW_HOVER = "0 8px 18px rgba(23, 33, 42, 0.30)";
+
 function isExtensionContextInvalidatedError(error) {
   return String(error?.message || error || "").includes(
     "Extension context invalidated",
@@ -28,10 +90,12 @@ function isExtensionContextInvalidatedError(error) {
 }
 
 function showExtensionRefreshNotice() {
-  const existing = document.getElementById("ytd-extension-refresh-notice");
+  const existing = document.getElementById(
+    DIGESTDOCK_YOUTUBE_DOM_IDS.refreshNotice,
+  );
   if (existing) existing.remove();
   const notice = document.createElement("div");
-  notice.id = "ytd-extension-refresh-notice";
+  notice.id = DIGESTDOCK_YOUTUBE_DOM_IDS.refreshNotice;
   notice.textContent =
     "DigestDock 已更新。请刷新当前 YouTube 页面后再生成摘要。";
   notice.style.cssText = `
@@ -259,33 +323,31 @@ function findDigestButtonHost() {
 
 function createDigestButton() {
   const digestButton = document.createElement("button");
-  digestButton.id = "ytd-digest-button";
+  digestButton.id = DIGESTDOCK_YOUTUBE_DOM_IDS.digestButton;
   digestButton.type = "button";
   digestButton.setAttribute("aria-label", "打开 DigestDock");
-  digestButton.innerHTML = `
-    <span class="ytd-digest-icon" style="font-size: 11px;">▶</span>
-    <span class="ytd-digest-label">生成摘要</span>
-  `;
+  digestButton.setAttribute("title", "DigestDock");
+  // Compact brand-icon button — no long text. The accessible name lives on the
+  // aria-label/title; the SVG <title> keeps "DigestDock" available to AT too.
+  digestButton.innerHTML = DIGESTDOCK_BRAND_ICON_SVG;
 
-  // Style the button — rounded pill in our terracotta accent, sized to sit
-  // comfortably among YouTube's native action buttons.
+  // A compact icon button sized to sit among YouTube's native action controls.
+  // width:max-content + flex:0 0 auto keep it from stretching into a full-width
+  // second row when YouTube switches #actions-inner to a vertical column.
   digestButton.style.cssText = `
     display: inline-flex;
     align-items: center;
-    gap: 7px;
-    padding: 0 18px;
+    justify-content: center;
+    gap: 0;
+    padding: 6px;
     height: 36px;
     border: none;
-    border-radius: 18px;
-    background: #c8674f;
-    color: white;
-    font-family: "Roboto", "Arial", sans-serif;
-    font-size: 14px;
-    font-weight: 600;
+    border-radius: 10px;
+    background: transparent;
+    color: #1f2933;
     cursor: pointer;
     margin-right: 8px;
-    transition: background 0.2s, transform 0.1s, box-shadow 0.2s;
-    box-shadow: 0 2px 8px rgba(200, 103, 79, 0.3);
+    transition: background 0.18s, transform 0.1s;
     flex: 0 0 auto;
     align-self: center;
     width: max-content;
@@ -294,15 +356,13 @@ function createDigestButton() {
     white-space: nowrap;
   `;
 
-  // Hover effects
+  // Hover effects — subtle neutral wash, no colored glow.
   digestButton.addEventListener("mouseenter", () => {
-    digestButton.style.background = "#b25742";
-    digestButton.style.transform = "scale(1.02)";
+    digestButton.style.background = "rgba(23, 33, 42, 0.08)";
   });
 
   digestButton.addEventListener("mouseleave", () => {
-    digestButton.style.background = "#c8674f";
-    digestButton.style.transform = "scale(1)";
+    digestButton.style.background = "transparent";
   });
 
   // Click handler — open the side panel
@@ -320,11 +380,12 @@ function createDigestButton() {
       debugLog("[DigestDock] openSidePanel response:", result);
     } catch (err) {
       if (isExtensionContextInvalidatedError(err)) {
+        // Stay icon-only. The full instruction lives in the fixed refresh
+        // notice; the button only needs a disabled state and an updated
+        // accessible name, never a restored long brand label.
         digestButton.disabled = true;
-        digestButton.innerHTML = `
-          <span class="ytd-digest-icon" style="font-size: 11px;">↻</span>
-          <span class="ytd-digest-label">请刷新页面</span>
-        `;
+        digestButton.setAttribute("aria-label", "DigestDock 已更新，请刷新页面");
+        digestButton.setAttribute("title", "请刷新页面");
         showExtensionRefreshNotice();
         return;
       }
@@ -343,7 +404,9 @@ function createDigestButton() {
  */
 function injectDigestButton() {
   const existingButtons = Array.from(
-    document.querySelectorAll("#ytd-digest-button"),
+    document.querySelectorAll(
+      `#${DIGESTDOCK_YOUTUBE_DOM_IDS.digestButton}`,
+    ),
   );
 
   if (!window.location.pathname.includes("/watch")) {
@@ -424,6 +487,8 @@ function setupButtonObserver() {
         !ytdNoteButtonRetryTimer
       ) {
         injectNoteButton();
+      } else if (ytdNoteButton?.isConnected) {
+        updateNoteButtonCoexistencePosition();
       }
     }
   });
@@ -451,7 +516,9 @@ function injectNoteButton() {
   // Don't inject if button already exists and is properly tracked.
   // If a stale button exists (e.g., from a previous content-script instance),
   // remove it and re-inject so event listeners are attached to the live one.
-  const existingButton = document.getElementById("ytd-note-button");
+  const existingButton = document.getElementById(
+    DIGESTDOCK_YOUTUBE_DOM_IDS.noteButton,
+  );
   if (existingButton) {
     if (ytdNoteButton === existingButton && existingButton.isConnected) {
       return; // already injected and connected
@@ -484,43 +551,45 @@ function injectNoteButton() {
 
   debugLog("[DigestDock Content] Injecting note button");
 
-  // Create the note button — a soft rounded pill that floats over the player
+  // Create the note button — a compact icon-only bookmark-plus control that
+  // floats over the player. No long text, no emoji; the accessible name and
+  // tooltip live on aria-label/title and the N shortcut hint is preserved.
   const noteButton = document.createElement("button");
-  noteButton.id = "ytd-note-button";
-  noteButton.innerHTML = `
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" style="margin-right: 7px;">
-      <path d="M12 20h9"></path>
-      <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path>
-    </svg>
-    <span>笔记</span>
-  `;
+  noteButton.id = DIGESTDOCK_YOUTUBE_DOM_IDS.noteButton;
+  noteButton.type = "button";
+  noteButton.setAttribute(
+    "aria-label",
+    "用 DigestDock 保存当前时刻的笔记（快捷键 N）",
+  );
+  noteButton.setAttribute("title", "保存当前时刻（N）");
+  noteButton.innerHTML = DIGESTDOCK_BOOKMARK_ICON_SVG;
 
-  // Soft rounded pill in the terracotta accent, with a gentle shadow.
-  // Start hidden; visibility is controlled by mouse activity.
+  // Compact rounded icon button in the neutral graphite surface, with a
+  // restrained shadow. Start hidden; visibility is controlled by mouse activity.
   noteButton.style.cssText = `
     position: absolute;
     top: 16px;
     right: 16px;
     z-index: 9999;
-    display: flex;
+    display: inline-flex;
     align-items: center;
-    padding: 9px 16px;
-    background: #c8674f;
-    color: white;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    padding: 0;
+    background: ${DIGESTDOCK_NOTE_BG};
+    color: #ffffff;
     border: none;
-    border-radius: 999px;
-    font-family: system-ui, -apple-system, "Roboto", sans-serif;
-    font-size: 13px;
-    font-weight: 600;
-    letter-spacing: 0.2px;
+    border-radius: 10px;
     cursor: pointer;
     transition: opacity 0.18s ease, transform 0.18s ease, background 0.18s ease, box-shadow 0.18s ease;
     opacity: 0;
     pointer-events: none;
-    box-shadow: 0 4px 14px rgba(0,0,0,0.3);
+    box-shadow: ${DIGESTDOCK_NOTE_SHADOW};
   `;
 
   ytdNoteButton = noteButton;
+  updateNoteButtonCoexistencePosition();
 
   // Show button when mouse enters or moves over the player.
   // Hide after 2 seconds of idle or when the mouse leaves.
@@ -540,16 +609,16 @@ function injectNoteButton() {
     hideNoteButton();
   });
 
-  // Hover effect — lift slightly
+  // Hover effect — subtle neutral lift, no color shift away from graphite.
   noteButton.addEventListener("mouseenter", () => {
-    noteButton.style.background = "#b25742";
-    noteButton.style.boxShadow = "0 6px 18px rgba(0,0,0,0.35)";
+    noteButton.style.background = DIGESTDOCK_NOTE_BG_HOVER;
+    noteButton.style.boxShadow = DIGESTDOCK_NOTE_SHADOW_HOVER;
     noteButton.style.transform = "translateY(-1px)";
   });
 
   noteButton.addEventListener("mouseleave", () => {
-    noteButton.style.background = "#c8674f";
-    noteButton.style.boxShadow = "0 4px 14px rgba(0,0,0,0.3)";
+    noteButton.style.background = DIGESTDOCK_NOTE_BG;
+    noteButton.style.boxShadow = DIGESTDOCK_NOTE_SHADOW;
     noteButton.style.transform = "translateY(0)";
   });
 
@@ -563,6 +632,12 @@ function injectNoteButton() {
   playerContainer.appendChild(noteButton);
 
   debugLog("[DigestDock Content] Note button injected");
+}
+
+function updateNoteButtonCoexistencePosition() {
+  if (!ytdNoteButton) return;
+  const legacyButton = document.getElementById(LEGACY_YOUTUBE_NOTE_BUTTON_ID);
+  ytdNoteButton.style.top = legacyButton?.isConnected ? "58px" : "16px";
 }
 
 function showNoteButton() {
@@ -592,6 +667,16 @@ function resetNoteButtonTimer() {
 function handleNoteKeyboardShortcut(e) {
   if (!window.location.pathname.includes("/watch")) return;
   if (e.key !== "n" && e.key !== "N") return;
+
+  // The legacy build owns the historical N shortcut when both versions are
+  // enabled. DigestDock remains available through its visibly branded button,
+  // while one keypress cannot save the same moment into two extension stores.
+  if (
+    document.getElementById(LEGACY_YOUTUBE_DIGEST_BUTTON_ID) ||
+    document.getElementById(LEGACY_YOUTUBE_NOTE_BUTTON_ID)
+  ) {
+    return;
+  }
 
   // Ignore if the user is typing in an input/textarea/contenteditable
   const active = document.activeElement;
@@ -632,11 +717,19 @@ async function saveCurrentNote() {
   const videoId = new URLSearchParams(window.location.search).get("v");
 
   const noteButton = ytdNoteButton;
-  const originalContent = noteButton ? noteButton.innerHTML : "";
+  // Icon-only feedback: swap the icon and update the accessible name/tooltip
+  // instead of restoring long text. The success toast still carries the detail.
+  const restoreLabel = "用 DigestDock 保存当前时刻的笔记（快捷键 N）";
+  const restoreTitle = "保存当前时刻（N）";
+
+  const setNoteButtonState = (message) => {
+    if (!noteButton) return;
+    noteButton.setAttribute("title", message);
+    noteButton.setAttribute("aria-label", message);
+  };
 
   if (noteButton) {
-    noteButton.innerHTML =
-      '<span style="letter-spacing: 0.2px;">正在保存…</span>';
+    setNoteButtonState("正在保存…");
     noteButton.style.pointerEvents = "none";
   }
 
@@ -651,37 +744,33 @@ async function saveCurrentNote() {
 
     if (result.success) {
       if (noteButton) {
-        noteButton.innerHTML =
-          '<span style="letter-spacing: 0.2px;">已保存</span>';
-        noteButton.style.background = "#7c8b6f";
+        noteButton.innerHTML = DIGESTDOCK_CHECK_ICON_SVG;
+        noteButton.style.background = DIGESTDOCK_NOTE_SUCCESS_BG;
+        setNoteButtonState("已保存");
       }
       showNoteSavedToast(result.note);
     } else {
-      if (noteButton) {
-        const label =
-          result.error === "SUPADATA_CONSENT_REQUIRED"
-            ? "请在侧栏确认"
-            : result.error === "SUPADATA_NOT_CONFIGURED"
-              ? "可在设置中配置回退"
-              : "出错了";
-        noteButton.innerHTML =
-          `<span style="letter-spacing: 0.2px;">${label}</span>`;
-      }
+      const label =
+        result.error === "SUPADATA_CONSENT_REQUIRED"
+          ? "请在侧栏授权"
+          : result.error === "SUPADATA_NOT_CONFIGURED"
+            ? "需在设置配置 Supadata"
+            : "出错了";
+      setNoteButtonState(label);
       console.error("[DigestDock] Save note error:", result.error);
     }
   } catch (err) {
-    if (noteButton) {
-      noteButton.innerHTML =
-        '<span style="letter-spacing: 0.2px;">出错了</span>';
-    }
+    setNoteButtonState("出错了");
     console.error("[DigestDock] Save note exception:", err);
   }
 
   setTimeout(() => {
     if (noteButton) {
-      noteButton.innerHTML = originalContent;
-      noteButton.style.background = "#c8674f";
+      noteButton.innerHTML = DIGESTDOCK_BOOKMARK_ICON_SVG;
+      noteButton.style.background = DIGESTDOCK_NOTE_BG;
       noteButton.style.pointerEvents = "auto";
+      noteButton.setAttribute("title", restoreTitle);
+      noteButton.setAttribute("aria-label", restoreLabel);
     }
   }, 2000);
 }
@@ -691,11 +780,13 @@ async function saveCurrentNote() {
  */
 function showNoteSavedToast(note) {
   // Remove existing toast
-  const existing = document.getElementById("ytd-note-toast");
+  const existing = document.getElementById(
+    DIGESTDOCK_YOUTUBE_DOM_IDS.noteToast,
+  );
   if (existing) existing.remove();
 
   const toast = document.createElement("div");
-  toast.id = "ytd-note-toast";
+  toast.id = DIGESTDOCK_YOUTUBE_DOM_IDS.noteToast;
   toast.innerHTML = `
     <div style="font-weight: 700; margin-bottom: 6px; color: #c8674f;">📝 笔记已保存</div>
     <div style="font-size: 12px; color: #6b6258; margin-bottom: 8px;">${escapeHtmlForContent(note.timestamp)} — ${escapeHtmlForContent(note.videoTitle)}</div>
@@ -717,13 +808,13 @@ function showNoteSavedToast(note) {
     max-width: 350px;
     box-shadow: 0 12px 32px rgba(50, 42, 32, 0.2);
     font-family: system-ui, -apple-system, "Roboto", sans-serif;
-    animation: ytdSlideIn 0.3s ease;
+    animation: ${DIGESTDOCK_YOUTUBE_TOAST_ANIMATION} 0.3s ease;
   `;
 
   // Add animation keyframes
   const style = document.createElement("style");
   style.textContent = `
-    @keyframes ytdSlideIn {
+    @keyframes ${DIGESTDOCK_YOUTUBE_TOAST_ANIMATION} {
       from { transform: translateX(100%); opacity: 0; }
       to { transform: translateX(0); opacity: 1; }
     }
@@ -745,7 +836,8 @@ function showNoteSavedToast(note) {
 
   // Auto-dismiss after 5 seconds
   setTimeout(() => {
-    toast.style.animation = "ytdSlideIn 0.3s ease reverse";
+    toast.style.animation =
+      `${DIGESTDOCK_YOUTUBE_TOAST_ANIMATION} 0.3s ease reverse`;
     setTimeout(() => toast.remove(), 300);
   }, 5000);
 }
@@ -858,12 +950,14 @@ function escapeHtmlForContent(text) {
  */
 document.addEventListener("yt-navigate-finish", () => {
   // Clean up old key moment markers when navigating to a new video
-  const existingMarkers = document.querySelectorAll(".ytd-key-moment-markers");
+  const existingMarkers = document.querySelectorAll(
+    `.${DIGESTDOCK_YOUTUBE_MARKER_CLASS}`,
+  );
   existingMarkers.forEach((m) => m.remove());
 
   // Remove old buttons (they will be re-injected for the new video)
   document
-    .querySelectorAll("#ytd-digest-button")
+    .querySelectorAll(`#${DIGESTDOCK_YOUTUBE_DOM_IDS.digestButton}`)
     .forEach((button) => button.remove());
   ytdDigestButton = null;
   if (digestButtonReconcileTimer) {
@@ -871,7 +965,9 @@ document.addEventListener("yt-navigate-finish", () => {
     digestButtonReconcileTimer = null;
   }
 
-  const existingNoteButton = document.getElementById("ytd-note-button");
+  const existingNoteButton = document.getElementById(
+    DIGESTDOCK_YOUTUBE_DOM_IDS.noteButton,
+  );
   if (existingNoteButton) existingNoteButton.remove();
 
   // Reset note button state
@@ -884,7 +980,9 @@ document.addEventListener("yt-navigate-finish", () => {
   }
 
   // Remove any toasts
-  const existingToast = document.getElementById("ytd-note-toast");
+  const existingToast = document.getElementById(
+    DIGESTDOCK_YOUTUBE_DOM_IDS.noteToast,
+  );
   if (existingToast) existingToast.remove();
 
   // Re-inject buttons for the new video (with a small delay for YouTube to render)

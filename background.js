@@ -3,7 +3,8 @@
  *
  * This is the "brain" of the extension. It runs in the background and handles:
  * 1. Opening the side panel when the user clicks the extension icon
- * 2. Fetching YouTube and Bilibili caption tracks locally, with optional Supadata fallback
+ * 2. Fetching Bilibili caption tracks locally, and YouTube native captions
+ *    through the user-authorized Supadata provider
  * 3. Calling DeepSeek to analyze the transcript
  * 4. Sending results back to the side panel
  *
@@ -14,23 +15,92 @@
 // Import safe defaults and validation helpers. Secret keys live in
 // chrome.storage.local and are never part of the extension source.
 importScripts("settings.js");
-importScripts("youtube-transcript.js");
 importScripts("bilibili.js");
 importScripts("notes-backup.js");
 
 const DEBUG = false;
 const ANALYSIS_SCHEMA_VERSION = 3;
-const RUNTIME_PROTOCOL_VERSION = 8;
+const RUNTIME_PROTOCOL_VERSION = 9;
 const ANALYSIS_BASE_LANGUAGE = "zh-Hans";
-const TRANSCRIPT_SOURCE_POLICY_VERSION = 3;
+const TRANSCRIPT_SOURCE_POLICY_VERSION = 4;
 const AI_PROVIDER_IDLE_TIMEOUT_MS = 50_000;
 const AI_PROVIDER_HARD_TIMEOUT_MS = 120_000;
 const AI_PROVIDER_MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MAX_SAVED_NOTES = 100;
 const NOTE_TRANSLATION_JOB_TIMEOUT_MS = 110_000;
+// After a Supadata 429 the extension refuses to start another provider request
+// for a bounded window. This is a Supadata-specific rate limit, never YouTube.
+const SUPADATA_RATE_LIMIT_COOLDOWN_MS = 60_000;
+const SUPADATA_COOLDOWN_STORAGE_KEY = "digestdock_supadata_cooldown_until";
+// Bounds for every Supadata request and job poll: a hard timeout and a response
+// body cap so a slow or oversized reply cannot hang or exhaust the worker.
+const SUPADATA_REQUEST_TIMEOUT_MS = 20_000;
+const SUPADATA_MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
+const SUPADATA_JOB_TIMEOUT_MS = 90_000;
 const debugLog = (...args) => {
   if (DEBUG) console.log(...args);
 };
+
+// Background single-flight for authorized YouTube Supadata requests. Duplicate
+// requests for the same tab, video, and preferred language (side-panel init,
+// the in-page Digest button, a page "complete" broadcast, and multi-window
+// side panels pointed at the same tab) share one in-flight provider call
+// instead of each spending a separate Supadata credit.
+const youtubeSupadataInFlight = new Map();
+let youtubeSupadataCooldownUntil = 0;
+
+function runYoutubeSupadataSingleFlight(key, task) {
+  const existing = youtubeSupadataInFlight.get(key);
+  if (existing) return existing;
+  const promise = Promise.resolve()
+    .then(task)
+    .finally(() => {
+      if (youtubeSupadataInFlight.get(key) === promise) {
+        youtubeSupadataInFlight.delete(key);
+      }
+    });
+  youtubeSupadataInFlight.set(key, promise);
+  return promise;
+}
+
+async function readYoutubeSupadataCooldownUntil() {
+  let cooldownUntil = youtubeSupadataCooldownUntil;
+  const now = Date.now();
+  try {
+    const sessionStorage = chrome.storage?.session;
+    if (typeof sessionStorage?.get === "function") {
+      const stored = await sessionStorage.get(SUPADATA_COOLDOWN_STORAGE_KEY);
+      const storedUntil = Number(stored?.[SUPADATA_COOLDOWN_STORAGE_KEY]);
+      if (
+        Number.isFinite(storedUntil) &&
+        storedUntil > now &&
+        storedUntil <= now + SUPADATA_RATE_LIMIT_COOLDOWN_MS
+      ) {
+        cooldownUntil = Math.max(cooldownUntil, storedUntil);
+      }
+    }
+  } catch (_error) {
+    // A transient storage failure must not bypass the in-memory cooldown.
+  }
+  youtubeSupadataCooldownUntil = cooldownUntil;
+  return cooldownUntil;
+}
+
+async function startYoutubeSupadataCooldown() {
+  const cooldownUntil = Date.now() + SUPADATA_RATE_LIMIT_COOLDOWN_MS;
+  youtubeSupadataCooldownUntil = cooldownUntil;
+  try {
+    const sessionStorage = chrome.storage?.session;
+    if (typeof sessionStorage?.set === "function") {
+      await sessionStorage.set({
+        [SUPADATA_COOLDOWN_STORAGE_KEY]: cooldownUntil,
+      });
+    }
+  } catch (_error) {
+    // The in-memory value still protects the current worker lifetime.
+  }
+  return cooldownUntil;
+}
 
 const CHINESE_LANGUAGE_CODES = new Set([
   "zh",
@@ -637,7 +707,7 @@ async function handleFetchMediaTranscript(
         sourceAttempt: "BILIBILI",
       };
     }
-    return handleFetchYoutubeTranscriptLocalFirst(
+    return handleFetchYoutubeTranscript(
       mediaRef.videoId,
       preferredLanguage,
       tabId,
@@ -1115,12 +1185,20 @@ async function getPlayerVideoDetails(tabId) {
   }
 }
 
+// The mainline no longer runs a YouTube tab fetch bridge or a local caption
+// adapter. YouTube caption bodies come only from the user-authorized Supadata
+// provider (see handleFetchYoutubeTranscript). The experimental worktree keeps
+// the in-page extraction path for later real-video verification.
+
 /**
- * Reads only the current video's caption-track metadata in YouTube's MAIN
- * world. Signed URLs stay in the service worker and are passed directly to the
- * bounded adapter; they are never logged, cached, or returned to the UI.
+ * Read-only, no-network YouTube page gate. Runs in the page MAIN world to
+ * confirm the tab still shows the exact video we are about to authorize, to
+ * read the default audio language, and to read the playability status. It
+ * deliberately does NOT read caption-track request URLs; those never
+ * enter the mainline. The absence of visible caption tracks is not evidence to
+ * skip Supadata — the mode=native provider returns the final no-caption state.
  */
-async function readYouTubeCaptionSnapshot(tabId, expectedVideoId) {
+async function readYouTubePlayabilitySnapshot(tabId, expectedVideoId) {
   if (!Number.isInteger(tabId)) return null;
   try {
     const results = await chrome.scripting.executeScript({
@@ -1154,36 +1232,23 @@ async function readYouTubeCaptionSnapshot(tabId, expectedVideoId) {
           const defaultCaptionIndex =
             defaultAudio?.defaultCaptionTrackIndex ??
             defaultAudio?.captionTrackIndices?.[0];
+          // Only the language code, never a signed caption request URL.
           const sourceLanguage =
             response?.videoDetails?.defaultAudioLanguage ||
             response?.microformat?.playerMicroformatRenderer
               ?.defaultAudioLanguage ||
             rawTracks[defaultCaptionIndex]?.languageCode ||
             "";
-          const readLabel = (name) =>
-            String(
-              name?.simpleText ||
-                name?.runs?.map((run) => run?.text || "").join("") ||
-                "",
-            ).slice(0, 160);
           return {
             ok: true,
             videoId: actualVideoId,
-            sourceLanguage,
-            tracks: rawTracks
-              .filter(
-                (track) =>
-                  typeof track?.baseUrl === "string" &&
-                  track.baseUrl.trim(),
-              )
-              .map((track, index) => ({
-                baseUrl: track.baseUrl,
-                languageCode: String(track.languageCode || ""),
-                kind: track.kind === "asr" ? "asr" : undefined,
-                vssId: String(track.vssId || ""),
-                name: { simpleText: readLabel(track.name) },
-                isDefault: index === defaultCaptionIndex,
-              })),
+            playability: String(
+              response?.playabilityStatus?.status || "",
+            ).slice(0, 80),
+            playabilityReason: String(
+              response?.playabilityStatus?.reason || "",
+            ).slice(0, 200),
+            sourceLanguage: String(sourceLanguage || "").slice(0, 35),
           };
         } catch (_error) {
           return { ok: false, error: "PAGE_CONTEXT_UNAVAILABLE" };
@@ -1200,11 +1265,43 @@ async function readYouTubeCaptionSnapshot(tabId, expectedVideoId) {
   } catch (error) {
     if (error?.code === "PAGE_CONTEXT_CHANGED") throw error;
     debugLog(
-      "[DigestDock] Page caption snapshot unavailable:",
+      "[DigestDock] Page playability snapshot unavailable:",
       error?.message,
     );
     return null;
   }
+}
+
+/**
+ * Classify a YouTube playabilityStatus into a terminal caption-source decision.
+ * Clear login, age, members-only, region, and unavailable states are terminal:
+ * the mainline returns a stable error and never sends the video to Supadata.
+ * Anything else (including a normal "OK" or an unknown status) is allowed to
+ * proceed to the authorized provider.
+ */
+function classifyYouTubePlayability(status, reason = "") {
+  const normalized = String(status || "").toUpperCase();
+  const haystack = `${normalized} ${String(reason || "").toUpperCase()}`;
+  if (!normalized || normalized === "OK") return null;
+  if (
+    normalized === "LOGIN_REQUIRED" ||
+    normalized === "AGE_CHECK_REQUIRED" ||
+    normalized === "AGE_VERIFICATION_REQUIRED" ||
+    normalized === "CONTENT_CHECK_REQUIRED" ||
+    /\bAGE\b|SIGN IN|LOG IN|MEMBER|MEMBERS-ONLY|CONFIRM YOUR AGE/.test(haystack)
+  ) {
+    return "LOGIN_REQUIRED";
+  }
+  if (
+    normalized === "UNPLAYABLE" ||
+    normalized === "ERROR" ||
+    normalized === "LIVE_STREAM_OFFLINE"
+  ) {
+    return "VIDEO_UNAVAILABLE";
+  }
+  // Unknown, non-OK statuses are not treated as terminal here; the mode=native
+  // provider makes the final call so a transient status never hides captions.
+  return null;
 }
 
 async function youtubeTabStillMatches(tabId, expectedVideoId) {
@@ -1235,111 +1332,296 @@ function pageContextChangedResult() {
   };
 }
 
-async function handleFetchYoutubeTranscriptLocalFirst(
+/**
+ * API-primary YouTube caption router.
+ *
+ * Order: read-only page gate (identity + playability) -> terminal restriction
+ * check -> Supadata key check -> strict per-attempt consent check -> bounded
+ * Supadata rate-limit cooldown -> single-flighted Supadata provider request.
+ * The mainline never constructs a direct YouTube transcript request.
+ */
+async function handleFetchYoutubeTranscript(
   videoId,
   preferredLanguage = "",
   tabId = null,
   supadataConsent = false,
 ) {
+  // Read-only, no-network page gate. Binds the current tab to this exact video
+  // so an SPA navigation cannot send an old video to Supadata, and surfaces
+  // clear login/age/members/unavailable states before any provider request.
   let snapshot = null;
   try {
-    snapshot = await readYouTubeCaptionSnapshot(tabId, videoId);
+    snapshot = await readYouTubePlayabilitySnapshot(tabId, videoId);
   } catch (error) {
     if (error?.code === "PAGE_CONTEXT_CHANGED") {
       return pageContextChangedResult();
     }
   }
 
+  const terminalPlayabilityMessages = {
+    LOGIN_REQUIRED:
+      "此视频需要登录、年龄验证或其他访问权限，DigestDock 不会把它发送给 Supadata。",
+    VIDEO_UNAVAILABLE:
+      "此视频当前不可用，DigestDock 不会把它发送给 Supadata。",
+  };
+  const terminalCode = snapshot
+    ? classifyYouTubePlayability(
+        snapshot.playability,
+        snapshot.playabilityReason,
+      )
+    : null;
+  if (terminalCode && Object.hasOwn(terminalPlayabilityMessages, terminalCode)) {
+    return {
+      success: false,
+      error: terminalCode,
+      message: terminalPlayabilityMessages[terminalCode],
+      supadataEligible: false,
+    };
+  }
+
   const requestedLanguage =
     normalizeLanguageCode(preferredLanguage) ||
     normalizeLanguageCode(snapshot?.sourceLanguage);
-  let localError = null;
-  try {
-    const localInput = {
-      videoId,
-      preferredLanguage: requestedLanguage,
-      kind: "manual-first",
-    };
-    if (snapshot) localInput.captionTracks = snapshot.tracks || [];
-    const local = await YOUTUBE_TRANSCRIPT_ADAPTER.fetchTranscript(localInput);
-    if (!(await youtubeTabStillMatches(tabId, videoId))) {
-      return pageContextChangedResult();
-    }
-    return {
-      success: true,
-      source: "youtube-timedtext",
-      ...local,
-    };
-  } catch (error) {
-    localError = error;
-  }
-
-  // Never spend fallback quota for a video the user has already left.
-  if (!(await youtubeTabStillMatches(tabId, videoId))) {
-    return pageContextChangedResult();
-  }
 
   const settings = await getSettings();
-  const attempts = Array.isArray(localError?.attempts)
-    ? localError.attempts
-    : [];
-  const localErrorCode = localError?.code || "LOCAL_TRANSCRIPT_FAILED";
-
   if (!settings.supadataApiKey) {
     return {
       success: false,
       error: "SUPADATA_NOT_CONFIGURED",
       message:
-        "未能直接读取 YouTube 原生字幕。如要使用 Supadata，可先在设置中配置可选密钥。",
-      localError: localErrorCode,
-      attempts,
+        "新的 YouTube 字幕需要 Supadata。请在设置中配置可选的 Supadata 密钥，然后回到侧栏逐次授权。",
     };
   }
 
-  // A saved key enables the choice, never an automatic third-party request.
-  // Only the side-panel action shown after local failure may opt this one
-  // attempt into Supadata. Note saves and ordinary transcript loads keep the
-  // default false value and therefore cannot silently use the provider.
+  // A saved key is not consent. Only the explicit side-panel authorization for
+  // this attempt sets supadataConsent to the strict boolean true. Note saves,
+  // page loads, navigation, and error retries keep the default false and can
+  // never silently spend a Supadata credit.
   if (supadataConsent !== true) {
     return {
       success: false,
       error: "SUPADATA_CONSENT_REQUIRED",
       message:
-        "未能直接读取 YouTube 原生字幕。你可以选择本次使用 Supadata 提取。",
-      localError: localErrorCode,
-      attempts,
+        "此视频将通过 Supadata 获取 YouTube 原生字幕。请在侧栏本次授权后继续。",
     };
   }
 
-  const fallback = await handleFetchTranscript(
-    videoId,
-    requestedLanguage,
-    () => youtubeTabStillMatches(tabId, videoId),
-  );
-  // Supadata can take long enough for a YouTube SPA navigation to finish
-  // while the request (or async job) is in flight. Do not accept that old
-  // video's result for the tab's new page or a cache-miss note save.
+  // Consent was granted for THIS video and tab. If the tab already moved on,
+  // do not open a provider request for a video the user has left.
   if (!(await youtubeTabStillMatches(tabId, videoId))) {
     return pageContextChangedResult();
   }
-  if (fallback.success) {
+
+  // A prior Supadata 429 puts the provider in a bounded cooldown. Refuse to
+  // start another request until it clears; this keeps the network-call count
+  // flat and never confuses the user with a YouTube rate-limit message.
+  const cooldownUntil = await readYoutubeSupadataCooldownUntil();
+  if (Date.now() < cooldownUntil) {
     return {
-      ...fallback,
+      success: false,
+      error: "RATE_LIMITED",
+      message:
+        "Supadata 刚刚返回了速率限制，正在冷却，请稍后再授权重试。这是 Supadata 的限流，并非 YouTube。",
+    };
+  }
+
+  // Collapse duplicate authorized requests (init, button, page-complete,
+  // multi-window) for the same tab+video+language into one provider call.
+  const flightKey = `${Number.isInteger(tabId) ? tabId : "no-tab"}::${videoId}::${requestedLanguage}`;
+  const result = await runYoutubeSupadataSingleFlight(flightKey, () =>
+    handleFetchTranscript(videoId, requestedLanguage, () =>
+      youtubeTabStillMatches(tabId, videoId),
+    ),
+  );
+
+  // Supadata (or its async job polling) can outlast a YouTube SPA navigation.
+  // Never accept an old video's result for the tab's new page.
+  if (!(await youtubeTabStillMatches(tabId, videoId))) {
+    return pageContextChangedResult();
+  }
+
+  if (result?.error === "RATE_LIMITED") {
+    await startYoutubeSupadataCooldown();
+  }
+
+  if (result.success) {
+    return {
+      ...result,
       source: "supadata",
       sourceAttempt: "SUPADATA",
       selectedTrack: null,
     };
   }
 
-  return {
-    ...fallback,
-    localError: localErrorCode,
-  };
+  return result;
 }
 
 // ============================================================
 // TRANSCRIPT FETCHING VIA SUPADATA API
 // ============================================================
+
+/**
+ * Reads a response body with a hard byte cap so an oversized or malformed
+ * reply cannot exhaust the worker. Streams when a ReadableStream is available;
+ * otherwise falls back to text() (or a test double's json()). Throws a coded
+ * RESPONSE_TOO_LARGE error when the cap is exceeded. The raw body is never
+ * logged.
+ */
+async function readBoundedResponseText(response, maxBytes) {
+  const tooLarge = () => {
+    const error = new Error("Supadata response exceeded the size limit.");
+    error.code = "RESPONSE_TOO_LARGE";
+    return error;
+  };
+  if (response?.body?.getReader && typeof TextDecoder === "function") {
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let text = "";
+    let bytes = 0;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        bytes += value?.byteLength || 0;
+        if (bytes > maxBytes) {
+          await reader.cancel().catch(() => {});
+          throw tooLarge();
+        }
+        text += decoder.decode(value, { stream: true });
+      }
+      text += decoder.decode();
+    } finally {
+      reader.releaseLock?.();
+    }
+    return text;
+  }
+  if (typeof response?.text === "function") {
+    const text = await response.text();
+    const bytes =
+      typeof TextEncoder === "function"
+        ? new TextEncoder().encode(text).byteLength
+        : String(text).length;
+    if (bytes > maxBytes) throw tooLarge();
+    return text;
+  }
+  if (typeof response?.json === "function") {
+    // Test doubles and minimal responses only expose json(). There is no raw
+    // body to cap here; production responses always go through the paths above.
+    return JSON.stringify(await response.json());
+  }
+  return "";
+}
+
+/**
+ * Performs one bounded Supadata GET: hard timeout via AbortController, response
+ * size cap, and tolerant JSON parsing. Returns { ok, status, data } where data
+ * is null when the body is absent or not valid JSON. Throws a coded error
+ * (TIMEOUT, NETWORK, RESPONSE_TOO_LARGE) for transport-level failures. The API
+ * key and raw body are never logged.
+ */
+async function fetchSupadataJson(url, apiKey, options = {}) {
+  const timeoutMs = Number.isFinite(options.timeoutMs)
+    ? options.timeoutMs
+    : SUPADATA_REQUEST_TIMEOUT_MS;
+  const maxBytes = Number.isFinite(options.maxResponseBytes)
+    ? options.maxResponseBytes
+    : SUPADATA_MAX_RESPONSE_BYTES;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  let response;
+  try {
+    response = await fetch(url, {
+      method: "GET",
+      headers: { "x-api-key": apiKey },
+      credentials: "omit",
+      cache: "no-store",
+      referrerPolicy: "no-referrer",
+      signal: controller.signal,
+    });
+  } catch (error) {
+    clearTimeout(timeoutId);
+    const coded = new Error("Supadata request failed.");
+    coded.code = error?.name === "AbortError" ? "TIMEOUT" : "NETWORK";
+    throw coded;
+  }
+  try {
+    const text = await readBoundedResponseText(response, maxBytes);
+    let data = null;
+    if (text) {
+      try {
+        data = JSON.parse(text);
+      } catch (_error) {
+        data = null;
+      }
+    }
+    return { ok: response.ok === true, status: Number(response.status) || 0, data };
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+/**
+ * Maps a Supadata transport-level failure code to the shared error contract.
+ */
+function supadataTransportFailure(error) {
+  const code = error?.code;
+  if (code === "TIMEOUT") {
+    return {
+      success: false,
+      error: "PROVIDER_TIMEOUT",
+      message: "Supadata 请求超时，请稍后重试。",
+    };
+  }
+  if (code === "RESPONSE_TOO_LARGE") {
+    return {
+      success: false,
+      error: "RESPONSE_TOO_LARGE",
+      message: "Supadata 返回的数据过大，已中止。",
+    };
+  }
+  return {
+    success: false,
+    error: "NETWORK_ERROR",
+    message: "无法连接 Supadata，请检查网络后重试。",
+  };
+}
+
+function supadataHttpFailure(status) {
+  if (status === 401) {
+    return {
+      success: false,
+      error: "INVALID_SUPADATA_KEY",
+      message: "Supadata API 密钥无效，请打开 DigestDock 设置。",
+    };
+  }
+  if (status === 404 || status === 206) {
+    return {
+      success: false,
+      error: "NO_TRANSCRIPT",
+      message: "未找到此视频的原生字幕。",
+    };
+  }
+  if (status === 429) {
+    return {
+      success: false,
+      error: "RATE_LIMITED",
+      message: "Supadata 请求次数已达上限，请等待一分钟后重试。",
+    };
+  }
+  return {
+    success: false,
+    error: "PROVIDER_HTTP_ERROR",
+    message: `Supadata 暂时不可用（HTTP ${Number(status) || 0}），请稍后重试。`,
+  };
+}
+
+function supadataJobTimeoutResult() {
+  return {
+    success: false,
+    error: "PROVIDER_TIMEOUT",
+    message: "Supadata 字幕任务超时，请稍后重新授权重试。",
+  };
+}
 
 /**
  * Fetches the transcript for a YouTube video using Supadata API.
@@ -1357,6 +1639,7 @@ async function handleFetchTranscript(
   videoId,
   preferredLanguage,
   shouldContinue = null,
+  options = {},
 ) {
   try {
     const settings = await getSettings();
@@ -1389,64 +1672,39 @@ async function handleFetchTranscript(
     // Caption-only product scope: never fall back to paid AI transcription.
     apiUrl.searchParams.set("mode", "native");
 
-    // Make the API request
-    const response = await fetch(apiUrl.toString(), {
-      method: "GET",
-      headers: {
-        "x-api-key": settings.supadataApiKey,
-      },
-    });
+    // Make the bounded API request (timeout + size cap + safe parse).
+    let response;
+    try {
+      response = await fetchSupadataJson(
+        apiUrl.toString(),
+        settings.supadataApiKey,
+        options,
+      );
+    } catch (error) {
+      return supadataTransportFailure(error);
+    }
 
     // Handle async jobs (for videos > 20 minutes, Supadata returns a job ID)
     if (response.status === 202) {
-      const jobData = await response.json();
       // Poll for the result
       return await pollTranscriptJob(
-        jobData.jobId,
+        response.data?.jobId,
         settings.supadataApiKey,
         normalizedPreferredLanguage,
         shouldContinue,
+        options,
       );
     }
 
     if (response.status === 206) {
-      return {
-        success: false,
-        error: "NO_TRANSCRIPT",
-        message: "此视频没有可用的原生字幕轨道。",
-      };
+      return supadataHttpFailure(response.status);
     }
 
     if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      if (response.status === 401) {
-        return {
-          success: false,
-          error: "INVALID_SUPADATA_KEY",
-          message: "Supadata API 密钥无效，请打开 DigestDock 设置。",
-        };
-      }
-      if (response.status === 404) {
-        return {
-          success: false,
-          error: "NO_TRANSCRIPT",
-          message: "未找到此视频的字幕。",
-        };
-      }
-      if (response.status === 429) {
-        return {
-          success: false,
-          error: "RATE_LIMITED",
-          message:
-            "Supadata 请求次数已达上限，请等待一分钟后重试。",
-        };
-      }
-      throw new Error(
-        errorData.message || `Supadata API error: ${response.status}`,
-      );
+      return supadataHttpFailure(response.status);
     }
 
-    const data = await response.json();
+    const data = response.data || {};
 
     // Parse the response into our internal format
     // Supadata returns: { content: [{ text, offset, duration, lang }], lang, availableLangs }
@@ -1512,11 +1770,11 @@ async function handleFetchTranscript(
       transcriptTextTimestamped: transcriptTextTimestamped.trim(), // For AI
       language: trackLanguage,
     };
-  } catch (error) {
-    console.error("Transcript fetch error:", error);
+  } catch (_error) {
     return {
       success: false,
-      error: error.message || "获取字幕失败",
+      error: "PROVIDER_ERROR",
+      message: "Supadata 字幕处理失败，请稍后重试。",
     };
   }
 }
@@ -1533,32 +1791,65 @@ async function pollTranscriptJob(
   supadataApiKey,
   preferredLanguage = "",
   shouldContinue = null,
+  options = {},
 ) {
-  const maxAttempts = 60; // Max 60 seconds of polling
+  if (!jobId) {
+    return {
+      success: false,
+      error: "EMPTY_TRANSCRIPT",
+      message: "Supadata 返回了空字幕。",
+    };
+  }
+  const maxAttempts = Number.isInteger(options.maxPollAttempts)
+    ? Math.max(1, Math.min(options.maxPollAttempts, 60))
+    : 60;
   const pollInterval = 1000; // Poll every 1 second
+  const now = typeof options.now === "function" ? options.now : Date.now;
+  const jobTimeoutMs = Number.isFinite(options.jobTimeoutMs)
+    ? Math.max(1, options.jobTimeoutMs)
+    : SUPADATA_JOB_TIMEOUT_MS;
+  const deadlineAt = now() + jobTimeoutMs;
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    if (now() >= deadlineAt) return supadataJobTimeoutResult();
     if (shouldContinue && !(await shouldContinue())) {
       return pageContextChangedResult();
     }
     // Wait before polling
-    await new Promise((resolve) => setTimeout(resolve, pollInterval));
+    await new Promise((resolve) =>
+      setTimeout(resolve, Math.min(pollInterval, Math.max(1, deadlineAt - now()))),
+    );
+    if (now() >= deadlineAt) return supadataJobTimeoutResult();
     if (shouldContinue && !(await shouldContinue())) {
       return pageContextChangedResult();
     }
 
-    const response = await fetch(
-      `https://api.supadata.ai/v1/transcript/${encodeURIComponent(jobId)}`,
-      {
-        headers: { "x-api-key": supadataApiKey },
-      },
-    );
-
-    if (!response.ok) {
-      throw new Error(`Job polling failed: ${response.status}`);
+    let response;
+    try {
+      response = await fetchSupadataJson(
+        `https://api.supadata.ai/v1/transcript/${encodeURIComponent(jobId)}`,
+        supadataApiKey,
+        {
+          ...options,
+          timeoutMs: Math.min(
+            Number.isFinite(options.timeoutMs)
+              ? options.timeoutMs
+              : SUPADATA_REQUEST_TIMEOUT_MS,
+            Math.max(1, deadlineAt - now()),
+          ),
+        },
+      );
+    } catch (error) {
+      return supadataTransportFailure(error);
     }
 
-    const data = await response.json();
+    // Propagate the same provider-specific codes the initial request uses so
+    // the same authorization surfaces stable errors during async polling.
+    if (!response.ok) {
+      return supadataHttpFailure(response.status);
+    }
+
+    const data = response.data || {};
 
     if (data.status === "completed") {
       // Parse the completed transcript
@@ -1620,13 +1911,17 @@ async function pollTranscriptJob(
     }
 
     if (data.status === "failed") {
-      throw new Error("字幕处理失败");
+      return {
+        success: false,
+        error: "PROVIDER_FAILED",
+        message: "Supadata 字幕任务失败，请稍后重新授权重试。",
+      };
     }
 
     // Status is 'queued' or 'active' — keep polling
   }
 
-  throw new Error("字幕处理超时");
+  return supadataJobTimeoutResult();
 }
 
 // ============================================================
@@ -1994,11 +2289,14 @@ async function handleSaveNote(
     try {
       const cached = await chrome.storage.local.get(`digest_${mediaKey}`);
       const digest = cached[`digest_${mediaKey}`];
+      const expectedTranscriptSource =
+        mediaRef.platform === "youtube" ? "supadata" : "bilibili";
       if (
         Array.isArray(digest?.transcript) &&
         digest.transcript.length > 0 &&
         digest.transcriptSourcePolicyVersion ===
-          TRANSCRIPT_SOURCE_POLICY_VERSION
+          TRANSCRIPT_SOURCE_POLICY_VERSION &&
+        digest.transcriptSource === expectedTranscriptSource
       ) {
         transcript = digest.transcript;
         debugLog("[DigestDock] Using cached transcript for note");
@@ -2026,10 +2324,22 @@ async function handleSaveNote(
         tabId,
       );
       if (!transcriptResult.success) {
+        // A cold-cache YouTube note must never silently authorize Supadata.
+        // Point the user to the side panel to authorize and generate captions
+        // once, then save notes against the cached transcript.
+        const noteConsentMessages = {
+          SUPADATA_CONSENT_REQUIRED:
+            "请先在侧栏本次授权 Supadata 并生成字幕，然后再保存笔记。",
+          SUPADATA_NOT_CONFIGURED:
+            "新的 YouTube 字幕需要 Supadata。请在设置中配置密钥并在侧栏授权生成字幕后再保存笔记。",
+        };
         return {
           success: false,
           error: transcriptResult.error || "Could not fetch transcript",
-          message: transcriptResult.message || "无法读取字幕。",
+          message:
+            noteConsentMessages[transcriptResult.error] ||
+            transcriptResult.message ||
+            "无法读取字幕。",
         };
       }
       transcript = transcriptResult.transcript;
@@ -3994,9 +4304,16 @@ globalThis.__YTD_TRANSLATION_TESTING__ = {
   normalizeTranslatedSegmentBatch,
   handleTranslateContent,
   isSupportedVideoUrl,
-  readYouTubeCaptionSnapshot,
+  readYouTubePlayabilitySnapshot,
+  classifyYouTubePlayability,
   youtubeTabStillMatches,
-  handleFetchYoutubeTranscriptLocalFirst,
+  readYoutubeSupadataCooldownUntil,
+  startYoutubeSupadataCooldown,
+  readBoundedResponseText,
+  fetchSupadataJson,
+  supadataHttpFailure,
+  pollTranscriptJob,
+  handleFetchYoutubeTranscript,
   normalizeBilibiliMediaRef,
   resolveMediaRef,
   handleFetchMediaTranscript,

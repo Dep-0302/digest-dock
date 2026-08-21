@@ -27,7 +27,6 @@ fail() {
 public_allowlist=(
   "manifest.json"
   "background.js"
-  "youtube-transcript.js"
   "settings.js"
   "notes-backup.js"
   "content.js"
@@ -42,6 +41,9 @@ public_allowlist=(
   "icons/icon16.png"
   "icons/icon48.png"
   "icons/icon128.png"
+  "fonts/BarlowCondensed-Regular.woff2"
+  "fonts/BarlowCondensed-Medium.woff2"
+  "fonts/OFL.txt"
   "prompts/analysis.md"
   "prompts/explain.md"
   "prompts/note-cleanup.md"
@@ -56,7 +58,6 @@ public_allowlist=(
 required_public_files=(
   "manifest.json"
   "background.js"
-  "youtube-transcript.js"
   "settings.js"
   "notes-backup.js"
   "content.js"

@@ -8,6 +8,13 @@ const contentScript = fs.readFileSync(
   path.resolve(__dirname, "..", "content.js"),
   "utf8",
 );
+const TEST_EXTENSION_ID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const DIGEST_BUTTON_ID =
+  `digestdock-${TEST_EXTENSION_ID}-youtube-digest-button`;
+const NOTE_BUTTON_ID =
+  `digestdock-${TEST_EXTENSION_ID}-youtube-note-button`;
+const REFRESH_NOTICE_ID =
+  `digestdock-${TEST_EXTENSION_ID}-youtube-refresh-notice`;
 
 class FakeElement {
   constructor({
@@ -117,9 +124,10 @@ function createHarness({ sendMessageImpl } = {}) {
     },
     querySelectorAll(selector) {
       if (selector === "ytd-watch-metadata #actions-inner") return actionRows;
-      if (selector === "#ytd-digest-button") {
+      if (/^#[A-Za-z0-9_-]+$/.test(selector)) {
+        const id = selector.slice(1);
         return elements.filter(
-          (element) => element.id === "ytd-digest-button" && element.isConnected,
+          (element) => element.id === id && element.isConnected,
         );
       }
       if (selector.includes("top-level-buttons-computed")) return fallbackRows;
@@ -161,6 +169,7 @@ function createHarness({ sendMessageImpl } = {}) {
     },
     chrome: {
       runtime: {
+        id: TEST_EXTENSION_ID,
         onMessage: { addListener() {} },
         async sendMessage(message) {
           return sendMessageImpl
@@ -281,7 +290,7 @@ test("a late player mutation restores the note button without another retry loop
   harness.setPlayerAvailable(true);
   harness.observers[0].callback([]);
 
-  assert.ok(harness.context.document.getElementById("ytd-note-button"));
+  assert.ok(harness.context.document.getElementById(NOTE_BUTTON_ID));
   assert.equal(harness.getIntervalCallCount(), 1);
 });
 
@@ -303,7 +312,13 @@ test("Digest button skips a hidden responsive toolbar", () => {
   assert.equal(harness.context.injectDigestButton(), true);
   assert.equal(hiddenGroup.children.length, 0);
   assert.equal(visibleRow.children.length, 1);
-  assert.equal(visibleGroup.children[0].id, "ytd-digest-button");
+  assert.equal(visibleGroup.children[0].id, DIGEST_BUTTON_ID);
+  // Icon-only brand opener: an inline SVG (with the coral time marker), an
+  // accessible name via aria-label, and no restored long brand-text label.
+  assert.match(visibleGroup.children[0].innerHTML, /<svg/);
+  assert.match(visibleGroup.children[0].innerHTML, /#F26A4F/);
+  assert.equal(visibleGroup.children[0]["aria-label"], "打开 DigestDock");
+  assert.doesNotMatch(visibleGroup.children[0].innerHTML, /DigestDock<\/span>/);
   assert.equal(visibleGroup.children[1], nativeButton);
   assert.match(visibleGroup.children[0].style.cssText, /flex:\s*0 0 auto/);
   assert.match(visibleGroup.children[0].style.cssText, /width:\s*max-content/);
@@ -323,9 +338,14 @@ test("stale extension buttons ask for a page refresh without logging another fai
   await button.listeners.click({ preventDefault() {}, stopPropagation() {} });
 
   assert.equal(button.disabled, true);
-  assert.match(button.innerHTML, /请刷新页面/);
+  // Stale state stays icon-only: the SVG remains and only the accessible
+  // name/tooltip change; the long brand label is never restored.
+  assert.match(button.innerHTML, /<svg/);
+  assert.doesNotMatch(button.innerHTML, /刷新 DigestDock/);
+  assert.equal(button.title, "请刷新页面");
+  assert.equal(button["aria-label"], "DigestDock 已更新，请刷新页面");
   const notice = harness.context.document.getElementById(
-    "ytd-extension-refresh-notice",
+    REFRESH_NOTICE_ID,
   );
   assert.ok(notice);
   assert.match(notice.textContent, /请刷新当前 YouTube 页面/);
@@ -350,9 +370,9 @@ test("Digest button replaces stale instances and removes duplicates", () => {
   harness.actionRows.push(staleRow, visibleRow);
 
   const staleButton = new FakeElement();
-  staleButton.id = "ytd-digest-button";
+  staleButton.id = DIGEST_BUTTON_ID;
   const duplicateButton = new FakeElement();
-  duplicateButton.id = "ytd-digest-button";
+  duplicateButton.id = DIGEST_BUTTON_ID;
   harness.elements.push(staleButton, duplicateButton);
   staleGroup.appendChild(staleButton);
   staleGroup.appendChild(duplicateButton);
@@ -362,7 +382,7 @@ test("Digest button replaces stale instances and removes duplicates", () => {
   assert.equal(visibleRow.children.length, 1);
   assert.equal(visibleGroup.children.length, 1);
   assert.notEqual(visibleGroup.children[0], staleButton);
-  assert.equal(visibleGroup.children[0].id, "ytd-digest-button");
+  assert.equal(visibleGroup.children[0].id, DIGEST_BUTTON_ID);
   assert.equal(staleButton.isConnected, false);
   assert.equal(duplicateButton.isConnected, false);
 });
@@ -396,7 +416,68 @@ test("resize reconciliation follows YouTube to the newly visible toolbar", () =>
   assert.equal(firstGroup.children.length, 0);
   assert.equal(secondRow.children.length, 1);
   assert.equal(secondGroup.children.length, 1);
-  assert.equal(secondGroup.children[0].id, "ytd-digest-button");
+  assert.equal(secondGroup.children[0].id, DIGEST_BUTTON_ID);
+});
+
+test("DigestDock coexists with legacy YouTube Digest DOM controls", async () => {
+  const sentActions = [];
+  const harness = createHarness({
+    async sendMessageImpl(message) {
+      sentActions.push(message.action);
+      return { success: true };
+    },
+  });
+  const { row, buttonGroup } = createActionRow({ width: 500, height: 36 });
+  harness.actionRows.push(row);
+  harness.setPlayerAvailable(true);
+  const player = harness.context.document.getElementById("movie_player");
+
+  const legacyDigestButton = new FakeElement({ id: "ytd-digest-button" });
+  const legacyNoteButton = new FakeElement({ id: "ytd-note-button" });
+  harness.elements.push(legacyDigestButton, legacyNoteButton);
+  buttonGroup.appendChild(legacyDigestButton);
+  player.appendChild(legacyNoteButton);
+
+  harness.documentListeners.DOMContentLoaded();
+
+  const digestButton = harness.context.document.getElementById(DIGEST_BUTTON_ID);
+  const noteButton = harness.context.document.getElementById(NOTE_BUTTON_ID);
+  assert.ok(digestButton);
+  assert.ok(noteButton);
+  assert.equal(legacyDigestButton.isConnected, true);
+  assert.equal(legacyNoteButton.isConnected, true);
+  assert.equal(digestButton.parentElement, buttonGroup);
+  assert.equal(noteButton.parentElement, player);
+  assert.equal(noteButton.style.top, "58px");
+  assert.equal(buttonGroup.children.includes(legacyDigestButton), true);
+  assert.equal(player.children.includes(legacyNoteButton), true);
+
+  await digestButton.listeners.click({
+    preventDefault() {},
+    stopPropagation() {},
+  });
+  assert.deepEqual(sentActions, ["openSidePanel"]);
+
+  harness.documentListeners.keydown({
+    key: "n",
+    preventDefault() {},
+    stopPropagation() {},
+  });
+  assert.deepEqual(
+    sentActions,
+    ["openSidePanel"],
+    "the legacy build keeps the shared N shortcut while both are enabled",
+  );
+
+  harness.documentListeners["yt-navigate-finish"]();
+  assert.equal(legacyDigestButton.isConnected, true);
+  assert.equal(legacyNoteButton.isConnected, true);
+  harness.flushTimers();
+  harness.flushTimers();
+  assert.ok(harness.context.document.getElementById(DIGEST_BUTTON_ID));
+  assert.ok(harness.context.document.getElementById(NOTE_BUTTON_ID));
+  assert.equal(legacyDigestButton.isConnected, true);
+  assert.equal(legacyNoteButton.isConnected, true);
 });
 
 test("DOM mutation reconciliation repairs a replaced toolbar", () => {
@@ -430,13 +511,36 @@ test("DOM mutation reconciliation repairs a replaced toolbar", () => {
   assert.equal(newGroup.children.length, 1);
 });
 
+test("the player note button uses the neutral graphite bookmark control, not a coral pill", () => {
+  const harness = createHarness();
+  harness.setPlayerAvailable(true);
+  harness.documentListeners.DOMContentLoaded();
+
+  const noteButton = harness.context.document.getElementById(NOTE_BUTTON_ID);
+  assert.ok(noteButton);
+  // Deep graphite surface with a ~10px radius and a restrained neutral shadow.
+  assert.match(noteButton.style.cssText, /background:\s*#1f2933/i);
+  assert.match(noteButton.style.cssText, /border-radius:\s*10px/);
+  assert.match(noteButton.style.cssText, /box-shadow:\s*0 4px 12px rgba\(23, 33, 42/);
+  // The old coral circle/pill is gone.
+  assert.doesNotMatch(noteButton.style.cssText, /border-radius:\s*999px/);
+  assert.doesNotMatch(noteButton.style.cssText, /#c8674f/i);
+  // Still an icon-only, text-free bookmark control with an accessible name.
+  assert.match(noteButton.innerHTML, /<svg/);
+  assert.doesNotMatch(noteButton.innerHTML, /DigestDock/);
+  assert.equal(
+    noteButton["aria-label"],
+    "用 DigestDock 保存当前时刻的笔记（快捷键 N）",
+  );
+});
+
 test("a note that needs third-party transcript consent points the user to the side panel", () => {
   assert.match(
     contentScript,
-    /result\.error === "SUPADATA_CONSENT_REQUIRED"[\s\S]*?请在侧栏确认/,
+    /result\.error === "SUPADATA_CONSENT_REQUIRED"[\s\S]*?请在侧栏授权/,
   );
   assert.match(
     contentScript,
-    /result\.error === "SUPADATA_NOT_CONFIGURED"[\s\S]*?可在设置中配置回退/,
+    /result\.error === "SUPADATA_NOT_CONFIGURED"[\s\S]*?需在设置配置 Supadata/,
   );
 });

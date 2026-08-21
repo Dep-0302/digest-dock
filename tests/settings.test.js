@@ -23,7 +23,7 @@ test("DeepSeek defaults use V4 Flash", () => {
   );
 });
 
-test("Supadata remains optional and blank values clear the saved fallback key", () => {
+test("Supadata remains optional for the extension and blank values clear the saved key", () => {
   const normalized = settings.normalize({
     aiApiKey: "deepseek-value",
     supadataApiKey: "   ",

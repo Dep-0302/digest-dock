@@ -7,10 +7,57 @@
     <link rel="stylesheet" href="options.css" />
   </head>
   <body>
-    <main class="settings-shell">
-      <header>
-        <div class="settings-heading-row">
-          <div class="eyebrow">DigestDock</div>
+    <div class="settings-app">
+      <aside class="settings-sidebar">
+        <div class="settings-brand">
+          <span class="settings-brand-mark" aria-hidden="true">
+            <svg width="26" height="26" viewBox="0 0 128 128" fill="none">
+              <rect width="128" height="128" rx="32" fill="#1F2933"></rect>
+              <rect x="24" y="32" width="80" height="16" rx="8" fill="#FFFFFF"></rect>
+              <circle cx="32" cy="64" r="8" fill="#F26A4F"></circle>
+              <rect x="48" y="56" width="56" height="16" rx="8" fill="#FFFFFF"></rect>
+              <rect x="40" y="80" width="56" height="16" rx="8" fill="#FFFFFF"></rect>
+            </svg>
+          </span>
+          <span class="settings-brand-name">DigestDock</span>
+        </div>
+
+        <nav
+          class="settings-nav"
+          aria-label="设置导航"
+          data-i18n-aria-label="navAriaLabel"
+        >
+          <p class="settings-nav-group" data-i18n="navGroupSettings">设置</p>
+          <a class="settings-nav-item is-active" href="#section-services" aria-current="location" data-i18n="navServices"
+            >服务连接</a
+          >
+          <a class="settings-nav-item" href="#section-transcript" data-i18n="navTranscript"
+            >字幕服务</a
+          >
+          <a class="settings-nav-item" href="#notesBackupCard" data-i18n="navNotes"
+            >笔记与备份</a
+          >
+          <a class="settings-nav-item" href="#section-data" data-i18n="localData"
+            >本地数据</a
+          >
+          <p class="settings-nav-group" data-i18n="navGroupOther">其他</p>
+          <a class="settings-nav-item" href="#section-remix" data-i18n="localRemix"
+            >本地改造</a
+          >
+          <a class="settings-nav-item" href="#section-privacy" data-i18n="navPrivacy"
+            >隐私说明</a
+          >
+        </nav>
+
+        <p class="settings-version">DigestDock 1.4.1</p>
+      </aside>
+
+      <main class="settings-content">
+        <header class="settings-topbar">
+          <div class="settings-topbar-heading">
+            <p class="eyebrow">DigestDock</p>
+            <h1 data-i18n="heading">使用你自己的 API 密钥</h1>
+          </div>
           <div
             class="language-switch"
             role="group"
@@ -34,217 +81,291 @@
               中文
             </button>
           </div>
+        </header>
+
+        <div class="settings-scroll">
+          <p class="lede" data-i18n="lede">
+            密钥仅保存在当前 Chrome 个人资料中。DeepSeek 用于 AI 功能，Supadata
+            是可选服务，用于为新的 YouTube 视频获取原生字幕。本开源扩展没有开发者服务器，也不使用分析服务。
+          </p>
+
+          <form id="settingsForm">
+            <section id="section-services" class="settings-section">
+              <h2 class="settings-section-title" data-i18n="navServices">服务连接</h2>
+              <div class="service-grid">
+                <section class="card service-card" id="section-ai" aria-labelledby="deepseekName">
+                  <div class="service-head">
+                    <span class="service-avatar service-avatar--ai" aria-hidden="true">D</span>
+                    <div class="service-headings">
+                      <h3 id="deepseekName" class="service-name">DeepSeek V4 Flash</h3>
+                      <p class="service-tagline" data-i18n="deepseekTagline">
+                        概览、解释、翻译和笔记润色
+                      </p>
+                    </div>
+                    <span
+                      class="service-status"
+                      id="deepseekStatus"
+                      data-status="unknown"
+                      data-i18n="statusNotConfigured"
+                      >未配置</span
+                    >
+                  </div>
+                  <div class="field">
+                    <div class="field-label-row">
+                      <label for="aiApiKey" data-i18n="deepseekApiKeyLabel"
+                        >DeepSeek API 密钥</label
+                      >
+                      <span class="field-flag field-flag--required" data-i18n="fieldRequired"
+                        >必需</span
+                      >
+                    </div>
+                    <div class="field-input">
+                      <input
+                        id="aiApiKey"
+                        name="aiApiKey"
+                        type="password"
+                        autocomplete="off"
+                        spellcheck="false"
+                        placeholder="粘贴 DeepSeek 密钥"
+                        data-i18n-placeholder="deepseekPlaceholder"
+                      />
+                      <button
+                        class="field-toggle"
+                        type="button"
+                        data-reveal="aiApiKey"
+                        aria-pressed="false"
+                        aria-label="显示或隐藏密钥"
+                        data-i18n-aria-label="toggleKeyVisibility"
+                      >
+                        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                          <path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"></path>
+                          <circle cx="12" cy="12" r="3"></circle>
+                        </svg>
+                      </button>
+                    </div>
+                    <p class="help">
+                      <span data-i18n="deepseekHelp"
+                        >DigestDock 使用 DeepSeek V4 Flash 生成概览、解释内容、翻译字幕和润色笔记。</span
+                      >
+                      <a
+                        href="https://platform.deepseek.com/api_keys"
+                        target="_blank"
+                        rel="noreferrer"
+                        data-i18n="deepseekLink"
+                        >创建 DeepSeek API 密钥</a
+                      ><span data-i18n="deepseekHelpSuffix">。</span>
+                    </p>
+                    <div class="privacy-note" data-i18n="privacyNote">
+                      使用 AI 功能时，DeepSeek 会收到视频字幕及相关视频上下文。保存前请查看
+                      DeepSeek 的服务条款和价格。
+                    </div>
+                  </div>
+                </section>
+
+                <section class="card service-card" id="section-transcript" aria-labelledby="supadataName">
+                  <div class="service-head">
+                    <span class="service-avatar service-avatar--transcript" aria-hidden="true">S</span>
+                    <div class="service-headings">
+                      <h3 id="supadataName" class="service-name">Supadata</h3>
+                      <p class="service-tagline" data-i18n="supadataTagline">
+                        新 YouTube 视频的可选字幕服务
+                      </p>
+                    </div>
+                    <span
+                      class="service-status"
+                      id="supadataStatus"
+                      data-status="unknown"
+                      data-i18n="statusNotConfigured"
+                      >未配置</span
+                    >
+                  </div>
+                  <div class="field">
+                    <div class="field-label-row">
+                      <label for="supadataApiKey" data-i18n="supadataApiKeyLabel"
+                        >Supadata API 密钥（可选）</label
+                      >
+                      <span class="field-flag" data-i18n="fieldOptional">可选</span>
+                    </div>
+                    <div class="field-input">
+                      <input
+                        id="supadataApiKey"
+                        name="supadataApiKey"
+                        type="password"
+                        autocomplete="off"
+                        spellcheck="false"
+                        placeholder="粘贴 Supadata 密钥"
+                        data-i18n-placeholder="supadataPlaceholder"
+                      />
+                      <button
+                        class="field-toggle"
+                        type="button"
+                        data-reveal="supadataApiKey"
+                        aria-pressed="false"
+                        aria-label="显示或隐藏密钥"
+                        data-i18n-aria-label="toggleKeyVisibility"
+                      >
+                        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                          <path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"></path>
+                          <circle cx="12" cy="12" r="3"></circle>
+                        </svg>
+                      </button>
+                    </div>
+                    <p class="help supadata-note">
+                      <span data-i18n="supadataHelp"
+                        >新的 YouTube 字幕由 Supadata 获取。它对整个扩展仍是可选配置，但只有你在侧边栏确认本次使用第三方 Supadata 时才会调用，且逐视频授权；B 站不会使用。</span
+                      >
+                      <a
+                        href="https://dash.supadata.ai/auth/sign-up"
+                        target="_blank"
+                        rel="noreferrer"
+                        data-i18n="supadataLink"
+                        >创建 Supadata 账号并获取密钥</a
+                      ><span data-i18n="supadataHelpSuffix"
+                        >。Supadata 会在引导流程中生成密钥。</span
+                      >
+                    </p>
+                  </div>
+                </section>
+              </div>
+            </section>
+          </form>
+
+          <section class="card" id="notesBackupCard">
+            <h2 data-i18n="notesBackup">笔记备份</h2>
+            <p class="help" id="notesBackupHelp" data-i18n="notesBackupHelp">
+              JSON 备份只包含已保存笔记、语言版本和经过校验的 YouTube 或 B 站媒体身份与时间戳，不包含 API 密钥、设置、完整字幕或摘要缓存。导入会重建安全时间戳链接，与本机笔记合并，并自动跳过重复项。
+            </p>
+            <div class="data-actions">
+              <button
+                id="exportNotesBtn"
+                type="button"
+                aria-describedby="notesBackupHelp"
+                data-i18n="exportNotes"
+              >
+                导出笔记备份
+              </button>
+              <button
+                id="importNotesBtn"
+                type="button"
+                aria-describedby="notesBackupHelp"
+                data-i18n="importNotes"
+              >
+                导入笔记备份
+              </button>
+              <input
+                id="importNotesFile"
+                type="file"
+                accept=".json,application/json"
+                hidden
+              />
+            </div>
+            <span id="backupStatus" role="status" aria-live="polite"></span>
+          </section>
+
+          <section class="card data-card" id="section-data">
+            <h2 data-i18n="localData">本地数据</h2>
+            <p class="help" data-i18n="localDataHelp">
+              摘要、翻译和笔记仅保存在当前 Chrome 个人资料中。你可以随时删除。
+            </p>
+            <div class="data-actions">
+              <button id="clearCacheBtn" type="button" data-i18n="clearCache">
+                清除缓存的摘要
+              </button>
+              <button id="clearNotesBtn" type="button" data-i18n="deleteNotes">
+                删除全部笔记
+              </button>
+              <button
+                id="resetBtn"
+                class="danger"
+                type="button"
+                data-i18n="resetData"
+              >
+                重置扩展数据
+              </button>
+            </div>
+            <span id="dataStatus" role="status" aria-live="polite"></span>
+          </section>
+
+          <details class="card customization-card" id="section-remix">
+            <summary class="customization-summary">
+              <span class="customization-summary-copy">
+                <span class="eyebrow" data-i18n="localRemix">本地改造</span>
+                <span class="customization-title" data-i18n="customizationTitle"
+                  >想使用其他 AI 模型？</span
+                >
+                <span
+                  class="customization-purpose"
+                  data-i18n="customizationPurpose"
+                  >编辑并复制一段可安全交给编程 Agent 的提示词</span
+                >
+              </span>
+              <span class="agent-badge" data-i18n="agentBadge"
+                >可交给编程 Agent</span
+              >
+            </summary>
+            <div class="customization-content">
+              <p class="help customization-intro" data-i18n="customizationIntro">
+                你可以直接编辑提示词。复制前完成以下三步：
+              </p>
+              <ol class="customization-steps">
+                <li data-i18n="customizationStepFolder">
+                  在编程 Agent 中打开 DigestDock 解压后的项目文件夹。
+                </li>
+                <li data-i18n="customizationStepReplace">
+                  把 [PROVIDER] 和 [MODEL] 替换成你想使用的服务和模型。
+                </li>
+                <li data-i18n="customizationStepKeys">
+                  不要在提示词或聊天中加入 API 密钥。代码准备好后，请自行填写。
+                </li>
+              </ol>
+              <label for="customizationPrompt" data-i18n="customizationPromptLabel"
+                >可编辑的自定义提示词</label
+              >
+              <div
+                id="customizationPromptReminder"
+                class="prompt-reminder"
+                role="note"
+                aria-label="提示词提醒"
+                data-i18n-aria-label="customizationReminderLabel"
+              >
+                <span data-i18n="customizationReminder"
+                  >复制前，请先把 [PROVIDER] 和 [MODEL] 替换成你想使用的服务和模型。</span
+                >
+              </div>
+              <textarea id="customizationPrompt" rows="12" aria-describedby="customizationPromptReminder">请把当前本地 DigestDock 工作区改为使用 [PROVIDER] 提供的 [MODEL]。只在当前工作区中操作。编辑前，先确认其中包含 manifest.json，且 manifest 中的 name 是 DigestDock。如果验证失败，请停止，并让我在编程 Agent 中打开 DigestDock 解压后的项目文件夹。不要搜索其他文件夹，不要编辑猜测的副本，不要假设安装路径，也不要声称 Chrome 可以显示操作系统中的绝对源码路径。更新该服务的 API endpoint、请求格式和最少的 Chrome host permissions。保留用户自带密钥模式和 Chrome 本地存储。不要把 API 密钥写入源代码、提交记录、日志、截图、这段提示词或聊天；代码准备好后，请告诉我应该在哪里自行填写密钥。DeepSeek 专用的请求参数和重试逻辑继续只用于 DeepSeek。新服务的专属规则请单独处理，避免相互影响。更新 README.md、README.zh-CN.md、PRIVACY.md、SECURITY.md 和测试。运行 npm test、npm run check 和 npm run package。最后，说明如何重新加载已解压的扩展，并在真实 YouTube 视频上测试。</textarea>
+              <div class="copy-actions">
+                <button
+                  id="copyCustomizationPromptBtn"
+                  type="button"
+                  data-i18n="copyCustomizationPrompt"
+                >
+                  复制编辑后的提示词
+                </button>
+                <span id="copyStatus" role="status" aria-live="polite"></span>
+              </div>
+            </div>
+          </details>
+
+          <section class="card privacy-card" id="section-privacy">
+            <h2 data-i18n="navPrivacy">隐私说明</h2>
+            <p class="help" data-i18n="privacySummary">
+              DigestDock 没有开发者服务器，也不使用分析服务。API 密钥、缓存摘要、翻译和笔记只保存在当前 Chrome 个人资料中。
+            </p>
+            <footer data-i18n-html="footer">
+              完整数据流说明请参阅仓库中的
+              <a href="PRIVACY.md" target="_blank">PRIVACY.md</a>。
+            </footer>
+          </section>
         </div>
-        <h1 data-i18n="heading">使用你自己的 API 密钥</h1>
-        <p class="lede" data-i18n="lede">
-          密钥仅保存在当前 Chrome 个人资料中。DeepSeek 用于 AI 功能，Supadata
-          仅作为可选的 YouTube 字幕回退。本开源扩展没有开发者服务器，也不使用分析服务。
-        </p>
-      </header>
 
-      <form id="settingsForm">
-        <section class="card">
-          <h2 data-i18n="transcriptProvider">YouTube 字幕回退</h2>
-          <label for="supadataApiKey" data-i18n="supadataApiKeyLabel"
-            >Supadata API 密钥（可选）</label
-          >
-          <input
-            id="supadataApiKey"
-            name="supadataApiKey"
-            type="password"
-            autocomplete="off"
-            spellcheck="false"
-            placeholder="粘贴 Supadata 密钥"
-            data-i18n-placeholder="supadataPlaceholder"
-          />
-          <p class="help">
-            <span data-i18n="supadataHelp"
-              >DigestDock 会先直接读取 YouTube 已有字幕轨。本地获取失败后，只有你在侧边栏确认本次使用第三方 Supadata 时才会调用；B 站不会使用。</span
-            >
-            <a
-              href="https://dash.supadata.ai/auth/sign-up"
-              target="_blank"
-              rel="noreferrer"
-              data-i18n="supadataLink"
-              >创建 Supadata 账号并获取密钥</a
-            ><span data-i18n="supadataHelpSuffix"
-              >。Supadata 会在引导流程中生成密钥。</span
-            >
-          </p>
-        </section>
-
-        <section class="card">
-          <h2 data-i18n="aiProvider">AI 服务</h2>
-          <div
-            class="provider-summary"
-            aria-label="支持的 AI 服务"
-            data-i18n-aria-label="providerSummaryLabel"
-          >
-            <span class="provider-name">DeepSeek V4 Flash</span>
-            <span class="provider-badge" data-i18n="providerBadge"
-              >当前版本支持</span
-            >
-          </div>
-
-          <label for="aiApiKey" data-i18n="deepseekApiKeyLabel"
-            >DeepSeek API 密钥</label
-          >
-          <input
-            id="aiApiKey"
-            name="aiApiKey"
-            type="password"
-            autocomplete="off"
-            spellcheck="false"
-            placeholder="粘贴 DeepSeek 密钥"
-            data-i18n-placeholder="deepseekPlaceholder"
-          />
-          <p class="help">
-            <span data-i18n="deepseekHelp"
-              >DigestDock 使用 DeepSeek V4 Flash 生成概览、解释内容、翻译字幕和润色笔记。</span
-            >
-            <a
-              href="https://platform.deepseek.com/api_keys"
-              target="_blank"
-              rel="noreferrer"
-              data-i18n="deepseekLink"
-              >创建 DeepSeek API 密钥</a
-            ><span data-i18n="deepseekHelpSuffix">。</span>
-          </p>
-          <div class="privacy-note" data-i18n="privacyNote">
-            使用 AI 功能时，DeepSeek 会收到视频字幕及相关视频上下文。保存前请查看
-            DeepSeek 的服务条款和价格。
-          </div>
-        </section>
-
-        <div class="form-actions">
-          <button class="primary" type="submit" data-i18n="saveSettings">
+        <div class="settings-savebar">
+          <span id="saveStatus" class="savebar-status" role="status" aria-live="polite"></span>
+          <button class="primary" type="submit" form="settingsForm" data-i18n="saveSettings">
             保存设置
           </button>
-          <span id="saveStatus" role="status" aria-live="polite"></span>
         </div>
-      </form>
-
-      <details class="card customization-card">
-        <summary class="customization-summary">
-          <span class="customization-summary-copy">
-            <span class="eyebrow" data-i18n="localRemix">本地改造</span>
-            <span class="customization-title" data-i18n="customizationTitle"
-              >想使用其他 AI 模型？</span
-            >
-            <span
-              class="customization-purpose"
-              data-i18n="customizationPurpose"
-              >编辑并复制一段可安全交给编程 Agent 的提示词</span
-            >
-          </span>
-          <span class="agent-badge" data-i18n="agentBadge"
-            >可交给编程 Agent</span
-          >
-        </summary>
-        <div class="customization-content">
-          <p class="help customization-intro" data-i18n="customizationIntro">
-            你可以直接编辑提示词。复制前完成以下三步：
-          </p>
-          <ol class="customization-steps">
-            <li data-i18n="customizationStepFolder">
-              在编程 Agent 中打开 DigestDock 解压后的项目文件夹。
-            </li>
-            <li data-i18n="customizationStepReplace">
-              把 [PROVIDER] 和 [MODEL] 替换成你想使用的服务和模型。
-            </li>
-            <li data-i18n="customizationStepKeys">
-              不要在提示词或聊天中加入 API 密钥。代码准备好后，请自行填写。
-            </li>
-          </ol>
-          <label for="customizationPrompt" data-i18n="customizationPromptLabel"
-            >可编辑的自定义提示词</label
-          >
-          <div
-            id="customizationPromptReminder"
-            class="prompt-reminder"
-            role="note"
-            aria-label="提示词提醒"
-            data-i18n-aria-label="customizationReminderLabel"
-          >
-            <span data-i18n="customizationReminder"
-              >复制前，请先把 [PROVIDER] 和 [MODEL] 替换成你想使用的服务和模型。</span
-            >
-          </div>
-          <textarea id="customizationPrompt" rows="12" aria-describedby="customizationPromptReminder">请把当前本地 DigestDock 工作区改为使用 [PROVIDER] 提供的 [MODEL]。只在当前工作区中操作。编辑前，先确认其中包含 manifest.json，且 manifest 中的 name 是 DigestDock。如果验证失败，请停止，并让我在编程 Agent 中打开 DigestDock 解压后的项目文件夹。不要搜索其他文件夹，不要编辑猜测的副本，不要假设安装路径，也不要声称 Chrome 可以显示操作系统中的绝对源码路径。更新该服务的 API endpoint、请求格式和最少的 Chrome host permissions。保留用户自带密钥模式和 Chrome 本地存储。不要把 API 密钥写入源代码、提交记录、日志、截图、这段提示词或聊天；代码准备好后，请告诉我应该在哪里自行填写密钥。DeepSeek 专用的请求参数和重试逻辑继续只用于 DeepSeek。新服务的专属规则请单独处理，避免相互影响。更新 README.md、README.zh-CN.md、PRIVACY.md、SECURITY.md 和测试。运行 npm test、npm run check 和 npm run package。最后，说明如何重新加载已解压的扩展，并在真实 YouTube 视频上测试。</textarea>
-          <div class="copy-actions">
-            <button
-              id="copyCustomizationPromptBtn"
-              type="button"
-              data-i18n="copyCustomizationPrompt"
-            >
-              复制编辑后的提示词
-            </button>
-            <span id="copyStatus" role="status" aria-live="polite"></span>
-          </div>
-        </div>
-      </details>
-
-      <section class="card" id="notesBackupCard">
-        <h2 data-i18n="notesBackup">笔记备份</h2>
-        <p class="help" id="notesBackupHelp" data-i18n="notesBackupHelp">
-          JSON 备份只包含已保存笔记、语言版本和经过校验的 YouTube 或 B 站媒体身份与时间戳，不包含 API 密钥、设置、完整字幕或摘要缓存。导入会重建安全时间戳链接，与本机笔记合并，并自动跳过重复项。
-        </p>
-        <div class="data-actions">
-          <button
-            id="exportNotesBtn"
-            type="button"
-            aria-describedby="notesBackupHelp"
-            data-i18n="exportNotes"
-          >
-            导出笔记备份
-          </button>
-          <button
-            id="importNotesBtn"
-            type="button"
-            aria-describedby="notesBackupHelp"
-            data-i18n="importNotes"
-          >
-            导入笔记备份
-          </button>
-          <input
-            id="importNotesFile"
-            type="file"
-            accept=".json,application/json"
-            hidden
-          />
-        </div>
-        <span id="backupStatus" role="status" aria-live="polite"></span>
-      </section>
-
-      <section class="card data-card">
-        <h2 data-i18n="localData">本地数据</h2>
-        <p class="help" data-i18n="localDataHelp">
-          摘要、翻译和笔记仅保存在当前 Chrome 个人资料中。你可以随时删除。
-        </p>
-        <div class="data-actions">
-          <button id="clearCacheBtn" type="button" data-i18n="clearCache">
-            清除缓存的摘要
-          </button>
-          <button id="clearNotesBtn" type="button" data-i18n="deleteNotes">
-            删除全部笔记
-          </button>
-          <button
-            id="resetBtn"
-            class="danger"
-            type="button"
-            data-i18n="resetData"
-          >
-            重置扩展数据
-          </button>
-        </div>
-        <span id="dataStatus" role="status" aria-live="polite"></span>
-      </section>
-
-      <footer data-i18n-html="footer">
-        完整数据流说明请参阅仓库中的
-        <a href="PRIVACY.md" target="_blank">PRIVACY.md</a>。
-      </footer>
-    </main>
+      </main>
+    </div>
 
     <script src="settings.js"></script>
     <script src="notes-backup.js"></script>
