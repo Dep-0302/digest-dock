@@ -371,11 +371,17 @@ test("inserts one Digest button immediately before Bilibili's native note button
   assert.equal(buttons.length, 1);
   assert.equal(harness.toolbar.children[0], buttons[0]);
   assert.equal(harness.toolbar.children[1], harness.nativeNote);
-  // Icon-only brand opener: no "▶" glyph child, no "DigestDock" text child,
-  // accessible name via aria-label, and a self-contained inline-SVG icon.
+  // Compact icon + DDK opener with the full name kept in the accessible label.
   assert.equal(buttons[0].children.length, 0);
+  assert.equal(buttons[0].textContent, "DDK");
   assert.equal(buttons[0].attributes["aria-label"], "打开 DigestDock");
+  assert.match(buttons[0].style.cssText, /min-width:\s*68px/);
+  assert.match(buttons[0].style.cssText, /background-size:\s*26px 26px/);
+  assert.match(buttons[0].style.cssText, /font:\s*700 12\.5px/);
   assert.match(buttons[0].style.cssText, /data:image\/svg\+xml/);
+  assert.match(buttons[0].style.cssText, /%230A5FE9/i);
+  assert.match(buttons[0].style.cssText, /%2304B7D2/i);
+  assert.match(buttons[0].style.cssText, /%23D8F7FF/i);
 
   await buttons[0].emit("click", {
     preventDefault() {},
@@ -497,30 +503,41 @@ test("DigestDock keeps legacy Bilibili controls separate", async () => {
   assert.equal(legacyNoteButton.isConnected, true);
 });
 
-test("the player note button uses the neutral graphite bookmark control, not a coral pill", () => {
+test("the player note button uses exact 20/50 default and 100 hover opacity", async () => {
   const harness = createHarness();
 
   assert.equal(harness.context.biliInjectNoteButton(), true);
   const noteButton = harness.document.getElementById(BILI_NOTE_BUTTON_ID);
   assert.ok(noteButton);
-  // Deep graphite surface with a ~10px radius and a restrained neutral shadow.
-  assert.match(noteButton.style.cssText, /background-color:\s*#1f2933/i);
+  assert.match(noteButton.style.cssText, /background-image:[^;]*linear-gradient\(/i);
+  assert.match(noteButton.style.cssText, /rgba\(10, 95, 233, 0\.2\)/i);
+  assert.match(noteButton.style.cssText, /rgba\(8, 127, 232, 0\.2\)/i);
+  assert.match(noteButton.style.cssText, /rgba\(4, 183, 210, 0\.2\)/i);
+  assert.match(
+    noteButton.style.cssText,
+    /color:\s*rgba\(255, 255, 255, 0\.5\)/i,
+  );
+  assert.match(noteButton.style.cssText, /stroke-opacity%3D%220\.5%22/i);
+  assert.match(noteButton.style.cssText, /backdrop-filter:\s*blur\(6px\)/i);
+  assert.match(noteButton.style.cssText, /min-width:\s*128px/);
   assert.match(noteButton.style.cssText, /border-radius:\s*10px/);
   assert.match(
     noteButton.style.cssText,
-    /box-shadow:\s*0 4px 12px rgba\(23, 33, 42/,
+    /box-shadow:\s*0 8px 18px rgba\(4, 73, 139/,
   );
-  // The old coral circle/pill is gone.
-  assert.doesNotMatch(noteButton.style.cssText, /border-radius:\s*999px/);
-  assert.doesNotMatch(noteButton.style.cssText, /#c8674f/i);
-  // Text-free icon control: the bookmark renders as a background image, no
-  // text child, and the accessible name lives on aria-label.
+  // Background SVG icon + exact visible label, with matching accessible name.
   assert.equal(noteButton.children.length, 0);
   assert.match(noteButton.style.cssText, /data:image\/svg\+xml/);
-  assert.equal(
-    noteButton.attributes["aria-label"],
-    "用 DigestDock 保存当前时刻的笔记（快捷键 N）",
-  );
+  assert.equal(noteButton.textContent, "金句速记 (N)");
+  assert.equal(noteButton.attributes["aria-label"], "金句速记 (N)");
+
+  await noteButton.emit("mouseenter");
+  assert.match(noteButton.style.backgroundImage, /#0a5fe9/i);
+  assert.match(noteButton.style.backgroundImage, /#04b7d2/i);
+  assert.equal(noteButton.style.color, "#ffffff");
+  await noteButton.emit("mouseleave");
+  assert.match(noteButton.style.backgroundImage, /rgba\(10, 95, 233, 0\.2\)/i);
+  assert.equal(noteButton.style.color, "rgba(255, 255, 255, 0.5)");
 });
 
 test("note feedback renders hostile dynamic content as text and rejects unsafe URLs", () => {
