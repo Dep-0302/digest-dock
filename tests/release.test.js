@@ -45,12 +45,12 @@ test("manifest uses minimized install-time permissions", () => {
   assert.equal(manifest.version, "1.4.0");
 });
 
-test("cross-platform runtime dependencies are included in the release surface", () => {
+test("cross-platform runtime dependencies match the API-primary release surface", () => {
   const background = read("background.js");
   const optionsPage = read("options.html");
   const releaseCheck = read("scripts/check-release.sh");
 
-  assert.match(background, /importScripts\("youtube-transcript\.js"\)/);
+  assert.doesNotMatch(background, /importScripts\("youtube-transcript\.js"\)/);
   assert.match(background, /importScripts\("notes-backup\.js"\)/);
   assert.ok(
     optionsPage.indexOf('<script src="notes-backup.js"></script>') <
@@ -61,17 +61,14 @@ test("cross-platform runtime dependencies are included in the release surface", 
     (releaseCheck.match(/"notes-backup\.js"/g) || []).length >= 2,
     "notes-backup.js must be both allowlisted and required for release",
   );
-  for (const file of [
-    "youtube-transcript.js",
-    "bilibili.js",
-    "content-bilibili.js",
-  ]) {
+  for (const file of ["bilibili.js", "content-bilibili.js"]) {
     assert.ok(
       (releaseCheck.match(new RegExp(`"${file.replace(".", "\\.")}"`, "g")) || [])
         .length >= 2,
       `${file} must be both allowlisted and required for release`,
     );
   }
+  assert.doesNotMatch(releaseCheck, /"youtube-transcript\.js"/);
   const publicAllowlist = releaseCheck.match(
     /public_allowlist=\(([\s\S]*?)\n\)/,
   )?.[1];
@@ -176,7 +173,7 @@ test("release copy documents current scope without em dashes", () => {
   assert.match(readme, /docs\.supadata\.ai\/get-transcript/i);
   assert.match(readme, /dash\.supadata\.ai\/auth\/sign-up/i);
   assert.match(readme, /saved key is never used automatically/i);
-  assert.match(readme, /user confirms that attempt/i);
+  assert.match(readme, /asks whether to use Supadata for that video attempt/i);
   assert.match(readme, /platform\.deepseek\.com\/api_keys/i);
   assert.match(readme, /api-docs\.deepseek\.com/i);
   assert.match(readme, /api-docs\.deepseek\.com\/quick_start\/pricing/i);
@@ -194,8 +191,8 @@ test("release copy documents current scope without em dashes", () => {
   assert.match(chineseReadme, /\u7ea6 32,600 \u4e2a\u8f93\u5165 token/);
   assert.match(chineseReadme, /\$0\.002[^\n]*\$0\.006 USD/);
   assert.match(chineseReadme, /dash\.supadata\.ai\/auth\/sign-up/i);
-  assert.match(chineseReadme, /已保存的 Key 也不会被自动使用/);
-  assert.match(chineseReadme, /用户在侧边栏确认本次使用/);
+  assert.match(chineseReadme, /保存 Key 不等于持续授权/);
+  assert.match(chineseReadme, /由你逐视频确认本次请求/);
   assert.match(chineseReadme, /platform\.deepseek\.com\/api_keys/i);
   assert.match(readme, /^### The Digest button is missing on a video$/m);
   assert.match(
@@ -325,7 +322,6 @@ test("notes filters preserve selected contrast and expose pressed state", () => 
 test("runtime has no source-file credential dependency or retired model", () => {
   const runtime = [
     "background.js",
-    "youtube-transcript.js",
     "bilibili.js",
     "content-bilibili.js",
     "content.js",

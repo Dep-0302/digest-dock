@@ -6,7 +6,7 @@
  */
 
 const DEBUG = false;
-const REQUIRED_RUNTIME_PROTOCOL_VERSION = 8;
+const REQUIRED_RUNTIME_PROTOCOL_VERSION = 9;
 const debugLog = (...args) => {
   if (DEBUG) console.log(...args);
 };
@@ -98,7 +98,7 @@ const TRANSLATION_MESSAGE_TIMEOUT_MS = 130_000;
 const NOTES_MANUAL_RETRY_DEBOUNCE_MS = 400;
 const NOTE_TRANSLATION_VALIDATION_VERSION = 1;
 const TRANSCRIPT_TRANSLATION_CACHE_VERSION = 2;
-const TRANSCRIPT_SOURCE_POLICY_VERSION = 3;
+const TRANSCRIPT_SOURCE_POLICY_VERSION = 4;
 
 function sanitizeTranscriptSelectedTrack(track) {
   if (!track || typeof track !== "object") return null;
@@ -119,10 +119,7 @@ function sanitizeTranscriptSelectedTrack(track) {
 }
 
 function transcriptSourceLabel() {
-  if (currentTranscriptSource === "supadata") return "Supadata 兜底字幕";
-  if (currentTranscriptSource === "youtube-timedtext") {
-    return "YouTube 本地字幕";
-  }
+  if (currentTranscriptSource === "supadata") return "Supadata 原生字幕";
   if (currentTranscriptSource === "bilibili") return "B 站视频字幕";
   return "来自视频字幕";
 }
@@ -1153,10 +1150,11 @@ async function runDigestLoad(
       showSupadataConsent(async () => {
         if (!isCurrentDigest(videoId, generation, routeKey)) return;
         const requestKey = `${generation}:${videoId}`;
-        // A same-video refresh may already own the ordinary local-only
+        // A same-video refresh may already own the ordinary consent-gated
         // single-flight. Wait for it to finish, then start a fresh consented
-        // attempt. This preserves ordering without running local-only and
-        // Supadata-authorized requests in parallel or swallowing the click.
+        // attempt. This preserves ordering without running the unconsented
+        // probe and the Supadata-authorized request in parallel or swallowing
+        // the click.
         await runDigestSingleFlight(
           requestKey,
           async () => undefined,
@@ -1174,20 +1172,38 @@ async function runDigestLoad(
               true,
             ),
         );
-      }, transcriptResult);
+      });
       return;
     }
     if (transcriptResult.error === "SUPADATA_NOT_CONFIGURED") {
       showSupadataNotConfigured(
-        transcriptResult.message || "未能直接读取 YouTube 原生字幕。",
+        transcriptResult.message ||
+          "新的 YouTube 字幕需要 Supadata。请在设置中配置密钥后逐次授权。",
       );
       return;
     }
     if (transcriptResult.error === "RATE_LIMITED") {
-      showNativeTranscriptRetry(
-        "YouTube 暂时限流",
-        transcriptResult.message || "请稍后重试 YouTube 原生字幕。",
+      showSupadataRateLimited(
+        transcriptResult.message ||
+          "Supadata 请求已达速率上限，请稍后再授权重试。",
       );
+      return;
+    }
+    if (transcriptResult.error === "INVALID_SUPADATA_KEY") {
+      showSupadataInvalidKey(transcriptResult.message);
+      return;
+    }
+    if (
+      [
+        "PROVIDER_TIMEOUT",
+        "RESPONSE_TOO_LARGE",
+        "NETWORK_ERROR",
+        "PROVIDER_HTTP_ERROR",
+        "PROVIDER_FAILED",
+        "PROVIDER_ERROR",
+      ].includes(transcriptResult.error)
+    ) {
+      showSupadataProviderError(transcriptResult.message);
       return;
     }
     showError(
@@ -1860,66 +1876,10 @@ function showError(title, message) {
   }
 }
 
-function safeDiagnosticToken(value, fallback = "-") {
-  const token = String(value || "")
-    .replace(/[^A-Za-z0-9_-]/g, "")
-    .slice(0, 48);
-  return token || fallback;
-}
-
-function formatLocalTranscriptDiagnostics(result = {}) {
-  const attempts = Array.isArray(result.attempts)
-    ? result.attempts.slice(0, 6)
-    : [];
-  if (!attempts.length) return "";
-  const lines = attempts.map((attempt) => {
-    const source = safeDiagnosticToken(attempt?.sourceAttempt, "UNKNOWN");
-    const outcome = safeDiagnosticToken(attempt?.outcome);
-    const playability = safeDiagnosticToken(attempt?.playability);
-    const playerStatus = Number(attempt?.player?.status);
-    const error = safeDiagnosticToken(attempt?.error);
-    const formats = (Array.isArray(attempt?.formats) ? attempt.formats : [])
-      .slice(0, 8)
-      .map((format) => {
-        const name = safeDiagnosticToken(format?.format, "format");
-        const status = Number(format?.status);
-        const bytes = Number(format?.bytes);
-        const segments = Number(format?.segmentCount);
-        const formatError = safeDiagnosticToken(format?.error);
-        return [
-          name,
-          Number.isFinite(status) ? `HTTP${status}` : formatError,
-          Number.isFinite(bytes) ? `${bytes}B` : null,
-          Number.isFinite(segments) ? `${segments}段` : null,
-        ]
-          .filter(Boolean)
-          .join("/");
-      })
-      .join(",");
-    return [
-      source,
-      outcome !== "-" ? outcome : null,
-      playability !== "-" ? playability : null,
-      Number.isFinite(playerStatus) ? `playerHTTP${playerStatus}` : null,
-      error !== "-" ? error : null,
-      formats || null,
-    ]
-      .filter(Boolean)
-      .join(" · ");
-  });
-  const code = safeDiagnosticToken(
-    result.localError || result.error,
-    "LOCAL_TRANSCRIPT_FAILED",
-  );
-  return `\n\n本地诊断：${code}\n${lines.join("\n")}`.slice(0, 1800);
-}
-
-function showSupadataConsent(onConfirm, transcriptResult = {}) {
-  const diagnostics = formatLocalTranscriptDiagnostics(transcriptResult);
+function showSupadataConsent(onConfirm) {
   showError(
-    "是否使用第三方字幕服务？",
-    "未能直接读取 YouTube 原生字幕。你可以选择本次使用 Supadata 重试；点击后会把此视频的标准 YouTube 链接发送给 Supadata，并可能消耗你的 API 额度。" +
-      diagnostics,
+    "是否使用 Supadata 获取字幕？",
+    "此视频将通过 Supadata 获取 YouTube 原生字幕。点击后会把此视频的标准 YouTube 链接发送给 Supadata，并可能消耗你的 API 额度。",
   );
   const primaryButton = document.getElementById("errorBtn");
   const secondaryButton = document.getElementById("errorSecondaryBtn");
@@ -1947,34 +1907,66 @@ function showSupadataConsent(onConfirm, transcriptResult = {}) {
     }
   };
   errorSecondaryAction = () => {
-    showNativeTranscriptRetry(
-      "继续使用 YouTube 原生字幕",
-      "没有向 Supadata 发送视频链接。",
-    );
+    showSupadataDeclined();
   };
   primaryButton.focus();
 }
 
-function showNativeTranscriptRetry(title, lead) {
+// After the user declines the third-party request, stay in a safe no-transcript
+// state. Do NOT offer a native retry that would immediately send a request; the
+// mainline has no local YouTube caption path. The default primary re-opens the
+// same single-attempt consent prompt (it never sends a request on its own).
+function showSupadataDeclined() {
   showError(
-    title,
-    `${lead} 你可以重试原生字幕读取。失败可能来自字幕轨尚未加载、YouTube 临时返回空响应、视频本身没有字幕，或当前网络与地区限制。可先刷新页面；若正在使用 VPN 或代理，可切换节点或暂时关闭后再试。`,
+    "已跳过 Supadata 字幕",
+    "没有向 Supadata 发送视频链接。此视频暂时没有可用字幕。如需字幕，可重新在侧栏本次授权 Supadata，或在设置中调整可选配置。",
   );
-  document.getElementById("errorBtn").textContent =
-    "重试 YouTube 原生字幕";
-}
-
-function showSupadataNotConfigured(message) {
-  showNativeTranscriptRetry("未能直接读取字幕", message);
-  const primaryButton = document.getElementById("errorBtn");
   const secondaryButton = document.getElementById("errorSecondaryBtn");
-  primaryButton.textContent = "重试 YouTube 原生字幕";
   if (secondaryButton) {
-    secondaryButton.textContent = "配置可选 Supadata 回退";
+    secondaryButton.textContent = "打开设置";
     secondaryButton.hidden = false;
   }
   errorSecondaryAction = () =>
     chrome.runtime.sendMessage({ action: "openOptions" });
+}
+
+// A Supadata 429. The message must make clear this is Supadata's rate limit,
+// never YouTube's. The background keeps a bounded cooldown, so an immediate
+// retry stays local until it clears.
+function showSupadataRateLimited(message) {
+  showError(
+    "Supadata 暂时限流",
+    message ||
+      "Supadata 请求已达速率上限，请稍后再授权重试。这是 Supadata 的限流，并非 YouTube。",
+  );
+}
+
+function showSupadataNotConfigured(message) {
+  showError(
+    "未配置 Supadata",
+    message ||
+      "新的 YouTube 字幕需要 Supadata。请在设置中配置可选的 Supadata 密钥，然后回到侧栏逐次授权。",
+  );
+  const primaryButton = document.getElementById("errorBtn");
+  primaryButton.textContent = "打开设置";
+  errorAction = () => chrome.runtime.sendMessage({ action: "openOptions" });
+}
+
+function showSupadataInvalidKey(message) {
+  showError(
+    "Supadata 密钥无效",
+    message || "请在设置中更新 Supadata API 密钥后重新授权。",
+  );
+  const primaryButton = document.getElementById("errorBtn");
+  primaryButton.textContent = "打开设置";
+  errorAction = () => chrome.runtime.sendMessage({ action: "openOptions" });
+}
+
+function showSupadataProviderError(message) {
+  showError(
+    "Supadata 获取失败",
+    message || "Supadata 暂时不可用，请稍后重新授权重试。",
+  );
 }
 
 function showPageRefreshRequired(tabId, message) {
@@ -2538,6 +2530,17 @@ async function loadFromCache(videoId) {
     if (
       cached.transcriptSourcePolicyVersion !== TRANSCRIPT_SOURCE_POLICY_VERSION
     ) {
+      return null;
+    }
+    // v4 binds every cached transcript to the active platform provider. A
+    // legacy or unknown YouTube source must never masquerade as an authorized
+    // Supadata result; Bilibili caches remain isolated to their own adapter.
+    const cachedPlatform =
+      cached.mediaRef?.platform ||
+      (String(videoId).startsWith("bilibili:") ? "bilibili" : "youtube");
+    const expectedSource =
+      cachedPlatform === "bilibili" ? "bilibili" : "supadata";
+    if (cached.transcriptSource !== expectedSource) {
       return null;
     }
 
@@ -3752,6 +3755,5 @@ globalThis.__YTD_TRANSCRIPT_TESTING__ = {
   renderTranscriptSegmentContent,
   extractMediaLocator,
   transcriptTranslationCacheKey,
-  formatLocalTranscriptDiagnostics,
   formatTimecode,
 };

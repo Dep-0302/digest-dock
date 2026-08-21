@@ -32,7 +32,7 @@
             >服务连接</a
           >
           <a class="settings-nav-item" href="#section-transcript" data-i18n="navTranscript"
-            >字幕回退</a
+            >字幕服务</a
           >
           <a class="settings-nav-item" href="#notesBackupCard" data-i18n="navNotes"
             >笔记与备份</a
@@ -86,7 +86,7 @@
         <div class="settings-scroll">
           <p class="lede" data-i18n="lede">
             密钥仅保存在当前 Chrome 个人资料中。DeepSeek 用于 AI 功能，Supadata
-            仅作为可选的 YouTube 字幕回退。本开源扩展没有开发者服务器，也不使用分析服务。
+            是可选服务，用于为新的 YouTube 视频获取原生字幕。本开源扩展没有开发者服务器，也不使用分析服务。
           </p>
 
           <form id="settingsForm">
@@ -168,7 +168,7 @@
                     <div class="service-headings">
                       <h3 id="supadataName" class="service-name">Supadata</h3>
                       <p class="service-tagline" data-i18n="supadataTagline">
-                        YouTube 字幕的可选回退
+                        新 YouTube 视频的可选字幕服务
                       </p>
                     </div>
                     <span
@@ -212,7 +212,7 @@
                     </div>
                     <p class="help supadata-note">
                       <span data-i18n="supadataHelp"
-                        >DigestDock 会先直接读取 YouTube 已有字幕轨。本地获取失败后，只有你在侧边栏确认本次使用第三方 Supadata 时才会调用；B 站不会使用。</span
+                        >新的 YouTube 字幕由 Supadata 获取。它对整个扩展仍是可选配置，但只有你在侧边栏确认本次使用第三方 Supadata 时才会调用，且逐视频授权；B 站不会使用。</span
                       >
                       <a
                         href="https://dash.supadata.ai/auth/sign-up"

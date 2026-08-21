@@ -752,9 +752,9 @@ async function saveCurrentNote() {
     } else {
       const label =
         result.error === "SUPADATA_CONSENT_REQUIRED"
-          ? "请在侧栏确认"
+          ? "请在侧栏授权"
           : result.error === "SUPADATA_NOT_CONFIGURED"
-            ? "可在设置中配置回退"
+            ? "需在设置配置 Supadata"
             : "出错了";
       setNoteButtonState(label);
       console.error("[DigestDock] Save note error:", result.error);

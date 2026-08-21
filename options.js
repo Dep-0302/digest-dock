@@ -12,11 +12,11 @@ const YTD_OPTIONS = (() => {
       navGroupSettings: "Settings",
       navGroupOther: "Other",
       navServices: "Service connections",
-      navTranscript: "Transcript fallback",
+      navTranscript: "Transcript provider",
       navNotes: "Notes & backup",
       navPrivacy: "Privacy",
       deepseekTagline: "Overviews, explanations, translation, and note polishing",
-      supadataTagline: "Optional fallback for YouTube transcripts",
+      supadataTagline: "Optional provider for new YouTube transcripts",
       statusConfigured: "Configured",
       statusNotConfigured: "Not configured",
       fieldRequired: "Required",
@@ -28,12 +28,12 @@ const YTD_OPTIONS = (() => {
       unsavedChanges: "You have unsaved changes.",
       heading: "Bring your own API keys",
       lede:
-        "Keys stay in this Chrome profile. DeepSeek powers AI features, and Supadata is an optional YouTube transcript fallback. This open-source extension has no developer server or analytics.",
-      transcriptProvider: "YouTube transcript fallback",
+        "Keys stay in this Chrome profile. DeepSeek powers AI features, and Supadata is the optional provider that fetches native captions for new YouTube videos. This open-source extension has no developer server or analytics.",
+      transcriptProvider: "YouTube transcript provider",
       supadataApiKeyLabel: "Supadata API key (optional)",
       supadataPlaceholder: "Paste your Supadata key",
       supadataHelp:
-        "DigestDock first reads existing caption tracks directly from YouTube. If local retrieval fails, Supadata is called only after you confirm that one third-party request in the side panel. Bilibili does not use it. ",
+        "New YouTube captions are fetched through Supadata. It stays optional for the extension, but Supadata is called only after you confirm that one third-party request in the side panel, once per video. Bilibili does not use it. ",
       supadataLink: "Create a Supadata account and key",
       supadataHelpSuffix:
         ". Supadata generates the key during onboarding.",
@@ -82,9 +82,10 @@ const YTD_OPTIONS = (() => {
       footer:
         'Read <a href="PRIVACY.md" target="_blank">PRIVACY.md</a> in the repository for the complete data-flow description.',
       migrationWarning:
-        "Custom provider settings were removed safely. Your optional Supadata fallback key was kept, but the AI key was cleared. Enter a DeepSeek API key to continue.",
+        "Custom provider settings were removed safely. Your optional Supadata key was kept, but the AI key was cleared. Enter a DeepSeek API key to continue.",
       saving: "Saving…",
-      addSupadataKey: "Add a Supadata API key to enable the optional fallback.",
+      addSupadataKey:
+        "Add a Supadata API key to fetch native captions for new YouTube videos after per-attempt consent.",
       addDeepseekKey: "Add a DeepSeek API key.",
       saved: "Saved. Reopen DigestDock to use these settings.",
       saveFailed: "Could not save settings. Please try again.",
@@ -136,11 +137,11 @@ const YTD_OPTIONS = (() => {
       navGroupSettings: "设置",
       navGroupOther: "其他",
       navServices: "服务连接",
-      navTranscript: "字幕回退",
+      navTranscript: "字幕服务",
       navNotes: "笔记与备份",
       navPrivacy: "隐私说明",
       deepseekTagline: "概览、解释、翻译和笔记润色",
-      supadataTagline: "YouTube 字幕的可选回退",
+      supadataTagline: "新 YouTube 视频的可选字幕服务",
       statusConfigured: "已配置",
       statusNotConfigured: "未配置",
       fieldRequired: "必需",
@@ -152,12 +153,12 @@ const YTD_OPTIONS = (() => {
       unsavedChanges: "有未保存的更改。",
       heading: "使用你自己的 API 密钥",
       lede:
-        "密钥仅保存在当前 Chrome 个人资料中。DeepSeek 用于 AI 功能，Supadata 仅作为可选的 YouTube 字幕回退。本开源扩展没有开发者服务器，也不使用分析服务。",
-      transcriptProvider: "YouTube 字幕回退",
+        "密钥仅保存在当前 Chrome 个人资料中。DeepSeek 用于 AI 功能，Supadata 是可选服务，用于为新的 YouTube 视频获取原生字幕。本开源扩展没有开发者服务器，也不使用分析服务。",
+      transcriptProvider: "YouTube 字幕服务",
       supadataApiKeyLabel: "Supadata API 密钥（可选）",
       supadataPlaceholder: "粘贴 Supadata 密钥",
       supadataHelp:
-        "DigestDock 会先直接读取 YouTube 已有字幕轨。本地获取失败后，只有你在侧边栏确认本次使用第三方 Supadata 时才会调用；B 站不会使用。",
+        "新的 YouTube 字幕由 Supadata 获取。它对整个扩展仍是可选配置，但只有你在侧边栏确认本次使用第三方 Supadata 时才会调用，且逐视频授权；B 站不会使用。",
       supadataLink: "创建 Supadata 账号并获取密钥",
       supadataHelpSuffix: "。Supadata 会在引导流程中生成密钥。",
       aiProvider: "AI 服务",
@@ -204,9 +205,10 @@ const YTD_OPTIONS = (() => {
       footer:
         '完整数据流说明请参阅仓库中的 <a href="PRIVACY.md" target="_blank">PRIVACY.md</a>。',
       migrationWarning:
-        "已安全移除自定义服务设置。可选的 Supadata 回退密钥已保留，AI 密钥已清除。请输入 DeepSeek API 密钥以继续使用。",
+        "已安全移除自定义服务设置。可选的 Supadata 密钥已保留，AI 密钥已清除。请输入 DeepSeek API 密钥以继续使用。",
       saving: "正在保存…",
-      addSupadataKey: "如需启用可选回退，请添加 Supadata API 密钥。",
+      addSupadataKey:
+        "为新的 YouTube 视频获取原生字幕，请添加可选的 Supadata API 密钥（每次逐一授权）。",
       addDeepseekKey: "请添加 DeepSeek API 密钥。",
       saved: "已保存。请重新打开 DigestDock 以使用这些设置。",
       saveFailed: "无法保存设置，请重试。",
