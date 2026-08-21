@@ -31,9 +31,16 @@ const DIGESTDOCK_BILIBILI_BRAND_ICON =
   "data:image/svg+xml," +
   encodeURIComponent(
     '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">' +
-      '<rect width="128" height="128" rx="32" fill="#1F2933"/>' +
+      '<defs><linearGradient id="dd-base" x1="12" y1="8" x2="116" y2="120" gradientUnits="userSpaceOnUse">' +
+      '<stop offset="0" stop-color="#0A5FE9"/><stop offset="0.46" stop-color="#087FE8"/>' +
+      '<stop offset="1" stop-color="#04B7D2"/></linearGradient>' +
+      '<radialGradient id="dd-glow" cx="0" cy="0" r="1" gradientTransform="translate(86 88) rotate(-132) scale(72 68)" gradientUnits="userSpaceOnUse">' +
+      '<stop stop-color="#30CFE5" stop-opacity="0.72"/><stop offset="1" stop-color="#0B80E8" stop-opacity="0"/>' +
+      '</radialGradient></defs>' +
+      '<rect width="128" height="128" rx="32" fill="url(#dd-base)"/>' +
+      '<rect width="128" height="128" rx="32" fill="url(#dd-glow)"/>' +
       '<rect x="24" y="32" width="80" height="16" rx="8" fill="#FFFFFF"/>' +
-      '<circle cx="32" cy="64" r="8" fill="#F26A4F"/>' +
+      '<circle cx="32" cy="64" r="8" fill="#D8F7FF"/>' +
       '<rect x="48" y="56" width="56" height="16" rx="8" fill="#FFFFFF"/>' +
       '<rect x="40" y="80" width="56" height="16" rx="8" fill="#FFFFFF"/>' +
       "</svg>",
@@ -48,6 +55,16 @@ const DIGESTDOCK_BILIBILI_NOTE_ICON =
       '<line x1="15" y1="6" x2="21" y2="6"/>' +
       "</svg>",
   );
+const DIGESTDOCK_BILIBILI_NOTE_ICON_MUTED =
+  "data:image/svg+xml," +
+  encodeURIComponent(
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" ' +
+      'stroke="#FFFFFF" stroke-opacity="0.5" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+      '<path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h6"/>' +
+      '<line x1="18" y1="3" x2="18" y2="9"/>' +
+      '<line x1="15" y1="6" x2="21" y2="6"/>' +
+      "</svg>",
+  );
 const DIGESTDOCK_BILIBILI_CHECK_ICON =
   "data:image/svg+xml," +
   encodeURIComponent(
@@ -57,14 +74,14 @@ const DIGESTDOCK_BILIBILI_CHECK_ICON =
       "</svg>",
   );
 
-// Neutral graphite styling for the player note control, matching
-// docs/design/final-icons-and-entry.jpg: a deep graphite surface, white
-// bookmark icon, ~10px radius (not a full pill/circle), and a restrained
-// neutral shadow. The transient "saved" success color reuses the shared
-// success green before restoring graphite.
-const DIGESTDOCK_BILIBILI_NOTE_BG = "#1f2933";
+const DIGESTDOCK_BILIBILI_NOTE_LABEL = "金句速记 (N)";
+const DIGESTDOCK_BILIBILI_NOTE_GRADIENT =
+  "linear-gradient(135deg, rgba(10, 95, 233, 0.2) 0%, rgba(8, 127, 232, 0.2) 52%, rgba(4, 183, 210, 0.2) 100%)";
+const DIGESTDOCK_BILIBILI_NOTE_GRADIENT_HOVER =
+  "linear-gradient(135deg, #0a5fe9 0%, #087fe8 52%, #04b7d2 100%)";
 const DIGESTDOCK_BILIBILI_NOTE_SUCCESS_BG = "#2c8a65";
-const DIGESTDOCK_BILIBILI_NOTE_SHADOW = "0 4px 12px rgba(23, 33, 42, 0.24)";
+const DIGESTDOCK_BILIBILI_NOTE_SHADOW =
+  "0 8px 18px rgba(4, 73, 139, 0.24)";
 
 let biliDigestButton = null;
 let biliNoteButton = null;
@@ -198,22 +215,28 @@ function biliCreateDigestButton() {
   button.type = "button";
   button.setAttribute("aria-label", "打开 DigestDock");
   button.setAttribute("title", "DigestDock");
-  // Icon-only brand button — no "▶" character and no repeated brand text.
+  button.textContent = "DDK";
+  // Compact brand icon + DDK label — no ambiguous "▶" character.
   button.style.cssText = `
     display: inline-flex;
     align-items: center;
-    justify-content: center;
-    width: 34px;
+    justify-content: flex-start;
+    width: auto;
+    min-width: 68px;
     height: 34px;
-    padding: 0;
+    padding: 0 11px 0 36px;
     margin-right: 10px;
     border: 0;
     border-radius: 10px;
     background-color: transparent;
     background-image: url("${DIGESTDOCK_BILIBILI_BRAND_ICON}");
     background-repeat: no-repeat;
-    background-position: center;
-    background-size: 24px 24px;
+    background-position: 6px center;
+    background-size: 26px 26px;
+    color: inherit;
+    font: 700 12.5px/1 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    letter-spacing: 0.01em;
+    white-space: nowrap;
     cursor: pointer;
     flex: 0 0 auto;
   `;
@@ -338,12 +361,13 @@ function biliCreateNoteButton() {
     id: BILI_NOTE_BUTTON_ID,
   });
   button.type = "button";
-  // Icon-only bookmark-plus control — no "✎" character and no long text.
+  // Bookmark-plus + text control — no ambiguous glyph-only action.
   button.setAttribute(
     "aria-label",
-    "用 DigestDock 保存当前时刻的笔记（快捷键 N）",
+    DIGESTDOCK_BILIBILI_NOTE_LABEL,
   );
-  button.setAttribute("title", "保存当前时刻（N）");
+  button.setAttribute("title", DIGESTDOCK_BILIBILI_NOTE_LABEL);
+  button.textContent = DIGESTDOCK_BILIBILI_NOTE_LABEL;
   button.style.cssText = `
     position: absolute;
     top: 16px;
@@ -351,23 +375,45 @@ function biliCreateNoteButton() {
     z-index: 10000;
     display: inline-flex;
     align-items: center;
-    justify-content: center;
-    width: 36px;
-    height: 36px;
-    padding: 0;
-    border: 0;
+    justify-content: flex-start;
+    width: auto;
+    min-width: 128px;
+    height: 38px;
+    padding: 0 14px 0 40px;
+    border: 1px solid rgba(255, 255, 255, 0.24);
     border-radius: 10px;
-    background-color: ${DIGESTDOCK_BILIBILI_NOTE_BG};
-    background-image: url("${DIGESTDOCK_BILIBILI_NOTE_ICON}");
-    background-repeat: no-repeat;
-    background-position: center;
-    background-size: 18px 18px;
+    background-color: transparent;
+    background-image: url("${DIGESTDOCK_BILIBILI_NOTE_ICON_MUTED}"), ${DIGESTDOCK_BILIBILI_NOTE_GRADIENT};
+    background-repeat: no-repeat, no-repeat, no-repeat;
+    background-position: 14px center, center, center;
+    background-size: 18px 18px, cover, cover;
+    color: rgba(255, 255, 255, 0.5);
+    font: 600 13px/1 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    white-space: nowrap;
     cursor: pointer;
     opacity: 0;
     pointer-events: none;
     box-shadow: ${DIGESTDOCK_BILIBILI_NOTE_SHADOW};
+    -webkit-backdrop-filter: blur(6px) saturate(1.08);
+    backdrop-filter: blur(6px) saturate(1.08);
     transition: opacity 0.18s ease, transform 0.18s ease, background-color 0.18s ease;
   `;
+  button.addEventListener("mouseenter", () => {
+    if (button.disabled) return;
+    button.style.backgroundImage =
+      `url("${DIGESTDOCK_BILIBILI_NOTE_ICON}"), ` +
+      DIGESTDOCK_BILIBILI_NOTE_GRADIENT_HOVER;
+    button.style.color = "#ffffff";
+    button.style.transform = "translateY(-1px)";
+  });
+  button.addEventListener("mouseleave", () => {
+    if (button.disabled) return;
+    button.style.backgroundImage =
+      `url("${DIGESTDOCK_BILIBILI_NOTE_ICON_MUTED}"), ` +
+      DIGESTDOCK_BILIBILI_NOTE_GRADIENT;
+    button.style.color = "rgba(255, 255, 255, 0.5)";
+    button.style.transform = "translateY(0)";
+  });
   button.addEventListener("click", async (event) => {
     event.preventDefault();
     event.stopPropagation();
@@ -458,12 +504,11 @@ async function biliSaveCurrentNote() {
 
   const info = biliExtractVideoInfo();
   const timestamp = Math.max(0, Math.floor(Number(video.currentTime) || 0) - 3);
-  // Icon-only feedback: update the accessible name/tooltip (and, on success,
-  // the icon) rather than restoring visible text.
   const setNoteState = (message) => {
     if (!biliNoteButton) return;
     biliNoteButton.setAttribute("title", message);
     biliNoteButton.setAttribute("aria-label", message);
+    biliNoteButton.textContent = message;
   };
   if (biliNoteButton) {
     setNoteState("正在保存…");
@@ -484,8 +529,11 @@ async function biliSaveCurrentNote() {
 
     if (result?.success) {
       if (biliNoteButton) {
-        biliNoteButton.style.backgroundImage = `url("${DIGESTDOCK_BILIBILI_CHECK_ICON}")`;
+        biliNoteButton.style.backgroundImage =
+          `url("${DIGESTDOCK_BILIBILI_CHECK_ICON}"), ` +
+          `linear-gradient(${DIGESTDOCK_BILIBILI_NOTE_SUCCESS_BG}, ${DIGESTDOCK_BILIBILI_NOTE_SUCCESS_BG})`;
         biliNoteButton.style.backgroundColor = DIGESTDOCK_BILIBILI_NOTE_SUCCESS_BG;
+        biliNoteButton.style.color = "#ffffff";
         setNoteState("已保存");
       }
       if (result.note) biliShowNoteSavedToast(result.note);
@@ -500,12 +548,16 @@ async function biliSaveCurrentNote() {
 
   setTimeout(() => {
     if (!biliNoteButton) return;
-    biliNoteButton.style.backgroundImage = `url("${DIGESTDOCK_BILIBILI_NOTE_ICON}")`;
-    biliNoteButton.style.backgroundColor = DIGESTDOCK_BILIBILI_NOTE_BG;
-    biliNoteButton.setAttribute("title", "保存当前时刻（N）");
+    biliNoteButton.style.backgroundImage =
+      `url("${DIGESTDOCK_BILIBILI_NOTE_ICON_MUTED}"), ` +
+      DIGESTDOCK_BILIBILI_NOTE_GRADIENT;
+    biliNoteButton.style.backgroundColor = "transparent";
+    biliNoteButton.style.color = "rgba(255, 255, 255, 0.5)";
+    biliNoteButton.textContent = DIGESTDOCK_BILIBILI_NOTE_LABEL;
+    biliNoteButton.setAttribute("title", DIGESTDOCK_BILIBILI_NOTE_LABEL);
     biliNoteButton.setAttribute(
       "aria-label",
-      "用 DigestDock 保存当前时刻的笔记（快捷键 N）",
+      DIGESTDOCK_BILIBILI_NOTE_LABEL,
     );
     biliNoteButton.disabled = false;
   }, 1800);

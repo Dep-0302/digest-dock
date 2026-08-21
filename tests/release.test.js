@@ -42,13 +42,15 @@ test("manifest uses minimized install-time permissions", () => {
     "https://www.bilibili.com/video/BV*",
   ]);
   assert.equal(Object.hasOwn(manifest, "optional_host_permissions"), false);
-  assert.equal(manifest.version, "1.4.1");
+  assert.equal(manifest.version, "1.4.2");
 });
 
 test("cross-platform runtime dependencies match the API-primary release surface", () => {
   const background = read("background.js");
   const optionsPage = read("options.html");
+  const optionsStyles = read("options.css");
   const releaseCheck = read("scripts/check-release.sh");
+  const brandIcon = read("icons/digestdock-icon-solid.svg");
 
   assert.doesNotMatch(background, /importScripts\("youtube-transcript\.js"\)/);
   assert.match(background, /importScripts\("notes-backup\.js"\)/);
@@ -69,6 +71,26 @@ test("cross-platform runtime dependencies match the API-primary release surface"
     );
   }
   assert.doesNotMatch(releaseCheck, /"youtube-transcript\.js"/);
+  assert.match(brandIcon, /#0A5FE9/);
+  assert.match(brandIcon, /#04B7D2/);
+  assert.match(brandIcon, /#D8F7FF|#BCEFFF/);
+  assert.doesNotMatch(brandIcon, /#1F2933|#F26A4F/);
+  assert.match(optionsPage, /#0A5FE9/);
+  assert.match(optionsPage, /#04B7D2/);
+  assert.match(optionsPage, /#D8F7FF/);
+  assert.match(optionsStyles, /--accent:\s*#076dd1/);
+  assert.match(optionsStyles, /--accent-gradient:[\s\S]*?#0a5fe9[\s\S]*?#04b7d2/);
+  assert.equal(
+    (optionsPage.match(/<strong class="brand-letter">[DDK]<\/strong>/g) || [])
+      .length,
+    3,
+    "only the icon-adjacent DigestDock brand word must emphasize D, D, and K",
+  );
+  assert.match(optionsPage, /<p class="settings-version">DigestDock 1\.4\.2<\/p>/);
+  assert.match(optionsPage, /<p class="eyebrow">DIGESTDOCK<\/p>/);
+  assert.match(optionsStyles, /\.brand-letter\s*\{[^}]*font-weight:\s*750/);
+  assert.doesNotMatch(optionsPage, /#1F2933|#F26A4F/);
+  assert.doesNotMatch(optionsStyles, /#e9654b|rgba\(233,\s*101,\s*75/);
   const publicAllowlist = releaseCheck.match(
     /public_allowlist=\(([\s\S]*?)\n\)/,
   )?.[1];
@@ -314,7 +336,11 @@ test("notes filters preserve selected contrast and expose pressed state", () => 
   );
   assert.match(
     css,
-    /\.notes-filter \.enhance-btn\.active:hover:not\(:disabled\)\s*\{[^}]*background:\s*var\(--accent-hover\);[^}]*color:\s*white;/,
+    /\.notes-filter \.enhance-btn\.active:hover:not\(:disabled\)\s*\{[^}]*background:\s*var\(--accent-icon-gradient\);[^}]*color:\s*white;/,
+  );
+  assert.match(
+    css,
+    /\.notes-filter \.enhance-btn\.active\s*\{[^}]*background:\s*var\(--accent-icon-gradient\);[^}]*color:\s*white;/,
   );
   assert.match(
     css,

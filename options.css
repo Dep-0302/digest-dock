@@ -8,9 +8,18 @@
   --ink-secondary: #53616d;
   --ink-muted: #89949d;
   --line: #dfe5e8;
-  --accent: #e9654b;
-  --accent-hover: #cf4f38;
-  --active-surface: #f8eae2;
+  --accent: #076dd1;
+  --accent-hover: #0558b5;
+  --accent-gradient:
+    linear-gradient(135deg, rgba(3, 43, 106, 0.16) 0%, rgba(3, 48, 98, 0.22) 52%, rgba(3, 54, 76, 0.45) 100%),
+    linear-gradient(135deg, #0a5fe9 0%, #087fe8 52%, #04b7d2 100%);
+  --accent-gradient-hover:
+    linear-gradient(135deg, rgba(3, 43, 106, 0.26) 0%, rgba(3, 48, 98, 0.32) 52%, rgba(3, 54, 76, 0.52) 100%),
+    linear-gradient(135deg, #0a5fe9 0%, #087fe8 52%, #04b7d2 100%);
+  --active-surface: #eaf6fc;
+  --accent-focus: rgba(7, 109, 209, 0.3);
+  --accent-focus-soft: rgba(7, 109, 209, 0.16);
+  --accent-border: rgba(7, 109, 209, 0.4);
   --success: #2c8a65;
   --danger: #b23a2f;
   --radius-control: 10px;
@@ -69,8 +78,16 @@ body {
 
 .settings-brand-name {
   font-size: 18px;
-  font-weight: 800;
+  font-weight: 600;
   letter-spacing: -0.01em;
+}
+
+.brand-word {
+  font-weight: 600;
+}
+
+.brand-letter {
+  font-weight: 750;
 }
 
 .settings-nav {
@@ -109,13 +126,13 @@ body {
 }
 
 .settings-nav-item.is-active {
-  background: var(--surface);
-  color: var(--ink);
+  background: var(--active-surface);
+  color: var(--accent-hover);
   box-shadow: 0 1px 4px rgba(23, 33, 42, 0.08);
 }
 
 .settings-nav-item:focus-visible {
-  outline: 3px solid rgba(233, 101, 75, 0.32);
+  outline: 3px solid var(--accent-focus);
   outline-offset: 1px;
 }
 
@@ -202,7 +219,7 @@ h1 {
 }
 
 .language-switch .language-option:focus-visible {
-  outline: 3px solid rgba(233, 101, 75, 0.3);
+  outline: 3px solid var(--accent-focus);
   outline-offset: 1px;
 }
 
@@ -377,7 +394,7 @@ input {
 
 input:focus {
   border-color: var(--accent);
-  outline: 3px solid rgba(233, 101, 75, 0.16);
+  outline: 3px solid var(--accent-focus-soft);
 }
 
 .field-toggle {
@@ -408,7 +425,7 @@ input:focus {
 }
 
 .field-toggle:focus-visible {
-  outline: 3px solid rgba(233, 101, 75, 0.3);
+  outline: 3px solid var(--accent-focus);
   outline-offset: 1px;
 }
 
@@ -432,7 +449,7 @@ a {
 
 .privacy-note {
   background: var(--active-surface);
-  color: #6b4a3f;
+  color: #245677;
 }
 
 .supadata-note {
@@ -472,18 +489,18 @@ button:hover {
 }
 
 button:focus-visible {
-  outline: 3px solid rgba(233, 101, 75, 0.3);
+  outline: 3px solid var(--accent-focus);
   outline-offset: 1px;
 }
 
 button.primary {
-  border-color: var(--accent);
-  background: var(--accent);
+  border-color: transparent;
+  background: var(--accent-gradient);
   color: #ffffff;
 }
 
 button.primary:hover {
-  background: var(--accent-hover);
+  background: var(--accent-gradient-hover);
 }
 
 button.danger {
@@ -552,7 +569,7 @@ button.danger:hover {
 }
 
 .customization-summary:focus-visible {
-  outline: 3px solid rgba(233, 101, 75, 0.3);
+  outline: 3px solid var(--accent-focus);
   outline-offset: -3px;
 }
 
@@ -611,10 +628,10 @@ button.danger:hover {
 .prompt-reminder {
   margin: 10px 0 10px;
   padding: 10px 12px;
-  border: 1px solid rgba(233, 101, 75, 0.4);
+  border: 1px solid var(--accent-border);
   border-radius: var(--radius-control);
   background: var(--active-surface);
-  color: #6b4a3f;
+  color: #245677;
   font-size: 13px;
   font-weight: 700;
 }
@@ -636,7 +653,7 @@ textarea {
 
 textarea:focus {
   border-color: var(--accent);
-  outline: 3px solid rgba(233, 101, 75, 0.16);
+  outline: 3px solid var(--accent-focus-soft);
 }
 
 .copy-actions {

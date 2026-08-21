@@ -1,9 +1,49 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-labelledby="title desc">
   <title id="title">DigestDock</title>
-  <desc id="desc">Three chapter lines and one coral time marker on a solid graphite rounded square.</desc>
-  <rect width="128" height="128" rx="32" fill="#1F2933"/>
-  <rect x="24" y="32" width="80" height="16" rx="8" fill="#FFFFFF"/>
-  <circle cx="32" cy="64" r="8" fill="#F26A4F"/>
-  <rect x="48" y="56" width="56" height="16" rx="8" fill="#FFFFFF"/>
-  <rect x="40" y="80" width="56" height="16" rx="8" fill="#FFFFFF"/>
+  <desc id="desc">Three white chapter lines and one luminous time marker on a blue-to-cyan gradient rounded square.</desc>
+  <defs>
+    <linearGradient id="base" x1="12" y1="8" x2="116" y2="120" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0A5FE9"/>
+      <stop offset="0.42" stop-color="#087FE8"/>
+      <stop offset="0.72" stop-color="#079FDF"/>
+      <stop offset="1" stop-color="#04B7D2"/>
+    </linearGradient>
+    <radialGradient id="cyanGlow" cx="0" cy="0" r="1" gradientTransform="translate(86 88) rotate(-132) scale(72 68)" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#30CFE5" stop-opacity="0.78"/>
+      <stop offset="0.58" stop-color="#13B5E5" stop-opacity="0.28"/>
+      <stop offset="1" stop-color="#0B80E8" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="topLight" cx="0" cy="0" r="1" gradientTransform="translate(34 24) rotate(45) scale(78)" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#48A9FF" stop-opacity="0.26"/>
+      <stop offset="0.62" stop-color="#2F9CF4" stop-opacity="0.06"/>
+      <stop offset="1" stop-color="#2F9CF4" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="edgeDepth" cx="0" cy="0" r="1" gradientTransform="translate(64 58) scale(86)" gradientUnits="userSpaceOnUse">
+      <stop offset="0.6" stop-color="#063F9E" stop-opacity="0"/>
+      <stop offset="1" stop-color="#063F9E" stop-opacity="0.17"/>
+    </radialGradient>
+    <linearGradient id="marker" x1="25" y1="57" x2="38" y2="71" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#BCEFFF"/>
+    </linearGradient>
+    <filter id="glyphShadow" x="14" y="22" width="100" height="86" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="2" stdDeviation="2.3" flood-color="#054B91" flood-opacity="0.22"/>
+    </filter>
+    <clipPath id="shape">
+      <rect width="128" height="128" rx="32"/>
+    </clipPath>
+  </defs>
+  <g clip-path="url(#shape)">
+    <rect width="128" height="128" fill="url(#base)"/>
+    <rect width="128" height="128" fill="url(#cyanGlow)"/>
+    <rect width="128" height="128" fill="url(#topLight)"/>
+    <rect width="128" height="128" fill="url(#edgeDepth)"/>
+  </g>
+  <rect x="0.75" y="0.75" width="126.5" height="126.5" rx="31.25" fill="none" stroke="#FFFFFF" stroke-opacity="0.2" stroke-width="1.5"/>
+  <g filter="url(#glyphShadow)">
+    <rect x="24" y="32" width="80" height="16" rx="8" fill="#FFFFFF"/>
+    <circle cx="32" cy="64" r="8" fill="url(#marker)"/>
+    <rect x="48" y="56" width="56" height="16" rx="8" fill="#FFFFFF"/>
+    <rect x="40" y="80" width="56" height="16" rx="8" fill="#FFFFFF"/>
+  </g>
 </svg>

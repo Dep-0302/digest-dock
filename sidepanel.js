@@ -1695,7 +1695,7 @@ function attachTranscriptTimeSeek(cardEl, seconds) {
 }
 
 /**
- * Marks the clicked overview chapter as selected (warm fill + short coral
+ * Marks the clicked overview chapter as selected (cool fill + short blue-cyan
  * accent) and clears the state from its siblings. Presentation only.
  */
 function setActiveChapter(activeItem) {
@@ -2083,10 +2083,10 @@ async function triggerAnalysis() {
         analysisResult.message || analysisResult.error || "未知错误",
       );
       if (chapterList) {
-        chapterList.innerHTML = `<li class="chapter-item" style="color: var(--accent); border: none;">分析失败：${message}</li>`;
+        chapterList.innerHTML = `<li class="chapter-item" style="color: var(--danger); border: none;">分析失败：${message}</li>`;
       }
       if (quotesList) {
-        quotesList.innerHTML = `<div class="quote-item" style="color: var(--accent); border-left-color: var(--border);">关键语句生成失败：${message}</div>`;
+        quotesList.innerHTML = `<div class="quote-item" style="color: var(--danger); border-left-color: var(--border);">关键语句生成失败：${message}</div>`;
       }
       return;
     }
@@ -2106,10 +2106,10 @@ async function triggerAnalysis() {
     if (!ownsRequest()) return;
     console.error("[DigestDock Panel] Analysis error:", error);
     if (chapterList) {
-      chapterList.innerHTML = `<li class="chapter-item" style="color: var(--accent); border: none;">出错了：${escapeHtml(error.message)}</li>`;
+      chapterList.innerHTML = `<li class="chapter-item" style="color: var(--danger); border: none;">出错了：${escapeHtml(error.message)}</li>`;
     }
     if (quotesList) {
-      quotesList.innerHTML = `<div class="quote-item" style="color: var(--accent); border-left-color: var(--border);">出错了：${escapeHtml(error.message)}</div>`;
+      quotesList.innerHTML = `<div class="quote-item" style="color: var(--danger); border-left-color: var(--border);">出错了：${escapeHtml(error.message)}</div>`;
     }
   } finally {
     if (ownsRequest()) isAnalysisLoading = false;
@@ -3267,22 +3267,12 @@ function highlightActiveEntry(currentSeconds) {
   // Remove old highlight, add new one
   entries.forEach((e) => e.classList.remove("active-playback"));
   activeEntry.classList.add("active-playback");
-  updateFollowPlaybackLabel(activeEntry.dataset.seconds);
 
   // Only scroll if auto-scroll is enabled
   if (autoScrollEnabled) {
     lastAutoScrollTime = Date.now();
     activeEntry.scrollIntoView({ behavior: "smooth", block: "center" });
   }
-}
-
-/**
- * Sets the "回到 H:MM:SS" label on the follow-playback pill so it always shows
- * the full formatted time of the line currently being spoken.
- */
-function updateFollowPlaybackLabel(seconds) {
-  const label = document.getElementById("followPlaybackTime");
-  if (label) label.textContent = formatTimecode(seconds);
 }
 
 /**
@@ -3298,10 +3288,6 @@ function onContentAreaScroll() {
   // User scrolled manually — disable auto-scroll and show the button
   if (autoScrollEnabled && autoScrollInterval) {
     autoScrollEnabled = false;
-    const activeEntry = document.querySelector(
-      "#transcriptList .transcript-entry.active-playback",
-    );
-    if (activeEntry) updateFollowPlaybackLabel(activeEntry.dataset.seconds);
     document.getElementById("followPlaybackBtn").style.display = "block";
   }
 }

@@ -40,23 +40,34 @@ const LEGACY_YOUTUBE_DIGEST_BUTTON_ID = "ytd-digest-button";
 const LEGACY_YOUTUBE_NOTE_BUTTON_ID = "ytd-note-button";
 
 // Self-contained inline brand icon for the page opener. Geometry and colors
-// match icons/digestdock-icon-solid.svg (graphite rounded square, three white
-// chapter lines, one coral time marker). It renders icon-only; the button
+// match icons/digestdock-icon-solid.svg (blue-cyan gradient, three white
+// chapter lines, one luminous time marker). It renders icon-only; the button
 // carries the accessible name via aria-label/title, so the SVG stays decorative
 // (aria-hidden) to avoid a duplicated announcement.
 const DIGESTDOCK_BRAND_ICON_SVG = `
-  <svg class="digestdock-brand-icon" width="22" height="22" viewBox="0 0 128 128" fill="none" aria-hidden="true" focusable="false">
-    <rect width="128" height="128" rx="32" fill="#1F2933"></rect>
+  <svg class="digestdock-brand-icon" width="26" height="26" viewBox="0 0 128 128" fill="none" aria-hidden="true" focusable="false">
+    <defs>
+      <linearGradient id="${DIGESTDOCK_YOUTUBE_DOM_PREFIX}-brand-base" x1="12" y1="8" x2="116" y2="120" gradientUnits="userSpaceOnUse">
+        <stop offset="0" stop-color="#0A5FE9"></stop>
+        <stop offset="0.46" stop-color="#087FE8"></stop>
+        <stop offset="1" stop-color="#04B7D2"></stop>
+      </linearGradient>
+      <radialGradient id="${DIGESTDOCK_YOUTUBE_DOM_PREFIX}-brand-glow" cx="0" cy="0" r="1" gradientTransform="translate(86 88) rotate(-132) scale(72 68)" gradientUnits="userSpaceOnUse">
+        <stop stop-color="#30CFE5" stop-opacity="0.72"></stop>
+        <stop offset="1" stop-color="#0B80E8" stop-opacity="0"></stop>
+      </radialGradient>
+    </defs>
+    <rect width="128" height="128" rx="32" fill="url(#${DIGESTDOCK_YOUTUBE_DOM_PREFIX}-brand-base)"></rect>
+    <rect width="128" height="128" rx="32" fill="url(#${DIGESTDOCK_YOUTUBE_DOM_PREFIX}-brand-glow)"></rect>
     <rect x="24" y="32" width="80" height="16" rx="8" fill="#FFFFFF"></rect>
-    <circle cx="32" cy="64" r="8" fill="#F26A4F"></circle>
+    <circle cx="32" cy="64" r="8" fill="#D8F7FF"></circle>
     <rect x="48" y="56" width="56" height="16" rx="8" fill="#FFFFFF"></rect>
     <rect x="40" y="80" width="56" height="16" rx="8" fill="#FFFFFF"></rect>
   </svg>
 `;
 
 // Linear bookmark-plus icon for the "save current moment" control. Stroke uses
-// currentColor and matches the sidebar UI_ICONS.bookmarkPlus. No emoji, no long
-// text; the button provides the accessible name.
+// currentColor and matches the sidebar UI_ICONS.bookmarkPlus.
 const DIGESTDOCK_BOOKMARK_ICON_SVG = `
   <svg class="digestdock-note-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
     <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h6"></path>
@@ -72,16 +83,23 @@ const DIGESTDOCK_CHECK_ICON_SVG = `
   </svg>
 `;
 
-// Neutral graphite styling for the player note control, matching
-// docs/design/final-icons-and-entry.jpg: a deep graphite surface, white
-// bookmark icon, ~10px radius (not a full pill/circle), and a restrained
-// neutral shadow. Hover/pressed feedback stays subtle; the transient "saved"
-// success color reuses the shared success green before restoring graphite.
-const DIGESTDOCK_NOTE_BG = "#1f2933";
-const DIGESTDOCK_NOTE_BG_HOVER = "#2b3947";
+const DIGESTDOCK_NOTE_BUTTON_LABEL = "金句速记 (N)";
+const DIGESTDOCK_NOTE_BG =
+  "linear-gradient(135deg, rgba(10, 95, 233, 0.2) 0%, rgba(8, 127, 232, 0.2) 52%, rgba(4, 183, 210, 0.2) 100%)";
+const DIGESTDOCK_NOTE_BG_HOVER =
+  "linear-gradient(135deg, #0a5fe9 0%, #087fe8 52%, #04b7d2 100%)";
 const DIGESTDOCK_NOTE_SUCCESS_BG = "#2c8a65";
-const DIGESTDOCK_NOTE_SHADOW = "0 4px 12px rgba(23, 33, 42, 0.24)";
-const DIGESTDOCK_NOTE_SHADOW_HOVER = "0 8px 18px rgba(23, 33, 42, 0.30)";
+const DIGESTDOCK_NOTE_SHADOW = "0 8px 18px rgba(4, 73, 139, 0.24)";
+const DIGESTDOCK_NOTE_SHADOW_HOVER = "0 10px 22px rgba(4, 73, 139, 0.3)";
+
+function setNoteButtonContent(button, iconSvg, label) {
+  if (!button) return;
+  button.innerHTML = iconSvg;
+  const labelEl = document.createElement("span");
+  labelEl.className = "digestdock-note-label";
+  labelEl.textContent = label;
+  button.appendChild(labelEl);
+}
 
 function isExtensionContextInvalidatedError(error) {
   return String(error?.message || error || "").includes(
@@ -327,24 +345,31 @@ function createDigestButton() {
   digestButton.type = "button";
   digestButton.setAttribute("aria-label", "打开 DigestDock");
   digestButton.setAttribute("title", "DigestDock");
-  // Compact brand-icon button — no long text. The accessible name lives on the
-  // aria-label/title; the SVG <title> keeps "DigestDock" available to AT too.
+  // Compact brand icon + DDK label. The full product name stays in the
+  // accessible name/title while the short label improves visual recognition.
   digestButton.innerHTML = DIGESTDOCK_BRAND_ICON_SVG;
+  const digestLabel = document.createElement("span");
+  digestLabel.className = "digestdock-short-label";
+  digestLabel.textContent = "DDK";
+  digestButton.appendChild(digestLabel);
 
-  // A compact icon button sized to sit among YouTube's native action controls.
+  // A compact icon + text button sized to sit among YouTube's native controls.
   // width:max-content + flex:0 0 auto keep it from stretching into a full-width
   // second row when YouTube switches #actions-inner to a vertical column.
   digestButton.style.cssText = `
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    gap: 0;
-    padding: 6px;
+    box-sizing: border-box;
+    gap: 6px;
+    padding: 5px 12px 5px 7px;
     height: 36px;
     border: none;
     border-radius: 10px;
     background: transparent;
     color: #1f2933;
+    font: 700 12.5px/1 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    letter-spacing: 0.01em;
     cursor: pointer;
     margin-right: 8px;
     transition: background 0.18s, transform 0.1s;
@@ -551,21 +576,24 @@ function injectNoteButton() {
 
   debugLog("[DigestDock Content] Injecting note button");
 
-  // Create the note button — a compact icon-only bookmark-plus control that
-  // floats over the player. No long text, no emoji; the accessible name and
-  // tooltip live on aria-label/title and the N shortcut hint is preserved.
+  // Create the note button — a compact bookmark-plus + text action that floats
+  // over the player. The visible label keeps the N shortcut discoverable.
   const noteButton = document.createElement("button");
   noteButton.id = DIGESTDOCK_YOUTUBE_DOM_IDS.noteButton;
   noteButton.type = "button";
   noteButton.setAttribute(
     "aria-label",
-    "用 DigestDock 保存当前时刻的笔记（快捷键 N）",
+    DIGESTDOCK_NOTE_BUTTON_LABEL,
   );
-  noteButton.setAttribute("title", "保存当前时刻（N）");
-  noteButton.innerHTML = DIGESTDOCK_BOOKMARK_ICON_SVG;
+  noteButton.setAttribute("title", DIGESTDOCK_NOTE_BUTTON_LABEL);
+  setNoteButtonContent(
+    noteButton,
+    DIGESTDOCK_BOOKMARK_ICON_SVG,
+    DIGESTDOCK_NOTE_BUTTON_LABEL,
+  );
 
-  // Compact rounded icon button in the neutral graphite surface, with a
-  // restrained shadow. Start hidden; visibility is controlled by mouse activity.
+  // Compact blue-cyan action with a restrained shadow. Start hidden; visibility
+  // is controlled by mouse activity.
   noteButton.style.cssText = `
     position: absolute;
     top: 16px;
@@ -574,18 +602,24 @@ function injectNoteButton() {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 36px;
-    height: 36px;
-    padding: 0;
+    gap: 7px;
+    width: auto;
+    min-width: 128px;
+    height: 38px;
+    padding: 0 14px;
     background: ${DIGESTDOCK_NOTE_BG};
-    color: #ffffff;
-    border: none;
+    color: rgba(255, 255, 255, 0.5);
+    border: 1px solid rgba(255, 255, 255, 0.24);
     border-radius: 10px;
+    font: 600 13px/1 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    white-space: nowrap;
     cursor: pointer;
     transition: opacity 0.18s ease, transform 0.18s ease, background 0.18s ease, box-shadow 0.18s ease;
     opacity: 0;
     pointer-events: none;
     box-shadow: ${DIGESTDOCK_NOTE_SHADOW};
+    -webkit-backdrop-filter: blur(6px) saturate(1.08);
+    backdrop-filter: blur(6px) saturate(1.08);
   `;
 
   ytdNoteButton = noteButton;
@@ -609,15 +643,17 @@ function injectNoteButton() {
     hideNoteButton();
   });
 
-  // Hover effect — subtle neutral lift, no color shift away from graphite.
+  // Hover effect — subtle lift with a darker blue-cyan gradient.
   noteButton.addEventListener("mouseenter", () => {
     noteButton.style.background = DIGESTDOCK_NOTE_BG_HOVER;
+    noteButton.style.color = "#ffffff";
     noteButton.style.boxShadow = DIGESTDOCK_NOTE_SHADOW_HOVER;
     noteButton.style.transform = "translateY(-1px)";
   });
 
   noteButton.addEventListener("mouseleave", () => {
     noteButton.style.background = DIGESTDOCK_NOTE_BG;
+    noteButton.style.color = "rgba(255, 255, 255, 0.5)";
     noteButton.style.boxShadow = DIGESTDOCK_NOTE_SHADOW;
     noteButton.style.transform = "translateY(0)";
   });
@@ -717,15 +753,17 @@ async function saveCurrentNote() {
   const videoId = new URLSearchParams(window.location.search).get("v");
 
   const noteButton = ytdNoteButton;
-  // Icon-only feedback: swap the icon and update the accessible name/tooltip
-  // instead of restoring long text. The success toast still carries the detail.
-  const restoreLabel = "用 DigestDock 保存当前时刻的笔记（快捷键 N）";
-  const restoreTitle = "保存当前时刻（N）";
+  const restoreLabel = DIGESTDOCK_NOTE_BUTTON_LABEL;
+  const restoreTitle = DIGESTDOCK_NOTE_BUTTON_LABEL;
 
-  const setNoteButtonState = (message) => {
+  const setNoteButtonState = (
+    message,
+    iconSvg = DIGESTDOCK_BOOKMARK_ICON_SVG,
+  ) => {
     if (!noteButton) return;
     noteButton.setAttribute("title", message);
     noteButton.setAttribute("aria-label", message);
+    setNoteButtonContent(noteButton, iconSvg, message);
   };
 
   if (noteButton) {
@@ -744,9 +782,9 @@ async function saveCurrentNote() {
 
     if (result.success) {
       if (noteButton) {
-        noteButton.innerHTML = DIGESTDOCK_CHECK_ICON_SVG;
+        setNoteButtonState("已保存", DIGESTDOCK_CHECK_ICON_SVG);
         noteButton.style.background = DIGESTDOCK_NOTE_SUCCESS_BG;
-        setNoteButtonState("已保存");
+        noteButton.style.color = "#ffffff";
       }
       showNoteSavedToast(result.note);
     } else {
@@ -766,8 +804,9 @@ async function saveCurrentNote() {
 
   setTimeout(() => {
     if (noteButton) {
-      noteButton.innerHTML = DIGESTDOCK_BOOKMARK_ICON_SVG;
+      setNoteButtonState(restoreLabel, DIGESTDOCK_BOOKMARK_ICON_SVG);
       noteButton.style.background = DIGESTDOCK_NOTE_BG;
+      noteButton.style.color = "rgba(255, 255, 255, 0.5)";
       noteButton.style.pointerEvents = "auto";
       noteButton.setAttribute("title", restoreTitle);
       noteButton.setAttribute("aria-label", restoreLabel);

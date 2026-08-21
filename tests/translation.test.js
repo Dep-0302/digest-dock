@@ -433,7 +433,26 @@ test("Header exposes tab-specific transcript, overview, and notes language modes
   assert.match(html, /data-notes-mode="original"[\s\S]*?>原文</);
   assert.match(html, /data-notes-mode="zh"[\s\S]*?>中文</);
   assert.match(html, /data-notes-mode="bilingual"[\s\S]*?aria-pressed="true"[\s\S]*?>双语</);
+  assert.match(
+    html,
+    /id="followPlaybackBtn"[\s\S]*?aria-label="跟随视频并回到当前播放位置"[\s\S]*?>[\s\S]*?跟随视频[\s\S]*?<\/button>/,
+  );
+  assert.doesNotMatch(html, /followPlaybackTime|回到 <span class="follow-time"/);
   assert.match(css, /\.header-actions\s*\{[\s\S]*?display:\s*flex/);
+  assert.match(css, /--accent-gradient:\s*linear-gradient\(/);
+  assert.match(
+    css,
+    /\.follow-playback-btn\s*\{[^}]*background:\s*var\(--accent-gradient\)[^}]*color:\s*#fff/,
+  );
+  assert.match(
+    css,
+    /\.follow-playback-btn:hover\s*\{[^}]*background:\s*var\(--accent-gradient-hover\)/,
+  );
+  assert.doesNotMatch(css, /\.follow-playback-btn::before/);
+  assert.match(
+    css,
+    /\.icon-btn\.primary\s*\{[^}]*background:\s*var\(--accent-icon-gradient\)/,
+  );
   assert.match(css, /\.language-mode-control\[hidden\]\s*\{[^}]*display:\s*none/);
   assert.match(
     js,
