@@ -25,11 +25,11 @@ There is no guaranteed response time or bug-bounty program. Please allow a reaso
 Examples include:
 
 - API keys or private content included in source, logs, screenshots, or release ZIPs;
-- requests to network origins outside the documented YouTube caption/player, Bilibili, Bilibili subtitle-CDN, Supadata, and DeepSeek hosts;
+- requests to network origins outside the documented Bilibili, Bilibili subtitle-CDN, Supadata, and DeepSeek hosts;
 - script or HTML injection through transcript, metadata, service errors, or model output;
 - access to browsing data outside the documented supported YouTube and Bilibili video-page scope;
 - unintended transmission of notes, transcripts, or credentials;
-- extension-initiated YouTube transcript requests that unexpectedly include browser credentials, or temporary signed subtitle URLs written to storage or logs;
+- any direct mainline YouTube transcript-body request, or temporary signed Bilibili subtitle URLs written to storage or logs;
 - a note backup that unexpectedly includes API keys, settings, complete
   transcripts, or cached overview and summary data;
 - note-backup validation bypasses, unsafe handling of imported fields, or a
@@ -48,9 +48,9 @@ Examples include:
 
 ## Transcript retrieval safety
 
-- YouTube transcript retrieval is local-first: the extension reads existing page caption tracks and their `timedtext` responses, and may continue with additional non-WEB YouTube player client profiles. These extension-initiated network requests must use `credentials: "omit"`.
-- Temporary signed YouTube and Bilibili subtitle URLs are request-scoped data. Use them only in memory for the immediate subtitle response; never write them to storage, caches, logs, diagnostics, screenshots, or test fixtures.
-- Supadata is an optional failure fallback. It may receive the canonical YouTube URL only after local retrieval fails, the user has saved a Supadata key, and the user explicitly confirms that one attempt in the side panel. Consent must not be persisted or inferred from the saved key. Saving Settings must not require that optional key.
+- The mainline must not construct a direct YouTube transcript-body request. A minimal MAIN-world page check may return only the current video identity, limited metadata, source language, and playability evidence; it must never return a signed caption request URL.
+- Temporary signed Bilibili subtitle URLs are request-scoped data. Use them only in memory for the immediate subtitle response; never write them to storage, caches, logs, diagnostics, screenshots, or test fixtures.
+- Supadata is the mainline provider for new YouTube transcript bodies. It may receive only the canonical watch URL after the user has saved a key and explicitly confirms that video attempt. Consent must not be persisted or inferred from the saved key. Clear login, age, membership, region, or unavailable states must stop before the request. Requests and polling must remain bounded by timeout, response-size, single-flight, navigation, and rate-limit cooldown controls. Saving Settings and using Bilibili must not require a Supadata key.
 - Transcript retrieval may read an existing platform-generated automatic caption track, but it must not download audio, perform ASR or other audio transcription, request generated transcription, or use OCR.
 - Bilibili keeps its existing session-aware path: it may use normal credentialed fetch behavior for Bilibili requests, but it must not request Chrome's `cookies` permission, read cookie values, export them, or store them.
 

@@ -118,7 +118,10 @@
             title="打开 DigestDock 设置"
             aria-label="打开 DigestDock 设置"
           >
-            设置
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <circle cx="12" cy="12" r="3"></circle>
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+            </svg>
           </button>
         </div>
       </div>
@@ -135,7 +138,14 @@
     <div class="content" id="contentArea">
       <!-- WELCOME STATE -->
       <div id="welcomeState" class="welcome-container">
-        <div class="welcome-icon">&#9655;</div>
+        <div class="welcome-icon" aria-hidden="true">
+          <svg viewBox="0 0 128 128" role="img" aria-label="DigestDock">
+            <rect x="24" y="32" width="80" height="16" rx="8" fill="#FFFFFF"></rect>
+            <circle cx="32" cy="64" r="8" fill="#F26A4F"></circle>
+            <rect x="48" y="56" width="56" height="16" rx="8" fill="#FFFFFF"></rect>
+            <rect x="40" y="80" width="56" height="16" rx="8" fill="#FFFFFF"></rect>
+          </svg>
+        </div>
         <div class="welcome-title">准备开始</div>
         <div class="welcome-desc">
           打开一个 YouTube 或带字幕的 B 站视频并点击扩展图标，即可生成 AI 学习摘要。
@@ -183,9 +193,30 @@
             <div class="section-header transcript-section-header">
               <div class="section-title">完整字幕</div>
               <div class="transcript-actions">
-                <button class="enhance-btn" id="copyTranscriptBtn">复制</button>
-                <button class="enhance-btn" id="exportTranscriptBtn">
-                  导出
+                <button
+                  class="icon-btn"
+                  id="copyTranscriptBtn"
+                  type="button"
+                  title="复制完整字幕"
+                  aria-label="复制完整字幕"
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <rect x="9" y="9" width="11" height="11" rx="2"></rect>
+                    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                  </svg>
+                </button>
+                <button
+                  class="icon-btn"
+                  id="exportTranscriptBtn"
+                  type="button"
+                  title="导出完整字幕"
+                  aria-label="导出完整字幕"
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                    <polyline points="7 10 12 15 17 10"></polyline>
+                    <line x1="12" y1="15" x2="12" y2="3"></line>
+                  </svg>
                 </button>
               </div>
             </div>
@@ -262,8 +293,8 @@
               </div>
             </div>
             <p class="notes-intro" id="notesIntro">
-              将鼠标移到视频上并点击“📝 笔记”，即可保存带时间戳的笔记；也可以在
-              视频获得焦点时按“n”键。
+              将鼠标移到视频上，点击书签图标即可保存带时间戳的笔记；也可以在
+              视频获得焦点时按 N 键。
             </p>
             <p
               class="notes-language-status"
@@ -282,9 +313,11 @@
     <button
       class="follow-playback-btn"
       id="followPlaybackBtn"
+      type="button"
       style="display: none"
+      aria-label="回到当前播放位置"
     >
-      跟随播放
+      回到 <span class="follow-time" id="followPlaybackTime"></span>
     </button>
 
     <script src="bilibili.js"></script>

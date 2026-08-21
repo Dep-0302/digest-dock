@@ -6,10 +6,26 @@
  */
 
 const DEBUG = false;
-const REQUIRED_RUNTIME_PROTOCOL_VERSION = 8;
+const REQUIRED_RUNTIME_PROTOCOL_VERSION = 9;
 const debugLog = (...args) => {
   if (DEBUG) console.log(...args);
 };
+
+/**
+ * Formats a playback offset for the time rail.
+ * Below one hour: MM:SS (e.g. 00:37, 59:18). At or above one hour: H:MM:SS
+ * (e.g. 1:00:27, 3:02:58). Minutes and seconds are always two digits; hours
+ * are shown without padding. Uses tabular numerals in CSS so widths align.
+ */
+function formatTimecode(totalSeconds) {
+  const safe = Math.max(0, Math.floor(Number(totalSeconds) || 0));
+  const hours = Math.floor(safe / 3600);
+  const minutes = Math.floor((safe % 3600) / 60);
+  const seconds = safe % 60;
+  const mm = String(minutes).padStart(2, "0");
+  const ss = String(seconds).padStart(2, "0");
+  return hours > 0 ? `${hours}:${mm}:${ss}` : `${mm}:${ss}`;
+}
 
 function createSingleFlight() {
   const activeByKey = new Map();
@@ -82,7 +98,7 @@ const TRANSLATION_MESSAGE_TIMEOUT_MS = 130_000;
 const NOTES_MANUAL_RETRY_DEBOUNCE_MS = 400;
 const NOTE_TRANSLATION_VALIDATION_VERSION = 1;
 const TRANSCRIPT_TRANSLATION_CACHE_VERSION = 2;
-const TRANSCRIPT_SOURCE_POLICY_VERSION = 3;
+const TRANSCRIPT_SOURCE_POLICY_VERSION = 4;
 
 function sanitizeTranscriptSelectedTrack(track) {
   if (!track || typeof track !== "object") return null;
@@ -103,10 +119,7 @@ function sanitizeTranscriptSelectedTrack(track) {
 }
 
 function transcriptSourceLabel() {
-  if (currentTranscriptSource === "supadata") return "Supadata 兜底字幕";
-  if (currentTranscriptSource === "youtube-timedtext") {
-    return "YouTube 本地字幕";
-  }
+  if (currentTranscriptSource === "supadata") return "Supadata 原生字幕";
   if (currentTranscriptSource === "bilibili") return "B 站视频字幕";
   return "来自视频字幕";
 }
@@ -1073,7 +1086,7 @@ async function runDigestLoad(
     if (currentVideoTitle || currentChannelName) {
       const videoInfo = document.getElementById("videoInfo");
       document.getElementById("videoTitle").textContent = currentVideoTitle;
-      document.getElementById("videoChannel").textContent = currentChannelName;
+      updateVideoMetaLine();
       videoInfo.style.display = "block";
     }
 
@@ -1137,10 +1150,11 @@ async function runDigestLoad(
       showSupadataConsent(async () => {
         if (!isCurrentDigest(videoId, generation, routeKey)) return;
         const requestKey = `${generation}:${videoId}`;
-        // A same-video refresh may already own the ordinary local-only
+        // A same-video refresh may already own the ordinary consent-gated
         // single-flight. Wait for it to finish, then start a fresh consented
-        // attempt. This preserves ordering without running local-only and
-        // Supadata-authorized requests in parallel or swallowing the click.
+        // attempt. This preserves ordering without running the unconsented
+        // probe and the Supadata-authorized request in parallel or swallowing
+        // the click.
         await runDigestSingleFlight(
           requestKey,
           async () => undefined,
@@ -1163,8 +1177,33 @@ async function runDigestLoad(
     }
     if (transcriptResult.error === "SUPADATA_NOT_CONFIGURED") {
       showSupadataNotConfigured(
-        transcriptResult.message || "未能直接读取 YouTube 原生字幕。",
+        transcriptResult.message ||
+          "新的 YouTube 字幕需要 Supadata。请在设置中配置密钥后逐次授权。",
       );
+      return;
+    }
+    if (transcriptResult.error === "RATE_LIMITED") {
+      showSupadataRateLimited(
+        transcriptResult.message ||
+          "Supadata 请求已达速率上限，请稍后再授权重试。",
+      );
+      return;
+    }
+    if (transcriptResult.error === "INVALID_SUPADATA_KEY") {
+      showSupadataInvalidKey(transcriptResult.message);
+      return;
+    }
+    if (
+      [
+        "PROVIDER_TIMEOUT",
+        "RESPONSE_TOO_LARGE",
+        "NETWORK_ERROR",
+        "PROVIDER_HTTP_ERROR",
+        "PROVIDER_FAILED",
+        "PROVIDER_ERROR",
+      ].includes(transcriptResult.error)
+    ) {
+      showSupadataProviderError(transcriptResult.message);
       return;
     }
     showError(
@@ -1462,8 +1501,9 @@ function renderAnalysisResults(analysis) {
     const li = document.createElement("li");
     li.className = "chapter-item";
     li.dataset.seconds = chapter.timestampSeconds;
+    const chapterTime = formatTimecode(chapter.timestampSeconds);
     li.innerHTML = `
-      <span class="chapter-timestamp">${escapeHtml(chapter.timestamp)}</span>
+      <span class="chapter-timestamp">${escapeHtml(chapterTime)}</span>
       <div class="chapter-content">
         ${renderChapterLanguageContent(chapter, currentOverviewMode, analysis.sourceLanguage)}
       </div>
@@ -1471,9 +1511,10 @@ function renderAnalysisResults(analysis) {
     li.addEventListener("click", () => {
       debugLog(
         "[DigestDock Panel] Chapter clicked:",
-        chapter.timestamp,
+        chapterTime,
         chapter.timestampSeconds,
       );
+      setActiveChapter(li);
       seekTo(chapter.timestampSeconds);
     });
     chapterList.appendChild(li);
@@ -1494,20 +1535,21 @@ function renderAnalysisResults(analysis) {
       currentOverviewMode,
       analysis.sourceLanguage,
     );
+    const quoteTime = formatTimecode(quote.timestampSeconds);
     div.innerHTML = `
       <div class="quote-text">${renderQuoteLanguageContent(quote, currentOverviewMode, analysis.sourceLanguage)}</div>
       <div class="quote-meta">
-        <span class="quote-timestamp">${escapeHtml(quote.timestamp)}</span>
+        <span class="quote-timestamp">${escapeHtml(quoteTime)}</span>
         <div class="quote-actions">
-          <button class="quote-save-note-btn" title="把这条语句保存为笔记">📝 笔记</button>
-          <button class="quote-copy-btn" title="复制这条语句">⧉ 复制</button>
+          <button class="icon-btn quote-save-note-btn" type="button" title="把这条语句保存为笔记" aria-label="把这条语句保存为笔记">${UI_ICONS.bookmarkPlus}</button>
+          <button class="icon-btn quote-copy-btn" type="button" title="复制这条语句" aria-label="复制这条语句">${UI_ICONS.copy}</button>
         </div>
       </div>
     `;
     div.addEventListener("click", () => {
       debugLog(
         "[DigestDock Panel] Quote clicked:",
-        quote.timestamp,
+        quoteTime,
         quote.timestampSeconds,
       );
       seekTo(quote.timestampSeconds);
@@ -1518,10 +1560,7 @@ function renderAnalysisResults(analysis) {
       e.stopPropagation();
       try {
         await navigator.clipboard.writeText(quoteCopyText);
-        quoteCopyBtn.textContent = "✓ 已复制";
-        setTimeout(() => {
-          quoteCopyBtn.textContent = "⧉ 复制";
-        }, 1500);
+        flashIconDone(quoteCopyBtn, "已复制", "复制这条语句");
       } catch (err) {
         console.error("Copy failed:", err);
       }
@@ -1543,8 +1582,7 @@ function renderAnalysisResults(analysis) {
 async function saveQuoteAsNote(quote, btn) {
   if (!currentVideoId) return;
 
-  const originalText = btn.textContent;
-  btn.textContent = "正在保存…";
+  const restoreTitle = btn.getAttribute("title") || "把这条语句保存为笔记";
   btn.disabled = true;
 
   try {
@@ -1562,28 +1600,21 @@ async function saveQuoteAsNote(quote, btn) {
     });
 
     if (result.success) {
-      btn.textContent = "✓ 已保存";
-      setTimeout(() => {
-        btn.textContent = originalText;
-        btn.disabled = false;
-      }, 1500);
+      btn.disabled = false;
+      flashIconDone(btn, "已保存为笔记", restoreTitle);
       // The background noteSaved broadcast owns the Notes refresh. Calling
       // loadNotes here as well can start two translation jobs for one save.
     } else {
       console.error("[DigestDock] Save quote as note failed:", result.error);
-      btn.textContent = "出错了";
-      setTimeout(() => {
-        btn.textContent = originalText;
-        btn.disabled = false;
-      }, 1500);
+      btn.disabled = false;
+      btn.setAttribute("title", "保存失败");
+      setTimeout(() => btn.setAttribute("title", restoreTitle), 1500);
     }
   } catch (error) {
     console.error("[DigestDock] Save quote as note error:", error);
-    btn.textContent = "出错了";
-    setTimeout(() => {
-      btn.textContent = originalText;
-      btn.disabled = false;
-    }, 1500);
+    btn.disabled = false;
+    btn.setAttribute("title", "保存失败");
+    setTimeout(() => btn.setAttribute("title", restoreTitle), 1500);
   }
 }
 
@@ -1615,7 +1646,9 @@ function hasNonCollapsedTextSelection() {
 }
 
 /**
- * Preserves normal row-click seeking while keeping text selection inert.
+ * Seeks from a time-rail click while keeping any in-progress text selection
+ * inert. Only the time code carries this handler; the transcript body stays
+ * natively selectable and never seeks.
  */
 function seekFromTranscriptEntryClick(event, seconds) {
   if (hasNonCollapsedTextSelection()) {
@@ -1625,6 +1658,83 @@ function seekFromTranscriptEntryClick(event, seconds) {
   }
 
   seekTo(seconds);
+}
+
+/**
+ * Keyboard activation for the time-rail seek target (Enter / Space).
+ */
+function seekFromTranscriptTimeKey(event, seconds) {
+  if (event.key !== "Enter" && event.key !== " " && event.key !== "Spacebar") {
+    return;
+  }
+  event.preventDefault();
+  seekTo(seconds);
+}
+
+/**
+ * Builds the time-rail markup for a transcript card. The time code is the only
+ * seek target (keyboard-focusable button); the body remains selectable text.
+ */
+function transcriptTimeCellMarkup(seconds) {
+  const timestamp = formatTimecode(seconds);
+  return `<span class="transcript-time" role="button" tabindex="0" title="跳转到 ${timestamp}" aria-label="跳转到 ${timestamp}">${timestamp}</span>`;
+}
+
+/**
+ * Wires the time-rail seek handlers on a freshly rendered transcript card.
+ */
+function attachTranscriptTimeSeek(cardEl, seconds) {
+  const timeEl = cardEl.querySelector(".transcript-time");
+  if (!timeEl) return;
+  timeEl.addEventListener("click", (event) =>
+    seekFromTranscriptEntryClick(event, seconds),
+  );
+  timeEl.addEventListener("keydown", (event) =>
+    seekFromTranscriptTimeKey(event, seconds),
+  );
+}
+
+/**
+ * Marks the clicked overview chapter as selected (warm fill + short coral
+ * accent) and clears the state from its siblings. Presentation only.
+ */
+function setActiveChapter(activeItem) {
+  const chapterList = document.getElementById("chapterList");
+  if (!chapterList) return;
+  chapterList
+    .querySelectorAll(".chapter-item.active-chapter")
+    .forEach((item) => item.classList.remove("active-chapter"));
+  activeItem?.classList.add("active-chapter");
+}
+
+// Inline line icons for compact action buttons. Kept as small stroke SVGs so
+// they inherit currentColor and stay crisp at 15px. No emoji, no play triangle.
+const UI_ICONS = Object.freeze({
+  copy: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>`,
+  link: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg>`,
+  play: `<svg viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true"><path d="M8 5.14v13.72a1 1 0 0 0 1.5.86l11-6.86a1 1 0 0 0 0-1.72L9.5 4.28A1 1 0 0 0 8 5.14z"></path></svg>`,
+  bookmarkPlus: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h6"></path><line x1="18" y1="3" x2="18" y2="9"></line><line x1="15" y1="6" x2="21" y2="6"></line></svg>`,
+  more: `<svg viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true"><circle cx="5" cy="12" r="1.7"></circle><circle cx="12" cy="12" r="1.7"></circle><circle cx="19" cy="12" r="1.7"></circle></svg>`,
+});
+
+/**
+ * Briefly flags an icon button as "done" (success color) without disturbing
+ * its icon, then restores it. Used for copy/save feedback on icon-only buttons.
+ */
+function flashIconDone(btn, doneTitle, restoreTitle, ms = 1600) {
+  if (!btn) return;
+  btn.classList.add("is-done");
+  if (doneTitle) {
+    btn.setAttribute("title", doneTitle);
+    btn.setAttribute("aria-label", doneTitle);
+  }
+  setTimeout(() => {
+    btn.classList.remove("is-done");
+    if (restoreTitle) {
+      btn.setAttribute("title", restoreTitle);
+      btn.setAttribute("aria-label", restoreTitle);
+    }
+  }, ms);
 }
 
 function renderTranscript() {
@@ -1653,18 +1763,12 @@ function renderTranscript() {
     div.className = "transcript-entry";
     div.dataset.seconds = group.start;
 
-    const minutes = Math.floor(group.start / 60);
-    const seconds = Math.floor(group.start % 60);
-    const timestamp = `${minutes}:${String(seconds).padStart(2, "0")}`;
-
     div.innerHTML = `
-      <span class="transcript-time">${timestamp}</span>
+      ${transcriptTimeCellMarkup(group.start)}
       <span class="transcript-text">${renderSubtitleInlineMarkup(group.text)}</span>
     `;
 
-    div.addEventListener("click", (event) =>
-      seekFromTranscriptEntryClick(event, group.start),
-    );
+    attachTranscriptTimeSeek(div, group.start);
     transcriptList.appendChild(div);
   });
 
@@ -1709,6 +1813,21 @@ function exportTranscript() {
 // ============================================================
 // UI STATE MANAGEMENT
 // ============================================================
+
+/**
+ * Composes the compact meta line under the video title: channel, then the
+ * total duration (H:MM:SS) when it is known. Presentation only.
+ */
+function updateVideoMetaLine() {
+  const channelEl = document.getElementById("videoChannel");
+  if (!channelEl) return;
+  const parts = [];
+  if (currentChannelName) parts.push(currentChannelName);
+  if (Number(currentVideoDuration) > 0) {
+    parts.push(formatTimecode(currentVideoDuration));
+  }
+  channelEl.textContent = parts.join(" · ");
+}
 
 function showState(state) {
   document.getElementById("welcomeState").style.display =
@@ -1759,8 +1878,8 @@ function showError(title, message) {
 
 function showSupadataConsent(onConfirm) {
   showError(
-    "是否使用第三方字幕服务？",
-    "未能直接读取 YouTube 原生字幕。你可以选择本次使用 Supadata 重试；点击后会把此视频的标准 YouTube 链接发送给 Supadata，并可能消耗你的 API 额度。",
+    "是否使用 Supadata 获取字幕？",
+    "此视频将通过 Supadata 获取 YouTube 原生字幕。点击后会把此视频的标准 YouTube 链接发送给 Supadata，并可能消耗你的 API 额度。",
   );
   const primaryButton = document.getElementById("errorBtn");
   const secondaryButton = document.getElementById("errorSecondaryBtn");
@@ -1788,34 +1907,66 @@ function showSupadataConsent(onConfirm) {
     }
   };
   errorSecondaryAction = () => {
-    showNativeTranscriptRetry(
-      "继续使用 YouTube 原生字幕",
-      "没有向 Supadata 发送视频链接。",
-    );
+    showSupadataDeclined();
   };
   primaryButton.focus();
 }
 
-function showNativeTranscriptRetry(title, lead) {
+// After the user declines the third-party request, stay in a safe no-transcript
+// state. Do NOT offer a native retry that would immediately send a request; the
+// mainline has no local YouTube caption path. The default primary re-opens the
+// same single-attempt consent prompt (it never sends a request on its own).
+function showSupadataDeclined() {
   showError(
-    title,
-    `${lead} 你可以重试原生字幕读取。失败可能来自字幕轨尚未加载、YouTube 临时返回空响应、视频本身没有字幕，或当前网络与地区限制。可先刷新页面；若正在使用 VPN 或代理，可切换节点或暂时关闭后再试。`,
+    "已跳过 Supadata 字幕",
+    "没有向 Supadata 发送视频链接。此视频暂时没有可用字幕。如需字幕，可重新在侧栏本次授权 Supadata，或在设置中调整可选配置。",
   );
-  document.getElementById("errorBtn").textContent =
-    "重试 YouTube 原生字幕";
-}
-
-function showSupadataNotConfigured(message) {
-  showNativeTranscriptRetry("未能直接读取字幕", message);
-  const primaryButton = document.getElementById("errorBtn");
   const secondaryButton = document.getElementById("errorSecondaryBtn");
-  primaryButton.textContent = "重试 YouTube 原生字幕";
   if (secondaryButton) {
-    secondaryButton.textContent = "配置可选 Supadata 回退";
+    secondaryButton.textContent = "打开设置";
     secondaryButton.hidden = false;
   }
   errorSecondaryAction = () =>
     chrome.runtime.sendMessage({ action: "openOptions" });
+}
+
+// A Supadata 429. The message must make clear this is Supadata's rate limit,
+// never YouTube's. The background keeps a bounded cooldown, so an immediate
+// retry stays local until it clears.
+function showSupadataRateLimited(message) {
+  showError(
+    "Supadata 暂时限流",
+    message ||
+      "Supadata 请求已达速率上限，请稍后再授权重试。这是 Supadata 的限流，并非 YouTube。",
+  );
+}
+
+function showSupadataNotConfigured(message) {
+  showError(
+    "未配置 Supadata",
+    message ||
+      "新的 YouTube 字幕需要 Supadata。请在设置中配置可选的 Supadata 密钥，然后回到侧栏逐次授权。",
+  );
+  const primaryButton = document.getElementById("errorBtn");
+  primaryButton.textContent = "打开设置";
+  errorAction = () => chrome.runtime.sendMessage({ action: "openOptions" });
+}
+
+function showSupadataInvalidKey(message) {
+  showError(
+    "Supadata 密钥无效",
+    message || "请在设置中更新 Supadata API 密钥后重新授权。",
+  );
+  const primaryButton = document.getElementById("errorBtn");
+  primaryButton.textContent = "打开设置";
+  errorAction = () => chrome.runtime.sendMessage({ action: "openOptions" });
+}
+
+function showSupadataProviderError(message) {
+  showError(
+    "Supadata 获取失败",
+    message || "Supadata 暂时不可用，请稍后重新授权重试。",
+  );
 }
 
 function showPageRefreshRequired(tabId, message) {
@@ -2079,14 +2230,12 @@ async function copyToClipboard(text) {
 
 async function copyToClipboardWithFeedback(text, buttonId) {
   const btn = document.getElementById(buttonId);
-  const original = btn.textContent;
+  if (!btn) return;
+  const restoreTitle = btn.getAttribute("title") || "";
 
   const success = await copyToClipboard(text);
   if (success) {
-    btn.textContent = "✓ 已复制";
-    setTimeout(() => {
-      btn.textContent = original;
-    }, 2000);
+    flashIconDone(btn, "已复制", restoreTitle, 2000);
   }
 }
 
@@ -2381,6 +2530,17 @@ async function loadFromCache(videoId) {
     if (
       cached.transcriptSourcePolicyVersion !== TRANSCRIPT_SOURCE_POLICY_VERSION
     ) {
+      return null;
+    }
+    // v4 binds every cached transcript to the active platform provider. A
+    // legacy or unknown YouTube source must never masquerade as an authorized
+    // Supadata result; Bilibili caches remain isolated to their own adapter.
+    const cachedPlatform =
+      cached.mediaRef?.platform ||
+      (String(videoId).startsWith("bilibili:") ? "bilibili" : "youtube");
+    const expectedSource =
+      cachedPlatform === "bilibili" ? "bilibili" : "supadata";
+    if (cached.transcriptSource !== expectedSource) {
       return null;
     }
 
@@ -2837,8 +2997,8 @@ function renderNotes(notes, filteredVideoId) {
     setNotesTranslationStatus();
     notesIntro.style.display = "block";
     notesIntro.textContent = filteredVideoId
-      ? "当前视频还没有笔记。将鼠标移到视频上并点击“📝 笔记”即可保存。"
-      : "还没有保存任何笔记。将鼠标移到视频上并点击“📝 笔记”即可保存。";
+      ? "当前视频还没有笔记。将鼠标移到视频上，点击书签图标即可保存。"
+      : "还没有保存任何笔记。将鼠标移到视频上，点击书签图标即可保存。";
     return;
   }
 
@@ -2855,73 +3015,117 @@ function renderNotes(notes, filteredVideoId) {
     const noteEl = document.createElement("div");
     noteEl.className = "note-item";
     const noteCopyText = noteCopyTextForMode(note);
+    const noteTime = formatTimecode(note.timestampSeconds);
     noteEl.innerHTML = `
       <div class="note-header">
-        <span class="note-timestamp" data-url="${escapeHtml(note.timestampedUrl)}" data-seconds="${Number(note.timestampSeconds) || 0}">${escapeHtml(note.timestamp)}</span>
+        <span class="note-timestamp" role="button" tabindex="0" data-seconds="${Number(note.timestampSeconds) || 0}" title="从 ${escapeHtml(noteTime)} 播放" aria-label="从 ${escapeHtml(noteTime)} 播放">${escapeHtml(noteTime)}</span>
         ${!filteredVideoId ? `<span class="note-video-title">${escapeHtml(note.videoTitle)}</span>` : ""}
-        <button class="note-delete" data-id="${escapeHtml(note.id)}" title="删除笔记" aria-label="删除笔记">✕</button>
+        <div class="note-more">
+          <button class="note-more-btn" type="button" aria-haspopup="true" aria-expanded="false" title="更多操作" aria-label="更多操作">${UI_ICONS.more}</button>
+          <div class="note-more-menu" role="menu" hidden>
+            <button class="note-menu-item danger note-delete" type="button" role="menuitem" data-id="${escapeHtml(note.id)}">删除笔记</button>
+          </div>
+        </div>
       </div>
       <div class="note-text">${renderNoteLanguageContent(note)}</div>
       <div class="note-actions">
-        <button class="note-action-btn note-copy-text">⧉ 复制文字</button>
-        <button class="note-action-btn note-copy-link" data-url="${escapeHtml(note.timestampedUrl)}">🔗 复制时间戳</button>
-        <button class="note-action-btn note-play" data-seconds="${Number(note.timestampSeconds) || 0}">▶ 播放</button>
+        <button class="icon-btn primary note-play" type="button" title="从此处播放" aria-label="从此处播放">${UI_ICONS.play}</button>
+        <button class="icon-btn note-copy-text" type="button" title="复制文字" aria-label="复制文字">${UI_ICONS.copy}</button>
+        <button class="icon-btn note-copy-link" type="button" title="复制时间戳链接" aria-label="复制时间戳链接">${UI_ICONS.link}</button>
       </div>
     `;
 
-    // Timestamp click - play from this point (in this tab or a new one)
-    noteEl.querySelector(".note-timestamp").addEventListener("click", () => {
-      playNote(note);
+    // Timestamp click / keyboard - play from this point (in this tab or a new one)
+    const timestampEl = noteEl.querySelector(".note-timestamp");
+    timestampEl.addEventListener("click", () => playNote(note));
+    timestampEl.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " " || e.key === "Spacebar") {
+        e.preventDefault();
+        playNote(note);
+      }
     });
 
-    // Delete button
-    noteEl
-      .querySelector(".note-delete")
-      .addEventListener("click", async (e) => {
-        e.stopPropagation();
-        await deleteNote(note.id);
-        loadNotes(filteredVideoId);
-      });
+    // More menu — holds the destructive delete action
+    const moreBtn = noteEl.querySelector(".note-more-btn");
+    const moreMenu = noteEl.querySelector(".note-more-menu");
+    moreBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const willOpen = moreMenu.hidden;
+      closeAllNoteMenus();
+      if (willOpen) {
+        moreMenu.hidden = false;
+        moreBtn.setAttribute("aria-expanded", "true");
+      }
+    });
+
+    // Delete lives inside the more menu
+    noteEl.querySelector(".note-delete").addEventListener("click", async (e) => {
+      e.stopPropagation();
+      closeAllNoteMenus();
+      await deleteNote(note.id);
+      loadNotes(filteredVideoId);
+    });
 
     // Copy text button — copies just the note's text
-    noteEl
-      .querySelector(".note-copy-text")
-      .addEventListener("click", async () => {
-        try {
-          await navigator.clipboard.writeText(noteCopyText);
-          const btn = noteEl.querySelector(".note-copy-text");
-          btn.textContent = "✓ 已复制";
-          setTimeout(() => {
-            btn.textContent = "⧉ 复制文字";
-          }, 2000);
-        } catch (err) {
-          console.error("Copy failed:", err);
-        }
-      });
+    const copyTextBtn = noteEl.querySelector(".note-copy-text");
+    copyTextBtn.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(noteCopyText);
+        flashIconDone(copyTextBtn, "已复制", "复制文字", 2000);
+      } catch (err) {
+        console.error("Copy failed:", err);
+      }
+    });
 
-    // Copy timestamp button — copies the timestamped YouTube link
-    noteEl
-      .querySelector(".note-copy-link")
-      .addEventListener("click", async () => {
-        try {
-          await navigator.clipboard.writeText(note.timestampedUrl);
-          const btn = noteEl.querySelector(".note-copy-link");
-          btn.textContent = "✓ 已复制";
-          setTimeout(() => {
-            btn.textContent = "🔗 复制时间戳";
-          }, 2000);
-        } catch (err) {
-          console.error("Copy failed:", err);
-        }
-      });
+    // Copy timestamp button — copies the timestamped link
+    const copyLinkBtn = noteEl.querySelector(".note-copy-link");
+    copyLinkBtn.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(note.timestampedUrl);
+        flashIconDone(copyLinkBtn, "已复制链接", "复制时间戳链接", 2000);
+      } catch (err) {
+        console.error("Copy failed:", err);
+      }
+    });
 
     // Play button (in this tab if it's the current video, else a new tab)
-    noteEl.querySelector(".note-play").addEventListener("click", () => {
-      playNote(note);
-    });
+    noteEl.querySelector(".note-play").addEventListener("click", () =>
+      playNote(note),
+    );
 
     notesList.appendChild(noteEl);
   });
+
+  ensureNoteMenuDismissHandler();
+}
+
+/**
+ * Closes any open note "more" menu and resets its trigger's expanded state.
+ */
+function closeAllNoteMenus() {
+  document.querySelectorAll(".note-more-menu").forEach((menu) => {
+    menu.hidden = true;
+  });
+  document.querySelectorAll(".note-more-btn").forEach((btn) => {
+    btn.setAttribute("aria-expanded", "false");
+  });
+}
+
+let noteMenuDismissHandlerAdded = false;
+
+/**
+ * Registers one-time listeners so an outside click or Escape closes any open
+ * note "more" menu.
+ */
+function ensureNoteMenuDismissHandler() {
+  if (noteMenuDismissHandlerAdded) return;
+  document.addEventListener("click", (event) => {
+    if (!event.target.closest(".note-more")) closeAllNoteMenus();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") closeAllNoteMenus();
+  });
+  noteMenuDismissHandlerAdded = true;
 }
 
 /**
@@ -3063,12 +3267,22 @@ function highlightActiveEntry(currentSeconds) {
   // Remove old highlight, add new one
   entries.forEach((e) => e.classList.remove("active-playback"));
   activeEntry.classList.add("active-playback");
+  updateFollowPlaybackLabel(activeEntry.dataset.seconds);
 
   // Only scroll if auto-scroll is enabled
   if (autoScrollEnabled) {
     lastAutoScrollTime = Date.now();
     activeEntry.scrollIntoView({ behavior: "smooth", block: "center" });
   }
+}
+
+/**
+ * Sets the "回到 H:MM:SS" label on the follow-playback pill so it always shows
+ * the full formatted time of the line currently being spoken.
+ */
+function updateFollowPlaybackLabel(seconds) {
+  const label = document.getElementById("followPlaybackTime");
+  if (label) label.textContent = formatTimecode(seconds);
 }
 
 /**
@@ -3084,6 +3298,10 @@ function onContentAreaScroll() {
   // User scrolled manually — disable auto-scroll and show the button
   if (autoScrollEnabled && autoScrollInterval) {
     autoScrollEnabled = false;
+    const activeEntry = document.querySelector(
+      "#transcriptList .transcript-entry.active-playback",
+    );
+    if (activeEntry) updateFollowPlaybackLabel(activeEntry.dataset.seconds);
     document.getElementById("followPlaybackBtn").style.display = "block";
   }
 }
@@ -3119,18 +3337,18 @@ function isConfirmedSimplifiedChineseSource(value) {
   return subtags.includes("cn") || subtags.includes("sg");
 }
 
-function currentVideoIsConfirmedSimplifiedChinese() {
-  return isConfirmedSimplifiedChineseSource(currentTranscriptLanguage);
+function currentVideoIsChinese() {
+  return isChineseLanguage(currentTranscriptLanguage);
 }
 
 /**
  * Reflects whether Chinese / bilingual transcript translation applies to the
- * current video. A confirmed Simplified-Chinese transcript is already in the
- * target language, so those buttons are disabled (with an explanatory title)
+ * current video. The user reads both Simplified and Traditional Chinese, so any
+ * Chinese transcript is already in the target language. Disable those buttons
  * rather than issuing a redundant, billable translation.
  */
 function updateTranscriptModeAvailability() {
-  const unavailable = currentVideoIsConfirmedSimplifiedChinese();
+  const unavailable = currentVideoIsChinese();
   document.querySelectorAll(".transcript-mode-btn").forEach((button) => {
     if (button.dataset.transcriptMode === "original") {
       button.disabled = false;
@@ -3141,7 +3359,7 @@ function updateTranscriptModeAvailability() {
     button.disabled = unavailable;
     if (unavailable) {
       button.setAttribute("aria-disabled", "true");
-      button.setAttribute("title", "字幕已是简体中文，无需翻译。");
+      button.setAttribute("title", "字幕已是中文，无需翻译。");
     } else {
       button.removeAttribute("aria-disabled");
       button.removeAttribute("title");
@@ -3183,15 +3401,27 @@ async function handleTranscriptModeChange(mode) {
   if (!["original", "zh", "bilingual"].includes(mode)) return;
   if (mode === currentTranscriptMode) return;
 
-  // A confirmed Simplified-Chinese transcript is already in the target
-  // language: never switch it into a Chinese or bilingual (duplicated) view or
-  // send it for translation. The controls are also disabled, but this guards
-  // the state directly in case a change is triggered another way.
-  if (mode !== "original" && currentVideoIsConfirmedSimplifiedChinese()) {
+  // Any Chinese transcript is already readable in the requested target
+  // language. Never switch it into a duplicated view or send it for
+  // translation. The controls are also disabled, but this guards the state
+  // directly in case a change is triggered another way.
+  if (mode !== "original" && currentVideoIsChinese()) {
     return;
   }
 
+  const previousMode = currentTranscriptMode;
   currentTranscriptMode = mode;
+
+  // Chinese-only and bilingual are two presentations of the same translated
+  // segments. Keep the active queue and observer alive, and only re-render the
+  // row content. Restarting translateTranscript here would discard an in-flight
+  // provider response and issue the same billable request again.
+  if (previousMode !== "original" && mode !== "original") {
+    setTranscriptModeButtons(mode);
+    renderTranscriptTranslationMode(mode);
+    return;
+  }
+
   translationGeneration += 1;
   translationWorkCount = 0;
   setTranslatingSpinner(false);
@@ -3225,10 +3455,9 @@ function renderTranscriptSegmentContent(segment, mode, translated, error) {
   return `<span class="transcript-copy"><span class="transcript-translation ${translated ? "" : error ? "translation-error" : "translation-pending"}">${translationHtml}</span></span>`;
 }
 
-function renderTranscriptModeRows(segments, mode) {
+function renderTranscriptTranslationBadge(mode) {
   const transcriptList = document.getElementById("transcriptList");
-  if (!transcriptList) return [];
-  transcriptList.innerHTML = "";
+  if (!transcriptList) return;
 
   const existingBadge = document.getElementById("transcriptSourceBadge");
   if (existingBadge) existingBadge.remove();
@@ -3242,6 +3471,57 @@ function renderTranscriptModeRows(segments, mode) {
       : `简体中文 · 译自${originalLabel}`;
   badge.innerHTML = `<span class="source-dot source-dot--subs"></span> ${escapeHtml(transcriptSourceLabel())} · ${modeLabel}`;
   transcriptList.parentElement.insertBefore(badge, transcriptList);
+}
+
+function attachTranslationRetry(row, index, generation) {
+  const retry = row.querySelector(".translation-retry-btn");
+  if (!retry) return;
+  ["mousedown", "mouseup"].forEach((eventName) => {
+    retry.addEventListener(eventName, (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+    });
+  });
+  retry.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    retryTranslationSegment(index, generation);
+  });
+}
+
+function renderTranscriptTranslationMode(mode) {
+  const segments = getActiveTranscriptSegments();
+  renderTranscriptTranslationBadge(mode);
+  segments.forEach((segment, index) => {
+    const row = document.querySelector(
+      `.transcript-entry[data-segment-id="${CSS.escape(segment.id)}"]`,
+    );
+    if (!row) return;
+    const translated = transcriptParagraphCache.get(
+      transcriptTranslationCacheKey(currentVideoId, segment),
+    );
+    const error = row.classList.contains("translation-failed")
+      ? "翻译失败。"
+      : "";
+    const copy = row.querySelector(".transcript-copy");
+    if (copy) {
+      copy.outerHTML = renderTranscriptSegmentContent(
+        segment,
+        mode,
+        translated,
+        error,
+      );
+    }
+    attachTranslationRetry(row, index, translationGeneration);
+  });
+}
+
+function renderTranscriptModeRows(segments, mode) {
+  const transcriptList = document.getElementById("transcriptList");
+  if (!transcriptList) return [];
+  transcriptList.innerHTML = "";
+
+  renderTranscriptTranslationBadge(mode);
 
   const rows = [];
   segments.forEach((segment, index) => {
@@ -3254,16 +3534,11 @@ function renderTranscriptModeRows(segments, mode) {
     div.dataset.segmentId = segment.id;
     div.dataset.segmentIndex = index;
 
-    const minutes = Math.floor(segment.start / 60);
-    const seconds = Math.floor(segment.start % 60);
-    const timestamp = `${minutes}:${String(seconds).padStart(2, "0")}`;
     div.innerHTML = `
-      <span class="transcript-time">${timestamp}</span>
+      ${transcriptTimeCellMarkup(segment.start)}
       ${renderTranscriptSegmentContent(segment, mode, cached, "")}
     `;
-    div.addEventListener("click", (event) =>
-      seekFromTranscriptEntryClick(event, segment.start),
-    );
+    attachTranscriptTimeSeek(div, segment.start);
     transcriptList.appendChild(div);
     rows.push(div);
   });
@@ -3323,20 +3598,7 @@ function updateTranslatedRow(segment, index, alignedItem, generation) {
   row.classList.toggle("translating", false);
   row.classList.toggle("translation-failed", !alignedItem.text);
 
-  const retry = row.querySelector(".translation-retry-btn");
-  if (retry) {
-    ["mousedown", "mouseup"].forEach((eventName) => {
-      retry.addEventListener(eventName, (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-      });
-    });
-    retry.addEventListener("click", (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      retryTranslationSegment(index, generation);
-    });
-  }
+  attachTranslationRetry(row, index, generation);
 }
 
 let activeTranslationQueue = null;
@@ -3346,7 +3608,6 @@ async function requestTranscriptTranslationBatch(
   segments,
   generation,
   videoId,
-  mode,
 ) {
   const sourceBatch = indices.map((index) => segments[index]);
   setTranslatingSpinner(true);
@@ -3362,9 +3623,7 @@ async function requestTranscriptTranslationBatch(
     });
 
     const isStale =
-      generation !== translationGeneration ||
-      videoId !== currentVideoId ||
-      mode !== currentTranscriptMode;
+      generation !== translationGeneration || videoId !== currentVideoId;
     if (isStale) return;
 
     const responseSegments = result?.success
@@ -3420,11 +3679,10 @@ function retryTranslationSegment(index, generation) {
  * remaining rows. Batches are sequential so the provider is never flooded.
  */
 async function translateTranscript() {
-  // Fail-safe: a confirmed Simplified-Chinese transcript needs no translation.
-  // Collapse back to the original view so no entry point (mode change, cache
-  // reload, retry) can emit a redundant translateContent request or leave a
-  // "waiting for translation" / duplicated bilingual row behind.
-  if (currentVideoIsConfirmedSimplifiedChinese()) {
+  // Fail-safe: any Chinese transcript needs no translation. Collapse back to
+  // the original view so no entry point (mode change, cache reload, retry) can
+  // emit a redundant translateContent request or leave a duplicated row behind.
+  if (currentVideoIsChinese()) {
     if (currentTranscriptMode !== "original") {
       currentTranscriptMode = "original";
       setTranscriptModeButtons("original");
@@ -3459,7 +3717,6 @@ async function translateTranscript() {
         segments,
         generation,
         videoId,
-        mode,
       );
     } finally {
       processing = false;
@@ -3542,4 +3799,5 @@ globalThis.__YTD_TRANSCRIPT_TESTING__ = {
   renderTranscriptSegmentContent,
   extractMediaLocator,
   transcriptTranslationCacheKey,
+  formatTimecode,
 };

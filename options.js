@@ -8,14 +8,32 @@ const YTD_OPTIONS = (() => {
     en: {
       pageTitle: "DigestDock Settings",
       languageGroupLabel: "Interface language",
+      navAriaLabel: "Settings navigation",
+      navGroupSettings: "Settings",
+      navGroupOther: "Other",
+      navServices: "Service connections",
+      navTranscript: "Transcript provider",
+      navNotes: "Notes & backup",
+      navPrivacy: "Privacy",
+      deepseekTagline: "Overviews, explanations, translation, and note polishing",
+      supadataTagline: "Optional provider for new YouTube transcripts",
+      statusConfigured: "Configured",
+      statusNotConfigured: "Not configured",
+      fieldRequired: "Required",
+      fieldOptional: "Optional",
+      toggleKeyVisibility: "Show or hide the key",
+      privacySummary:
+        "DigestDock has no developer server and uses no analytics. API keys, cached digests, translations, and notes stay only in this Chrome profile.",
+      noUnsavedChanges: "No unsaved changes.",
+      unsavedChanges: "You have unsaved changes.",
       heading: "Bring your own API keys",
       lede:
-        "Keys stay in this Chrome profile. DeepSeek powers AI features, and Supadata is an optional YouTube transcript fallback. This open-source extension has no developer server or analytics.",
-      transcriptProvider: "YouTube transcript fallback",
+        "Keys stay in this Chrome profile. DeepSeek powers AI features, and Supadata is the optional provider that fetches native captions for new YouTube videos. This open-source extension has no developer server or analytics.",
+      transcriptProvider: "YouTube transcript provider",
       supadataApiKeyLabel: "Supadata API key (optional)",
       supadataPlaceholder: "Paste your Supadata key",
       supadataHelp:
-        "DigestDock first reads existing caption tracks directly from YouTube. If local retrieval fails, Supadata is called only after you confirm that one third-party request in the side panel. Bilibili does not use it. ",
+        "New YouTube captions are fetched through Supadata. It stays optional for the extension, but Supadata is called only after you confirm that one third-party request in the side panel, once per video. Bilibili does not use it. ",
       supadataLink: "Create a Supadata account and key",
       supadataHelpSuffix:
         ". Supadata generates the key during onboarding.",
@@ -64,9 +82,10 @@ const YTD_OPTIONS = (() => {
       footer:
         'Read <a href="PRIVACY.md" target="_blank">PRIVACY.md</a> in the repository for the complete data-flow description.',
       migrationWarning:
-        "Custom provider settings were removed safely. Your optional Supadata fallback key was kept, but the AI key was cleared. Enter a DeepSeek API key to continue.",
+        "Custom provider settings were removed safely. Your optional Supadata key was kept, but the AI key was cleared. Enter a DeepSeek API key to continue.",
       saving: "Saving…",
-      addSupadataKey: "Add a Supadata API key to enable the optional fallback.",
+      addSupadataKey:
+        "Add a Supadata API key to fetch native captions for new YouTube videos after per-attempt consent.",
       addDeepseekKey: "Add a DeepSeek API key.",
       saved: "Saved. Reopen DigestDock to use these settings.",
       saveFailed: "Could not save settings. Please try again.",
@@ -114,14 +133,32 @@ const YTD_OPTIONS = (() => {
     "zh-CN": {
       pageTitle: "DigestDock 设置",
       languageGroupLabel: "界面语言",
+      navAriaLabel: "设置导航",
+      navGroupSettings: "设置",
+      navGroupOther: "其他",
+      navServices: "服务连接",
+      navTranscript: "字幕服务",
+      navNotes: "笔记与备份",
+      navPrivacy: "隐私说明",
+      deepseekTagline: "概览、解释、翻译和笔记润色",
+      supadataTagline: "新 YouTube 视频的可选字幕服务",
+      statusConfigured: "已配置",
+      statusNotConfigured: "未配置",
+      fieldRequired: "必需",
+      fieldOptional: "可选",
+      toggleKeyVisibility: "显示或隐藏密钥",
+      privacySummary:
+        "DigestDock 没有开发者服务器，也不使用分析服务。API 密钥、缓存摘要、翻译和笔记只保存在当前 Chrome 个人资料中。",
+      noUnsavedChanges: "设置没有未保存的更改。",
+      unsavedChanges: "有未保存的更改。",
       heading: "使用你自己的 API 密钥",
       lede:
-        "密钥仅保存在当前 Chrome 个人资料中。DeepSeek 用于 AI 功能，Supadata 仅作为可选的 YouTube 字幕回退。本开源扩展没有开发者服务器，也不使用分析服务。",
-      transcriptProvider: "YouTube 字幕回退",
+        "密钥仅保存在当前 Chrome 个人资料中。DeepSeek 用于 AI 功能，Supadata 是可选服务，用于为新的 YouTube 视频获取原生字幕。本开源扩展没有开发者服务器，也不使用分析服务。",
+      transcriptProvider: "YouTube 字幕服务",
       supadataApiKeyLabel: "Supadata API 密钥（可选）",
       supadataPlaceholder: "粘贴 Supadata 密钥",
       supadataHelp:
-        "DigestDock 会先直接读取 YouTube 已有字幕轨。本地获取失败后，只有你在侧边栏确认本次使用第三方 Supadata 时才会调用；B 站不会使用。",
+        "新的 YouTube 字幕由 Supadata 获取。它对整个扩展仍是可选配置，但只有你在侧边栏确认本次使用第三方 Supadata 时才会调用，且逐视频授权；B 站不会使用。",
       supadataLink: "创建 Supadata 账号并获取密钥",
       supadataHelpSuffix: "。Supadata 会在引导流程中生成密钥。",
       aiProvider: "AI 服务",
@@ -168,9 +205,10 @@ const YTD_OPTIONS = (() => {
       footer:
         '完整数据流说明请参阅仓库中的 <a href="PRIVACY.md" target="_blank">PRIVACY.md</a>。',
       migrationWarning:
-        "已安全移除自定义服务设置。可选的 Supadata 回退密钥已保留，AI 密钥已清除。请输入 DeepSeek API 密钥以继续使用。",
+        "已安全移除自定义服务设置。可选的 Supadata 密钥已保留，AI 密钥已清除。请输入 DeepSeek API 密钥以继续使用。",
       saving: "正在保存…",
-      addSupadataKey: "如需启用可选回退，请添加 Supadata API 密钥。",
+      addSupadataKey:
+        "为新的 YouTube 视频获取原生字幕，请添加可选的 Supadata API 密钥（每次逐一授权）。",
       addDeepseekKey: "请添加 DeepSeek API 密钥。",
       saved: "已保存。请重新打开 DigestDock 以使用这些设置。",
       saveFailed: "无法保存设置，请重试。",
@@ -444,6 +482,95 @@ const YTD_OPTIONS = (() => {
     }
   }
 
+  const SETTINGS_NAV_ACTIVE_CLASS = "is-active";
+  // aria-current="location" marks the nav item pointing at the section the user
+  // is currently viewing within the same document (WAI-ARIA "location" token).
+  const SETTINGS_NAV_CURRENT_VALUE = "location";
+  // Activation line, in px below the top of the internal scroller, where a
+  // section is considered the current one for scroll-spy purposes.
+  const SETTINGS_NAV_ACTIVATION_OFFSET = 24;
+  // Slack, in px, for treating the internal scroller as scrolled to its end.
+  // Sub-pixel rounding means scrollTop + clientHeight rarely equals scrollHeight
+  // exactly at the bottom.
+  const SETTINGS_NAV_BOTTOM_EPSILON = 2;
+
+  function settingsNavTargetFromHref(href) {
+    if (typeof href !== "string") return "";
+    const hashIndex = href.indexOf("#");
+    return hashIndex === -1 ? "" : href.slice(hashIndex + 1);
+  }
+
+  // Deterministic scroll-spy: given the sections in document order with each
+  // top measured relative to the scroller's top edge, the active section is the
+  // last one whose top has reached or passed the activation line. Above the
+  // first section, the first section stays active.
+  //
+  // options.atBottom marks that the scroller is pinned at its end, where the
+  // final sections can never bring their top to the activation line. In that
+  // state an explicit click target (options.preferredId) that is still visible
+  // wins so navigation lands where the user asked; otherwise the last visible
+  // section wins, matching the "scrolled to the very end" convention. Callers
+  // that omit options keep the plain line-based behavior. options.viewportHeight
+  // bounds visibility (defaults to unbounded for line-only callers and tests).
+  function resolveActiveSettingsSection(sections, activationLine = 0, options = {}) {
+    if (!sections.length) return "";
+
+    let activeId = sections[0].id;
+    for (const section of sections) {
+      if (section.top <= activationLine + 1) activeId = section.id;
+    }
+
+    if (options.atBottom !== true) return activeId;
+
+    const viewportHeight =
+      typeof options.viewportHeight === "number"
+        ? options.viewportHeight
+        : Infinity;
+    // A section is visible when its top is above the viewport's bottom edge and
+    // its bottom (approximated by the next section's top) is below the top edge.
+    const isVisible = (index) => {
+      const top = sections[index].top;
+      const bottom =
+        index + 1 < sections.length ? sections[index + 1].top : Infinity;
+      return top < viewportHeight && bottom > 0;
+    };
+
+    if (options.preferredId) {
+      const preferredIndex = sections.findIndex(
+        (section) => section.id === options.preferredId,
+      );
+      if (preferredIndex !== -1 && isVisible(preferredIndex)) {
+        return options.preferredId;
+      }
+    }
+
+    let bottomId = activeId;
+    for (let index = 0; index < sections.length; index += 1) {
+      if (isVisible(index)) bottomId = sections[index].id;
+    }
+    return bottomId;
+  }
+
+  // Sets is-active and aria-current only on the item whose href targets
+  // activeId; clears both from every sibling. Never touches text, so it cannot
+  // disturb localization, IDs, or anchor behavior.
+  function applySettingsNavState(navItems, activeId) {
+    for (const item of navItems) {
+      const target = settingsNavTargetFromHref(
+        typeof item.getAttribute === "function"
+          ? item.getAttribute("href")
+          : item.href,
+      );
+      const isActive = Boolean(activeId) && target === activeId;
+      item.classList.toggle(SETTINGS_NAV_ACTIVE_CLASS, isActive);
+      if (isActive) {
+        item.setAttribute("aria-current", SETTINGS_NAV_CURRENT_VALUE);
+      } else {
+        item.removeAttribute("aria-current");
+      }
+    }
+  }
+
   function initialize(root = globalThis) {
     const doc = root.document;
     const settingsApi = root.YTD_SETTINGS;
@@ -468,6 +595,20 @@ const YTD_OPTIONS = (() => {
     const importNotesBtn = doc.getElementById("importNotesBtn");
     const importNotesFile = doc.getElementById("importNotesFile");
     const languageButtons = [...doc.querySelectorAll("[data-language]")];
+    const deepseekStatus = doc.getElementById("deepseekStatus");
+    const supadataStatus = doc.getElementById("supadataStatus");
+    const revealToggles = [...doc.querySelectorAll("[data-reveal]")];
+    const settingsScroll = doc.querySelector(".settings-scroll");
+    const settingsNavItems = [...doc.querySelectorAll(".settings-nav-item")];
+    const settingsNavTargets = settingsNavItems
+      .map((item) => {
+        const id = settingsNavTargetFromHref(item.getAttribute("href"));
+        return id ? { id, element: doc.getElementById(id) } : null;
+      })
+      .filter((entry) => entry && entry.element);
+    const settingsNavTargetIds = new Set(
+      settingsNavTargets.map((entry) => entry.id),
+    );
     const statusStates = new Map();
     const promptDrafts = createPromptDrafts();
     let currentLanguage = DEFAULT_LANGUAGE;
@@ -482,6 +623,37 @@ const YTD_OPTIONS = (() => {
     function setStatus(element, key, params = {}) {
       statusStates.set(element, { key, params });
       renderStatus(element);
+    }
+
+    // Presentation-only: reflect whether each key is present. Reads the loaded
+    // input values; never sends or logs the key itself.
+    function setServiceBadge(badge, hasKey) {
+      if (!badge) return;
+      badge.textContent = translate(
+        currentLanguage,
+        hasKey ? "statusConfigured" : "statusNotConfigured",
+      );
+      badge.dataset.status = hasKey ? "configured" : "empty";
+    }
+
+    function updateServiceStatus() {
+      setServiceBadge(deepseekStatus, Boolean(aiApiKeyInput.value.trim()));
+      setServiceBadge(supadataStatus, Boolean(supadataApiKeyInput.value.trim()));
+    }
+
+    // Sticky save bar hint. Guarded so a keystroke does not re-announce the
+    // same polite status on every character.
+    function markUnsaved() {
+      if (statusStates.get(saveStatus)?.key === "unsavedChanges") return;
+      setStatus(saveStatus, "unsavedChanges");
+    }
+
+    function toggleKeyReveal(button) {
+      const input = doc.getElementById(button.dataset.reveal);
+      if (!input) return;
+      const reveal = input.type === "password";
+      input.type = reveal ? "text" : "password";
+      button.setAttribute("aria-pressed", String(reveal));
     }
 
     function applyLanguage(language) {
@@ -526,6 +698,9 @@ const YTD_OPTIONS = (() => {
       );
       updateLanguageButtonState(languageButtons, currentLanguage);
       for (const element of statusStates.keys()) renderStatus(element);
+      // Re-apply the dynamic configured/not-configured badges after the static
+      // data-i18n pass has reset them to the default label.
+      updateServiceStatus();
     }
 
     async function loadSettings() {
@@ -538,6 +713,7 @@ const YTD_OPTIONS = (() => {
 
         aiApiKeyInput.value = settings.aiApiKey;
         supadataApiKeyInput.value = settings.supadataApiKey;
+        updateServiceStatus();
         if (migration.migrated) {
           await storage.set({ [settingsApi.STORAGE_KEY]: settings });
           setStatus(saveStatus, "migrationWarning");
@@ -554,6 +730,9 @@ const YTD_OPTIONS = (() => {
         applyLanguage(DEFAULT_LANGUAGE);
       }
       await loadSettings();
+      if (!statusStates.has(saveStatus)) {
+        setStatus(saveStatus, "noUnsavedChanges");
+      }
     }
 
     async function saveSettings(event) {
@@ -710,7 +889,150 @@ const YTD_OPTIONS = (() => {
       }
     }
 
+    // Explicit navigation intent (nav click or hash change). While set, the
+    // clicked section stays active through its smooth scroll and, at the bottom
+    // where it cannot align to the top, wins over the passive scroll-spy default
+    // instead of letting spy retreat to the previous section. Cleared once the
+    // user scrolls away, so passive scroll-spy is never permanently suppressed.
+    let pendingNavId = null;
+    // Becomes true once the click-driven smooth scroll reaches its destination,
+    // which lets us tell an in-progress scroll (hold the target) apart from a
+    // later user scroll away from the anchored bottom (release the target).
+    let pendingNavArrived = false;
+
+    // Live geometry of the internal scroller: each section's top relative to the
+    // scroller viewport, the viewport height, and whether the scroller is pinned
+    // at its end (where trailing sections can never reach the activation line).
+    function measureSettingsSections() {
+      const scrollerTop = settingsScroll.getBoundingClientRect().top;
+      const sections = settingsNavTargets.map(({ id, element }) => ({
+        id,
+        top: element.getBoundingClientRect().top - scrollerTop,
+      }));
+      const atBottom =
+        settingsScroll.scrollTop + settingsScroll.clientHeight >=
+        settingsScroll.scrollHeight - SETTINGS_NAV_BOTTOM_EPSILON;
+      return { sections, atBottom, viewportHeight: settingsScroll.clientHeight };
+    }
+
+    function beginPendingNav(id) {
+      pendingNavId = id;
+      pendingNavArrived = false;
+      applySettingsNavState(settingsNavItems, id);
+    }
+
+    // Scroll-spy scoped to the internal scroller. Reads live positions relative
+    // to the scroller viewport so it stays correct regardless of window height.
+    function syncActiveNavFromScroll() {
+      if (!settingsScroll || !settingsNavTargets.length) return;
+      const { sections, atBottom, viewportHeight } = measureSettingsSections();
+
+      if (pendingNavId !== null) {
+        if (!pendingNavArrived) {
+          const pendingTop = sections.find(
+            (section) => section.id === pendingNavId,
+          )?.top;
+          if (atBottom) {
+            // Reached the end; the target is anchored as high as it can go.
+            pendingNavArrived = true;
+          } else if (
+            typeof pendingTop === "number" &&
+            pendingTop <= SETTINGS_NAV_ACTIVATION_OFFSET + 1
+          ) {
+            // The target aligned to the top on its own, so passive scroll-spy
+            // already resolves to it; release the hold.
+            pendingNavId = null;
+            pendingNavArrived = false;
+          } else {
+            // Smooth scroll still settling toward the target: keep it active and
+            // do not let scroll-spy retreat to an earlier section.
+            return;
+          }
+        }
+        if (pendingNavId !== null) {
+          if (atBottom) {
+            applySettingsNavState(
+              settingsNavItems,
+              resolveActiveSettingsSection(
+                sections,
+                SETTINGS_NAV_ACTIVATION_OFFSET,
+                { atBottom, viewportHeight, preferredId: pendingNavId },
+              ),
+            );
+            return;
+          }
+          // Anchored at the bottom, but the user has since scrolled away; hand
+          // control back to passive scroll-spy.
+          pendingNavId = null;
+          pendingNavArrived = false;
+        }
+      }
+
+      applySettingsNavState(
+        settingsNavItems,
+        resolveActiveSettingsSection(sections, SETTINGS_NAV_ACTIVATION_OFFSET, {
+          atBottom,
+          viewportHeight,
+        }),
+      );
+    }
+
+    // Resolve the active item from the URL hash (initial load and browser
+    // back/forward hash changes). Returns false when the hash targets no
+    // section so the caller can fall back to scroll position.
+    function syncActiveNavFromHash() {
+      const id = settingsNavTargetFromHref(root.location?.hash || "");
+      if (!settingsNavTargetIds.has(id)) return false;
+      beginPendingNav(id);
+      return true;
+    }
+
+    if (settingsScroll && settingsNavTargets.length) {
+      const scheduleFrame =
+        typeof root.requestAnimationFrame === "function"
+          ? root.requestAnimationFrame.bind(root)
+          : (callback) => root.setTimeout(callback, 16);
+      let scrollFrame = null;
+      // Bounded listener: at most one measurement per animation frame.
+      settingsScroll.addEventListener(
+        "scroll",
+        () => {
+          if (scrollFrame !== null) return;
+          scrollFrame = scheduleFrame(() => {
+            scrollFrame = null;
+            syncActiveNavFromScroll();
+          });
+        },
+        { passive: true },
+      );
+      for (const item of settingsNavItems) {
+        // Reflect the click immediately and remember it as navigation intent;
+        // the anchor still performs its native hash navigation and smooth
+        // scroll. The intent keeps the clicked item active through the scroll,
+        // including near-bottom sections that cannot align to the top.
+        item.addEventListener("click", () => {
+          const id = settingsNavTargetFromHref(item.getAttribute("href"));
+          if (settingsNavTargetIds.has(id)) {
+            beginPendingNav(id);
+          }
+        });
+      }
+      root.addEventListener?.("hashchange", () => {
+        if (!syncActiveNavFromHash()) syncActiveNavFromScroll();
+      });
+      if (!syncActiveNavFromHash()) syncActiveNavFromScroll();
+    }
+
     form.addEventListener("submit", saveSettings);
+    for (const input of [aiApiKeyInput, supadataApiKeyInput]) {
+      input.addEventListener("input", () => {
+        updateServiceStatus();
+        markUnsaved();
+      });
+    }
+    for (const button of revealToggles) {
+      button.addEventListener("click", () => toggleKeyReveal(button));
+    }
     copyCustomizationPromptBtn.addEventListener(
       "click",
       copyCustomizationPrompt,
@@ -754,6 +1076,9 @@ const YTD_OPTIONS = (() => {
     updateLanguageButtonState,
     updateLocalizedPrompt,
     switchPromptDraft,
+    settingsNavTargetFromHref,
+    resolveActiveSettingsSection,
+    applySettingsNavState,
     initialize,
   };
 })();

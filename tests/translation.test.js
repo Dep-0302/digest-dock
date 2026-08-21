@@ -7,7 +7,6 @@ const vm = require("node:vm");
 const root = path.resolve(__dirname, "..");
 const read = (file) => fs.readFileSync(path.join(root, file), "utf8");
 const bilibiliAdapter = require("../bilibili.js");
-const youtubeTranscriptAdapter = require("../youtube-transcript.js");
 
 function loadSidepanelRuntime({
   sendMessage = () => Promise.resolve({}),
@@ -99,7 +98,6 @@ function loadBackgroundHelpers({
   storageSetImpl = async () => {},
   tabsImpl = {},
   bilibiliAdapterImpl = bilibiliAdapter,
-  youtubeTranscriptAdapterImpl = youtubeTranscriptAdapter,
 } = {}) {
   const listeners = { addListener() {} };
   const runtimeMessageListeners = [];
@@ -149,7 +147,6 @@ function loadBackgroundHelpers({
         `https://www.youtube.com/watch?v=${videoId}`,
     },
     BILIBILI_ADAPTER: bilibiliAdapterImpl,
-    YOUTUBE_TRANSCRIPT_ADAPTER: youtubeTranscriptAdapterImpl,
   };
   sandbox.globalThis = sandbox;
   vm.runInNewContext(read("background.js"), sandbox);
@@ -457,14 +454,14 @@ test("Header exposes tab-specific transcript, overview, and notes language modes
     js,
     /function ensureNotesChinese\(\)[\s\S]*?await sendTranslationMessage\(\{[\s\S]*?action: "translateNotes"/,
   );
-  assert.match(js, /const REQUIRED_RUNTIME_PROTOCOL_VERSION = 8/);
+  assert.match(js, /const REQUIRED_RUNTIME_PROTOCOL_VERSION = 9/);
   assert.match(
     js,
     /runtimeProtocolVersion\s*!==\s*REQUIRED_RUNTIME_PROTOCOL_VERSION[\s\S]*?showRuntimeVersionError\(\)/,
   );
   assert.match(js, /扩展后台未响应原文翻译请求，请重新加载扩展/);
   const backgroundSource = read("background.js");
-  assert.match(backgroundSource, /const RUNTIME_PROTOCOL_VERSION = 8/);
+  assert.match(backgroundSource, /const RUNTIME_PROTOCOL_VERSION = 9/);
   assert.match(
     backgroundSource,
     /runtimeProtocolVersion: RUNTIME_PROTOCOL_VERSION/,
@@ -487,7 +484,7 @@ test("Header exposes tab-specific transcript, overview, and notes language modes
   assert.match(js, /cached\.analysisVideoId === videoId/);
   assert.match(js, /videoId !== currentVideoId \|\| !currentTranscript/);
   assert.match(js, /preferredLanguage: currentVideoSourceLanguage/);
-  assert.match(js, /const TRANSCRIPT_SOURCE_POLICY_VERSION = 3/);
+  assert.match(js, /const TRANSCRIPT_SOURCE_POLICY_VERSION = 4/);
   assert.match(
     js,
     /cached\.transcriptSourcePolicyVersion !== TRANSCRIPT_SOURCE_POLICY_VERSION/,
@@ -633,9 +630,9 @@ test("Supadata is requested only after the user confirms the third-party action"
     [false],
   );
   assert.deepEqual(JSON.parse(fixture.errorSnapshot()), {
-    title: "是否使用第三方字幕服务？",
+    title: "是否使用 Supadata 获取字幕？",
     message:
-      "未能直接读取 YouTube 原生字幕。你可以选择本次使用 Supadata 重试；点击后会把此视频的标准 YouTube 链接发送给 Supadata，并可能消耗你的 API 额度。",
+      "此视频将通过 Supadata 获取 YouTube 原生字幕。点击后会把此视频的标准 YouTube 链接发送给 Supadata，并可能消耗你的 API 额度。",
     primaryText: "本次使用 Supadata",
     primaryDisabled: false,
     secondaryText: "不使用第三方服务",
@@ -657,7 +654,14 @@ test("Supadata is requested only after the user confirms the third-party action"
   assert.equal(JSON.parse(fixture.saved()).at(-1).transcriptText, "Approved fallback");
 });
 
-test("declining Supadata sends no third-party transcript request", async () => {
+test("the API-primary side panel exposes no local transcript diagnostics", () => {
+  const helpers = loadSidepanelHelpers();
+  const panel = read("sidepanel.js");
+  assert.equal(helpers.formatLocalTranscriptDiagnostics, undefined);
+  assert.doesNotMatch(panel, /本地诊断|formatLocalTranscriptDiagnostics/);
+});
+
+test("declining Supadata sends no third-party request and retry only reopens consent", async () => {
   const messages = [];
   const videoId = "abc123DEF45";
   const runtime = loadSidepanelRuntime({
@@ -684,25 +688,29 @@ test("declining Supadata sends no third-party transcript request", async () => {
     [false],
   );
   const errorState = JSON.parse(fixture.errorSnapshot());
-  assert.equal(errorState.title, "继续使用 YouTube 原生字幕");
+  assert.equal(errorState.title, "已跳过 Supadata 字幕");
   assert.match(errorState.message, /没有向 Supadata 发送视频链接/);
-  assert.match(errorState.message, /字幕轨尚未加载/);
-  assert.match(errorState.message, /VPN 或代理/);
-  assert.equal(errorState.primaryText, "重试 YouTube 原生字幕");
-  assert.equal(errorState.secondaryHidden, true);
+  assert.match(errorState.message, /重新在侧栏本次授权 Supadata/);
+  assert.equal(errorState.primaryText, "重试");
+  assert.equal(errorState.secondaryText, "打开设置");
+  assert.equal(errorState.secondaryHidden, false);
 
-  const nativeRetry = fixture.clickError();
+  const consentRetry = fixture.clickError();
   await nextTurn();
   fixture.resolveCache(videoId, null);
-  await nativeRetry;
+  await consentRetry;
 
   assert.deepEqual(
     messages.map((message) => message.supadataConsent),
     [false, false],
   );
+  assert.equal(
+    JSON.parse(fixture.errorSnapshot()).title,
+    "是否使用 Supadata 获取字幕？",
+  );
 });
 
-test("a consent click waits for an older local-only refresh and still runs", async () => {
+test("a consent click waits for an older unconsented refresh and still runs", async () => {
   const messages = [];
   const videoId = "abc123DEF45";
   const runtime = loadSidepanelRuntime({
@@ -2636,7 +2644,8 @@ test("Bilibili timestamp note saves polished Chinese once without translation", 
       if (key === `digest_${mediaRef.mediaKey}`) {
         return {
           [`digest_${mediaRef.mediaKey}`]: {
-            transcriptSourcePolicyVersion: 3,
+            transcriptSourcePolicyVersion: 4,
+            transcriptSource: "bilibili",
             mediaRef,
             transcriptLanguage: "zh-CN",
             transcript: [
@@ -2722,7 +2731,8 @@ test("a note saved before the first caption uses the first line instead of the l
       if (key === `digest_${mediaRef.mediaKey}`) {
         return {
           [`digest_${mediaRef.mediaKey}`]: {
-            transcriptSourcePolicyVersion: 3,
+            transcriptSourcePolicyVersion: 4,
+            transcriptSource: "bilibili",
             mediaRef,
             transcriptLanguage: "zh-CN",
             transcript: [
@@ -5039,7 +5049,8 @@ test("saving a note from a Chinese caption skips AI cleanup and keeps the origin
     aiModel: "deepseek-v4-flash",
   };
   const makeDigest = (language) => ({
-    transcriptSourcePolicyVersion: 3,
+    transcriptSourcePolicyVersion: 4,
+    transcriptSource: "supadata",
     transcript: [
       { start: 0, text: "开场白。", language },
       { start: 10, text: "第二句中文字幕内容。", language },
@@ -5146,7 +5157,7 @@ test("isConfirmedSimplifiedChineseSource matches only explicit Simplified tags",
   }
 });
 
-test("a confirmed Simplified-Chinese transcript never requests translation and stays on original", async () => {
+test("Chinese transcripts never request translation and stay on original", async () => {
   const runtime = loadSidepanelRuntime();
   const fixture = runtime.evaluate(`
     (() => {
@@ -5160,6 +5171,10 @@ test("a confirmed Simplified-Chinese transcript never requests translation and s
           translatedContent: { segments: [] },
         });
       };
+      IntersectionObserver = class {
+        observe() {}
+        disconnect() {}
+      };
       renderTranscript = () => { renders += 1; };
       setTranscriptModeButtons = (mode) => { modeButtonCalls.push(mode); };
       currentVideoId = "vid_zh";
@@ -5167,9 +5182,15 @@ test("a confirmed Simplified-Chinese transcript never requests translation and s
         { start: 0, text: "第一段简体中文字幕。" },
         { start: 8, text: "第二段简体中文字幕内容。" },
       ];
-      currentTranscriptLanguage = "zh-Hans";
       currentTranscriptMode = "original";
       return {
+        setLanguage: (language) => {
+          currentTranscriptLanguage = language;
+          currentTranscriptMode = "original";
+          translateContentRequests = 0;
+          renders = 0;
+          modeButtonCalls.length = 0;
+        },
         changeMode: (mode) => handleTranscriptModeChange(mode),
         forceTranslate: (mode) => {
           currentTranscriptMode = mode;
@@ -5185,25 +5206,37 @@ test("a confirmed Simplified-Chinese transcript never requests translation and s
     })()
   `);
 
-  // The control layer refuses to switch into zh / bilingual.
-  await fixture.changeMode("bilingual");
-  await fixture.changeMode("zh");
-  let snap = JSON.parse(fixture.snapshot());
-  assert.equal(snap.translateContentRequests, 0);
-  assert.equal(snap.mode, "original", "mode must stay original for a Simplified source");
+  for (const language of [
+    "zh",
+    "zh-Hans",
+    "zh-Hant",
+    "zh-CN",
+    "zh-TW",
+    "cmn",
+    "yue",
+  ]) {
+    fixture.setLanguage(language);
 
-  // The fail-safe inside translateTranscript also protects the load-time path
-  // (e.g. arriving from an English video still stuck in bilingual mode): it
-  // collapses back to original with no request and no pending/duplicate row.
-  await fixture.forceTranslate("bilingual");
-  snap = JSON.parse(fixture.snapshot());
-  assert.equal(snap.translateContentRequests, 0);
-  assert.equal(snap.mode, "original", "the fail-safe must reset the mode to original");
-  assert.deepEqual(snap.modeButtonCalls, ["original"]);
-  assert.ok(snap.renders >= 1, "the fail-safe re-renders the plain transcript");
+    // The control layer refuses to switch into zh / bilingual.
+    await fixture.changeMode("bilingual");
+    await fixture.changeMode("zh");
+    let snap = JSON.parse(fixture.snapshot());
+    assert.equal(snap.translateContentRequests, 0, language);
+    assert.equal(snap.mode, "original", `${language} must stay on original`);
+
+    // The fail-safe inside translateTranscript also protects the load-time path
+    // (e.g. arriving from an English video still stuck in bilingual mode): it
+    // collapses back to original with no request and no pending/duplicate row.
+    await fixture.forceTranslate("bilingual");
+    snap = JSON.parse(fixture.snapshot());
+    assert.equal(snap.translateContentRequests, 0, language);
+    assert.equal(snap.mode, "original", `${language} must reset to original`);
+    assert.deepEqual(snap.modeButtonCalls, ["original"]);
+    assert.ok(snap.renders >= 1, "the fail-safe re-renders the plain transcript");
+  }
 });
 
-test("Traditional and non-Chinese transcripts still enter the translation path", async () => {
+test("non-Chinese transcripts still enter the translation path", async () => {
   const runtime = loadSidepanelRuntime();
   const fixture = runtime.evaluate(`
     (() => {
@@ -5224,11 +5257,6 @@ test("Traditional and non-Chinese transcripts still enter the translation path",
     })()
   `);
 
-  // Traditional Chinese must keep working — it still needs conversion to zh.
-  fixture.setLanguage("zh-Hant");
-  await fixture.changeMode("zh");
-  assert.deepEqual(JSON.parse(fixture.snapshot()), { translateCalls: 1, mode: "zh" });
-
   // English is unaffected: bilingual mode still translates.
   fixture.setLanguage("en");
   await fixture.changeMode("bilingual");
@@ -5236,14 +5264,103 @@ test("Traditional and non-Chinese transcripts still enter the translation path",
     translateCalls: 1,
     mode: "bilingual",
   });
-
-  // A bare, ambiguous `zh` is not confirmed Simplified, so it still translates.
-  fixture.setLanguage("zh");
-  await fixture.changeMode("zh");
-  assert.deepEqual(JSON.parse(fixture.snapshot()), { translateCalls: 1, mode: "zh" });
 });
 
-test("Simplified-Chinese videos disable the Chinese and bilingual transcript buttons", () => {
+test("switching between bilingual and Chinese reuses active translation work", async () => {
+  const runtime = loadSidepanelRuntime();
+  const fixture = runtime.evaluate(`
+    (() => {
+      let translateCalls = 0;
+      let modeOnlyRenders = 0;
+      translateTranscript = () => {
+        translateCalls += 1;
+        return Promise.resolve();
+      };
+      renderTranscriptTranslationMode = () => {
+        modeOnlyRenders += 1;
+      };
+      setTranscriptModeButtons = () => {};
+      currentTranscript = [{ start: 0, text: "English source sentence." }];
+      currentTranscriptLanguage = "en";
+      currentTranscriptMode = "original";
+      return {
+        changeMode: (mode) => handleTranscriptModeChange(mode),
+        snapshot: () => JSON.stringify({
+          translateCalls,
+          modeOnlyRenders,
+          mode: currentTranscriptMode,
+        }),
+      };
+    })()
+  `);
+
+  await fixture.changeMode("bilingual");
+  assert.deepEqual(JSON.parse(fixture.snapshot()), {
+    translateCalls: 1,
+    modeOnlyRenders: 0,
+    mode: "bilingual",
+  });
+
+  // Presentation changes must not restart the provider-backed translation.
+  await fixture.changeMode("zh");
+  assert.deepEqual(JSON.parse(fixture.snapshot()), {
+    translateCalls: 1,
+    modeOnlyRenders: 1,
+    mode: "zh",
+  });
+});
+
+test("an in-flight translation result survives a presentation mode change", async () => {
+  const runtime = loadSidepanelRuntime();
+  const fixture = runtime.evaluate(`
+    (() => {
+      let resolveRequest;
+      let updatedRows = 0;
+      sendTranslationMessage = () =>
+        new Promise((resolve) => {
+          resolveRequest = resolve;
+        });
+      setTranslatingSpinner = () => {};
+      updateCache = async () => {};
+      updateTranslatedRow = () => {
+        updatedRows += 1;
+      };
+      currentVideoId = "vid_en";
+      currentTranscriptMode = "bilingual";
+      translationGeneration = 7;
+      const segments = [{ id: "segment-0-0", text: "English source." }];
+      return {
+        start: () =>
+          requestTranscriptTranslationBatch(
+            [0],
+            segments,
+            7,
+            "vid_en",
+            "bilingual",
+          ),
+        switchMode: () => {
+          currentTranscriptMode = "zh";
+        },
+        finish: () =>
+          resolveRequest({
+            success: true,
+            translatedContent: {
+              segments: [{ id: "segment-0-0", text: "中文译文。" }],
+            },
+          }),
+        snapshot: () => JSON.stringify({ updatedRows }),
+      };
+    })()
+  `);
+
+  const pending = fixture.start();
+  fixture.switchMode();
+  fixture.finish();
+  await pending;
+  assert.deepEqual(JSON.parse(fixture.snapshot()), { updatedRows: 1 });
+});
+
+test("Chinese videos disable the Chinese and bilingual transcript buttons", () => {
   const runtime = loadSidepanelRuntime();
   const fixture = runtime.evaluate(`
     (() => {
@@ -5276,24 +5393,26 @@ test("Simplified-Chinese videos disable the Chinese and bilingual transcript but
     })()
   `);
 
-  fixture.apply("zh-CN");
-  assert.deepEqual(JSON.parse(fixture.snapshot()), [
-    { mode: "original", disabled: false, ariaDisabled: null, title: null },
-    {
-      mode: "zh",
-      disabled: true,
-      ariaDisabled: "true",
-      title: "字幕已是简体中文，无需翻译。",
-    },
-    {
-      mode: "bilingual",
-      disabled: true,
-      ariaDisabled: "true",
-      title: "字幕已是简体中文，无需翻译。",
-    },
-  ]);
+  for (const language of ["zh", "zh-CN", "zh-TW", "cmn", "yue"]) {
+    fixture.apply(language);
+    assert.deepEqual(JSON.parse(fixture.snapshot()), [
+      { mode: "original", disabled: false, ariaDisabled: null, title: null },
+      {
+        mode: "zh",
+        disabled: true,
+        ariaDisabled: "true",
+        title: "字幕已是中文，无需翻译。",
+      },
+      {
+        mode: "bilingual",
+        disabled: true,
+        ariaDisabled: "true",
+        title: "字幕已是中文，无需翻译。",
+      },
+    ]);
+  }
 
-  // Switching to an English (or Traditional) video re-enables every button.
+  // Switching to an English video re-enables every button.
   fixture.apply("en");
   assert.deepEqual(JSON.parse(fixture.snapshot()), [
     { mode: "original", disabled: false, ariaDisabled: null, title: null },

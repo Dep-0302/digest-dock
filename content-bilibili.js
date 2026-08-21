@@ -12,9 +12,59 @@ const BILI_VIDEO_SELECTOR =
 const BILI_PLAYER_SELECTOR = "#bilibili-player, .bpx-player-container";
 const BILI_DIGEST_HOST_SELECTOR =
   "#arc_toolbar_report .video-toolbar-right";
-const BILI_DIGEST_BUTTON_ID = "bili-digest-button";
-const BILI_NOTE_BUTTON_ID = "bili-note-button";
-const BILI_NOTE_TOAST_ID = "bili-note-toast";
+const DIGESTDOCK_BILIBILI_DOM_PREFIX =
+  `digestdock-${chrome.runtime.id}-bilibili`;
+const BILI_DIGEST_BUTTON_ID =
+  `${DIGESTDOCK_BILIBILI_DOM_PREFIX}-digest-button`;
+const BILI_NOTE_BUTTON_ID =
+  `${DIGESTDOCK_BILIBILI_DOM_PREFIX}-note-button`;
+const BILI_NOTE_TOAST_ID =
+  `${DIGESTDOCK_BILIBILI_DOM_PREFIX}-note-toast`;
+const LEGACY_BILI_DIGEST_BUTTON_ID = "bili-digest-button";
+const LEGACY_BILI_NOTE_BUTTON_ID = "bili-note-button";
+
+// This file must never assign element.innerHTML (see bilibili-content.test.js),
+// so page icons are rendered as CSS background images built from self-contained
+// inline SVGs. The brand icon matches icons/digestdock-icon-solid.svg; the note
+// icon is the same linear bookmark-plus used across the extension.
+const DIGESTDOCK_BILIBILI_BRAND_ICON =
+  "data:image/svg+xml," +
+  encodeURIComponent(
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">' +
+      '<rect width="128" height="128" rx="32" fill="#1F2933"/>' +
+      '<rect x="24" y="32" width="80" height="16" rx="8" fill="#FFFFFF"/>' +
+      '<circle cx="32" cy="64" r="8" fill="#F26A4F"/>' +
+      '<rect x="48" y="56" width="56" height="16" rx="8" fill="#FFFFFF"/>' +
+      '<rect x="40" y="80" width="56" height="16" rx="8" fill="#FFFFFF"/>' +
+      "</svg>",
+  );
+const DIGESTDOCK_BILIBILI_NOTE_ICON =
+  "data:image/svg+xml," +
+  encodeURIComponent(
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" ' +
+      'stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+      '<path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h6"/>' +
+      '<line x1="18" y1="3" x2="18" y2="9"/>' +
+      '<line x1="15" y1="6" x2="21" y2="6"/>' +
+      "</svg>",
+  );
+const DIGESTDOCK_BILIBILI_CHECK_ICON =
+  "data:image/svg+xml," +
+  encodeURIComponent(
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" ' +
+      'stroke="#FFFFFF" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">' +
+      '<polyline points="20 6 9 17 4 12"/>' +
+      "</svg>",
+  );
+
+// Neutral graphite styling for the player note control, matching
+// docs/design/final-icons-and-entry.jpg: a deep graphite surface, white
+// bookmark icon, ~10px radius (not a full pill/circle), and a restrained
+// neutral shadow. The transient "saved" success color reuses the shared
+// success green before restoring graphite.
+const DIGESTDOCK_BILIBILI_NOTE_BG = "#1f2933";
+const DIGESTDOCK_BILIBILI_NOTE_SUCCESS_BG = "#2c8a65";
+const DIGESTDOCK_BILIBILI_NOTE_SHADOW = "0 4px 12px rgba(23, 33, 42, 0.24)";
 
 let biliDigestButton = null;
 let biliNoteButton = null;
@@ -147,29 +197,26 @@ function biliCreateDigestButton() {
   });
   button.type = "button";
   button.setAttribute("aria-label", "打开 DigestDock");
+  button.setAttribute("title", "DigestDock");
+  // Icon-only brand button — no "▶" character and no repeated brand text.
   button.style.cssText = `
     display: inline-flex;
     align-items: center;
     justify-content: center;
+    width: 34px;
     height: 34px;
-    padding: 0 16px;
+    padding: 0;
     margin-right: 10px;
     border: 0;
-    border-radius: 17px;
-    background: #c8674f;
-    color: #fff;
-    font: 600 14px/1 system-ui, -apple-system, "Segoe UI", sans-serif;
-    white-space: nowrap;
+    border-radius: 10px;
+    background-color: transparent;
+    background-image: url("${DIGESTDOCK_BILIBILI_BRAND_ICON}");
+    background-repeat: no-repeat;
+    background-position: center;
+    background-size: 24px 24px;
     cursor: pointer;
-    box-shadow: 0 2px 8px rgba(200, 103, 79, 0.25);
+    flex: 0 0 auto;
   `;
-
-  const icon = biliCreateElement("span", { text: "▶" });
-  icon.setAttribute("aria-hidden", "true");
-  icon.style.marginRight = "7px";
-  const label = biliCreateElement("span", { text: "生成摘要" });
-  button.appendChild(icon);
-  button.appendChild(label);
 
   button.addEventListener("click", async (event) => {
     event.preventDefault();
@@ -187,8 +234,11 @@ function biliCreateDigestButton() {
           "Extension context invalidated",
         )
       ) {
+        // Stay icon-only: disable and update the accessible name/tooltip
+        // instead of restoring visible text on the brand button.
         button.disabled = true;
-        button.textContent = "请刷新页面";
+        button.setAttribute("aria-label", "DigestDock 已更新，请刷新页面");
+        button.setAttribute("title", "请刷新页面");
       } else {
         console.error("[DigestDock/Bilibili] 无法打开侧边栏", error);
       }
@@ -286,10 +336,14 @@ function biliResetNoteHideTimer() {
 function biliCreateNoteButton() {
   const button = biliCreateElement("button", {
     id: BILI_NOTE_BUTTON_ID,
-    text: "✎  笔记",
   });
   button.type = "button";
-  button.setAttribute("aria-label", "保存当前时刻的笔记（快捷键 N）");
+  // Icon-only bookmark-plus control — no "✎" character and no long text.
+  button.setAttribute(
+    "aria-label",
+    "用 DigestDock 保存当前时刻的笔记（快捷键 N）",
+  );
+  button.setAttribute("title", "保存当前时刻（N）");
   button.style.cssText = `
     position: absolute;
     top: 16px;
@@ -297,17 +351,22 @@ function biliCreateNoteButton() {
     z-index: 10000;
     display: inline-flex;
     align-items: center;
-    padding: 9px 16px;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    padding: 0;
     border: 0;
-    border-radius: 999px;
-    background: #c8674f;
-    color: #fff;
-    font: 600 13px/1 system-ui, -apple-system, "Segoe UI", sans-serif;
+    border-radius: 10px;
+    background-color: ${DIGESTDOCK_BILIBILI_NOTE_BG};
+    background-image: url("${DIGESTDOCK_BILIBILI_NOTE_ICON}");
+    background-repeat: no-repeat;
+    background-position: center;
+    background-size: 18px 18px;
     cursor: pointer;
     opacity: 0;
     pointer-events: none;
-    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.3);
-    transition: opacity 0.18s ease, transform 0.18s ease;
+    box-shadow: ${DIGESTDOCK_BILIBILI_NOTE_SHADOW};
+    transition: opacity 0.18s ease, transform 0.18s ease, background-color 0.18s ease;
   `;
   button.addEventListener("click", async (event) => {
     event.preventDefault();
@@ -315,7 +374,14 @@ function biliCreateNoteButton() {
     await biliSaveCurrentNote();
   });
   biliNoteButton = button;
+  biliUpdateNoteButtonCoexistencePosition();
   return button;
+}
+
+function biliUpdateNoteButtonCoexistencePosition() {
+  if (!biliNoteButton) return;
+  const legacyButton = document.getElementById(LEGACY_BILI_NOTE_BUTTON_ID);
+  biliNoteButton.style.top = legacyButton?.isConnected ? "58px" : "16px";
 }
 
 function biliInjectNoteButton() {
@@ -334,6 +400,7 @@ function biliInjectNoteButton() {
     existing.isConnected &&
     existing.parentElement === player
   ) {
+    biliUpdateNoteButtonCoexistencePosition();
     return true;
   }
 
@@ -391,9 +458,15 @@ async function biliSaveCurrentNote() {
 
   const info = biliExtractVideoInfo();
   const timestamp = Math.max(0, Math.floor(Number(video.currentTime) || 0) - 3);
-  const originalText = biliNoteButton?.textContent || "✎  笔记";
+  // Icon-only feedback: update the accessible name/tooltip (and, on success,
+  // the icon) rather than restoring visible text.
+  const setNoteState = (message) => {
+    if (!biliNoteButton) return;
+    biliNoteButton.setAttribute("title", message);
+    biliNoteButton.setAttribute("aria-label", message);
+  };
   if (biliNoteButton) {
-    biliNoteButton.textContent = "正在保存…";
+    setNoteState("正在保存…");
     biliNoteButton.disabled = true;
   }
 
@@ -410,20 +483,30 @@ async function biliSaveCurrentNote() {
     });
 
     if (result?.success) {
-      if (biliNoteButton) biliNoteButton.textContent = "已保存";
+      if (biliNoteButton) {
+        biliNoteButton.style.backgroundImage = `url("${DIGESTDOCK_BILIBILI_CHECK_ICON}")`;
+        biliNoteButton.style.backgroundColor = DIGESTDOCK_BILIBILI_NOTE_SUCCESS_BG;
+        setNoteState("已保存");
+      }
       if (result.note) biliShowNoteSavedToast(result.note);
-    } else if (biliNoteButton) {
-      biliNoteButton.textContent = "出错了";
+    } else {
+      setNoteState("出错了");
     }
   } catch (error) {
     result = { success: false, error: error?.message || String(error) };
-    if (biliNoteButton) biliNoteButton.textContent = "出错了";
+    setNoteState("出错了");
     console.error("[DigestDock/Bilibili] 保存笔记失败", error);
   }
 
   setTimeout(() => {
     if (!biliNoteButton) return;
-    biliNoteButton.textContent = originalText;
+    biliNoteButton.style.backgroundImage = `url("${DIGESTDOCK_BILIBILI_NOTE_ICON}")`;
+    biliNoteButton.style.backgroundColor = DIGESTDOCK_BILIBILI_NOTE_BG;
+    biliNoteButton.setAttribute("title", "保存当前时刻（N）");
+    biliNoteButton.setAttribute(
+      "aria-label",
+      "用 DigestDock 保存当前时刻的笔记（快捷键 N）",
+    );
     biliNoteButton.disabled = false;
   }, 1800);
   return result;
@@ -515,6 +598,16 @@ function biliHandleNoteKeyboardShortcut(event) {
   if (event.key !== "n" && event.key !== "N") return;
   if (event.repeat) return;
   if (event.metaKey || event.ctrlKey || event.altKey) return;
+
+  // Avoid two note saves when a legacy YouTube Digest installation remains
+  // enabled. Its historical N shortcut keeps working; DigestDock is available
+  // through the separate, visibly branded overlay button.
+  if (
+    document.getElementById(LEGACY_BILI_DIGEST_BUTTON_ID) ||
+    document.getElementById(LEGACY_BILI_NOTE_BUTTON_ID)
+  ) {
+    return;
+  }
 
   const active = document.activeElement;
   if (
