@@ -146,7 +146,7 @@ This JSON feature is a recovery format for restoring DigestDock notes. Study-ori
 - Human or AI subtitle tracks exposed by the current Bilibili browser session. Bilibili transcript retrieval does not use Supadata credits.
 - For YouTube, a read-only page check binds the current tab and video and blocks clear access restrictions before any provider request. After per-video confirmation, Supadata retrieves the existing native caption track.
 - A saved Supadata key is not standing consent. New or expired YouTube transcript cache entries require an explicit side-panel confirmation; cached Supadata results are reused without another provider call.
-- Original, Simplified Chinese, and aligned bilingual transcript views.
+- Original, Simplified Chinese, and aligned bilingual transcript views for non-Chinese subtitle tracks. Chinese subtitle tracks stay in Original and never trigger a Chinese-translation request.
 - AI overviews are generated directly in Simplified Chinese. For non-Chinese subtitle tracks, source-language chapter titles and summaries are translated only when **Original** or **Bilingual** is requested; key quotes preserve the source wording. Chinese-source overviews reuse Chinese in every mode without an extra translation call.
 - Notes are polished in English once and translated into Simplified Chinese once; bilingual note mode only combines the two stored versions.
 - When a note's source subtitle is already Chinese, the original subtitle is reused as the Chinese note and no Chinese-translation request is sent.

@@ -5157,7 +5157,7 @@ test("isConfirmedSimplifiedChineseSource matches only explicit Simplified tags",
   }
 });
 
-test("a confirmed Simplified-Chinese transcript never requests translation and stays on original", async () => {
+test("Chinese transcripts never request translation and stay on original", async () => {
   const runtime = loadSidepanelRuntime();
   const fixture = runtime.evaluate(`
     (() => {
@@ -5171,6 +5171,10 @@ test("a confirmed Simplified-Chinese transcript never requests translation and s
           translatedContent: { segments: [] },
         });
       };
+      IntersectionObserver = class {
+        observe() {}
+        disconnect() {}
+      };
       renderTranscript = () => { renders += 1; };
       setTranscriptModeButtons = (mode) => { modeButtonCalls.push(mode); };
       currentVideoId = "vid_zh";
@@ -5178,9 +5182,15 @@ test("a confirmed Simplified-Chinese transcript never requests translation and s
         { start: 0, text: "第一段简体中文字幕。" },
         { start: 8, text: "第二段简体中文字幕内容。" },
       ];
-      currentTranscriptLanguage = "zh-Hans";
       currentTranscriptMode = "original";
       return {
+        setLanguage: (language) => {
+          currentTranscriptLanguage = language;
+          currentTranscriptMode = "original";
+          translateContentRequests = 0;
+          renders = 0;
+          modeButtonCalls.length = 0;
+        },
         changeMode: (mode) => handleTranscriptModeChange(mode),
         forceTranslate: (mode) => {
           currentTranscriptMode = mode;
@@ -5196,25 +5206,37 @@ test("a confirmed Simplified-Chinese transcript never requests translation and s
     })()
   `);
 
-  // The control layer refuses to switch into zh / bilingual.
-  await fixture.changeMode("bilingual");
-  await fixture.changeMode("zh");
-  let snap = JSON.parse(fixture.snapshot());
-  assert.equal(snap.translateContentRequests, 0);
-  assert.equal(snap.mode, "original", "mode must stay original for a Simplified source");
+  for (const language of [
+    "zh",
+    "zh-Hans",
+    "zh-Hant",
+    "zh-CN",
+    "zh-TW",
+    "cmn",
+    "yue",
+  ]) {
+    fixture.setLanguage(language);
 
-  // The fail-safe inside translateTranscript also protects the load-time path
-  // (e.g. arriving from an English video still stuck in bilingual mode): it
-  // collapses back to original with no request and no pending/duplicate row.
-  await fixture.forceTranslate("bilingual");
-  snap = JSON.parse(fixture.snapshot());
-  assert.equal(snap.translateContentRequests, 0);
-  assert.equal(snap.mode, "original", "the fail-safe must reset the mode to original");
-  assert.deepEqual(snap.modeButtonCalls, ["original"]);
-  assert.ok(snap.renders >= 1, "the fail-safe re-renders the plain transcript");
+    // The control layer refuses to switch into zh / bilingual.
+    await fixture.changeMode("bilingual");
+    await fixture.changeMode("zh");
+    let snap = JSON.parse(fixture.snapshot());
+    assert.equal(snap.translateContentRequests, 0, language);
+    assert.equal(snap.mode, "original", `${language} must stay on original`);
+
+    // The fail-safe inside translateTranscript also protects the load-time path
+    // (e.g. arriving from an English video still stuck in bilingual mode): it
+    // collapses back to original with no request and no pending/duplicate row.
+    await fixture.forceTranslate("bilingual");
+    snap = JSON.parse(fixture.snapshot());
+    assert.equal(snap.translateContentRequests, 0, language);
+    assert.equal(snap.mode, "original", `${language} must reset to original`);
+    assert.deepEqual(snap.modeButtonCalls, ["original"]);
+    assert.ok(snap.renders >= 1, "the fail-safe re-renders the plain transcript");
+  }
 });
 
-test("Traditional and non-Chinese transcripts still enter the translation path", async () => {
+test("non-Chinese transcripts still enter the translation path", async () => {
   const runtime = loadSidepanelRuntime();
   const fixture = runtime.evaluate(`
     (() => {
@@ -5235,11 +5257,6 @@ test("Traditional and non-Chinese transcripts still enter the translation path",
     })()
   `);
 
-  // Traditional Chinese must keep working — it still needs conversion to zh.
-  fixture.setLanguage("zh-Hant");
-  await fixture.changeMode("zh");
-  assert.deepEqual(JSON.parse(fixture.snapshot()), { translateCalls: 1, mode: "zh" });
-
   // English is unaffected: bilingual mode still translates.
   fixture.setLanguage("en");
   await fixture.changeMode("bilingual");
@@ -5247,14 +5264,103 @@ test("Traditional and non-Chinese transcripts still enter the translation path",
     translateCalls: 1,
     mode: "bilingual",
   });
-
-  // A bare, ambiguous `zh` is not confirmed Simplified, so it still translates.
-  fixture.setLanguage("zh");
-  await fixture.changeMode("zh");
-  assert.deepEqual(JSON.parse(fixture.snapshot()), { translateCalls: 1, mode: "zh" });
 });
 
-test("Simplified-Chinese videos disable the Chinese and bilingual transcript buttons", () => {
+test("switching between bilingual and Chinese reuses active translation work", async () => {
+  const runtime = loadSidepanelRuntime();
+  const fixture = runtime.evaluate(`
+    (() => {
+      let translateCalls = 0;
+      let modeOnlyRenders = 0;
+      translateTranscript = () => {
+        translateCalls += 1;
+        return Promise.resolve();
+      };
+      renderTranscriptTranslationMode = () => {
+        modeOnlyRenders += 1;
+      };
+      setTranscriptModeButtons = () => {};
+      currentTranscript = [{ start: 0, text: "English source sentence." }];
+      currentTranscriptLanguage = "en";
+      currentTranscriptMode = "original";
+      return {
+        changeMode: (mode) => handleTranscriptModeChange(mode),
+        snapshot: () => JSON.stringify({
+          translateCalls,
+          modeOnlyRenders,
+          mode: currentTranscriptMode,
+        }),
+      };
+    })()
+  `);
+
+  await fixture.changeMode("bilingual");
+  assert.deepEqual(JSON.parse(fixture.snapshot()), {
+    translateCalls: 1,
+    modeOnlyRenders: 0,
+    mode: "bilingual",
+  });
+
+  // Presentation changes must not restart the provider-backed translation.
+  await fixture.changeMode("zh");
+  assert.deepEqual(JSON.parse(fixture.snapshot()), {
+    translateCalls: 1,
+    modeOnlyRenders: 1,
+    mode: "zh",
+  });
+});
+
+test("an in-flight translation result survives a presentation mode change", async () => {
+  const runtime = loadSidepanelRuntime();
+  const fixture = runtime.evaluate(`
+    (() => {
+      let resolveRequest;
+      let updatedRows = 0;
+      sendTranslationMessage = () =>
+        new Promise((resolve) => {
+          resolveRequest = resolve;
+        });
+      setTranslatingSpinner = () => {};
+      updateCache = async () => {};
+      updateTranslatedRow = () => {
+        updatedRows += 1;
+      };
+      currentVideoId = "vid_en";
+      currentTranscriptMode = "bilingual";
+      translationGeneration = 7;
+      const segments = [{ id: "segment-0-0", text: "English source." }];
+      return {
+        start: () =>
+          requestTranscriptTranslationBatch(
+            [0],
+            segments,
+            7,
+            "vid_en",
+            "bilingual",
+          ),
+        switchMode: () => {
+          currentTranscriptMode = "zh";
+        },
+        finish: () =>
+          resolveRequest({
+            success: true,
+            translatedContent: {
+              segments: [{ id: "segment-0-0", text: "中文译文。" }],
+            },
+          }),
+        snapshot: () => JSON.stringify({ updatedRows }),
+      };
+    })()
+  `);
+
+  const pending = fixture.start();
+  fixture.switchMode();
+  fixture.finish();
+  await pending;
+  assert.deepEqual(JSON.parse(fixture.snapshot()), { updatedRows: 1 });
+});
+
+test("Chinese videos disable the Chinese and bilingual transcript buttons", () => {
   const runtime = loadSidepanelRuntime();
   const fixture = runtime.evaluate(`
     (() => {
@@ -5287,24 +5393,26 @@ test("Simplified-Chinese videos disable the Chinese and bilingual transcript but
     })()
   `);
 
-  fixture.apply("zh-CN");
-  assert.deepEqual(JSON.parse(fixture.snapshot()), [
-    { mode: "original", disabled: false, ariaDisabled: null, title: null },
-    {
-      mode: "zh",
-      disabled: true,
-      ariaDisabled: "true",
-      title: "字幕已是简体中文，无需翻译。",
-    },
-    {
-      mode: "bilingual",
-      disabled: true,
-      ariaDisabled: "true",
-      title: "字幕已是简体中文，无需翻译。",
-    },
-  ]);
+  for (const language of ["zh", "zh-CN", "zh-TW", "cmn", "yue"]) {
+    fixture.apply(language);
+    assert.deepEqual(JSON.parse(fixture.snapshot()), [
+      { mode: "original", disabled: false, ariaDisabled: null, title: null },
+      {
+        mode: "zh",
+        disabled: true,
+        ariaDisabled: "true",
+        title: "字幕已是中文，无需翻译。",
+      },
+      {
+        mode: "bilingual",
+        disabled: true,
+        ariaDisabled: "true",
+        title: "字幕已是中文，无需翻译。",
+      },
+    ]);
+  }
 
-  // Switching to an English (or Traditional) video re-enables every button.
+  // Switching to an English video re-enables every button.
   fixture.apply("en");
   assert.deepEqual(JSON.parse(fixture.snapshot()), [
     { mode: "original", disabled: false, ariaDisabled: null, title: null },

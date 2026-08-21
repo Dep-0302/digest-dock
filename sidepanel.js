@@ -3337,18 +3337,18 @@ function isConfirmedSimplifiedChineseSource(value) {
   return subtags.includes("cn") || subtags.includes("sg");
 }
 
-function currentVideoIsConfirmedSimplifiedChinese() {
-  return isConfirmedSimplifiedChineseSource(currentTranscriptLanguage);
+function currentVideoIsChinese() {
+  return isChineseLanguage(currentTranscriptLanguage);
 }
 
 /**
  * Reflects whether Chinese / bilingual transcript translation applies to the
- * current video. A confirmed Simplified-Chinese transcript is already in the
- * target language, so those buttons are disabled (with an explanatory title)
+ * current video. The user reads both Simplified and Traditional Chinese, so any
+ * Chinese transcript is already in the target language. Disable those buttons
  * rather than issuing a redundant, billable translation.
  */
 function updateTranscriptModeAvailability() {
-  const unavailable = currentVideoIsConfirmedSimplifiedChinese();
+  const unavailable = currentVideoIsChinese();
   document.querySelectorAll(".transcript-mode-btn").forEach((button) => {
     if (button.dataset.transcriptMode === "original") {
       button.disabled = false;
@@ -3359,7 +3359,7 @@ function updateTranscriptModeAvailability() {
     button.disabled = unavailable;
     if (unavailable) {
       button.setAttribute("aria-disabled", "true");
-      button.setAttribute("title", "字幕已是简体中文，无需翻译。");
+      button.setAttribute("title", "字幕已是中文，无需翻译。");
     } else {
       button.removeAttribute("aria-disabled");
       button.removeAttribute("title");
@@ -3401,15 +3401,27 @@ async function handleTranscriptModeChange(mode) {
   if (!["original", "zh", "bilingual"].includes(mode)) return;
   if (mode === currentTranscriptMode) return;
 
-  // A confirmed Simplified-Chinese transcript is already in the target
-  // language: never switch it into a Chinese or bilingual (duplicated) view or
-  // send it for translation. The controls are also disabled, but this guards
-  // the state directly in case a change is triggered another way.
-  if (mode !== "original" && currentVideoIsConfirmedSimplifiedChinese()) {
+  // Any Chinese transcript is already readable in the requested target
+  // language. Never switch it into a duplicated view or send it for
+  // translation. The controls are also disabled, but this guards the state
+  // directly in case a change is triggered another way.
+  if (mode !== "original" && currentVideoIsChinese()) {
     return;
   }
 
+  const previousMode = currentTranscriptMode;
   currentTranscriptMode = mode;
+
+  // Chinese-only and bilingual are two presentations of the same translated
+  // segments. Keep the active queue and observer alive, and only re-render the
+  // row content. Restarting translateTranscript here would discard an in-flight
+  // provider response and issue the same billable request again.
+  if (previousMode !== "original" && mode !== "original") {
+    setTranscriptModeButtons(mode);
+    renderTranscriptTranslationMode(mode);
+    return;
+  }
+
   translationGeneration += 1;
   translationWorkCount = 0;
   setTranslatingSpinner(false);
@@ -3443,10 +3455,9 @@ function renderTranscriptSegmentContent(segment, mode, translated, error) {
   return `<span class="transcript-copy"><span class="transcript-translation ${translated ? "" : error ? "translation-error" : "translation-pending"}">${translationHtml}</span></span>`;
 }
 
-function renderTranscriptModeRows(segments, mode) {
+function renderTranscriptTranslationBadge(mode) {
   const transcriptList = document.getElementById("transcriptList");
-  if (!transcriptList) return [];
-  transcriptList.innerHTML = "";
+  if (!transcriptList) return;
 
   const existingBadge = document.getElementById("transcriptSourceBadge");
   if (existingBadge) existingBadge.remove();
@@ -3460,6 +3471,57 @@ function renderTranscriptModeRows(segments, mode) {
       : `简体中文 · 译自${originalLabel}`;
   badge.innerHTML = `<span class="source-dot source-dot--subs"></span> ${escapeHtml(transcriptSourceLabel())} · ${modeLabel}`;
   transcriptList.parentElement.insertBefore(badge, transcriptList);
+}
+
+function attachTranslationRetry(row, index, generation) {
+  const retry = row.querySelector(".translation-retry-btn");
+  if (!retry) return;
+  ["mousedown", "mouseup"].forEach((eventName) => {
+    retry.addEventListener(eventName, (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+    });
+  });
+  retry.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    retryTranslationSegment(index, generation);
+  });
+}
+
+function renderTranscriptTranslationMode(mode) {
+  const segments = getActiveTranscriptSegments();
+  renderTranscriptTranslationBadge(mode);
+  segments.forEach((segment, index) => {
+    const row = document.querySelector(
+      `.transcript-entry[data-segment-id="${CSS.escape(segment.id)}"]`,
+    );
+    if (!row) return;
+    const translated = transcriptParagraphCache.get(
+      transcriptTranslationCacheKey(currentVideoId, segment),
+    );
+    const error = row.classList.contains("translation-failed")
+      ? "翻译失败。"
+      : "";
+    const copy = row.querySelector(".transcript-copy");
+    if (copy) {
+      copy.outerHTML = renderTranscriptSegmentContent(
+        segment,
+        mode,
+        translated,
+        error,
+      );
+    }
+    attachTranslationRetry(row, index, translationGeneration);
+  });
+}
+
+function renderTranscriptModeRows(segments, mode) {
+  const transcriptList = document.getElementById("transcriptList");
+  if (!transcriptList) return [];
+  transcriptList.innerHTML = "";
+
+  renderTranscriptTranslationBadge(mode);
 
   const rows = [];
   segments.forEach((segment, index) => {
@@ -3536,20 +3598,7 @@ function updateTranslatedRow(segment, index, alignedItem, generation) {
   row.classList.toggle("translating", false);
   row.classList.toggle("translation-failed", !alignedItem.text);
 
-  const retry = row.querySelector(".translation-retry-btn");
-  if (retry) {
-    ["mousedown", "mouseup"].forEach((eventName) => {
-      retry.addEventListener(eventName, (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-      });
-    });
-    retry.addEventListener("click", (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      retryTranslationSegment(index, generation);
-    });
-  }
+  attachTranslationRetry(row, index, generation);
 }
 
 let activeTranslationQueue = null;
@@ -3559,7 +3608,6 @@ async function requestTranscriptTranslationBatch(
   segments,
   generation,
   videoId,
-  mode,
 ) {
   const sourceBatch = indices.map((index) => segments[index]);
   setTranslatingSpinner(true);
@@ -3575,9 +3623,7 @@ async function requestTranscriptTranslationBatch(
     });
 
     const isStale =
-      generation !== translationGeneration ||
-      videoId !== currentVideoId ||
-      mode !== currentTranscriptMode;
+      generation !== translationGeneration || videoId !== currentVideoId;
     if (isStale) return;
 
     const responseSegments = result?.success
@@ -3633,11 +3679,10 @@ function retryTranslationSegment(index, generation) {
  * remaining rows. Batches are sequential so the provider is never flooded.
  */
 async function translateTranscript() {
-  // Fail-safe: a confirmed Simplified-Chinese transcript needs no translation.
-  // Collapse back to the original view so no entry point (mode change, cache
-  // reload, retry) can emit a redundant translateContent request or leave a
-  // "waiting for translation" / duplicated bilingual row behind.
-  if (currentVideoIsConfirmedSimplifiedChinese()) {
+  // Fail-safe: any Chinese transcript needs no translation. Collapse back to
+  // the original view so no entry point (mode change, cache reload, retry) can
+  // emit a redundant translateContent request or leave a duplicated row behind.
+  if (currentVideoIsChinese()) {
     if (currentTranscriptMode !== "original") {
       currentTranscriptMode = "original";
       setTranscriptModeButtons("original");
@@ -3672,7 +3717,6 @@ async function translateTranscript() {
         segments,
         generation,
         videoId,
-        mode,
       );
     } finally {
       processing = false;

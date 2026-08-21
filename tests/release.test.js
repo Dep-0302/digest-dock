@@ -42,7 +42,7 @@ test("manifest uses minimized install-time permissions", () => {
     "https://www.bilibili.com/video/BV*",
   ]);
   assert.equal(Object.hasOwn(manifest, "optional_host_permissions"), false);
-  assert.equal(manifest.version, "1.4.0");
+  assert.equal(manifest.version, "1.4.1");
 });
 
 test("cross-platform runtime dependencies match the API-primary release surface", () => {
@@ -148,6 +148,14 @@ test("release copy documents current scope without em dashes", () => {
   assert.match(chineseReadme, /增加更多翻译语言/);
   assert.match(readme, /choose \*\*Original\*\*, \*\*中文\*\*, or \*\*双语\*\*/);
   assert.match(chineseReadme, /可选择 \*\*原文\*\*、\*\*中文\*\*或\*\*双语\*\*/);
+  assert.match(
+    readme,
+    /Chinese subtitle tracks stay in Original[\s\S]*never trigger a Chinese-translation request/,
+  );
+  assert.match(
+    chineseReadme,
+    /中文字幕直接保留原文[\s\S]*禁用无需使用的中文／双语翻译控件[\s\S]*不发送字幕翻译请求/,
+  );
   assert.match(readme, /generated directly in Simplified Chinese/);
   assert.match(chineseReadme, /直接生成简体中文底稿/);
   assert.match(readme, /only when \*\*Original\*\* or \*\*Bilingual\*\* is requested/);
