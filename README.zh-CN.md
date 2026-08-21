@@ -53,11 +53,13 @@ DigestDock 是在 [Zara Zhang 原作 YouTube Digest](https://github.com/zarazhan
 
 如果要把已有安装从旧的 `youtube-digest` 文件夹迁移到新的 `digest-dock` 文件夹，请先导出笔记备份。Chrome 可能把不同的本地加载路径视为两个扩展，因此本地设置和笔记不一定自动跟随；加载新文件夹后，请重新配置设置并导入备份。
 
+DigestDock 会按扩展 ID 隔离注入到页面中的控件，因此旧版 YouTube Digest 与当前版同时启用时，不会再删除或接管当前版按钮；当前入口会直接显示 **DigestDock**。两套扩展仍各自保存设置和笔记；页面检测到旧版控件时，历史 `N` 快捷键继续交给旧版，当前版可通过带有 DigestDock 标识的笔记按钮使用。正式验收时仍应只启用本次测试的版本。
+
 ## 设置 API Key
 
 服务访问使用你自己的账号和 Key。保存设置时只要求填写 **DeepSeek API Key**，用于生成概览、讲解内容、翻译和自动润色笔记。YouTube 和 B 站共用这套 DeepSeek 流程；Supadata 回退 Key 是可选项。
 
-YouTube 字幕采用本地优先：扩展会先直接从 YouTube 读取字幕轨，不经过第三方字幕服务。**Supadata API Key 是可选项**，已保存的 Key 也不会被自动使用。本地获取失败后，侧边栏会说明将发送的数据，并由你决定本次是否使用 Supadata；没有保存 Key 时只提供可选的设置入口。B 站不会使用 Supadata。
+YouTube 字幕采用本地优先：扩展会先直接从 YouTube 读取字幕轨，不经过第三方字幕服务。**Supadata API Key 是可选项**，已保存的 Key 也不会被自动使用。只有可恢复的本地提取失败才会在侧边栏说明将发送的数据，并由你决定本次是否使用 Supadata；登录或年龄限制、视频不可用、明确无字幕以及 YouTube 临时限流都会在本地停止，不提供回退。可恢复失败且没有保存 Key 时只提供可选的设置入口。B 站不会使用 Supadata。
 
 ### 获取可选的 Supadata API Key
 
@@ -143,7 +145,7 @@ JSON 文件只包含备份格式信息和已保存的笔记记录，包括其中
 - 标准的 `www.bilibili.com/video/BV...` 视频页面，每次只处理当前分P。
 - 当前 B 站浏览器会话可以访问的人工或 AI 字幕轨。B 站字幕读取不消耗 Supadata 额度。
 - 对 YouTube，先读取当前页面公开的已有字幕轨及其 `timedtext` 响应；如果没有得到可用字幕，扩展还可以继续尝试其他非 WEB YouTube player client，再考虑 Supadata。
-- 可选的 Supadata 原生字幕回退；只有本地 YouTube 获取失败、已经保存 Supadata Key，并且用户在侧边栏确认本次使用时才会运行。
+- 可选的 Supadata 原生字幕回退；只有可恢复的本地 YouTube 提取失败、已经保存 Supadata Key，并且用户在侧边栏确认本次使用时才会运行。登录或年龄限制、视频不可用、明确无字幕以及 YouTube 临时限流不会提供回退。
 - 原文、简体中文和双语对照字幕。
 - AI 概览直接生成简体中文底稿。非中文字幕只有在请求**原文**或**双语**时，才翻译章节标题和总结；重点引用会保留源字幕原句。中文字幕的三种模式复用同一份中文内容，不发起额外翻译。
 - 笔记先生成一次润色后的英文，再单独生成一次简体中文；双语笔记只合并两份已保存内容。
@@ -208,8 +210,8 @@ DigestDock 使用原生 HTML、CSS 和 JavaScript，应用本身没有构建步�
 
 DigestDock 会直接从扩展发起网络请求：
 
-1. 对 YouTube，先从当前页面读取字幕轨信息，并直接向 YouTube 请求选中的 `timedtext` 字幕；也可能使用其他非 WEB client 向 YouTube player endpoint 查询字幕轨。扩展主动发起的这些字幕请求都使用 `credentials: "omit"`。
-2. 如果所有本地 YouTube 尝试都失败，并且你保存了 Supadata Key，侧边栏会提供第三方回退选项。只有你点击 Supadata 操作后，扩展才可能为本次原生字幕请求发送标准化的视频地址。
+1. 对 YouTube，先从当前页面读取字幕轨信息，并直接向 YouTube 请求选中的 `timedtext` 字幕；也可能使用其他非 WEB client 向 YouTube player endpoint 查询字幕轨。固定的 player POST 通过最小 MAIN-world 页面 Origin bridge 运行，`timedtext` GET 则在当前 YouTube 标签页内属于 DigestDock 的隔离世界中运行，解析仍留在扩展中；两类请求都使用 `credentials: "omit"`，不会读取或发送 YouTube Cookie。
+2. 如果所有本地 YouTube 尝试都以可恢复的提取失败结束，并且你保存了 Supadata Key，侧边栏会提供第三方回退选项。登录或年龄限制、视频不可用以及明确无字幕的结果会在本地停止。只有你点击 Supadata 操作后，扩展才可能为本次原生字幕请求发送标准化的视频地址。
 3. 对 B 站，直接向 B 站请求当前视频元数据和已有字幕轨，复用浏览器当前会话但不读取或保存 Cookie 值。
 4. 当你使用 AI 功能时，把字幕和相关视频信息发送给 DeepSeek。翻译或讲解等功能只发送当前需要的内容，例如选中的文本和上下文，或少量字幕分段。
 5. API Key、设置、笔记和最近缓存保存在 Chrome 本地。临时签名的 YouTube 或 B 站字幕 URL 只用于当次请求，不会保存或写入日志。

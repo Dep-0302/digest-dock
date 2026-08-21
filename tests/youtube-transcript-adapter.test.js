@@ -360,6 +360,23 @@ test("public failures keep transport, access, availability, language, and empty-
       }),
     },
     {
+      name: "page captions plus failed player transport stay probe failed",
+      code: "PROBE_FAILED",
+      input: {
+        videoId: "jNQXAC9IVRw",
+        captionTracks: [track({ languageCode: "en" })],
+        preferredLanguage: "en",
+      },
+      adapter: youtube.create({
+        clients: ONE_CLIENT,
+        timeoutMs: 0,
+        fetchImpl: async (url) =>
+          String(url).includes("/api/timedtext")
+            ? response("")
+            : response("forbidden", 403),
+      }),
+    },
+    {
       name: "login required",
       code: "LOGIN_REQUIRED",
       input: { videoId: "jNQXAC9IVRw" },
@@ -367,6 +384,23 @@ test("public failures keep transport, access, availability, language, and empty-
         clients: ONE_CLIENT,
         timeoutMs: 0,
         fetchImpl: async () => playerResponse({ status: "LOGIN_REQUIRED" }),
+      }),
+    },
+    {
+      name: "age-restricted page evidence stays login required",
+      code: "LOGIN_REQUIRED",
+      input: {
+        videoId: "jNQXAC9IVRw",
+        captionTracks: [track({ languageCode: "en" })],
+        pagePlayability: "AGE_CHECK_REQUIRED",
+      },
+      adapter: youtube.create({
+        clients: ONE_CLIENT,
+        timeoutMs: 0,
+        fetchImpl: async (url) =>
+          String(url).includes("/api/timedtext")
+            ? response("")
+            : playerResponse({ status: "LOGIN_REQUIRED" }),
       }),
     },
     {
@@ -378,6 +412,16 @@ test("public failures keep transport, access, availability, language, and empty-
         timeoutMs: 0,
         fetchImpl: async () => playerResponse({ status: "UNPLAYABLE" }),
       }),
+    },
+    {
+      name: "unavailable page evidence stays unavailable",
+      code: "VIDEO_UNAVAILABLE",
+      input: {
+        videoId: "jNQXAC9IVRw",
+        captionTracks: [],
+        pagePlayability: "UNPLAYABLE",
+      },
+      adapter: youtube.create({ clients: [], timeoutMs: 0 }),
     },
     {
       name: "no transcript",
@@ -451,6 +495,33 @@ test("untrusted signed URLs are reduced to a safe attempt error", async () => {
       return true;
     },
   );
+});
+
+test("a caption 429 stops immediately with a stable rate-limit code", async () => {
+  let calls = 0;
+  const adapter = youtube.create({
+    clients: ONE_CLIENT,
+    timeoutMs: 0,
+    fetchImpl: async () => {
+      calls += 1;
+      return response("rate limited", 429);
+    },
+  });
+
+  await assert.rejects(
+    adapter.fetchTranscript({
+      videoId: "jNQXAC9IVRw",
+      captionTracks: [track({ languageCode: "en" })],
+      preferredLanguage: "en",
+    }),
+    (error) => {
+      assert.equal(error.code, "RATE_LIMITED");
+      assert.equal(error.attempts[0].outcome, "rate-limited");
+      assert.equal(error.attempts[0].formats[0].status, 429);
+      return true;
+    },
+  );
+  assert.equal(calls, 1);
 });
 
 test("bounded requests stream-enforce the byte limit and abort at the timeout", async () => {

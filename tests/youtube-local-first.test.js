@@ -121,15 +121,21 @@ function loadBackground({
   return {
     helpers: sandbox.__YTD_TRANSLATION_TESTING__,
     runtimeMessageListeners,
+    sandbox,
   };
 }
 
-function pageSnapshot(videoId = "jNQXAC9IVRw", language = "en") {
+function pageSnapshot(
+  videoId = "jNQXAC9IVRw",
+  language = "en",
+  playability = "OK",
+) {
   return [
     {
       result: {
         ok: true,
         videoId,
+        playability,
         sourceLanguage: language,
         tracks: [
           {
@@ -148,15 +154,17 @@ function pageSnapshot(videoId = "jNQXAC9IVRw", language = "en") {
 
 test("local PAGE extraction short-circuits Supadata and preserves the shared contract", async () => {
   let adapterInput = null;
+  let adapterOptions = null;
   let supadataCalls = 0;
-  const { helpers } = loadBackground({
+  const harness = loadBackground({
     settings: {
       aiApiKey: "test-key",
       supadataApiKey: "optional-key",
     },
     youtubeAdapter: {
-      async fetchTranscript(input) {
+      async fetchTranscript(input, options) {
         adapterInput = input;
+        adapterOptions = options;
         return localResult("en");
       },
     },
@@ -166,6 +174,7 @@ test("local PAGE extraction short-circuits Supadata and preserves the shared con
       return jsonResponse({});
     },
   });
+  const { helpers } = harness;
 
   const result = await helpers.handleFetchYoutubeTranscriptLocalFirst(
     "jNQXAC9IVRw",
@@ -182,7 +191,176 @@ test("local PAGE extraction short-circuits Supadata and preserves the shared con
   assert.equal(adapterInput.videoId, "jNQXAC9IVRw");
   assert.equal(adapterInput.preferredLanguage, "en-US");
   assert.equal(adapterInput.captionTracks.length, 1);
+  assert.equal(adapterInput.pagePlayability, "OK");
+  assert.equal(typeof adapterOptions.fetchImpl, "function");
   assert.equal(supadataCalls, 0);
+});
+
+test("player POST uses MAIN and timedtext GET uses the isolated tab bridge", async () => {
+  const playerEndpoint =
+    "https://www.youtube.com/youtubei/v1/player?prettyPrint=false";
+  const workerCalls = [];
+  const isolatedCalls = [];
+  const playerText = JSON.stringify({ playabilityStatus: { status: "OK" } });
+  const timedtextText = "caption body";
+  const harness = loadBackground({
+    youtubeAdapter: {
+      PLAYER_ENDPOINT: playerEndpoint,
+      DEFAULT_TIMEOUT_MS: 15_000,
+      DEFAULT_MAX_RESPONSE_BYTES: 8 * 1024 * 1024,
+      async fetchTranscript(input, options) {
+        const timedtext = await options.fetchImpl(
+          "https://www.youtube.com/api/timedtext?v=jNQXAC9IVRw",
+          { method: "GET" },
+        );
+        assert.equal(timedtext.status, 200);
+        assert.equal(await timedtext.text(), timedtextText);
+
+        const player = await options.fetchImpl(playerEndpoint, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-YouTube-Client-Name": "5",
+            "X-YouTube-Client-Version": "20.10.4",
+          },
+          body: JSON.stringify({ videoId: input.videoId }),
+        });
+        assert.equal(player.status, 200);
+        assert.equal(await player.text(), playerText);
+        return localResult("en");
+      },
+    },
+    executeScript: async (details) => {
+      if (
+        (details.world === "ISOLATED" || details.world === "MAIN") &&
+        details.args?.[0]?.url
+      ) {
+        isolatedCalls.push(details);
+        const isPlayer = details.args[0].method === "POST";
+        const text = isPlayer ? playerText : timedtextText;
+        return [
+          {
+            result: {
+              success: true,
+              response: {
+                ok: true,
+                status: 200,
+                text,
+                bytes: Buffer.byteLength(text),
+              },
+            },
+          },
+        ];
+      }
+      return pageSnapshot();
+    },
+    fetchImpl: async (url, options) => {
+      workerCalls.push({ url: String(url), options });
+      return { source: "service-worker" };
+    },
+  });
+  const { helpers } = harness;
+
+  const result = await helpers.handleFetchYoutubeTranscriptLocalFirst(
+    "jNQXAC9IVRw",
+    "en",
+    42,
+  );
+
+  assert.equal(result.success, true);
+  assert.deepEqual(workerCalls, []);
+  assert.equal(isolatedCalls.length, 2);
+  const timedtextCall = isolatedCalls.find(
+    (call) => call.args[0].method === "GET",
+  );
+  const playerCall = isolatedCalls.find(
+    (call) => call.args[0].method === "POST",
+  );
+  assert.equal(timedtextCall.world, "ISOLATED");
+  assert.equal(timedtextCall.target.tabId, 42);
+  assert.match(timedtextCall.args[0].url, /\/api\/timedtext\?/);
+  assert.equal(timedtextCall.args[0].body, null);
+  assert.equal(playerCall.world, "MAIN");
+  assert.equal(playerCall.target.tabId, 42);
+  assert.equal(playerCall.args[0].url, playerEndpoint);
+  assert.equal(playerCall.args[0].expectedVideoId, "jNQXAC9IVRw");
+  assert.equal(playerCall.args[0].headers.Origin, undefined);
+  assert.equal(playerCall.args[0].headers.Referer, undefined);
+  assert.match(String(playerCall.func), /mode:\s*"cors"/);
+  assert.match(String(playerCall.func), /credentials:\s*"omit"/);
+  assert.match(String(playerCall.func), /referrerPolicy:\s*"no-referrer"/);
+
+  harness.sandbox.window = {
+    location: { href: "https://www.youtube.com/watch?v=jNQXAC9IVRw" },
+  };
+  harness.sandbox.fetch = async () => new Response(playerText, { status: 200 });
+  const pageSuccess = await playerCall.func(playerCall.args[0]);
+  assert.equal(pageSuccess.success, true);
+  assert.equal(pageSuccess.response.status, 200);
+  assert.equal(pageSuccess.response.text, playerText);
+
+  harness.sandbox.window.location.href =
+    "https://www.youtube.com/watch?v=abcdefghijk";
+  const wrongPage = await playerCall.func(playerCall.args[0]);
+  assert.deepEqual(JSON.parse(JSON.stringify(wrongPage)), {
+    success: false,
+    error: "PAGE_CONTEXT_CHANGED",
+  });
+
+  harness.sandbox.window.location.href =
+    "https://www.youtube.com/watch?v=jNQXAC9IVRw";
+  const tinyLimitRequest = {
+    ...playerCall.args[0],
+    maxResponseBytes: 1,
+  };
+  const oversized = await playerCall.func(tinyLimitRequest);
+  assert.equal(oversized.success, false);
+  assert.equal(oversized.error, "RESPONSE_TOO_LARGE");
+
+  harness.sandbox.fetch = async (_url, options) =>
+    new Promise((_resolve, reject) => {
+      options.signal.addEventListener("abort", () => {
+        const error = new Error("aborted");
+        error.name = "AbortError";
+        reject(error);
+      });
+    });
+  const timeout = await playerCall.func({
+    ...playerCall.args[0],
+    timeoutMs: 1,
+  });
+  assert.equal(timeout.success, false);
+  assert.equal(timeout.error, "TIMEOUT");
+});
+
+test("tab bridge honors an already-aborted adapter request", async () => {
+  const playerEndpoint =
+    "https://www.youtube.com/youtubei/v1/player?prettyPrint=false";
+  const { helpers } = loadBackground({
+    youtubeAdapter: {
+      PLAYER_ENDPOINT: playerEndpoint,
+      DEFAULT_TIMEOUT_MS: 15_000,
+      DEFAULT_MAX_RESPONSE_BYTES: 8 * 1024 * 1024,
+    },
+    executeScript: async () => new Promise(() => {}),
+  });
+  const controller = new AbortController();
+  controller.abort();
+
+  await assert.rejects(
+    helpers.fetchYouTubeResourceViaTab(
+      42,
+      "jNQXAC9IVRw",
+      playerEndpoint,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ videoId: "jNQXAC9IVRw" }),
+        signal: controller.signal,
+      },
+    ),
+    (error) => error.name === "AbortError",
+  );
 });
 
 test("an empty preference uses the page default source language", async () => {
@@ -312,6 +490,54 @@ test("Supadata stays unused without a configured key even if consent is requeste
   assert.equal(failed.localError, "EMPTY_TRANSCRIPT");
   assert.match(failed.message, /可选密钥/);
   assert.equal(providerCalls, 0);
+});
+
+test("terminal local states never offer or call Supadata", async (t) => {
+  for (const code of [
+    "LOGIN_REQUIRED",
+    "VIDEO_UNAVAILABLE",
+    "NO_TRANSCRIPT",
+    "RATE_LIMITED",
+  ]) {
+    await t.test(code, async () => {
+      let providerCalls = 0;
+      const localError = Object.assign(new Error(code), {
+        code,
+        attempts: [{ sourceAttempt: "PAGE", playability: code }],
+      });
+      const { helpers } = loadBackground({
+        settings: { aiApiKey: "test-key", supadataApiKey: "optional-key" },
+        youtubeAdapter: {
+          async fetchTranscript(input) {
+            assert.equal(input.pagePlayability, "AGE_CHECK_REQUIRED");
+            throw localError;
+          },
+        },
+        executeScript: async () =>
+          pageSnapshot("jNQXAC9IVRw", "en", "AGE_CHECK_REQUIRED"),
+        fetchImpl: async () => {
+          providerCalls += 1;
+          return jsonResponse({});
+        },
+      });
+
+      for (const consent of [false, true]) {
+        const result =
+          await helpers.handleFetchYoutubeTranscriptLocalFirst(
+            "jNQXAC9IVRw",
+            "en",
+            42,
+            consent,
+          );
+        assert.equal(result.success, false);
+        assert.equal(result.error, code);
+        assert.equal(result.localError, code);
+        assert.equal(result.supadataEligible, false);
+        assert.doesNotMatch(result.message, /本次使用 Supadata|Supadata 提取/);
+      }
+      assert.equal(providerCalls, 0);
+    });
+  }
 });
 
 test("only strict boolean consent can authorize the optional provider", async () => {
@@ -681,6 +907,8 @@ test("side panel and note messages thread the exact tab and language through", (
   assert.match(panel, /不使用第三方服务/);
   assert.match(panel, /SUPADATA_CONSENT_REQUIRED/);
   assert.match(panel, /SUPADATA_NOT_CONFIGURED/);
+  assert.match(panel, /transcriptResult\.error === "RATE_LIMITED"/);
+  assert.match(panel, /YouTube 暂时限流/);
   const errorUi = read("sidepanel.html");
   assert.match(errorUi, /id="errorSecondaryBtn"[\s\S]*?type="button"[\s\S]*?hidden/);
   assert.match(panel, /if \(!currentConfigStatus\?\.hasAiKey\)/);

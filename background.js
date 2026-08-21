@@ -1116,9 +1116,266 @@ async function getPlayerVideoDetails(tabId) {
 }
 
 /**
+ * YouTube rejects transcript requests whose browser-generated Origin is the
+ * extension origin. Run only the fixed player POST and trusted timedtext GET
+ * inside the active YouTube tab. The player POST uses MAIN so its browser
+ * Origin is the page Origin; timedtext GET uses the extension-isolated world.
+ * Both omit cookies and referrer data, while response parsing remains in the
+ * trusted adapter.
+ */
+async function fetchYouTubeResourceViaTab(
+  tabId,
+  expectedVideoId,
+  requestUrl,
+  requestOptions = {},
+) {
+  const endpoint = YOUTUBE_TRANSCRIPT_ADAPTER.PLAYER_ENDPOINT;
+  let parsedUrl;
+  try {
+    parsedUrl = new URL(String(requestUrl));
+  } catch {
+    throw new Error("Invalid YouTube tab bridge URL.");
+  }
+  const method = String(requestOptions.method || "GET").toUpperCase();
+  const trustedUrl =
+    parsedUrl.protocol === "https:" &&
+    parsedUrl.hostname === "www.youtube.com" &&
+    !parsedUrl.username &&
+    !parsedUrl.password &&
+    (!parsedUrl.port || parsedUrl.port === "443");
+  const isPlayerRequest =
+    parsedUrl.href === endpoint && method === "POST";
+  const isTimedtextRequest =
+    trustedUrl &&
+    parsedUrl.pathname === "/api/timedtext" &&
+    parsedUrl.searchParams.get("v") === expectedVideoId &&
+    method === "GET";
+  if (!Number.isInteger(tabId) || (!isPlayerRequest && !isTimedtextRequest)) {
+    throw new Error("Untrusted YouTube tab bridge request.");
+  }
+
+  let requestBody = null;
+  const serializedRequestBody = String(requestOptions.body || "");
+  if (isPlayerRequest) {
+    try {
+      requestBody = JSON.parse(serializedRequestBody);
+    } catch {
+      throw new Error("Invalid YouTube player bridge body.");
+    }
+    if (requestBody?.videoId !== expectedVideoId) {
+      throw new Error("YouTube player bridge video mismatch.");
+    }
+  }
+
+  const allowedHeaders = new Set([
+    "accept",
+    "content-type",
+    "x-youtube-client-name",
+    "x-youtube-client-version",
+  ]);
+  const headerEntries = Object.entries(requestOptions.headers || {}).map(
+    ([name, value]) => [String(name), String(value)],
+  );
+  if (
+    headerEntries.some(
+      ([name]) => !allowedHeaders.has(name.toLowerCase()),
+    )
+  ) {
+    throw new Error("Untrusted YouTube tab bridge header.");
+  }
+  const headers = Object.fromEntries(headerEntries);
+  const timeoutMs = YOUTUBE_TRANSCRIPT_ADAPTER.DEFAULT_TIMEOUT_MS;
+  const maxResponseBytes =
+    YOUTUBE_TRANSCRIPT_ADAPTER.DEFAULT_MAX_RESPONSE_BYTES;
+  const executionPromise = chrome.scripting.executeScript({
+    target: { tabId },
+    world: isPlayerRequest ? "MAIN" : "ISOLATED",
+    args: [
+      {
+        url: parsedUrl.href,
+        method,
+        headers,
+        body: requestBody ? serializedRequestBody : null,
+        expectedVideoId,
+        timeoutMs,
+        maxResponseBytes,
+      },
+    ],
+    func: async (request) => {
+      try {
+        const pageUrl = new URL(window.location.href);
+        if (
+          pageUrl.protocol !== "https:" ||
+          pageUrl.hostname !== "www.youtube.com" ||
+          pageUrl.pathname !== "/watch" ||
+          pageUrl.searchParams.get("v") !== request.expectedVideoId
+        ) {
+          return { success: false, error: "PAGE_CONTEXT_CHANGED" };
+        }
+
+        const targetUrl = new URL(request.url);
+        const trustedTarget =
+          targetUrl.protocol === "https:" &&
+          targetUrl.hostname === "www.youtube.com" &&
+          !targetUrl.username &&
+          !targetUrl.password &&
+          (!targetUrl.port || targetUrl.port === "443");
+        const isPlayer =
+          targetUrl.pathname === "/youtubei/v1/player" &&
+          request.method === "POST";
+        const isTimedtext =
+          targetUrl.pathname === "/api/timedtext" &&
+          targetUrl.searchParams.get("v") === request.expectedVideoId &&
+          request.method === "GET";
+        if (!trustedTarget || (!isPlayer && !isTimedtext)) {
+          return { success: false, error: "UNTRUSTED_REQUEST" };
+        }
+
+        const controller = new AbortController();
+        const timeoutId = setTimeout(
+          () => controller.abort(),
+          request.timeoutMs,
+        );
+        const startedAt = Date.now();
+        try {
+          const response = await fetch(request.url, {
+            method: request.method,
+            headers: request.headers,
+            ...(request.body ? { body: request.body } : {}),
+            mode: "cors",
+            credentials: "omit",
+            cache: "no-store",
+            referrerPolicy: "no-referrer",
+            signal: controller.signal,
+          });
+          let text = "";
+          let bytes = 0;
+          if (response.body?.getReader && typeof TextDecoder === "function") {
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            try {
+              while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                bytes += value?.byteLength || 0;
+                if (bytes > request.maxResponseBytes) {
+                  await reader.cancel().catch(() => {});
+                  return {
+                    success: false,
+                    error: "RESPONSE_TOO_LARGE",
+                  };
+                }
+                text += decoder.decode(value, { stream: true });
+              }
+              text += decoder.decode();
+            } finally {
+              reader.releaseLock?.();
+            }
+          } else {
+            text = await response.text();
+            bytes = new TextEncoder().encode(text).byteLength;
+            if (bytes > request.maxResponseBytes) {
+              return { success: false, error: "RESPONSE_TOO_LARGE" };
+            }
+          }
+          return {
+            success: true,
+            response: {
+              ok: response.ok,
+              status: response.status,
+              text,
+              bytes,
+              elapsedMs: Date.now() - startedAt,
+            },
+          };
+        } finally {
+          clearTimeout(timeoutId);
+        }
+      } catch (error) {
+        return {
+          success: false,
+          error: error?.name === "AbortError" ? "TIMEOUT" : "NETWORK",
+        };
+      }
+    },
+  });
+
+  let outerTimeoutId = null;
+  let abortHandler = null;
+  const abortPromise = new Promise((_resolve, reject) => {
+    abortHandler = () => {
+      const error = new Error("YouTube tab request timed out.");
+      error.name = "AbortError";
+      reject(error);
+    };
+    if (requestOptions.signal?.aborted) {
+      abortHandler();
+      return;
+    }
+    requestOptions.signal?.addEventListener("abort", abortHandler, {
+      once: true,
+    });
+    outerTimeoutId = setTimeout(abortHandler, timeoutMs + 2_000);
+  });
+  let results;
+  try {
+    results = await Promise.race([executionPromise, abortPromise]);
+  } finally {
+    if (outerTimeoutId) clearTimeout(outerTimeoutId);
+    requestOptions.signal?.removeEventListener("abort", abortHandler);
+  }
+
+  const payload = results?.[0]?.result;
+  if (!payload?.success || !payload.response) {
+    const error = new Error("YouTube tab request failed.");
+    if (payload?.error === "TIMEOUT") error.name = "AbortError";
+    throw error;
+  }
+  const response = payload.response;
+  return {
+    ok: response.ok === true,
+    status: Number(response.status) || 0,
+    headers: {
+      get(name) {
+        return String(name).toLowerCase() === "content-length"
+          ? String(Number(response.bytes) || 0)
+          : null;
+      },
+    },
+    text: async () => String(response.text || ""),
+  };
+}
+
+function createYouTubeTabFetchImpl(tabId, expectedVideoId) {
+  const serviceWorkerFetch = globalThis.fetch;
+  return async (url, options = {}) => {
+    let parsedUrl;
+    try {
+      parsedUrl = new URL(String(url));
+    } catch {
+      return serviceWorkerFetch(url, options);
+    }
+    const isPlayer =
+      parsedUrl.href === YOUTUBE_TRANSCRIPT_ADAPTER.PLAYER_ENDPOINT;
+    const isTimedtext =
+      parsedUrl.protocol === "https:" &&
+      parsedUrl.hostname === "www.youtube.com" &&
+      parsedUrl.pathname === "/api/timedtext";
+    if (!isPlayer && !isTimedtext) return serviceWorkerFetch(url, options);
+    return fetchYouTubeResourceViaTab(
+      tabId,
+      expectedVideoId,
+      url,
+      options,
+    );
+  };
+}
+
+/**
  * Reads only the current video's caption-track metadata in YouTube's MAIN
- * world. Signed URLs stay in the service worker and are passed directly to the
- * bounded adapter; they are never logged, cached, or returned to the UI.
+ * world. Signed URLs pass only in memory to the bounded adapter and its
+ * isolated-tab fetch bridge; they are never logged, cached, or returned to the
+ * UI.
  */
 async function readYouTubeCaptionSnapshot(tabId, expectedVideoId) {
   if (!Number.isInteger(tabId)) return null;
@@ -1169,6 +1426,9 @@ async function readYouTubeCaptionSnapshot(tabId, expectedVideoId) {
           return {
             ok: true,
             videoId: actualVideoId,
+            playability: String(
+              response?.playabilityStatus?.status || "",
+            ).slice(0, 80),
             sourceLanguage,
             tracks: rawTracks
               .filter(
@@ -1261,7 +1521,14 @@ async function handleFetchYoutubeTranscriptLocalFirst(
       kind: "manual-first",
     };
     if (snapshot) localInput.captionTracks = snapshot.tracks || [];
-    const local = await YOUTUBE_TRANSCRIPT_ADAPTER.fetchTranscript(localInput);
+    if (snapshot) localInput.pagePlayability = snapshot.playability || "";
+    const localOptions = Number.isInteger(tabId)
+      ? { fetchImpl: createYouTubeTabFetchImpl(tabId, videoId) }
+      : {};
+    const local = await YOUTUBE_TRANSCRIPT_ADAPTER.fetchTranscript(
+      localInput,
+      localOptions,
+    );
     if (!(await youtubeTabStillMatches(tabId, videoId))) {
       return pageContextChangedResult();
     }
@@ -1279,12 +1546,33 @@ async function handleFetchYoutubeTranscriptLocalFirst(
     return pageContextChangedResult();
   }
 
-  const settings = await getSettings();
   const attempts = Array.isArray(localError?.attempts)
     ? localError.attempts
     : [];
   const localErrorCode = localError?.code || "LOCAL_TRANSCRIPT_FAILED";
 
+  const terminalLocalMessages = {
+    LOGIN_REQUIRED:
+      "此视频需要登录、年龄验证或其他访问权限，DigestDock 不会把它发送给 Supadata。",
+    VIDEO_UNAVAILABLE:
+      "此视频当前不可用，DigestDock 不会把它发送给 Supadata。",
+    NO_TRANSCRIPT:
+      "YouTube 没有为此视频提供可用字幕轨，DigestDock 不会调用 Supadata。",
+    RATE_LIMITED:
+      "YouTube 暂时限制了字幕请求。请稍后重试；DigestDock 不会因此调用 Supadata。",
+  };
+  if (Object.hasOwn(terminalLocalMessages, localErrorCode)) {
+    return {
+      success: false,
+      error: localErrorCode,
+      message: terminalLocalMessages[localErrorCode],
+      localError: localErrorCode,
+      attempts,
+      supadataEligible: false,
+    };
+  }
+
+  const settings = await getSettings();
   if (!settings.supadataApiKey) {
     return {
       success: false,
@@ -3995,6 +4283,8 @@ globalThis.__YTD_TRANSLATION_TESTING__ = {
   handleTranslateContent,
   isSupportedVideoUrl,
   readYouTubeCaptionSnapshot,
+  fetchYouTubeResourceViaTab,
+  createYouTubeTabFetchImpl,
   youtubeTabStillMatches,
   handleFetchYoutubeTranscriptLocalFirst,
   normalizeBilibiliMediaRef,

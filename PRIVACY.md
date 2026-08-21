@@ -24,15 +24,15 @@ Depending on the feature you use, DigestDock handles:
 
 ### YouTube
 
-For a standard YouTube watch page, the extension first reads caption-track data exposed by the active page and requests the selected `timedtext` response directly from YouTube. If that does not return a usable transcript, it may send the video identity to YouTube's player endpoint with additional non-WEB client profiles and try the resulting caption tracks.
+For a standard YouTube watch page, the extension first reads caption-track data exposed by the active page and requests the selected `timedtext` response directly from YouTube. If that does not return a usable transcript, it may send the video identity to YouTube's player endpoint with additional non-WEB client profiles and try the resulting caption tracks. The fixed player POST runs through a minimal MAIN-world page-origin bridge, while the `timedtext` GET runs in DigestDock's isolated extension world inside that YouTube tab. The adapter, parsing, settings, and provider keys remain outside the page's own JavaScript.
 
-All network requests initiated by the extension for this YouTube transcript path use `credentials: "omit"`; the extension does not attach the browser's YouTube cookies or authorization credentials. Temporary signed caption URLs are kept only in memory for the immediate request and are not stored in Chrome storage, transcript caches, or logs. Parsed transcript content may still enter the local transcript cache described below.
+All network requests initiated by the extension for this YouTube transcript path use `credentials: "omit"`; the extension does not attach the browser's YouTube cookies or authorization credentials. The tab bridges accept only the exact YouTube player POST and trusted `www.youtube.com/api/timedtext` GET for the current tab's video. Temporary signed caption URLs are kept only in memory for the immediate request and are not stored in Chrome storage, transcript caches, or logs. Parsed transcript content may still enter the local transcript cache described below.
 
 This path reads only caption tracks that YouTube already exposes. It does not download the video's audio, perform ASR or other audio transcription, request generated transcription, or use OCR, and it does not guarantee coverage of every captioned video.
 
 ### Supadata
 
-Supadata is an optional failure fallback for YouTube. Local failure and a saved key are not sufficient to call it: the side panel explains the third-party request and requires you to confirm that attempt. Only after that click may DigestDock send the canonical video URL to `https://api.supadata.ai` with your key. Consent is not stored as a standing preference. The fallback requests a native transcript and timestamps; it does not request generated transcription. A Supadata key is not required to save Settings, try local YouTube retrieval, or use Bilibili.
+Supadata is an optional failure fallback for YouTube. Only recoverable local extraction failures are eligible. Login or age restrictions, unavailable videos, explicit no-caption results, and temporary YouTube rate limits stop locally and never offer the fallback. An eligible failure and a saved key are still not sufficient to call Supadata: the side panel explains the third-party request and requires you to confirm that attempt. Only after that click may DigestDock send the canonical video URL to `https://api.supadata.ai` with your key. Consent is not stored as a standing preference. The fallback requests a native transcript and timestamps; it does not request generated transcription. A Supadata key is not required to save Settings, try local YouTube retrieval, or use Bilibili.
 
 ### Bilibili
 
@@ -108,7 +108,7 @@ DigestDock uses Chrome permissions for these purposes:
 - `scripting`: coordinate the extension's YouTube and Bilibili page controls.
 - YouTube host access: read the active video's URL, metadata, and existing caption tracks; request player and `timedtext` responses with credentials omitted; and provide timestamp controls.
 - Bilibili and Bilibili subtitle-CDN host access: resolve the current part, read an existing subtitle track, and provide timestamp controls without requesting cookie values.
-- Supadata host access: retrieve a native transcript only after local YouTube retrieval fails and the user explicitly confirms that third-party attempt.
+- Supadata host access: retrieve a native transcript only after an eligible local YouTube extraction failure and the user explicitly confirms that third-party attempt; access restrictions, unavailable videos, and explicit no-caption results are ineligible.
 - DeepSeek host access: provide AI overviews, explanations, translation, and note polishing through DeepSeek V4 Flash.
 
 DigestDock does not use these permissions to monitor general browsing activity.

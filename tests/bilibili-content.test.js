@@ -8,6 +8,11 @@ const source = fs.readFileSync(
   path.resolve(__dirname, "..", "content-bilibili.js"),
   "utf8",
 );
+const TEST_EXTENSION_ID = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+const BILI_DIGEST_BUTTON_ID =
+  `digestdock-${TEST_EXTENSION_ID}-bilibili-digest-button`;
+const BILI_NOTE_BUTTON_ID =
+  `digestdock-${TEST_EXTENSION_ID}-bilibili-note-button`;
 
 class FakeElement {
   constructor(tagName = "div") {
@@ -243,6 +248,7 @@ function createHarness({
     },
     chrome: {
       runtime: {
+        id: TEST_EXTENSION_ID,
         onMessage: {
           addListener(listener) {
             messageListener = listener;
@@ -359,10 +365,17 @@ test("inserts one Digest button immediately before Bilibili's native note button
 
   assert.equal(harness.context.biliInjectDigestButton(), true);
   assert.equal(harness.context.biliInjectDigestButton(), true);
-  const buttons = harness.document.querySelectorAll("#bili-digest-button");
+  const buttons = harness.document.querySelectorAll(
+    `#${BILI_DIGEST_BUTTON_ID}`,
+  );
   assert.equal(buttons.length, 1);
   assert.equal(harness.toolbar.children[0], buttons[0]);
   assert.equal(harness.toolbar.children[1], harness.nativeNote);
+  // Icon-only brand opener: no "▶" glyph child, no "DigestDock" text child,
+  // accessible name via aria-label, and a self-contained inline-SVG icon.
+  assert.equal(buttons[0].children.length, 0);
+  assert.equal(buttons[0].attributes["aria-label"], "打开 DigestDock");
+  assert.match(buttons[0].style.cssText, /data:image\/svg\+xml/);
 
   await buttons[0].emit("click", {
     preventDefault() {},
@@ -412,8 +425,10 @@ test("overlay note save includes canonical videoUrl, fallback timestamp, title, 
 test("pathname and p polling cleans stale buttons and reinjects for SPA navigation", () => {
   const harness = createHarness();
   harness.context.biliInit();
-  const firstDigestButton = harness.document.getElementById("bili-digest-button");
-  const firstNoteButton = harness.document.getElementById("bili-note-button");
+  const firstDigestButton = harness.document.getElementById(
+    BILI_DIGEST_BUTTON_ID,
+  );
+  const firstNoteButton = harness.document.getElementById(BILI_NOTE_BUTTON_ID);
   assert.ok(firstDigestButton);
   assert.ok(firstNoteButton);
 
@@ -424,12 +439,87 @@ test("pathname and p polling cleans stale buttons and reinjects for SPA navigati
 
   harness.flushTimeouts();
   assert.notEqual(
-    harness.document.getElementById("bili-digest-button"),
+    harness.document.getElementById(BILI_DIGEST_BUTTON_ID),
     firstDigestButton,
   );
   assert.notEqual(
-    harness.document.getElementById("bili-note-button"),
+    harness.document.getElementById(BILI_NOTE_BUTTON_ID),
     firstNoteButton,
+  );
+});
+
+test("DigestDock keeps legacy Bilibili controls separate", async () => {
+  const harness = createHarness();
+  const legacyDigestButton = new FakeElement("button");
+  legacyDigestButton.id = "bili-digest-button";
+  const legacyNoteButton = new FakeElement("button");
+  legacyNoteButton.id = "bili-note-button";
+  harness.elements.push(legacyDigestButton, legacyNoteButton);
+  harness.toolbar.insertBefore(legacyDigestButton, harness.nativeNote);
+  harness.player.appendChild(legacyNoteButton);
+
+  assert.equal(harness.context.biliInjectDigestButton(), true);
+  assert.equal(harness.context.biliInjectNoteButton(), true);
+
+  const digestButton = harness.document.getElementById(BILI_DIGEST_BUTTON_ID);
+  const noteButton = harness.document.getElementById(BILI_NOTE_BUTTON_ID);
+  assert.ok(digestButton);
+  assert.ok(noteButton);
+  assert.equal(legacyDigestButton.isConnected, true);
+  assert.equal(legacyNoteButton.isConnected, true);
+  assert.equal(noteButton.style.top, "58px");
+
+  await digestButton.emit("click", {
+    preventDefault() {},
+    stopPropagation() {},
+  });
+  assert.equal(harness.messages[0].action, "openSidePanel");
+
+  harness.context.biliHandleNoteKeyboardShortcut({
+    key: "n",
+    repeat: false,
+    metaKey: false,
+    ctrlKey: false,
+    altKey: false,
+    preventDefault() {},
+    stopPropagation() {},
+  });
+  assert.equal(
+    harness.messages.length,
+    1,
+    "the legacy build keeps the shared N shortcut while both are enabled",
+  );
+
+  harness.context.biliCleanupPageArtifacts();
+  assert.equal(digestButton.isConnected, false);
+  assert.equal(noteButton.isConnected, false);
+  assert.equal(legacyDigestButton.isConnected, true);
+  assert.equal(legacyNoteButton.isConnected, true);
+});
+
+test("the player note button uses the neutral graphite bookmark control, not a coral pill", () => {
+  const harness = createHarness();
+
+  assert.equal(harness.context.biliInjectNoteButton(), true);
+  const noteButton = harness.document.getElementById(BILI_NOTE_BUTTON_ID);
+  assert.ok(noteButton);
+  // Deep graphite surface with a ~10px radius and a restrained neutral shadow.
+  assert.match(noteButton.style.cssText, /background-color:\s*#1f2933/i);
+  assert.match(noteButton.style.cssText, /border-radius:\s*10px/);
+  assert.match(
+    noteButton.style.cssText,
+    /box-shadow:\s*0 4px 12px rgba\(23, 33, 42/,
+  );
+  // The old coral circle/pill is gone.
+  assert.doesNotMatch(noteButton.style.cssText, /border-radius:\s*999px/);
+  assert.doesNotMatch(noteButton.style.cssText, /#c8674f/i);
+  // Text-free icon control: the bookmark renders as a background image, no
+  // text child, and the accessible name lives on aria-label.
+  assert.equal(noteButton.children.length, 0);
+  assert.match(noteButton.style.cssText, /data:image\/svg\+xml/);
+  assert.equal(
+    noteButton.attributes["aria-label"],
+    "用 DigestDock 保存当前时刻的笔记（快捷键 N）",
   );
 });
 

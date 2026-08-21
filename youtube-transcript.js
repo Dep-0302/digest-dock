@@ -75,6 +75,26 @@ var YOUTUBE_TRANSCRIPT_ADAPTER = (() => {
     "NO_TRANSCRIPT",
     "TRACK_UNAVAILABLE",
     "EMPTY_TRANSCRIPT",
+    "RATE_LIMITED",
+  ]);
+  const KNOWN_PLAYABILITY_STATUSES = new Set([
+    "OK",
+    "LOGIN_REQUIRED",
+    "UNPLAYABLE",
+    "ERROR",
+    "AGE_CHECK_REQUIRED",
+    "CONTENT_CHECK_REQUIRED",
+    "LIVE_STREAM_OFFLINE",
+  ]);
+  const RESTRICTED_PLAYABILITY_STATUSES = new Set([
+    "LOGIN_REQUIRED",
+    "AGE_CHECK_REQUIRED",
+    "CONTENT_CHECK_REQUIRED",
+  ]);
+  const UNAVAILABLE_PLAYABILITY_STATUSES = new Set([
+    "UNPLAYABLE",
+    "ERROR",
+    "LIVE_STREAM_OFFLINE",
   ]);
 
   class YouTubeTranscriptError extends Error {
@@ -151,6 +171,12 @@ var YOUTUBE_TRANSCRIPT_ADAPTER = (() => {
     return ["manual-first", "manual", "asr", "any"].includes(value)
       ? value
       : "manual-first";
+  }
+
+  function normalizePlayability(value) {
+    const status = String(value || "").trim().toUpperCase();
+    if (!status) return null;
+    return KNOWN_PLAYABILITY_STATUSES.has(status) ? status : "OTHER";
   }
 
   /**
@@ -555,6 +581,14 @@ var YOUTUBE_TRANSCRIPT_ADAPTER = (() => {
           formatAttempt.status = response.status;
           formatAttempt.bytes = response.bytes;
           formatAttempt.elapsedMs = response.elapsedMs;
+          if (response.status === 429) {
+            attempt.outcome = "rate-limited";
+            fail(
+              "RATE_LIMITED",
+              "YouTube temporarily rate-limited caption requests.",
+              { attempts: stats.attempts },
+            );
+          }
           if (!response.ok || !response.text.trim()) continue;
 
           let transcript;
@@ -580,6 +614,12 @@ var YOUTUBE_TRANSCRIPT_ADAPTER = (() => {
             stats.attempts,
           );
         } catch (error) {
+          if (
+            error instanceof YouTubeTranscriptError &&
+            error.code === "RATE_LIMITED"
+          ) {
+            throw error;
+          }
           formatAttempt.error = safeErrorCode(error);
         }
       }
@@ -622,15 +662,28 @@ var YOUTUBE_TRANSCRIPT_ADAPTER = (() => {
           callOptions.kind ??
           callOptions.mode,
       ),
+      pagePlayability: normalizePlayability(objectInput.pagePlayability),
     };
   }
 
   function publicFailure(stats) {
     let code;
-    if (stats.sawMatchingTrack) code = "EMPTY_TRANSCRIPT";
-    else if (stats.sawTracks) code = "TRACK_UNAVAILABLE";
-    else if (stats.pageEvidence || stats.sawPlayable) code = "NO_TRANSCRIPT";
-    else if (stats.parsedPlayerCount === 0) code = "PROBE_FAILED";
+    if (RESTRICTED_PLAYABILITY_STATUSES.has(stats.pagePlayability)) {
+      code = "LOGIN_REQUIRED";
+    } else if (UNAVAILABLE_PLAYABILITY_STATUSES.has(stats.pagePlayability)) {
+      code = "VIDEO_UNAVAILABLE";
+    } else if (
+      stats.clientsAttempted > 0 &&
+      stats.parsedPlayerCount === 0
+    ) {
+      code = "PROBE_FAILED";
+    } else if (stats.sawMatchingTrack) {
+      code = "EMPTY_TRANSCRIPT";
+    } else if (stats.sawTracks) {
+      code = "TRACK_UNAVAILABLE";
+    } else if (stats.pageEvidence || stats.sawPlayable) {
+      code = "NO_TRANSCRIPT";
+    } else if (stats.parsedPlayerCount === 0) code = "PROBE_FAILED";
     else if (stats.sawLoginRequired) code = "LOGIN_REQUIRED";
     else code = "VIDEO_UNAVAILABLE";
 
@@ -645,6 +698,7 @@ var YOUTUBE_TRANSCRIPT_ADAPTER = (() => {
         "YouTube returned captions, but not the requested language or track kind.",
       EMPTY_TRANSCRIPT:
         "Matching caption tracks were found, but every caption body was empty or invalid.",
+      RATE_LIMITED: "YouTube temporarily rate-limited transcript requests.",
     };
     fail(code, messages[code], { attempts: stats.attempts });
   }
@@ -684,6 +738,8 @@ var YOUTUBE_TRANSCRIPT_ADAPTER = (() => {
         sawMatchingTrack: false,
         sawPlayable: false,
         sawLoginRequired: false,
+        pagePlayability: normalized.pagePlayability,
+        clientsAttempted: 0,
       };
 
       if (normalized.hasPageTracks) {
@@ -693,6 +749,7 @@ var YOUTUBE_TRANSCRIPT_ADAPTER = (() => {
           normalized.preferredLanguage,
           normalized.kind,
         );
+        attempt.playability = normalized.pagePlayability;
         stats.attempts.push(attempt);
         const result = await tryTracks({
           tracks: normalized.captionTracks,
@@ -706,6 +763,7 @@ var YOUTUBE_TRANSCRIPT_ADAPTER = (() => {
       }
 
       for (const profile of clients) {
+        stats.clientsAttempted += 1;
         const attempt = createAttempt(
           String(profile?.id || "UNKNOWN").slice(0, 80),
           normalized.preferredLanguage,
@@ -753,6 +811,14 @@ var YOUTUBE_TRANSCRIPT_ADAPTER = (() => {
           continue;
         }
         if (!playerResponse.ok) {
+          if (playerResponse.status === 429) {
+            attempt.outcome = "rate-limited";
+            fail(
+              "RATE_LIMITED",
+              "YouTube temporarily rate-limited player requests.",
+              { attempts: stats.attempts },
+            );
+          }
           attempt.outcome = "player-http-error";
           continue;
         }
@@ -765,22 +831,9 @@ var YOUTUBE_TRANSCRIPT_ADAPTER = (() => {
           continue;
         }
         stats.parsedPlayerCount += 1;
-        const rawPlayability = String(
-          playerData?.playabilityStatus?.status || "",
+        attempt.playability = normalizePlayability(
+          playerData?.playabilityStatus?.status,
         );
-        attempt.playability = [
-          "OK",
-          "LOGIN_REQUIRED",
-          "UNPLAYABLE",
-          "ERROR",
-          "AGE_CHECK_REQUIRED",
-          "CONTENT_CHECK_REQUIRED",
-          "LIVE_STREAM_OFFLINE",
-        ].includes(rawPlayability)
-          ? rawPlayability
-          : rawPlayability
-            ? "OTHER"
-            : null;
         if (attempt.playability === "OK") stats.sawPlayable = true;
         if (attempt.playability === "LOGIN_REQUIRED") {
           stats.sawLoginRequired = true;
@@ -823,6 +876,7 @@ var YOUTUBE_TRANSCRIPT_ADAPTER = (() => {
     PUBLIC_ERROR_CODES,
     normalizeLanguage,
     primaryLanguage,
+    normalizePlayability,
     trackKind,
     sanitizeTrack,
     chooseTracks,

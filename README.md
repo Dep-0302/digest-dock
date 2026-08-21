@@ -53,11 +53,13 @@ Because this is an unpacked extension, it does not update automatically. After d
 
 If you move an existing installation from an older `youtube-digest` folder into a new `digest-dock` folder, export a notes backup first. Chrome can treat a different unpacked path as a separate extension, so local settings and notes may not carry over automatically; load the new folder, configure its settings, and import the backup there.
 
+DigestDock namespaces its injected page controls by extension ID, so an older YouTube Digest installation no longer deletes or takes over the current buttons when both remain enabled. The current page entry is visibly labeled **DigestDock**. Each extension still has separate settings and notes. While a legacy page control is present, the historical `N` shortcut is left to that version and the current build remains available through its visibly labeled note button. For release acceptance, keep only the version under test enabled.
+
 ## Set up your API keys
 
 Provider access uses your own accounts. Saving Settings requires only a **DeepSeek API key** for overviews, explanations, translation, and automatic note polishing. YouTube and Bilibili use the same DeepSeek workflow; the Supadata fallback key is optional.
 
-YouTube transcript retrieval is local-first: the extension reads caption tracks directly from YouTube before offering any third-party transcript provider. A **Supadata API key is optional**. A saved key is never used automatically: after local retrieval fails, the side panel explains what will be shared and asks whether to use Supadata for that attempt. Without a saved key, it offers the optional Settings entry instead. Bilibili does not use Supadata.
+YouTube transcript retrieval is local-first: the extension reads caption tracks directly from YouTube before offering any third-party transcript provider. A **Supadata API key is optional**. A saved key is never used automatically: after a recoverable local extraction failure, the side panel explains what will be shared and asks whether to use Supadata for that attempt. Login or age restrictions, unavailable videos, an explicit no-caption result, and a temporary YouTube rate limit never offer the fallback. Without a saved key, recoverable failures offer the optional Settings entry instead. Bilibili does not use Supadata.
 
 ### Get an optional Supadata API key
 
@@ -143,7 +145,7 @@ This JSON feature is a recovery format for restoring DigestDock notes. Study-ori
 - Standard `www.bilibili.com/video/BV...` pages, one current part at a time.
 - Human or AI subtitle tracks exposed by the current Bilibili browser session. Bilibili transcript retrieval does not use Supadata credits.
 - For YouTube, existing caption tracks read from the active page and their `timedtext` responses. If that does not produce a usable transcript, the extension may continue with additional non-WEB YouTube player client profiles before considering Supadata.
-- An optional Supadata native-transcript fallback, offered only after local YouTube retrieval fails. Even with a saved key, it runs only when the user confirms that attempt in the side panel.
+- An optional Supadata native-transcript fallback, offered only after a recoverable local YouTube extraction failure. Login or age restrictions, unavailable videos, explicit no-caption results, and YouTube rate limits do not offer it. Even with a saved key, it runs only when the user confirms that attempt in the side panel.
 - Original, Simplified Chinese, and aligned bilingual transcript views.
 - AI overviews are generated directly in Simplified Chinese. For non-Chinese subtitle tracks, source-language chapter titles and summaries are translated only when **Original** or **Bilingual** is requested; key quotes preserve the source wording. Chinese-source overviews reuse Chinese in every mode without an extra translation call.
 - Notes are polished in English once and translated into Simplified Chinese once; bilingual note mode only combines the two stored versions.
@@ -166,7 +168,7 @@ The [Supadata transcript documentation](https://docs.supadata.ai/get-transcript)
 - A generated transcript costs **2 credits per video minute**. DigestDock does not use this path because it forces `mode=native`.
 - An unavailable native lookup returned as HTTP `206` still uses **1 credit**.
 
-Successful local YouTube retrieval does not call Supadata or use Supadata credits. When the user confirms the optional fallback, the current native-only behavior means the free tier can cover roughly 100 transcript lookups per month when each request succeeds once; all of those are user-approved fallback calls. Retries and unavailable-caption lookups may also consume credits, so actual successful-video coverage can be lower.
+Successful local YouTube retrieval does not call Supadata or use Supadata credits. When the user confirms the optional fallback, the current native-only behavior means the free tier can cover roughly 100 transcript lookups per month when each request succeeds once; all of those are user-approved fallback calls. Retries or a provider-side no-native-transcript result after a recoverable local failure may also consume credits, so actual successful-video coverage can be lower.
 
 DeepSeek usage is separate from Supadata. DeepSeek may apply its own free quota, rate limits, or charges. DigestDock does not collect payments or resell access. Set spending limits and monitor each provider account you configure. The estimate below explains the current DeepSeek translation cost.
 
@@ -208,8 +210,8 @@ If you want another AI provider or model, first open the exact DigestDock projec
 
 DigestDock makes network requests directly from the extension:
 
-1. For YouTube, it first reads caption-track data from the active page and requests the selected `timedtext` track directly from YouTube. It may also ask YouTube's player endpoint for tracks with additional non-WEB client profiles. These extension-initiated transcript requests use `credentials: "omit"`.
-2. If every local YouTube attempt fails and you saved a Supadata key, the side panel offers a third-party fallback. Only after you click the Supadata action may it send the canonical watch URL to Supadata for that native-transcript request.
+1. For YouTube, it first reads caption-track data from the active page and requests the selected `timedtext` track directly from YouTube. It may also ask YouTube's player endpoint for tracks with additional non-WEB client profiles. The fixed player POST runs through a minimal MAIN-world page-origin bridge, while the `timedtext` GET runs in DigestDock's isolated world inside the active YouTube tab. Parsing remains in the extension. Both requests use `credentials: "omit"` and do not read or send YouTube cookies.
+2. If every local YouTube attempt ends in a recoverable extraction failure and you saved a Supadata key, the side panel offers a third-party fallback. Login or age restrictions, unavailable videos, and explicit no-caption results stop locally. Only after you click the Supadata action may it send the canonical watch URL to Supadata for that native-transcript request.
 3. For Bilibili, it requests the current video's metadata and existing subtitle track directly from Bilibili while reusing the browser's current session; it does not read or store cookie values.
 4. It sends the transcript and relevant video metadata to DeepSeek when you request AI features. Focused features send only the content they need, such as selected text with context or small transcript batches for translation.
 5. It stores keys, settings, notes, and recent cache entries locally in Chrome. Temporary signed YouTube or Bilibili subtitle URLs are used only for the immediate request and are not stored or logged.

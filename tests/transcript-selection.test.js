@@ -8,7 +8,7 @@ const source = fs.readFileSync(
   "utf8",
 );
 
-test("all timestamped transcript row clicks use the selection-aware seek helper", () => {
+test("only the time rail seeks; the transcript body stays selectable text", () => {
   assert.match(
     source,
     /function hasNonCollapsedTextSelection\(\)[\s\S]*?selection\.rangeCount > 0 && !selection\.isCollapsed/,
@@ -18,22 +18,38 @@ test("all timestamped transcript row clicks use the selection-aware seek helper"
     /function seekFromTranscriptEntryClick\(event, seconds\)[\s\S]*?if \(hasNonCollapsedTextSelection\(\)\) \{[\s\S]*?event\.preventDefault\(\);[\s\S]*?event\.stopPropagation\(\);[\s\S]*?return;[\s\S]*?\}[\s\S]*?seekTo\(seconds\);/,
   );
 
-  const guardedRowHandlers = source.match(
-    /div\.addEventListener\("click", \(event\) =>\s+seekFromTranscriptEntryClick\(event, group\.start\),\s+\);/g,
-  );
-  assert.equal(
-    guardedRowHandlers?.length,
-    1,
-    "raw transcript rows must use the guard",
-  );
+  // The time code is the only seek target and is a keyboard-focusable button.
   assert.match(
     source,
-    /div\.addEventListener\("click", \(event\) =>\s+seekFromTranscriptEntryClick\(event, segment\.start\),\s+\);/,
-    "translated-only and bilingual rows must use the guard",
+    /function transcriptTimeCellMarkup\(seconds\)[\s\S]*?class="transcript-time" role="button" tabindex="0"/,
+  );
+
+  // Seek handlers bind to the .transcript-time rail only, never to the row div
+  // or the selectable body text.
+  assert.match(
+    source,
+    /function attachTranscriptTimeSeek\(cardEl, seconds\) \{[\s\S]*?const timeEl = cardEl\.querySelector\("\.transcript-time"\);[\s\S]*?timeEl\.addEventListener\("click", \(event\) =>\s+seekFromTranscriptEntryClick\(event, seconds\),\s+\);[\s\S]*?timeEl\.addEventListener\("keydown", \(event\) =>\s+seekFromTranscriptTimeKey\(event, seconds\),\s+\);/,
+  );
+
+  const railWiring = source.match(/attachTranscriptTimeSeek\(div, [^)]+\)/g) || [];
+  assert.ok(
+    railWiring.includes("attachTranscriptTimeSeek(div, group.start)"),
+    "raw transcript rows must wire seek onto the time rail",
+  );
+  assert.ok(
+    railWiring.includes("attachTranscriptTimeSeek(div, segment.start)"),
+    "translated-only and bilingual rows must wire seek onto the time rail",
+  );
+
+  // The whole-row seek handlers (guarded or not) must be gone: the body text
+  // never triggers playback.
+  assert.doesNotMatch(
+    source,
+    /div\.addEventListener\("click", \(event\) =>\s+seekFromTranscriptEntryClick\(event, (?:group|segment)\.start\),/,
   );
   assert.doesNotMatch(
     source,
-    /div\.addEventListener\("click", \(\) => seekTo\(group\.start\)\);/,
+    /div\.addEventListener\("click", \(\) => seekTo\((?:group|segment)\.start\)\);/,
   );
 });
 

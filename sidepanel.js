@@ -11,6 +11,22 @@ const debugLog = (...args) => {
   if (DEBUG) console.log(...args);
 };
 
+/**
+ * Formats a playback offset for the time rail.
+ * Below one hour: MM:SS (e.g. 00:37, 59:18). At or above one hour: H:MM:SS
+ * (e.g. 1:00:27, 3:02:58). Minutes and seconds are always two digits; hours
+ * are shown without padding. Uses tabular numerals in CSS so widths align.
+ */
+function formatTimecode(totalSeconds) {
+  const safe = Math.max(0, Math.floor(Number(totalSeconds) || 0));
+  const hours = Math.floor(safe / 3600);
+  const minutes = Math.floor((safe % 3600) / 60);
+  const seconds = safe % 60;
+  const mm = String(minutes).padStart(2, "0");
+  const ss = String(seconds).padStart(2, "0");
+  return hours > 0 ? `${hours}:${mm}:${ss}` : `${mm}:${ss}`;
+}
+
 function createSingleFlight() {
   const activeByKey = new Map();
   return (key, task) => {
@@ -1073,7 +1089,7 @@ async function runDigestLoad(
     if (currentVideoTitle || currentChannelName) {
       const videoInfo = document.getElementById("videoInfo");
       document.getElementById("videoTitle").textContent = currentVideoTitle;
-      document.getElementById("videoChannel").textContent = currentChannelName;
+      updateVideoMetaLine();
       videoInfo.style.display = "block";
     }
 
@@ -1158,12 +1174,19 @@ async function runDigestLoad(
               true,
             ),
         );
-      });
+      }, transcriptResult);
       return;
     }
     if (transcriptResult.error === "SUPADATA_NOT_CONFIGURED") {
       showSupadataNotConfigured(
         transcriptResult.message || "未能直接读取 YouTube 原生字幕。",
+      );
+      return;
+    }
+    if (transcriptResult.error === "RATE_LIMITED") {
+      showNativeTranscriptRetry(
+        "YouTube 暂时限流",
+        transcriptResult.message || "请稍后重试 YouTube 原生字幕。",
       );
       return;
     }
@@ -1462,8 +1485,9 @@ function renderAnalysisResults(analysis) {
     const li = document.createElement("li");
     li.className = "chapter-item";
     li.dataset.seconds = chapter.timestampSeconds;
+    const chapterTime = formatTimecode(chapter.timestampSeconds);
     li.innerHTML = `
-      <span class="chapter-timestamp">${escapeHtml(chapter.timestamp)}</span>
+      <span class="chapter-timestamp">${escapeHtml(chapterTime)}</span>
       <div class="chapter-content">
         ${renderChapterLanguageContent(chapter, currentOverviewMode, analysis.sourceLanguage)}
       </div>
@@ -1471,9 +1495,10 @@ function renderAnalysisResults(analysis) {
     li.addEventListener("click", () => {
       debugLog(
         "[DigestDock Panel] Chapter clicked:",
-        chapter.timestamp,
+        chapterTime,
         chapter.timestampSeconds,
       );
+      setActiveChapter(li);
       seekTo(chapter.timestampSeconds);
     });
     chapterList.appendChild(li);
@@ -1494,20 +1519,21 @@ function renderAnalysisResults(analysis) {
       currentOverviewMode,
       analysis.sourceLanguage,
     );
+    const quoteTime = formatTimecode(quote.timestampSeconds);
     div.innerHTML = `
       <div class="quote-text">${renderQuoteLanguageContent(quote, currentOverviewMode, analysis.sourceLanguage)}</div>
       <div class="quote-meta">
-        <span class="quote-timestamp">${escapeHtml(quote.timestamp)}</span>
+        <span class="quote-timestamp">${escapeHtml(quoteTime)}</span>
         <div class="quote-actions">
-          <button class="quote-save-note-btn" title="把这条语句保存为笔记">📝 笔记</button>
-          <button class="quote-copy-btn" title="复制这条语句">⧉ 复制</button>
+          <button class="icon-btn quote-save-note-btn" type="button" title="把这条语句保存为笔记" aria-label="把这条语句保存为笔记">${UI_ICONS.bookmarkPlus}</button>
+          <button class="icon-btn quote-copy-btn" type="button" title="复制这条语句" aria-label="复制这条语句">${UI_ICONS.copy}</button>
         </div>
       </div>
     `;
     div.addEventListener("click", () => {
       debugLog(
         "[DigestDock Panel] Quote clicked:",
-        quote.timestamp,
+        quoteTime,
         quote.timestampSeconds,
       );
       seekTo(quote.timestampSeconds);
@@ -1518,10 +1544,7 @@ function renderAnalysisResults(analysis) {
       e.stopPropagation();
       try {
         await navigator.clipboard.writeText(quoteCopyText);
-        quoteCopyBtn.textContent = "✓ 已复制";
-        setTimeout(() => {
-          quoteCopyBtn.textContent = "⧉ 复制";
-        }, 1500);
+        flashIconDone(quoteCopyBtn, "已复制", "复制这条语句");
       } catch (err) {
         console.error("Copy failed:", err);
       }
@@ -1543,8 +1566,7 @@ function renderAnalysisResults(analysis) {
 async function saveQuoteAsNote(quote, btn) {
   if (!currentVideoId) return;
 
-  const originalText = btn.textContent;
-  btn.textContent = "正在保存…";
+  const restoreTitle = btn.getAttribute("title") || "把这条语句保存为笔记";
   btn.disabled = true;
 
   try {
@@ -1562,28 +1584,21 @@ async function saveQuoteAsNote(quote, btn) {
     });
 
     if (result.success) {
-      btn.textContent = "✓ 已保存";
-      setTimeout(() => {
-        btn.textContent = originalText;
-        btn.disabled = false;
-      }, 1500);
+      btn.disabled = false;
+      flashIconDone(btn, "已保存为笔记", restoreTitle);
       // The background noteSaved broadcast owns the Notes refresh. Calling
       // loadNotes here as well can start two translation jobs for one save.
     } else {
       console.error("[DigestDock] Save quote as note failed:", result.error);
-      btn.textContent = "出错了";
-      setTimeout(() => {
-        btn.textContent = originalText;
-        btn.disabled = false;
-      }, 1500);
+      btn.disabled = false;
+      btn.setAttribute("title", "保存失败");
+      setTimeout(() => btn.setAttribute("title", restoreTitle), 1500);
     }
   } catch (error) {
     console.error("[DigestDock] Save quote as note error:", error);
-    btn.textContent = "出错了";
-    setTimeout(() => {
-      btn.textContent = originalText;
-      btn.disabled = false;
-    }, 1500);
+    btn.disabled = false;
+    btn.setAttribute("title", "保存失败");
+    setTimeout(() => btn.setAttribute("title", restoreTitle), 1500);
   }
 }
 
@@ -1615,7 +1630,9 @@ function hasNonCollapsedTextSelection() {
 }
 
 /**
- * Preserves normal row-click seeking while keeping text selection inert.
+ * Seeks from a time-rail click while keeping any in-progress text selection
+ * inert. Only the time code carries this handler; the transcript body stays
+ * natively selectable and never seeks.
  */
 function seekFromTranscriptEntryClick(event, seconds) {
   if (hasNonCollapsedTextSelection()) {
@@ -1625,6 +1642,83 @@ function seekFromTranscriptEntryClick(event, seconds) {
   }
 
   seekTo(seconds);
+}
+
+/**
+ * Keyboard activation for the time-rail seek target (Enter / Space).
+ */
+function seekFromTranscriptTimeKey(event, seconds) {
+  if (event.key !== "Enter" && event.key !== " " && event.key !== "Spacebar") {
+    return;
+  }
+  event.preventDefault();
+  seekTo(seconds);
+}
+
+/**
+ * Builds the time-rail markup for a transcript card. The time code is the only
+ * seek target (keyboard-focusable button); the body remains selectable text.
+ */
+function transcriptTimeCellMarkup(seconds) {
+  const timestamp = formatTimecode(seconds);
+  return `<span class="transcript-time" role="button" tabindex="0" title="跳转到 ${timestamp}" aria-label="跳转到 ${timestamp}">${timestamp}</span>`;
+}
+
+/**
+ * Wires the time-rail seek handlers on a freshly rendered transcript card.
+ */
+function attachTranscriptTimeSeek(cardEl, seconds) {
+  const timeEl = cardEl.querySelector(".transcript-time");
+  if (!timeEl) return;
+  timeEl.addEventListener("click", (event) =>
+    seekFromTranscriptEntryClick(event, seconds),
+  );
+  timeEl.addEventListener("keydown", (event) =>
+    seekFromTranscriptTimeKey(event, seconds),
+  );
+}
+
+/**
+ * Marks the clicked overview chapter as selected (warm fill + short coral
+ * accent) and clears the state from its siblings. Presentation only.
+ */
+function setActiveChapter(activeItem) {
+  const chapterList = document.getElementById("chapterList");
+  if (!chapterList) return;
+  chapterList
+    .querySelectorAll(".chapter-item.active-chapter")
+    .forEach((item) => item.classList.remove("active-chapter"));
+  activeItem?.classList.add("active-chapter");
+}
+
+// Inline line icons for compact action buttons. Kept as small stroke SVGs so
+// they inherit currentColor and stay crisp at 15px. No emoji, no play triangle.
+const UI_ICONS = Object.freeze({
+  copy: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>`,
+  link: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg>`,
+  play: `<svg viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true"><path d="M8 5.14v13.72a1 1 0 0 0 1.5.86l11-6.86a1 1 0 0 0 0-1.72L9.5 4.28A1 1 0 0 0 8 5.14z"></path></svg>`,
+  bookmarkPlus: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h6"></path><line x1="18" y1="3" x2="18" y2="9"></line><line x1="15" y1="6" x2="21" y2="6"></line></svg>`,
+  more: `<svg viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true"><circle cx="5" cy="12" r="1.7"></circle><circle cx="12" cy="12" r="1.7"></circle><circle cx="19" cy="12" r="1.7"></circle></svg>`,
+});
+
+/**
+ * Briefly flags an icon button as "done" (success color) without disturbing
+ * its icon, then restores it. Used for copy/save feedback on icon-only buttons.
+ */
+function flashIconDone(btn, doneTitle, restoreTitle, ms = 1600) {
+  if (!btn) return;
+  btn.classList.add("is-done");
+  if (doneTitle) {
+    btn.setAttribute("title", doneTitle);
+    btn.setAttribute("aria-label", doneTitle);
+  }
+  setTimeout(() => {
+    btn.classList.remove("is-done");
+    if (restoreTitle) {
+      btn.setAttribute("title", restoreTitle);
+      btn.setAttribute("aria-label", restoreTitle);
+    }
+  }, ms);
 }
 
 function renderTranscript() {
@@ -1653,18 +1747,12 @@ function renderTranscript() {
     div.className = "transcript-entry";
     div.dataset.seconds = group.start;
 
-    const minutes = Math.floor(group.start / 60);
-    const seconds = Math.floor(group.start % 60);
-    const timestamp = `${minutes}:${String(seconds).padStart(2, "0")}`;
-
     div.innerHTML = `
-      <span class="transcript-time">${timestamp}</span>
+      ${transcriptTimeCellMarkup(group.start)}
       <span class="transcript-text">${renderSubtitleInlineMarkup(group.text)}</span>
     `;
 
-    div.addEventListener("click", (event) =>
-      seekFromTranscriptEntryClick(event, group.start),
-    );
+    attachTranscriptTimeSeek(div, group.start);
     transcriptList.appendChild(div);
   });
 
@@ -1709,6 +1797,21 @@ function exportTranscript() {
 // ============================================================
 // UI STATE MANAGEMENT
 // ============================================================
+
+/**
+ * Composes the compact meta line under the video title: channel, then the
+ * total duration (H:MM:SS) when it is known. Presentation only.
+ */
+function updateVideoMetaLine() {
+  const channelEl = document.getElementById("videoChannel");
+  if (!channelEl) return;
+  const parts = [];
+  if (currentChannelName) parts.push(currentChannelName);
+  if (Number(currentVideoDuration) > 0) {
+    parts.push(formatTimecode(currentVideoDuration));
+  }
+  channelEl.textContent = parts.join(" · ");
+}
 
 function showState(state) {
   document.getElementById("welcomeState").style.display =
@@ -1757,10 +1860,66 @@ function showError(title, message) {
   }
 }
 
-function showSupadataConsent(onConfirm) {
+function safeDiagnosticToken(value, fallback = "-") {
+  const token = String(value || "")
+    .replace(/[^A-Za-z0-9_-]/g, "")
+    .slice(0, 48);
+  return token || fallback;
+}
+
+function formatLocalTranscriptDiagnostics(result = {}) {
+  const attempts = Array.isArray(result.attempts)
+    ? result.attempts.slice(0, 6)
+    : [];
+  if (!attempts.length) return "";
+  const lines = attempts.map((attempt) => {
+    const source = safeDiagnosticToken(attempt?.sourceAttempt, "UNKNOWN");
+    const outcome = safeDiagnosticToken(attempt?.outcome);
+    const playability = safeDiagnosticToken(attempt?.playability);
+    const playerStatus = Number(attempt?.player?.status);
+    const error = safeDiagnosticToken(attempt?.error);
+    const formats = (Array.isArray(attempt?.formats) ? attempt.formats : [])
+      .slice(0, 8)
+      .map((format) => {
+        const name = safeDiagnosticToken(format?.format, "format");
+        const status = Number(format?.status);
+        const bytes = Number(format?.bytes);
+        const segments = Number(format?.segmentCount);
+        const formatError = safeDiagnosticToken(format?.error);
+        return [
+          name,
+          Number.isFinite(status) ? `HTTP${status}` : formatError,
+          Number.isFinite(bytes) ? `${bytes}B` : null,
+          Number.isFinite(segments) ? `${segments}段` : null,
+        ]
+          .filter(Boolean)
+          .join("/");
+      })
+      .join(",");
+    return [
+      source,
+      outcome !== "-" ? outcome : null,
+      playability !== "-" ? playability : null,
+      Number.isFinite(playerStatus) ? `playerHTTP${playerStatus}` : null,
+      error !== "-" ? error : null,
+      formats || null,
+    ]
+      .filter(Boolean)
+      .join(" · ");
+  });
+  const code = safeDiagnosticToken(
+    result.localError || result.error,
+    "LOCAL_TRANSCRIPT_FAILED",
+  );
+  return `\n\n本地诊断：${code}\n${lines.join("\n")}`.slice(0, 1800);
+}
+
+function showSupadataConsent(onConfirm, transcriptResult = {}) {
+  const diagnostics = formatLocalTranscriptDiagnostics(transcriptResult);
   showError(
     "是否使用第三方字幕服务？",
-    "未能直接读取 YouTube 原生字幕。你可以选择本次使用 Supadata 重试；点击后会把此视频的标准 YouTube 链接发送给 Supadata，并可能消耗你的 API 额度。",
+    "未能直接读取 YouTube 原生字幕。你可以选择本次使用 Supadata 重试；点击后会把此视频的标准 YouTube 链接发送给 Supadata，并可能消耗你的 API 额度。" +
+      diagnostics,
   );
   const primaryButton = document.getElementById("errorBtn");
   const secondaryButton = document.getElementById("errorSecondaryBtn");
@@ -2079,14 +2238,12 @@ async function copyToClipboard(text) {
 
 async function copyToClipboardWithFeedback(text, buttonId) {
   const btn = document.getElementById(buttonId);
-  const original = btn.textContent;
+  if (!btn) return;
+  const restoreTitle = btn.getAttribute("title") || "";
 
   const success = await copyToClipboard(text);
   if (success) {
-    btn.textContent = "✓ 已复制";
-    setTimeout(() => {
-      btn.textContent = original;
-    }, 2000);
+    flashIconDone(btn, "已复制", restoreTitle, 2000);
   }
 }
 
@@ -2837,8 +2994,8 @@ function renderNotes(notes, filteredVideoId) {
     setNotesTranslationStatus();
     notesIntro.style.display = "block";
     notesIntro.textContent = filteredVideoId
-      ? "当前视频还没有笔记。将鼠标移到视频上并点击“📝 笔记”即可保存。"
-      : "还没有保存任何笔记。将鼠标移到视频上并点击“📝 笔记”即可保存。";
+      ? "当前视频还没有笔记。将鼠标移到视频上，点击书签图标即可保存。"
+      : "还没有保存任何笔记。将鼠标移到视频上，点击书签图标即可保存。";
     return;
   }
 
@@ -2855,73 +3012,117 @@ function renderNotes(notes, filteredVideoId) {
     const noteEl = document.createElement("div");
     noteEl.className = "note-item";
     const noteCopyText = noteCopyTextForMode(note);
+    const noteTime = formatTimecode(note.timestampSeconds);
     noteEl.innerHTML = `
       <div class="note-header">
-        <span class="note-timestamp" data-url="${escapeHtml(note.timestampedUrl)}" data-seconds="${Number(note.timestampSeconds) || 0}">${escapeHtml(note.timestamp)}</span>
+        <span class="note-timestamp" role="button" tabindex="0" data-seconds="${Number(note.timestampSeconds) || 0}" title="从 ${escapeHtml(noteTime)} 播放" aria-label="从 ${escapeHtml(noteTime)} 播放">${escapeHtml(noteTime)}</span>
         ${!filteredVideoId ? `<span class="note-video-title">${escapeHtml(note.videoTitle)}</span>` : ""}
-        <button class="note-delete" data-id="${escapeHtml(note.id)}" title="删除笔记" aria-label="删除笔记">✕</button>
+        <div class="note-more">
+          <button class="note-more-btn" type="button" aria-haspopup="true" aria-expanded="false" title="更多操作" aria-label="更多操作">${UI_ICONS.more}</button>
+          <div class="note-more-menu" role="menu" hidden>
+            <button class="note-menu-item danger note-delete" type="button" role="menuitem" data-id="${escapeHtml(note.id)}">删除笔记</button>
+          </div>
+        </div>
       </div>
       <div class="note-text">${renderNoteLanguageContent(note)}</div>
       <div class="note-actions">
-        <button class="note-action-btn note-copy-text">⧉ 复制文字</button>
-        <button class="note-action-btn note-copy-link" data-url="${escapeHtml(note.timestampedUrl)}">🔗 复制时间戳</button>
-        <button class="note-action-btn note-play" data-seconds="${Number(note.timestampSeconds) || 0}">▶ 播放</button>
+        <button class="icon-btn primary note-play" type="button" title="从此处播放" aria-label="从此处播放">${UI_ICONS.play}</button>
+        <button class="icon-btn note-copy-text" type="button" title="复制文字" aria-label="复制文字">${UI_ICONS.copy}</button>
+        <button class="icon-btn note-copy-link" type="button" title="复制时间戳链接" aria-label="复制时间戳链接">${UI_ICONS.link}</button>
       </div>
     `;
 
-    // Timestamp click - play from this point (in this tab or a new one)
-    noteEl.querySelector(".note-timestamp").addEventListener("click", () => {
-      playNote(note);
+    // Timestamp click / keyboard - play from this point (in this tab or a new one)
+    const timestampEl = noteEl.querySelector(".note-timestamp");
+    timestampEl.addEventListener("click", () => playNote(note));
+    timestampEl.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " " || e.key === "Spacebar") {
+        e.preventDefault();
+        playNote(note);
+      }
     });
 
-    // Delete button
-    noteEl
-      .querySelector(".note-delete")
-      .addEventListener("click", async (e) => {
-        e.stopPropagation();
-        await deleteNote(note.id);
-        loadNotes(filteredVideoId);
-      });
+    // More menu — holds the destructive delete action
+    const moreBtn = noteEl.querySelector(".note-more-btn");
+    const moreMenu = noteEl.querySelector(".note-more-menu");
+    moreBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const willOpen = moreMenu.hidden;
+      closeAllNoteMenus();
+      if (willOpen) {
+        moreMenu.hidden = false;
+        moreBtn.setAttribute("aria-expanded", "true");
+      }
+    });
+
+    // Delete lives inside the more menu
+    noteEl.querySelector(".note-delete").addEventListener("click", async (e) => {
+      e.stopPropagation();
+      closeAllNoteMenus();
+      await deleteNote(note.id);
+      loadNotes(filteredVideoId);
+    });
 
     // Copy text button — copies just the note's text
-    noteEl
-      .querySelector(".note-copy-text")
-      .addEventListener("click", async () => {
-        try {
-          await navigator.clipboard.writeText(noteCopyText);
-          const btn = noteEl.querySelector(".note-copy-text");
-          btn.textContent = "✓ 已复制";
-          setTimeout(() => {
-            btn.textContent = "⧉ 复制文字";
-          }, 2000);
-        } catch (err) {
-          console.error("Copy failed:", err);
-        }
-      });
+    const copyTextBtn = noteEl.querySelector(".note-copy-text");
+    copyTextBtn.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(noteCopyText);
+        flashIconDone(copyTextBtn, "已复制", "复制文字", 2000);
+      } catch (err) {
+        console.error("Copy failed:", err);
+      }
+    });
 
-    // Copy timestamp button — copies the timestamped YouTube link
-    noteEl
-      .querySelector(".note-copy-link")
-      .addEventListener("click", async () => {
-        try {
-          await navigator.clipboard.writeText(note.timestampedUrl);
-          const btn = noteEl.querySelector(".note-copy-link");
-          btn.textContent = "✓ 已复制";
-          setTimeout(() => {
-            btn.textContent = "🔗 复制时间戳";
-          }, 2000);
-        } catch (err) {
-          console.error("Copy failed:", err);
-        }
-      });
+    // Copy timestamp button — copies the timestamped link
+    const copyLinkBtn = noteEl.querySelector(".note-copy-link");
+    copyLinkBtn.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(note.timestampedUrl);
+        flashIconDone(copyLinkBtn, "已复制链接", "复制时间戳链接", 2000);
+      } catch (err) {
+        console.error("Copy failed:", err);
+      }
+    });
 
     // Play button (in this tab if it's the current video, else a new tab)
-    noteEl.querySelector(".note-play").addEventListener("click", () => {
-      playNote(note);
-    });
+    noteEl.querySelector(".note-play").addEventListener("click", () =>
+      playNote(note),
+    );
 
     notesList.appendChild(noteEl);
   });
+
+  ensureNoteMenuDismissHandler();
+}
+
+/**
+ * Closes any open note "more" menu and resets its trigger's expanded state.
+ */
+function closeAllNoteMenus() {
+  document.querySelectorAll(".note-more-menu").forEach((menu) => {
+    menu.hidden = true;
+  });
+  document.querySelectorAll(".note-more-btn").forEach((btn) => {
+    btn.setAttribute("aria-expanded", "false");
+  });
+}
+
+let noteMenuDismissHandlerAdded = false;
+
+/**
+ * Registers one-time listeners so an outside click or Escape closes any open
+ * note "more" menu.
+ */
+function ensureNoteMenuDismissHandler() {
+  if (noteMenuDismissHandlerAdded) return;
+  document.addEventListener("click", (event) => {
+    if (!event.target.closest(".note-more")) closeAllNoteMenus();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") closeAllNoteMenus();
+  });
+  noteMenuDismissHandlerAdded = true;
 }
 
 /**
@@ -3063,12 +3264,22 @@ function highlightActiveEntry(currentSeconds) {
   // Remove old highlight, add new one
   entries.forEach((e) => e.classList.remove("active-playback"));
   activeEntry.classList.add("active-playback");
+  updateFollowPlaybackLabel(activeEntry.dataset.seconds);
 
   // Only scroll if auto-scroll is enabled
   if (autoScrollEnabled) {
     lastAutoScrollTime = Date.now();
     activeEntry.scrollIntoView({ behavior: "smooth", block: "center" });
   }
+}
+
+/**
+ * Sets the "回到 H:MM:SS" label on the follow-playback pill so it always shows
+ * the full formatted time of the line currently being spoken.
+ */
+function updateFollowPlaybackLabel(seconds) {
+  const label = document.getElementById("followPlaybackTime");
+  if (label) label.textContent = formatTimecode(seconds);
 }
 
 /**
@@ -3084,6 +3295,10 @@ function onContentAreaScroll() {
   // User scrolled manually — disable auto-scroll and show the button
   if (autoScrollEnabled && autoScrollInterval) {
     autoScrollEnabled = false;
+    const activeEntry = document.querySelector(
+      "#transcriptList .transcript-entry.active-playback",
+    );
+    if (activeEntry) updateFollowPlaybackLabel(activeEntry.dataset.seconds);
     document.getElementById("followPlaybackBtn").style.display = "block";
   }
 }
@@ -3254,16 +3469,11 @@ function renderTranscriptModeRows(segments, mode) {
     div.dataset.segmentId = segment.id;
     div.dataset.segmentIndex = index;
 
-    const minutes = Math.floor(segment.start / 60);
-    const seconds = Math.floor(segment.start % 60);
-    const timestamp = `${minutes}:${String(seconds).padStart(2, "0")}`;
     div.innerHTML = `
-      <span class="transcript-time">${timestamp}</span>
+      ${transcriptTimeCellMarkup(segment.start)}
       ${renderTranscriptSegmentContent(segment, mode, cached, "")}
     `;
-    div.addEventListener("click", (event) =>
-      seekFromTranscriptEntryClick(event, segment.start),
-    );
+    attachTranscriptTimeSeek(div, segment.start);
     transcriptList.appendChild(div);
     rows.push(div);
   });
@@ -3542,4 +3752,6 @@ globalThis.__YTD_TRANSCRIPT_TESTING__ = {
   renderTranscriptSegmentContent,
   extractMediaLocator,
   transcriptTranslationCacheKey,
+  formatLocalTranscriptDiagnostics,
+  formatTimecode,
 };

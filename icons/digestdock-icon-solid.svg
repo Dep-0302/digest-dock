@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-labelledby="title desc">
+  <title id="title">DigestDock</title>
+  <desc id="desc">Three chapter lines and one coral time marker on a solid graphite rounded square.</desc>
+  <rect width="128" height="128" rx="32" fill="#1F2933"/>
+  <rect x="24" y="32" width="80" height="16" rx="8" fill="#FFFFFF"/>
+  <circle cx="32" cy="64" r="8" fill="#F26A4F"/>
+  <rect x="48" y="56" width="56" height="16" rx="8" fill="#FFFFFF"/>
+  <rect x="40" y="80" width="56" height="16" rx="8" fill="#FFFFFF"/>
+</svg>

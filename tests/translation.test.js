@@ -657,6 +657,35 @@ test("Supadata is requested only after the user confirms the third-party action"
   assert.equal(JSON.parse(fixture.saved()).at(-1).transcriptText, "Approved fallback");
 });
 
+test("local transcript diagnostics expose safe status without signed URLs", () => {
+  const { formatLocalTranscriptDiagnostics } = loadSidepanelHelpers();
+  const output = formatLocalTranscriptDiagnostics({
+    error: "SUPADATA_CONSENT_REQUIRED",
+    localError: "PROBE_FAILED",
+    attempts: [
+      {
+        sourceAttempt: "PAGE",
+        outcome: "empty-caption-body",
+        baseUrl:
+          "https://www.youtube.com/api/timedtext?signature=secret&pot=private",
+        formats: [
+          { format: "json3", status: 200, bytes: 0 },
+        ],
+      },
+      {
+        sourceAttempt: "IOS",
+        outcome: "player-http-error",
+        player: { status: 403, body: "private" },
+      },
+    ],
+  });
+
+  assert.match(output, /本地诊断：PROBE_FAILED/);
+  assert.match(output, /PAGE · empty-caption-body · json3\/HTTP200\/0B/);
+  assert.match(output, /IOS · player-http-error · playerHTTP403/);
+  assert.doesNotMatch(output, /signature|secret|pot|private|youtube\.com/);
+});
+
 test("declining Supadata sends no third-party transcript request", async () => {
   const messages = [];
   const videoId = "abc123DEF45";
