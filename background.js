@@ -4004,7 +4004,7 @@ async function executeExportSourceBatch(request) {
     error.checkpoint = true;
     throw error;
   }
-  if (!["running", "cancel_requested", "cancelled"].includes(latestJob.state)) {
+  if (!["running", "cancelled"].includes(latestJob.state)) {
     throw exportSourceBatchError(
       "EXPORT_JOB_NOT_RUNNING",
       "The export job stopped before this response could be committed.",
@@ -4083,8 +4083,7 @@ async function executeExportSourceBatch(request) {
   return {
     success: true,
     code:
-      checkpoint.job.state === "cancelled" ||
-      checkpoint.job.state === "cancel_requested"
+      checkpoint.job.state === "cancelled"
         ? "EXPORT_CANCELLED_BATCH_COMMITTED"
         : "OK",
     jobState: checkpoint.job.state,

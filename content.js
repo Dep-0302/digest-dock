@@ -919,7 +919,7 @@ function extractVideoInfo() {
     descriptionStatus: descriptionElement
       ? descriptionElement.textContent?.trim()
         ? "present"
-        : "confirmed-empty"
+        : "unknown"
       : "unknown",
   };
 }

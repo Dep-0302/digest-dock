@@ -958,6 +958,54 @@ test("legacy key migrates once to the schema-2 key without modifying legacy data
   assert.equal(upgraded.transcriptZh[0].segmentId, "semantic-segment");
 });
 
+test("oversized legacy reads never evict sources before protected migration", async () => {
+  const legacy = Object.fromEntries(
+    Array.from({ length: sources.MAX_SOURCES + 1 }, (_, index) => [
+      `legacy-${index}`,
+      {
+        schemaVersion: 1,
+        mediaKey: `legacy-${index}`,
+        titleOriginal: `Legacy ${index}`,
+        updatedAt: index + 1,
+      },
+    ]),
+  );
+  const storage = makeStorage({ [sources.LEGACY_STORAGE_KEY]: legacy });
+  const read = await sources.readAllSources(storage);
+  assert.equal(Object.keys(read).length, sources.MAX_SOURCES + 1);
+  assert.equal(Object.hasOwn(storage.store, sources.STORAGE_KEY), false);
+
+  const noop = await sources.writeNoteSource(storage, {
+    mediaKey: "legacy-0",
+    titleOriginal: "Legacy 0",
+  });
+  assert.equal(noop.changed, false);
+  assert.equal(
+    Object.hasOwn(storage.store, sources.STORAGE_KEY),
+    false,
+    "an oversized no-op must not become an unprotected migration write",
+  );
+  const missing = await sources.commitExportSourceTranslationBatch(storage, {
+    mediaKey: "legacy-missing",
+    expectedRevision: "fnv1a-0000000000000000",
+    units: [{ id: "missing-unit" }],
+    translationsById: {},
+  });
+  assert.equal(missing.code, "SOURCE_MISSING");
+  assert.equal(Object.hasOwn(storage.store, sources.STORAGE_KEY), false);
+
+  await sources.writeNoteSource(
+    storage,
+    { mediaKey: "new-source", titleOriginal: "New source" },
+    { protectedKeys: new Set(["legacy-0"]), now: 10_000 },
+  );
+  const migrated = storage.store[sources.STORAGE_KEY];
+  assert.ok(migrated["legacy-0"], "note-referenced legacy source is retained");
+  assert.ok(migrated["new-source"], "the current source is retained");
+  assert.ok(Object.keys(migrated).length <= sources.MAX_SOURCES);
+  assert.strictEqual(storage.store[sources.LEGACY_STORAGE_KEY], legacy);
+});
+
 test("description chunks persist partially and assemble only when all chunks finish", () => {
   const description = `${"a".repeat(3000)}${"b".repeat(3000)}${"c".repeat(500)}`;
   const source = sources.normalizeNoteSource({

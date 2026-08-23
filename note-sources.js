@@ -1685,14 +1685,20 @@ var YTD_NOTE_SOURCES = (() => {
     return next;
   }
 
+  function mapFitsStorageCap(map) {
+    return (
+      Object.keys(map).length <= MAX_SOURCES &&
+      byteLength(JSON.stringify(map)) <= MAX_TOTAL_BYTES
+    );
+  }
+
   async function readAllSources(storage) {
     return enqueueStorageOperation(storage, async () => {
       const snapshot = await readStorageSnapshot(storage);
-      const bounded = evictToCap(snapshot.map);
-      if (snapshot.needsMigration) {
-        await storage.set({ [STORAGE_KEY]: bounded });
+      if (snapshot.needsMigration && mapFitsStorageCap(snapshot.map)) {
+        await storage.set({ [STORAGE_KEY]: snapshot.map });
       }
-      return bounded;
+      return snapshot.map;
     });
   }
 
@@ -1701,11 +1707,10 @@ var YTD_NOTE_SOURCES = (() => {
     if (!key) return null;
     return enqueueStorageOperation(storage, async () => {
       const snapshot = await readStorageSnapshot(storage);
-      const bounded = evictToCap(snapshot.map);
-      if (snapshot.needsMigration) {
-        await storage.set({ [STORAGE_KEY]: bounded });
+      if (snapshot.needsMigration && mapFitsStorageCap(snapshot.map)) {
+        await storage.set({ [STORAGE_KEY]: snapshot.map });
       }
-      return bounded[key] || null;
+      return snapshot.map[key] || null;
     });
   }
 
@@ -1726,8 +1731,8 @@ var YTD_NOTE_SOURCES = (() => {
       );
       if (!source) return { changed: false };
       if (!changed && map[candidate.mediaKey]) {
-        if (snapshot.needsMigration) {
-          await storage.set({ [STORAGE_KEY]: evictToCap(map) });
+        if (snapshot.needsMigration && mapFitsStorageCap(map)) {
+          await storage.set({ [STORAGE_KEY]: map });
         }
         return { changed: false };
       }
@@ -1855,8 +1860,8 @@ var YTD_NOTE_SOURCES = (() => {
       const snapshot = await readStorageSnapshot(storage);
       const current = snapshot.map[key] || null;
       if (!current) {
-        if (snapshot.needsMigration) {
-          await storage.set({ [STORAGE_KEY]: evictToCap(snapshot.map) });
+        if (snapshot.needsMigration && mapFitsStorageCap(snapshot.map)) {
+          await storage.set({ [STORAGE_KEY]: snapshot.map });
         }
         return {
           changed: false,
@@ -1904,8 +1909,11 @@ var YTD_NOTE_SOURCES = (() => {
           protectedKeys instanceof Set ? new Set(protectedKeys) : new Set();
         keep.add(key);
         await storage.set({ [STORAGE_KEY]: evictToCap(map, keep) });
-      } else if (snapshot.needsMigration) {
-        await storage.set({ [STORAGE_KEY]: evictToCap(snapshot.map) });
+      } else if (
+        snapshot.needsMigration &&
+        mapFitsStorageCap(snapshot.map)
+      ) {
+        await storage.set({ [STORAGE_KEY]: snapshot.map });
       }
       return {
         changed,

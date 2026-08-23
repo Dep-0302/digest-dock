@@ -3184,7 +3184,7 @@ async function runConfirmedExportTranslationRound({
       if (!result?.success) {
         throw exportJobError(result, "字幕或简介补译失败。");
       }
-      if (["cancelled", "cancel_requested"].includes(result.jobState)) {
+      if (result.jobState === "cancelled") {
         throw exportCancelledError();
       }
       job = await readExportJobFromBackground(job.jobId);

@@ -605,6 +605,35 @@ var YTD_EXPORT_JOBS = (() => {
     await storage.set({ [STORAGE_KEY]: library });
   }
 
+  function makeRoomForNewJob(jobs, candidate) {
+    const retained = { ...jobs };
+    const evictable = Object.values(retained)
+      .filter((job) => ["completed", "stale"].includes(job.state))
+      .sort(
+        (left, right) =>
+          left.updatedAt - right.updatedAt ||
+          left.jobId.localeCompare(right.jobId),
+      );
+    const fits = () => {
+      const next = { ...retained, [candidate.jobId]: candidate };
+      return (
+        Object.keys(next).length <= MAX_JOBS &&
+        byteLength(JSON.stringify({ schemaVersion: SCHEMA_VERSION, jobs: next })) <=
+          MAX_LIBRARY_BYTES
+      );
+    };
+    while (!fits() && evictable.length) {
+      delete retained[evictable.shift().jobId];
+    }
+    if (!fits()) {
+      throw exportJobsError(
+        "EXPORT_JOBS_STORAGE_LIMIT",
+        "Export jobs are full and contain no completed history that can be pruned safely.",
+      );
+    }
+    return retained;
+  }
+
   function enqueueMutation(storage, operation) {
     validateStorage(storage);
     const previous = mutationQueues.get(storage) || Promise.resolve();
@@ -934,7 +963,9 @@ var YTD_EXPORT_JOBS = (() => {
       const library = await readLibrary(storage);
       const existing = library.jobs[candidate.jobId];
       let result;
+      let retainedJobs = library.jobs;
       if (!existing) {
+        retainedJobs = makeRoomForNewJob(library.jobs, candidate);
         result = { changed: true, job: candidate };
       } else {
         assertFrozenFieldsMatch(existing, candidate);
@@ -953,7 +984,7 @@ var YTD_EXPORT_JOBS = (() => {
         );
       }
       if (!result.changed) return result;
-      const jobs = { ...library.jobs, [candidate.jobId]: result.job };
+      const jobs = { ...retainedJobs, [candidate.jobId]: result.job };
       await writeLibrary(storage, jobs);
       return result;
     });

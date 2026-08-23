@@ -531,3 +531,67 @@ test("remove and clear are serialized, idempotent storage operations", async () 
   assert.equal((await jobs.clear(storage)).changed, false);
   assert.deepEqual(await jobs.read(storage), {});
 });
+
+test("a new job prunes the oldest completed history at capacity", async () => {
+  const storage = makeStorage();
+  const completed = [];
+  for (let index = 0; index < jobs.MAX_JOBS; index += 1) {
+    const input = makeInput(`video-${index}`, {
+      scope: `scope-${index}`,
+      units: [`video-${index}:unit`],
+      sourceRevision: index + 1,
+    });
+    const job = jobs.createExportJob(
+      {
+        ...input,
+        state: "completed",
+        completedUnitKeys: input.orderedUnitKeys,
+      },
+      { now: index + 1 },
+    );
+    completed.push(job);
+    await jobs.upsertExportJob(storage, job, { now: index + 1 });
+  }
+
+  const newcomer = jobs.createExportJob(
+    makeInput("video-new", {
+      scope: "scope-new",
+      units: ["video-new:unit"],
+      sourceRevision: 99,
+    }),
+    { now: 10_000 },
+  );
+  await jobs.upsertExportJob(storage, newcomer, { now: 10_000 });
+
+  const stored = await jobs.readExportJobs(storage);
+  assert.equal(Object.keys(stored).length, jobs.MAX_JOBS);
+  assert.equal(Object.hasOwn(stored, completed[0].jobId), false);
+  assert.equal(Object.hasOwn(stored, completed[1].jobId), true);
+  assert.equal(Object.hasOwn(stored, newcomer.jobId), true);
+});
+
+test("capacity fails closed when every stored job is still resumable", async () => {
+  const storage = makeStorage();
+  for (let index = 0; index < jobs.MAX_JOBS; index += 1) {
+    const job = jobs.createExportJob(
+      makeInput(`active-${index}`, {
+        scope: `active-scope-${index}`,
+        units: [`active-${index}:unit`],
+        sourceRevision: index + 1,
+      }),
+      { now: index + 1 },
+    );
+    await jobs.upsertExportJob(storage, job, { now: index + 1 });
+  }
+  const blocked = jobs.createExportJob(
+    makeInput("active-new", {
+      scope: "active-scope-new",
+      units: ["active-new:unit"],
+      sourceRevision: 100,
+    }),
+  );
+  await assert.rejects(() => jobs.upsertExportJob(storage, blocked), {
+    code: "EXPORT_JOBS_STORAGE_LIMIT",
+  });
+  assert.equal(Object.keys(await jobs.readExportJobs(storage)).length, jobs.MAX_JOBS);
+});

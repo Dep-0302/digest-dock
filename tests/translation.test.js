@@ -827,6 +827,7 @@ function makeExportNotesBackground({ switchProviderBeforeFetch = false } = {}) {
   return {
     background,
     storage,
+    noteSources,
     exportJobs,
     job,
     mediaKey,
