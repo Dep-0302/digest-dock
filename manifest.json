@@ -13,7 +13,11 @@
     "https://*.hdslb.com/*",
     "https://*.bilivideo.com/*",
     "https://api.supadata.ai/*",
-    "https://api.deepseek.com/*"
+    "https://api.deepseek.com/*",
+    "https://open.bigmodel.cn/*",
+    "https://dashscope.aliyuncs.com/*",
+    "https://api.siliconflow.cn/*",
+    "https://api.fireworks.ai/*"
   ],
   "action": {
     "default_title": "打开 DigestDock",

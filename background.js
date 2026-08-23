@@ -14,6 +14,9 @@
 
 // Import safe defaults and validation helpers. Secret keys live in
 // chrome.storage.local and are never part of the extension source.
+// ai-providers.js loads first so settings and request logic can derive each
+// provider's endpoint, model, and adapter from the registry.
+importScripts("ai-providers.js");
 importScripts("settings.js");
 importScripts("bilibili.js");
 importScripts("notes-backup.js");
@@ -260,6 +263,20 @@ async function getSettings() {
   return YTD_SETTINGS.normalize(stored[YTD_SETTINGS.STORAGE_KEY]);
 }
 
+// Resolves the active provider record for a settings object. Always returns a
+// verified, selectable provider (falling back to the default id, never adopting
+// another provider's key), so request construction can rely on a valid adapter.
+function resolveActiveProvider(settings) {
+  const id = YTD_AI_PROVIDERS.resolveProviderId(settings?.provider);
+  return YTD_AI_PROVIDERS.getProvider(id);
+}
+
+// User-facing provider name for error copy, so messages never hardcode
+// "DeepSeek" once another provider is selected.
+function providerDisplayLabel(settings) {
+  return resolveActiveProvider(settings)?.displayName || "AI 服务";
+}
+
 function isMissingContentReceiverError(error) {
   const message = String(error?.message || error || "");
   return (
@@ -365,24 +382,26 @@ async function requestAiCompletion({
   settingsOverride,
 }) {
   const settings = settingsOverride || (await getSettings());
-  if (!settings.aiApiKey) {
+  const provider = resolveActiveProvider(settings);
+  const providerLabel = provider?.displayName || "AI 服务";
+  const apiKey = YTD_SETTINGS.apiKeyFor(settings, provider?.id);
+  if (!apiKey) {
     const error = new Error(
-      "尚未配置 DeepSeek API 密钥，请打开 DigestDock 设置。",
+      `尚未配置${providerLabel} API 密钥，请打开 DigestDock 设置。`,
     );
     error.code = "NO_AI_KEY";
     throw error;
   }
-  const body = {
-    model: settings.aiModel,
-    max_tokens: maxTokens,
+  // The provider adapter owns endpoint, auth header, model field, and which
+  // optional fields (JSON mode, thinking-disable) are allowed, so a field like
+  // DeepSeek's `thinking` never leaks onto a provider that would reject it.
+  const { url, headers, body } = provider.buildRequest({
+    apiKey,
     messages,
-  };
-  if (typeof temperature === "number") body.temperature = temperature;
-  if (responseFormat) {
-    body.response_format = responseFormat;
-  }
-  // Product features need bounded, predictable latency rather than reasoning traces.
-  body.thinking = { type: "disabled" };
+    maxTokens,
+    temperature,
+    responseFormat,
+  });
 
   const controller = new AbortController();
   const effectiveHardTimeoutMs =
@@ -411,20 +430,14 @@ async function requestAiCompletion({
   );
   resetIdleTimeout();
   try {
-    const response = await fetch(
-      YTD_SETTINGS.chatCompletionsUrl(),
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${settings.aiApiKey}`,
-        },
-        body: JSON.stringify(body),
-        signal: controller.signal,
-      },
-    );
-    // Receiving headers proves DeepSeek is still making progress. DeepSeek
-    // may then send blank-line body chunks while a non-streaming request queues.
+    const response = await fetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    // Receiving headers proves the provider is still making progress. It may
+    // then send blank-line body chunks while a non-streaming request queues.
     resetIdleTimeout();
 
     const data = await readBoundedAiResponse(response, resetIdleTimeout);
@@ -433,14 +446,20 @@ async function requestAiCompletion({
       const error = new Error(
         errorData.error?.message ||
           errorData.message ||
-          `DeepSeek error: ${response.status}`,
+          `${providerLabel} error: ${response.status}`,
       );
       error.status = response.status;
+      // Provider adapter maps the raw status onto a product error code.
+      const normalized = provider.normalizeError({
+        status: response.status,
+        body: errorData,
+      });
+      if (normalized) error.code = normalized;
       throw error;
     }
 
-    const choice = data.choices?.[0];
-    const finishReason = choice?.finish_reason;
+    const parsed = provider.parseResponse(data);
+    const finishReason = parsed.finishReason;
     if (finishReason && finishReason !== "stop") {
       const codeByFinishReason = {
         length: "OUTPUT_TRUNCATED",
@@ -448,16 +467,16 @@ async function requestAiCompletion({
         insufficient_system_resource: "PROVIDER_UNAVAILABLE",
       };
       const finishError = new Error(
-        `DeepSeek stopped before completing the response (${finishReason}).`,
+        `${providerLabel} stopped before completing the response (${finishReason}).`,
       );
       finishError.code =
         codeByFinishReason[finishReason] || "UNEXPECTED_FINISH_REASON";
       throw finishError;
     }
 
-    const text = choice?.message?.content;
+    const text = parsed.text;
     if (typeof text !== "string" || !text.trim()) {
-      const error = new Error("DeepSeek returned an empty response.");
+      const error = new Error(`${providerLabel} returned an empty response.`);
       error.code = "EMPTY_AI_RESPONSE";
       throw error;
     }
@@ -466,14 +485,14 @@ async function requestAiCompletion({
   } catch (error) {
     if (timeoutKind === "idle") {
       const timeoutError = new Error(
-        "DeepSeek 请求已连续 50 秒没有响应，请重试。",
+        `${providerLabel} 请求已连续 50 秒没有响应，请重试。`,
       );
       timeoutError.code = "AI_IDLE_TIMEOUT";
       throw timeoutError;
     }
     if (timeoutKind === "hard") {
       const timeoutError = new Error(
-        `DeepSeek 请求超过 ${Math.ceil(effectiveHardTimeoutMs / 1000)} 秒，请重试。`,
+        `${providerLabel} 请求超过 ${Math.ceil(effectiveHardTimeoutMs / 1000)} 秒，请重试。`,
       );
       timeoutError.code = "AI_HARD_TIMEOUT";
       throw timeoutError;
@@ -494,13 +513,13 @@ async function readBoundedAiResponse(response, onActivity) {
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
-      // Every received chunk is activity, including DeepSeek's blank lines.
+      // Every received chunk is activity, including a provider's blank lines.
       onActivity();
       const byteLength = value?.byteLength ?? 0;
       responseBytes += byteLength;
       if (responseBytes > AI_PROVIDER_MAX_RESPONSE_BYTES) {
         await reader.cancel?.().catch(() => {});
-        const error = new Error("DeepSeek response exceeded the 2 MiB limit.");
+        const error = new Error("AI provider response exceeded the 2 MiB limit.");
         error.code = "AI_RESPONSE_TOO_LARGE";
         throw error;
       }
@@ -517,7 +536,7 @@ async function readBoundedAiResponse(response, onActivity) {
     onActivity();
     const byteLength = new TextEncoder().encode(responseText).byteLength;
     if (byteLength > AI_PROVIDER_MAX_RESPONSE_BYTES) {
-      const error = new Error("DeepSeek response exceeded the 2 MiB limit.");
+      const error = new Error("AI provider response exceeded the 2 MiB limit.");
       error.code = "AI_RESPONSE_TOO_LARGE";
       throw error;
     }
@@ -827,7 +846,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.action === "translateNotes") {
-    handleTranslateNotes(message.notes)
+    handleTranslateNotes({ notes: message.notes, titles: message.titles })
       .then(sendResponse)
       .catch((err) => sendResponse({ success: false, error: err.message }));
     return true;
@@ -935,13 +954,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message.action === "checkConfig") {
     getSettings()
-      .then((settings) =>
+      .then((settings) => {
+        const provider = resolveActiveProvider(settings);
         sendResponse({
           hasSupadataKey: !!settings.supadataApiKey,
-          hasAiKey: !!settings.aiApiKey,
+          hasAiKey: YTD_SETTINGS.hasActiveApiKey(settings),
+          // Provider identity and capabilities (never the key itself) so the
+          // side panel can label the active service and gate unsupported
+          // features without a second round trip.
+          provider: YTD_AI_PROVIDERS.describeProvider(provider?.id),
           runtimeProtocolVersion: RUNTIME_PROTOCOL_VERSION,
-        }),
-      )
+        });
+      })
       .catch((error) => sendResponse({ error: error.message }));
     return true;
   }
@@ -1997,13 +2021,15 @@ async function handleAnalyzeTranscript(
   sourceLanguage = "",
   platform = "youtube",
 ) {
+  // Hoisted so the catch block can name the active provider in error copy.
+  let settings;
   try {
-    const settings = await getSettings();
-    if (!settings.aiApiKey) {
+    settings = await getSettings();
+    if (!YTD_SETTINGS.hasActiveApiKey(settings)) {
       return {
         success: false,
         error: "NO_AI_KEY",
-        message: "尚未配置 DeepSeek API 密钥，请打开 DigestDock 设置。",
+        message: `尚未配置${providerDisplayLabel(settings)} API 密钥，请打开 DigestDock 设置。`,
       };
     }
 
@@ -2067,7 +2093,7 @@ async function handleAnalyzeTranscript(
     debugLog(
       "[DigestDock] Requesting video analysis",
       normalizedPlatform,
-      settings.aiModel,
+      resolveActiveProvider(settings)?.model,
     );
     const { text: responseText } = await requestAiCompletion({
       maxTokens: 8192,
@@ -2089,7 +2115,9 @@ async function handleAnalyzeTranscript(
       normalizedSourceLanguage,
     );
     if (!hasUsableChineseOverview(analysis)) {
-      throw new Error("DeepSeek 没有返回可用的中文概览，请重试。");
+      throw new Error(
+        `${providerDisplayLabel(settings)} 没有返回可用的中文概览，请重试。`,
+      );
     }
 
     return {
@@ -2102,14 +2130,14 @@ async function handleAnalyzeTranscript(
       return {
         success: false,
         error: "INVALID_AI_KEY",
-        message: "DeepSeek 拒绝了该 API 密钥。",
+        message: `${providerDisplayLabel(settings)} 拒绝了该 API 密钥。`,
       };
     }
     if (error.status === 429) {
       return {
         success: false,
         error: "RATE_LIMITED",
-        message: "DeepSeek 限制了本次请求，请稍后重试。",
+        message: `${providerDisplayLabel(settings)} 限制了本次请求，请稍后重试。`,
       };
     }
     return {
@@ -2536,7 +2564,7 @@ async function cleanupNoteText(
   sourceLanguage = "",
 ) {
   const settings = await getSettings();
-  if (!settings.aiApiKey) {
+  if (!YTD_SETTINGS.hasActiveApiKey(settings)) {
     return [beforeText, targetText, afterText].filter(Boolean).join(" ");
   }
 
@@ -2783,11 +2811,11 @@ async function handleExplainSelection(
 ) {
   try {
     const settings = await getSettings();
-    if (!settings.aiApiKey) {
+    if (!YTD_SETTINGS.hasActiveApiKey(settings)) {
       return {
         success: false,
         error: "NO_AI_KEY",
-        message: "尚未配置 DeepSeek API 密钥。",
+        message: `尚未配置${providerDisplayLabel(settings)} API 密钥。`,
       };
     }
 
@@ -2930,6 +2958,33 @@ function normalizeTranslatedSegmentBatch(parsed, sourceSegments) {
   };
 }
 
+function transcriptTranslationMaxTokens(sourceSegments) {
+  const totalCharacters = sourceSegments.reduce(
+    (sum, segment) => sum + segment.text.length,
+    0,
+  );
+  // Short on-screen batches keep the established 1536-token budget. Export
+  // completion can legitimately send up to 12k source characters, so scale the
+  // output allowance rather than truncating a valid JSON object mid-string.
+  return Math.min(
+    8192,
+    Math.max(1536, Math.ceil(totalCharacters * 0.8) + 512),
+  );
+}
+
+function parseTranscriptTranslation(text, sourceSegments) {
+  try {
+    const parsed = parseLooseJson(text);
+    const aligned = normalizeTranslatedSegmentBatch(parsed, sourceSegments);
+    return {
+      success: aligned.segments.some((segment) => segment.text),
+      translatedContent: aligned,
+    };
+  } catch (_error) {
+    return { success: false, translatedContent: null };
+  }
+}
+
 function validateOverviewOriginalTranslationRequest(analysis, targetLanguage) {
   if (
     analysis?.schemaVersion !== ANALYSIS_SCHEMA_VERSION ||
@@ -3032,8 +3087,11 @@ async function handleTranslateOverviewOriginal(
 ) {
   try {
     const settings = await getSettings();
-    if (!settings.aiApiKey) {
-      return { success: false, error: "尚未配置 DeepSeek API 密钥" };
+    if (!YTD_SETTINGS.hasActiveApiKey(settings)) {
+      return {
+        success: false,
+        error: `尚未配置${providerDisplayLabel(settings)} API 密钥`,
+      };
     }
 
     const source = validateOverviewOriginalTranslationRequest(
@@ -3619,6 +3677,9 @@ const NOTE_TRANSLATION_MAX_PROVIDER_CALLS = 5;
 const NOTE_TRANSLATION_RATE_LIMIT_BACKOFF_MS = 1_000;
 const NOTE_TRANSLATION_RATE_LIMIT_COOLDOWN_MS = 5_000;
 const NOTE_TRANSLATION_VALIDATION_VERSION = 1;
+const NOTE_TITLE_TRANSLATION_VALIDATION_VERSION = 1;
+const NOTE_TITLE_MEDIA_KEY_PATTERN = /^[A-Za-z0-9:_-]{1,64}$/;
+const NOTE_TITLE_TRANSLATION_MAX_TITLES = 10;
 
 function noteFailureCode(result, fallback = "PROVIDER_ERROR") {
   if (result?.code === "RATE_LIMITED") return "RATE_LIMITED";
@@ -3834,7 +3895,12 @@ async function callStructuredNoteTranslation(
   return result;
 }
 
-function noteTranslationResult(requestedNotes, validTranslations, failureById) {
+function noteTranslationResult(
+  requestedNotes,
+  validTranslations,
+  failureById,
+  providerLabel = "AI 服务",
+) {
   const successfulIds = new Set(validTranslations.map((note) => note.id));
   const failures = requestedNotes
     .filter((note) => !successfulIds.has(note.id))
@@ -3844,14 +3910,14 @@ function noteTranslationResult(requestedNotes, validTranslations, failureById) {
     }));
   const primaryFailureCode = failures[0]?.code || "";
   const errorByCode = {
-    RATE_LIMITED: "DeepSeek 请求受限，请稍后重试。",
-    PROVIDER_TIMEOUT: "DeepSeek 请求超时，请稍后重试。",
+    RATE_LIMITED: `${providerLabel} 请求受限，请稍后重试。`,
+    PROVIDER_TIMEOUT: `${providerLabel} 请求超时，请稍后重试。`,
     NOTE_JOB_TIMEOUT: "笔记翻译任务超时，请重试。",
-    OUTPUT_TRUNCATED: "DeepSeek 输出被截断，请重试。",
-    CONTENT_FILTERED: "DeepSeek 未返回这条内容，请修改原文或稍后重试。",
-    PROVIDER_UNAVAILABLE: "DeepSeek 暂时不可用，请稍后重试。",
-    UNEXPECTED_FINISH_REASON: "DeepSeek 未正常完成响应，请重试。",
-    EMPTY_RESPONSE: "DeepSeek 未返回有效内容，请重试。",
+    OUTPUT_TRUNCATED: `${providerLabel} 输出被截断，请重试。`,
+    CONTENT_FILTERED: `${providerLabel} 未返回这条内容，请修改原文或稍后重试。`,
+    PROVIDER_UNAVAILABLE: `${providerLabel} 暂时不可用，请稍后重试。`,
+    UNEXPECTED_FINISH_REASON: `${providerLabel} 未正常完成响应，请重试。`,
+    EMPTY_RESPONSE: `${providerLabel} 未返回有效内容，请重试。`,
     RETRY_BUDGET_EXHAUSTED: "本轮笔记重试次数已达上限，请再次重试。",
   };
   return {
@@ -3866,7 +3932,233 @@ function noteTranslationResult(requestedNotes, validTranslations, failureById) {
   };
 }
 
-function handleTranslateNotes(notes, dependencies = {}) {
+// ============================================================
+// NOTE VIDEO TITLE TRANSLATION
+// Titles are translated once per stable media identity and validated
+// independently of the note bodies, so a failed title never blocks a note's
+// body (and vice versa). Every note sharing the mediaKey is backfilled with the
+// same validated Chinese title.
+// ============================================================
+
+function noteTitleMediaKey(note) {
+  return String(note?.mediaKey || note?.videoId || "").trim();
+}
+
+/**
+ * Normalizes and de-duplicates the optional `titles` request array. Invalid or
+ * duplicate entries are skipped rather than throwing, so a malformed auxiliary
+ * title can never reject the note-body translation it travels with.
+ */
+function validateNoteTitleTranslationRequest(titles) {
+  if (!Array.isArray(titles) || !titles.length) return [];
+  const seen = new Set();
+  const normalized = [];
+  for (const entry of titles) {
+    const mediaKey =
+      typeof entry?.mediaKey === "string" ? entry.mediaKey.trim() : "";
+    const title =
+      typeof entry?.title === "string" ? entry.title.trim().slice(0, 500) : "";
+    if (!NOTE_TITLE_MEDIA_KEY_PATTERN.test(mediaKey) || !title) continue;
+    if (seen.has(mediaKey)) continue;
+    seen.add(mediaKey);
+    normalized.push({ mediaKey, title });
+    if (normalized.length >= NOTE_TITLE_TRANSLATION_MAX_TITLES) break;
+  }
+  return normalized;
+}
+
+function noteTitleTranslationUserContent(titles) {
+  return JSON.stringify({
+    titles: titles.map(({ mediaKey, title }) => ({ mediaKey, title })),
+  });
+}
+
+function validateNoteTitleCandidate(candidate) {
+  const titleZh =
+    typeof candidate?.titleZh === "string" ? candidate.titleZh.trim() : "";
+  if (!titleZh) return { titleZh: "", failureCode: "EMPTY_RESPONSE" };
+  if (titleZh.length > 500 || hasExplicitBilingualLabels(titleZh)) {
+    return { titleZh: "", failureCode: "INVALID_TRANSLATION" };
+  }
+  if (looksLikeUsableChineseNote(titleZh)) {
+    return { titleZh, failureCode: "" };
+  }
+  return { titleZh: "", failureCode: "INVALID_TRANSLATION" };
+}
+
+function normalizeNoteTitleTranslation(parsed, sourceTitles) {
+  const raw = Array.isArray(parsed?.titles) ? parsed.titles : [];
+  const byKey = new Map();
+  const duplicateKeys = new Set();
+  raw.forEach((candidate) => {
+    const key =
+      typeof candidate?.mediaKey === "string" ? candidate.mediaKey.trim() : "";
+    if (!key) return;
+    if (byKey.has(key)) {
+      duplicateKeys.add(key);
+      return;
+    }
+    byKey.set(key, candidate);
+  });
+  return sourceTitles.map((source) => {
+    if (duplicateKeys.has(source.mediaKey)) {
+      return {
+        mediaKey: source.mediaKey,
+        titleZh: "",
+        failureCode: "MULTIPLE_CANDIDATES",
+      };
+    }
+    const candidate = byKey.get(source.mediaKey);
+    if (!candidate) {
+      return {
+        mediaKey: source.mediaKey,
+        titleZh: "",
+        failureCode: "MISSING_ITEM",
+      };
+    }
+    const validated = validateNoteTitleCandidate(candidate);
+    return {
+      mediaKey: source.mediaKey,
+      titleZh: validated.titleZh,
+      failureCode: validated.failureCode,
+    };
+  });
+}
+
+function persistNoteTitleTranslations(titleByMediaKey, job) {
+  return withNoteStorageWrite(async () => {
+    const stored = job
+      ? await waitForNoteJobDeadline(job, () =>
+          chrome.storage.local.get("ytd_notes"),
+        )
+      : await chrome.storage.local.get("ytd_notes");
+    const storedNotes = Array.isArray(stored.ytd_notes) ? stored.ytd_notes : [];
+    const updatedNotes = storedNotes.map((note) => {
+      const key = noteTitleMediaKey(note);
+      if (!key || !titleByMediaKey.has(key)) return note;
+      return {
+        ...note,
+        videoTitleZh: titleByMediaKey.get(key),
+        videoTitleZhValidated: true,
+        videoTitleZhValidationVersion: NOTE_TITLE_TRANSLATION_VALIDATION_VERSION,
+      };
+    });
+    if (job && noteJobRemainingMs(job) <= 0) {
+      const error = new Error("笔记翻译任务超时，请重试。");
+      error.code = "NOTE_JOB_TIMEOUT";
+      job.stopCode = error.code;
+      throw error;
+    }
+    await chrome.storage.local.set({ ytd_notes: updatedNotes });
+  });
+}
+
+/**
+ * Translates a de-duplicated batch of titles inside an existing note-translation
+ * job, sharing that job's provider-call budget, rate-limit cooldown and
+ * deadline. Returns valid titles plus a per-mediaKey failure map. Never throws.
+ */
+async function translateNoteTitlesInJob(job, sourceTitles) {
+  const failureByKey = new Map();
+  if (!sourceTitles.length) return { titles: [], failureByKey };
+  const failAll = (code) => {
+    sourceTitles.forEach((title) => failureByKey.set(title.mediaKey, code));
+    return { titles: [], failureByKey };
+  };
+  if (job.stopCode) return failAll(job.stopCode);
+  if (noteJobRemainingMs(job) <= 0) return failAll("NOTE_JOB_TIMEOUT");
+  if (job.now() < noteTranslationCooldownUntil) return failAll("RATE_LIMITED");
+
+  const options = {
+    temperature: 0.2,
+    maxTokens: 1024,
+    responseFormat: { type: "json_object" },
+  };
+  let systemPrompt;
+  try {
+    const baseRules = await waitForNoteJobDeadline(job, () =>
+      getTranslationBaseRules("zh"),
+    );
+    systemPrompt = await waitForNoteJobDeadline(job, () =>
+      loadPromptSection("translation.md", "Note title translation", {
+        langName: "Simplified Chinese",
+        baseRules,
+      }),
+    );
+  } catch (error) {
+    return failAll(error?.code === "NOTE_JOB_TIMEOUT" ? error.code : "PROVIDER_ERROR");
+  }
+
+  const result = await callStructuredNoteTranslation(
+    job,
+    systemPrompt,
+    noteTitleTranslationUserContent(sourceTitles),
+    options,
+  );
+  if (!result.success) return failAll(noteFailureCode(result));
+
+  let normalized;
+  try {
+    normalized = normalizeNoteTitleTranslation(
+      parseLooseJson(result.text),
+      sourceTitles,
+    );
+  } catch (_error) {
+    normalized = sourceTitles.map((title) => ({
+      mediaKey: title.mediaKey,
+      titleZh: "",
+      failureCode: "INVALID_JSON",
+    }));
+  }
+
+  for (let index = 0; index < normalized.length; index += 1) {
+    if (normalized[index].titleZh) continue;
+    if (job.stopCode) {
+      normalized[index].failureCode = job.stopCode;
+      continue;
+    }
+    const retry = await callStructuredNoteTranslation(
+      job,
+      systemPrompt,
+      noteTitleTranslationUserContent([sourceTitles[index]]),
+      options,
+    );
+    if (!retry.success) {
+      normalized[index].failureCode = noteFailureCode(retry);
+      continue;
+    }
+    let retryNormalized;
+    try {
+      retryNormalized = normalizeNoteTitleTranslation(parseLooseJson(retry.text), [
+        sourceTitles[index],
+      ]);
+    } catch (_error) {
+      retryNormalized = [
+        { mediaKey: sourceTitles[index].mediaKey, titleZh: "", failureCode: "INVALID_JSON" },
+      ];
+    }
+    normalized[index] = retryNormalized[0];
+  }
+
+  const titles = normalized
+    .filter((title) => title.titleZh)
+    .map(({ mediaKey, titleZh }) => ({ mediaKey, titleZh }));
+  normalized.forEach((title) => {
+    if (!title.titleZh) {
+      failureByKey.set(
+        title.mediaKey,
+        title.failureCode || job.stopCode || "INVALID_TRANSLATION",
+      );
+    }
+  });
+  return { titles, failureByKey };
+}
+
+function handleTranslateNotes(request, dependencies = {}) {
+  // Backward compatible: an array is a notes-only request; an object may carry
+  // an optional de-duplicated `titles` batch translated in the same job.
+  const notes = Array.isArray(request) ? request : request?.notes || [];
+  const titles = Array.isArray(request) ? [] : request?.titles || [];
   const now = dependencies.now || Date.now;
   const requestDependencies = {
     ...dependencies,
@@ -3876,15 +4168,66 @@ function handleTranslateNotes(notes, dependencies = {}) {
       : now() + NOTE_TRANSLATION_JOB_TIMEOUT_MS,
   };
   const run = noteTranslationQueue.then(() =>
-    runTranslateNotes(notes, requestDependencies),
+    runTranslateNotes(notes, titles, requestDependencies),
   );
   noteTranslationQueue = run.catch(() => {});
   return run;
 }
 
-async function runTranslateNotes(notes, dependencies = {}) {
-  let requestedNotes = [];
+async function runTranslateNotes(notes, titles, dependencies = {}) {
   const job = createNoteTranslationJob(dependencies);
+  const normalizedTitles = validateNoteTitleTranslationRequest(titles);
+  const bodyResult = (notes || []).length
+    ? await runTranslateNoteBodies(notes, job)
+    : { success: true, translations: [], missingIds: [], failures: [] };
+  if (!normalizedTitles.length) return bodyResult;
+
+  let titleOutcome = { titles: [], failureByKey: new Map() };
+  try {
+    if (!job.settings) {
+      const settings = await waitForNoteJobDeadline(job, () => getSettings());
+      if (YTD_SETTINGS.hasActiveApiKey(settings)) job.settings = settings;
+    }
+    if (job.settings && YTD_SETTINGS.hasActiveApiKey(job.settings)) {
+      titleOutcome = await translateNoteTitlesInJob(job, normalizedTitles);
+      if (titleOutcome.titles.length) {
+        await persistNoteTitleTranslations(
+          new Map(titleOutcome.titles.map((t) => [t.mediaKey, t.titleZh])),
+          job,
+        );
+      }
+    } else {
+      normalizedTitles.forEach((t) =>
+        titleOutcome.failureByKey.set(t.mediaKey, "NO_AI_KEY"),
+      );
+    }
+  } catch (error) {
+    // A title failure must never corrupt the body result.
+    normalizedTitles.forEach((t) => {
+      if (!titleOutcome.failureByKey.has(t.mediaKey)) {
+        titleOutcome.failureByKey.set(t.mediaKey, error?.code || "PROVIDER_ERROR");
+      }
+    });
+  }
+
+  const successfulTitleKeys = new Set(
+    titleOutcome.titles.map((t) => t.mediaKey),
+  );
+  return {
+    ...bodyResult,
+    success: bodyResult.success || titleOutcome.titles.length > 0,
+    titles: titleOutcome.titles,
+    titleFailures: normalizedTitles
+      .filter((t) => !successfulTitleKeys.has(t.mediaKey))
+      .map((t) => ({
+        mediaKey: t.mediaKey,
+        code: titleOutcome.failureByKey.get(t.mediaKey) || "INVALID_TRANSLATION",
+      })),
+  };
+}
+
+async function runTranslateNoteBodies(notes, job) {
+  let requestedNotes = [];
   try {
     requestedNotes = validateNoteTranslationRequest(notes);
     const storedBefore = await waitForNoteJobDeadline(
@@ -3976,12 +4319,16 @@ async function runTranslateNotes(notes, dependencies = {}) {
         requestedNotes,
         existingTranslations,
         failureById,
+        providerDisplayLabel(job.settings),
       );
     }
 
     const settings = await waitForNoteJobDeadline(job, () => getSettings());
-    if (!settings.aiApiKey) {
-      return { success: false, error: "尚未配置 DeepSeek API 密钥" };
+    if (!YTD_SETTINGS.hasActiveApiKey(settings)) {
+      return {
+        success: false,
+        error: `尚未配置${providerDisplayLabel(settings)} API 密钥`,
+      };
     }
     job.settings = settings;
     if (job.now() < noteTranslationCooldownUntil) {
@@ -3990,6 +4337,7 @@ async function runTranslateNotes(notes, dependencies = {}) {
         requestedNotes,
         existingTranslations,
         failureById,
+        providerDisplayLabel(job.settings),
       );
     }
 
@@ -4024,6 +4372,7 @@ async function runTranslateNotes(notes, dependencies = {}) {
         requestedNotes,
         existingTranslations,
         failureById,
+        providerDisplayLabel(job.settings),
       );
     }
 
@@ -4120,13 +4469,19 @@ async function runTranslateNotes(notes, dependencies = {}) {
       requestedNotes,
       validTranslations,
       failureById,
+      providerDisplayLabel(job.settings),
     );
   } catch (error) {
     if (error?.code === "NOTE_JOB_TIMEOUT" && requestedNotes.length) {
       const failureById = new Map(
         requestedNotes.map((note) => [note.id, "NOTE_JOB_TIMEOUT"]),
       );
-      return noteTranslationResult(requestedNotes, [], failureById);
+      return noteTranslationResult(
+        requestedNotes,
+        [],
+        failureById,
+        providerDisplayLabel(job.settings),
+      );
     }
     return { success: false, error: error.message || "中文笔记生成失败" };
   }
@@ -4161,8 +4516,11 @@ async function handleTranslateContent(
     }
 
     const settings = await getSettings();
-    if (!settings.aiApiKey) {
-      return { success: false, error: "尚未配置 DeepSeek API 密钥" };
+    if (!YTD_SETTINGS.hasActiveApiKey(settings)) {
+      return {
+        success: false,
+        error: `尚未配置${providerDisplayLabel(settings)} API 密钥`,
+      };
     }
 
     const sourceSegments = validateTranscriptBatchRequest(content);
@@ -4180,7 +4538,7 @@ async function handleTranslateContent(
     const userContent = JSON.stringify({ segments: sourceSegments });
     const translationOptions = {
       temperature: 0.2,
-      maxTokens: 1536,
+      maxTokens: transcriptTranslationMaxTokens(sourceSegments),
       responseFormat: { type: "json_object" },
     };
     let result = await callAiTranslation(
@@ -4188,26 +4546,48 @@ async function handleTranslateContent(
       userContent,
       translationOptions,
     );
+    let retried = false;
 
-    // DeepSeek JSON mode can rarely return an empty content string. The prompt
-    // already requires JSON, so retry once without response_format.
-    if (!result.success && result.code === "EMPTY_AI_RESPONSE") {
+    // A provider may return an empty response or signal an output-length stop.
+    // Retry once with a larger budget and without response_format. The prompt
+    // still requires exact JSON, while the one-retry bound prevents cost fanout.
+    if (
+      !result.success &&
+      ["EMPTY_AI_RESPONSE", "OUTPUT_TRUNCATED"].includes(result.code)
+    ) {
       result = await callAiTranslation(systemPrompt, userContent, {
         temperature: translationOptions.temperature,
-        maxTokens: translationOptions.maxTokens,
+        maxTokens: Math.min(8192, translationOptions.maxTokens * 2),
       });
+      retried = true;
     }
     if (!result.success) return result;
 
-    const parsed = parseLooseJson(result.text);
-    const aligned = normalizeTranslatedSegmentBatch(parsed, sourceSegments);
-    if (!aligned.segments.some((segment) => segment.text)) {
+    let parsed = parseTranscriptTranslation(result.text, sourceSegments);
+    // Some OpenAI-compatible providers report finish_reason=stop even when the
+    // JSON text ends inside a quoted string. Treat that as untrusted provider
+    // output, not an extension runtime exception, and recover exactly once.
+    if (!parsed.success && !retried) {
+      result = await callAiTranslation(
+        `${systemPrompt}\nReturn one complete JSON object. Do not stop inside a string or omit the final brackets.`,
+        userContent,
+        {
+          temperature: translationOptions.temperature,
+          maxTokens: Math.min(8192, translationOptions.maxTokens * 2),
+        },
+      );
+      retried = true;
+      if (!result.success) return result;
+      parsed = parseTranscriptTranslation(result.text, sourceSegments);
+    }
+    if (!parsed.success) {
       return {
         success: false,
-        error: "翻译结果中没有有效的中文片段",
+        code: "INVALID_JSON",
+        error: "AI 返回的翻译 JSON 不完整，请重试该段。",
       };
     }
-    return { success: true, translatedContent: aligned };
+    return { success: true, translatedContent: parsed.translatedContent };
   } catch (error) {
     console.error("[DigestDock] Translation error:", error);
     return { success: false, error: error.message || "翻译失败" };
@@ -4294,6 +4674,11 @@ globalThis.__YTD_TRANSLATION_TESTING__ = {
   normalizeNoteTranslation,
   normalizeSingletonNoteTranslationResponse,
   validateNoteTranslationCandidate,
+  validateNoteTitleTranslationRequest,
+  validateNoteTitleCandidate,
+  normalizeNoteTitleTranslation,
+  noteTitleTranslationUserContent,
+  noteTitleMediaKey,
   resolveSourceLanguage,
   saveNoteToStorage,
   sendMessageToContentWithRecovery,

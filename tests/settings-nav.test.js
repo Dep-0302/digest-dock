@@ -211,7 +211,15 @@ test("every settings nav item points at a section that exists in the markup", ()
   const navHrefs = [
     ...html.matchAll(/class="settings-nav-item[^"]*"[^>]*href="(#[^"]+)"/g),
   ].map((match) => match[1]);
-  assert.ok(navHrefs.length >= 6, "expected the full settings nav");
+  // The final navigation is exactly the four destinations from the settings IA:
+  // services, notes backup, local data, privacy. The retired "字幕服务" entry is
+  // gone (Supadata stays as a card inside services) and so is "本地改造".
+  assert.deepEqual(navHrefs, [
+    "#section-services",
+    "#notesBackupCard",
+    "#section-data",
+    "#section-privacy",
+  ]);
 
   for (const href of navHrefs) {
     const id = options.settingsNavTargetFromHref(href);

@@ -67,6 +67,8 @@ function loadSidepanelRuntime({
     },
     YTD_SETTINGS: {},
     BILIBILI_ADAPTER: bilibiliAdapter,
+    YTD_NOTE_EXPORT: require("../note-export.js"),
+    YTD_NOTE_SOURCES: require("../note-sources.js"),
   };
   sandbox.globalThis = sandbox;
   const context = vm.createContext(sandbox);
@@ -139,13 +141,15 @@ function loadBackgroundHelpers({
       },
       tabs: { onUpdated: listeners, onActivated: listeners, ...tabsImpl },
     },
-    YTD_SETTINGS: {
-      STORAGE_KEY: "ytd_settings",
-      normalize: (value) => value,
-      chatCompletionsUrl: (baseUrl) => `${baseUrl}/chat/completions`,
-      canonicalYouTubeUrl: (videoId) =>
-        `https://www.youtube.com/watch?v=${videoId}`,
-    },
+    // Load the real, published logic modules the service worker derives its
+    // provider config from, instead of a hand-written stub. background.js calls
+    // YTD_SETTINGS.hasActiveApiKey()/apiKeyFor()/normalize() and
+    // YTD_AI_PROVIDERS.resolveProviderId()/getProvider()/describeProvider(), so
+    // the harness must honor the same contract the extension ships. All three
+    // are pure logic (no network, chrome.*, or DOM) and safe to require here.
+    YTD_AI_PROVIDERS: require("../ai-providers.js"),
+    YTD_SETTINGS: require("../settings.js"),
+    YTD_NOTES_BACKUP: require("../notes-backup.js"),
     BILIBILI_ADAPTER: bilibiliAdapterImpl,
   };
   sandbox.globalThis = sandbox;
@@ -210,6 +214,81 @@ function streamingResponse(chunks, { ok = true, status = 200 } = {}) {
 
 const encode = (value) => new TextEncoder().encode(value);
 const nextTurn = () => new Promise((resolve) => setImmediate(resolve));
+
+test("export precheck names every translation gap and forbids original-text substitution", () => {
+  const helpers = loadSidepanelHelpers();
+  const summary = helpers.describeExportPrecheck({
+    videoCount: 2,
+    noteCount: 3,
+    hasBlocking: false,
+    blockingVideos: [],
+    hasTranslationGaps: true,
+    translationGaps: {
+      titles: 1,
+      descriptions: 1,
+      transcriptSegments: 4,
+      notes: 2,
+    },
+  });
+  assert.match(summary, /1 个标题/);
+  assert.match(summary, /1 个简介/);
+  assert.match(summary, /4 段字幕/);
+  assert.match(summary, /2 条笔记/);
+  assert.match(summary, /不会用原文冒充中文导出/);
+  assert.doesNotMatch(summary, /缺失部分将以原文呈现/);
+});
+
+test("cancelling an export translation prevents every later request batch", async () => {
+  const calls = [];
+  let releaseFirstBatch;
+  const runtime = loadSidepanelRuntime({
+    sendMessage(message) {
+      calls.push(message.action);
+      if (message.action === "checkConfig") {
+        return Promise.resolve({
+          hasAiKey: true,
+          provider: { displayName: "Test", capabilities: ["translate"] },
+        });
+      }
+      if (message.action === "translateNotes") {
+        return new Promise((resolve) => {
+          releaseFirstBatch = resolve;
+        });
+      }
+      return Promise.resolve({ success: true });
+    },
+  });
+  const plan = {
+    overLimit: false,
+    estimatedBatches: 2,
+    noteBatches: [
+      [{ id: "n1", text: "one" }],
+      [{ id: "n2", text: "two" }],
+    ],
+    titleBatches: [],
+    sourceBatches: [],
+    sourceWorkByKey: {},
+  };
+  const task = runtime.helpers.runConfirmedExportTranslation({
+    plan,
+    sourcesByKey: {},
+    panelId: "missing",
+    setStatus() {},
+  });
+  await nextTurn();
+  assert.deepEqual(calls, ["checkConfig", "translateNotes"]);
+  runtime.evaluate("exportTranslationGeneration += 1");
+  releaseFirstBatch({ success: true, translations: [] });
+  await assert.rejects(task, (error) => {
+    assert.equal(error.code, "EXPORT_TRANSLATION_CANCELLED");
+    return true;
+  });
+  assert.deepEqual(
+    calls,
+    ["checkConfig", "translateNotes"],
+    "the second batch is never started",
+  );
+});
 
 function dispatchBackgroundMessage(background, message, sender = {}) {
   const listener = background.__runtimeMessageListeners[0];
@@ -456,7 +535,29 @@ test("Header exposes tab-specific transcript, overview, and notes language modes
   assert.match(css, /\.language-mode-control\[hidden\]\s*\{[^}]*display:\s*none/);
   assert.match(
     js,
-    /function updateHeaderLanguageControlsVisibility\(\)[\s\S]*?transcriptControl\.hidden = !\(showingResults && activeTab === "transcript"\)[\s\S]*?overviewControl\.hidden = !\(showingResults && activeTab === "overview"\)[\s\S]*?notesControl\.hidden = !\(showingResults && activeTab === "notes"\)/,
+    /function updateHeaderLanguageControlsVisibility\(\)[\s\S]*?const isBilibili = currentPlatformIsBilibili\(\)[\s\S]*?activeTab === "transcript" &&\s*!isBilibili[\s\S]*?activeTab === "overview" &&\s*!isBilibili[\s\S]*?notesControl\.hidden = !\(showingResults && activeTab === "notes"\)/,
+  );
+  // Bilibili notes keep the language control: the notes line closes right after
+  // the "notes" tab check with no platform gate (positive match above pins it).
+  assert.match(
+    js,
+    /function currentPlatformIsBilibili\(\)[\s\S]*?currentMediaRef\?\.platform === "bilibili"/,
+  );
+  // applyMediaLanguageDefaults must clear per-button hidden state so a switch
+  // back to YouTube never inherits a Bilibili button that was left hidden.
+  assert.match(
+    js,
+    /function applyMediaLanguageDefaults\(\)[\s\S]*?currentNotesMode = isBilibili \? "zh" : "bilingual"[\s\S]*?\.transcript-mode-btn, \.overview-mode-btn, \.notes-mode-btn[\s\S]*?button\.hidden = false/,
+  );
+  assert.doesNotMatch(
+    js,
+    /button\.hidden = directChinese/,
+  );
+  // Bilibili original-mode badge folds the language into the source label
+  // instead of appending the redundant 原文 mode word.
+  assert.match(
+    js,
+    /function transcriptOriginalBadgeText\(\)[\s\S]*?currentPlatformIsBilibili\(\)[\s\S]*?\$\{transcriptSourceLabel\(\)\}（\$\{language\}）/,
   );
   assert.match(js, /function showState\(state\)[\s\S]*?updateHeaderLanguageControlsVisibility\(\)/);
   assert.match(js, /function switchTab\(tabName\)[\s\S]*?updateHeaderLanguageControlsVisibility\(\)/);
@@ -2912,6 +3013,192 @@ test("Traditional Bilibili notes make one provider call and persist Simplified C
   );
 });
 
+// ----------------------------------------------------------------
+// Note video title translation
+// ----------------------------------------------------------------
+
+function loadTitleTranslationBackground({
+  notesResponse,
+  titlesResponse,
+  onProviderCall = () => {},
+  storedNotesRef,
+} = {}) {
+  const isTitleRequest = (options) => {
+    try {
+      const body = JSON.parse(options.body);
+      return String(body.messages?.[1]?.content || "").includes('"titles"');
+    } catch (_error) {
+      return false;
+    }
+  };
+  return loadBackgroundHelpers({
+    storageGetImpl: async (key) => {
+      if (key === "ytd_settings") return { ytd_settings: { aiApiKey: "test-key" } };
+      if (key === "ytd_notes") return { ytd_notes: storedNotesRef.notes };
+      return {};
+    },
+    storageSetImpl: async (items) => {
+      if (Array.isArray(items.ytd_notes)) storedNotesRef.notes = items.ytd_notes;
+    },
+    fetchImpl: async (url, options) => {
+      if (String(url).startsWith("chrome-extension://")) {
+        return { ok: true, text: async () => read("prompts/translation.md") };
+      }
+      const forTitles = isTitleRequest(options);
+      onProviderCall(forTitles ? "titles" : "notes");
+      const content = forTitles ? titlesResponse : notesResponse;
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ choices: [{ message: { content } }] }),
+      };
+    },
+  });
+}
+
+test("one title translation is generated per media identity and backfilled to every note", async () => {
+  const notes = [
+    {
+      id: "n1",
+      videoId: "vid1",
+      mediaKey: "vid1",
+      platform: "youtube",
+      videoTitle: "The Future of AI",
+      text: "First english note.",
+      translatedText: "",
+    },
+    {
+      id: "n2",
+      videoId: "vid1",
+      mediaKey: "vid1",
+      platform: "youtube",
+      videoTitle: "The Future of AI",
+      text: "Second english note.",
+      translatedText: "",
+    },
+  ];
+  const storedNotesRef = { notes };
+  const providerCalls = [];
+  const background = loadTitleTranslationBackground({
+    storedNotesRef,
+    onProviderCall: (kind) => providerCalls.push(kind),
+    notesResponse: JSON.stringify({
+      notes: [
+        { id: "n1", textZh: "第一条中文笔记。" },
+        { id: "n2", textZh: "第二条中文笔记。" },
+      ],
+    }),
+    titlesResponse: JSON.stringify({
+      titles: [{ mediaKey: "vid1", titleZh: "人工智能的未来" }],
+    }),
+  });
+
+  const result = await background.handleTranslateNotes({
+    notes: notes.map((note) => ({ id: note.id, text: note.text, videoTitle: note.videoTitle, platform: "youtube" })),
+    titles: [{ mediaKey: "vid1", title: "The Future of AI" }],
+  });
+
+  assert.equal(result.success, true);
+  assert.equal(providerCalls.filter((kind) => kind === "titles").length, 1, "exactly one title provider call for the shared media");
+  assert.equal(result.titles.length, 1);
+  assert.equal(result.titles[0].mediaKey, "vid1");
+  assert.equal(result.titles[0].titleZh, "人工智能的未来");
+  // Both notes of the same media are backfilled with the validated title.
+  assert.equal(storedNotesRef.notes.length, 2);
+  storedNotesRef.notes.forEach((note) => {
+    assert.equal(note.videoTitleZh, "人工智能的未来");
+    assert.equal(note.videoTitleZhValidated, true);
+    assert.equal(note.videoTitleZhValidationVersion, 1);
+  });
+});
+
+test("a failed body still lets the title translate, and vice versa", async () => {
+  // Body fails (empty), title succeeds.
+  const bodyFail = { notes: [{ id: "n1", mediaKey: "vid1", videoId: "vid1", platform: "youtube", videoTitle: "Deep Dive", text: "English body.", translatedText: "" }] };
+  const refA = { notes: bodyFail.notes };
+  const backgroundA = loadTitleTranslationBackground({
+    storedNotesRef: refA,
+    notesResponse: JSON.stringify({ notes: [{ id: "n1", textZh: "" }] }),
+    titlesResponse: JSON.stringify({ titles: [{ mediaKey: "vid1", titleZh: "深入解析" }] }),
+  });
+  const resultA = await backgroundA.handleTranslateNotes({
+    notes: [{ id: "n1", text: "English body.", videoTitle: "Deep Dive", platform: "youtube" }],
+    titles: [{ mediaKey: "vid1", title: "Deep Dive" }],
+  });
+  assert.equal(resultA.translations.length, 0, "body did not translate");
+  assert.ok(resultA.failures.some((f) => f.id === "n1"));
+  assert.equal(resultA.titles.length, 1, "title still translated");
+  assert.equal(resultA.titles[0].titleZh, "深入解析");
+  assert.equal(refA.notes[0].videoTitleZh, "深入解析");
+  assert.equal(refA.notes[0].translatedText, "");
+
+  // Body succeeds, title fails validation (returns English).
+  const refB = { notes: [{ id: "n1", mediaKey: "vid2", videoId: "vid2", platform: "youtube", videoTitle: "Another One", text: "English body.", translatedText: "" }] };
+  const backgroundB = loadTitleTranslationBackground({
+    storedNotesRef: refB,
+    notesResponse: JSON.stringify({ notes: [{ id: "n1", textZh: "英文正文的中文翻译。" }] }),
+    titlesResponse: JSON.stringify({ titles: [{ mediaKey: "vid2", titleZh: "Another One" }] }),
+  });
+  const resultB = await backgroundB.handleTranslateNotes({
+    notes: [{ id: "n1", text: "English body.", videoTitle: "Another One", platform: "youtube" }],
+    titles: [{ mediaKey: "vid2", title: "Another One" }],
+  });
+  assert.equal(resultB.translations[0].textZh, "英文正文的中文翻译。", "body translated");
+  assert.equal(resultB.titles.length, 0, "English title rejected");
+  assert.ok(resultB.titleFailures.some((f) => f.mediaKey === "vid2" && f.code === "INVALID_TRANSLATION"));
+  assert.equal(refB.notes[0].videoTitleZh, undefined, "no invalid title persisted");
+  assert.equal(refB.notes[0].translatedText, "英文正文的中文翻译。");
+});
+
+test("a title-only request translates without any note bodies", async () => {
+  const refC = { notes: [{ id: "n1", mediaKey: "vid3", videoId: "vid3", platform: "youtube", videoTitle: "Title Only", text: "已经翻译好的中文笔记。", translatedText: "已经翻译好的中文笔记。", translatedValidated: true, translatedValidationVersion: 1 }] };
+  const providerCalls = [];
+  const backgroundC = loadTitleTranslationBackground({
+    storedNotesRef: refC,
+    onProviderCall: (kind) => providerCalls.push(kind),
+    notesResponse: JSON.stringify({ notes: [] }),
+    titlesResponse: JSON.stringify({ titles: [{ mediaKey: "vid3", titleZh: "只有标题" }] }),
+  });
+  const resultC = await backgroundC.handleTranslateNotes({
+    notes: [],
+    titles: [{ mediaKey: "vid3", title: "Title Only" }],
+  });
+  assert.equal(resultC.success, true);
+  assert.equal(providerCalls.length, 1, "no note-body provider call when notes are empty");
+  assert.equal(providerCalls[0], "titles");
+  assert.equal(resultC.titles.length, 1);
+  assert.equal(resultC.titles[0].titleZh, "只有标题");
+  assert.equal(refC.notes[0].videoTitleZh, "只有标题");
+});
+
+test("note title request/candidate validators enforce the contract", () => {
+  const background = loadBackgroundHelpers();
+  // De-dup by mediaKey, skip invalid, cap at 10.
+  const normalized = background.validateNoteTitleTranslationRequest([
+    { mediaKey: "vid1", title: "A" },
+    { mediaKey: "vid1", title: "duplicate skipped" },
+    { mediaKey: "bad key!", title: "invalid" },
+    { mediaKey: "vid2", title: "" },
+    { mediaKey: "vid3", title: "B" },
+  ]);
+  assert.equal(normalized.length, 2);
+  assert.equal(normalized[0].mediaKey, "vid1");
+  assert.equal(normalized[0].title, "A");
+  assert.equal(normalized[1].mediaKey, "vid3");
+  assert.equal(background.validateNoteTitleTranslationRequest(undefined).length, 0);
+
+  assert.equal(background.validateNoteTitleCandidate({ titleZh: "人工智能" }).titleZh, "人工智能");
+  assert.equal(background.validateNoteTitleCandidate({ titleZh: "All English Title" }).failureCode, "INVALID_TRANSLATION");
+  assert.equal(background.validateNoteTitleCandidate({ titleZh: "" }).failureCode, "EMPTY_RESPONSE");
+
+  const mapped = background.normalizeNoteTitleTranslation(
+    { titles: [{ mediaKey: "vid1", titleZh: "标题一" }, { mediaKey: "vid1", titleZh: "冲突" }] },
+    [{ mediaKey: "vid1", title: "T1" }, { mediaKey: "vid2", title: "T2" }],
+  );
+  assert.equal(mapped[0].failureCode, "MULTIPLE_CANDIDATES");
+  assert.equal(mapped[1].failureCode, "MISSING_ITEM");
+});
+
 test("notes generate Chinese once from polished English and persist it", async () => {
   const backgroundSource = read("background.js");
   assert.match(
@@ -4967,6 +5254,116 @@ test("DeepSeek retries one empty transcript JSON response without response_forma
   assert.equal(requests[0].max_tokens, 1536);
 });
 
+test("an unterminated translation JSON response retries once and recovers", async () => {
+  const requests = [];
+  const helpers = loadBackgroundHelpers({
+    fetchImpl: async (url, options) => {
+      if (url.startsWith("chrome-extension://")) {
+        return { ok: true, text: async () => read("prompts/translation.md") };
+      }
+      requests.push(JSON.parse(options.body));
+      return {
+        ok: true,
+        json: async () => ({
+          choices: [{
+            finish_reason: "stop",
+            message: {
+              content: requests.length === 1
+                ? '{"segments":[{"id":"segment-0-0","text":"没有结束的字符串'
+                : '{"segments":[{"id":"segment-0-0","text":"完整中文译文。"}]}',
+            },
+          }],
+        }),
+      };
+    },
+  });
+  const result = await helpers.handleTranslateContent(
+    { segments: [{ id: "segment-0-0", text: "English source sentence." }] },
+    "transcriptBatch",
+    "zh",
+    "Video",
+  );
+  assert.equal(result.success, true);
+  assert.equal(requests.length, 2);
+  assert.deepEqual(requests[0].response_format, { type: "json_object" });
+  assert.equal(Object.hasOwn(requests[1], "response_format"), false);
+  assert.equal(result.translatedContent.segments[0].text, "完整中文译文。");
+});
+
+test("repeated unterminated translation JSON becomes a product error, not a throw", async () => {
+  let providerCalls = 0;
+  const helpers = loadBackgroundHelpers({
+    fetchImpl: async (url) => {
+      if (url.startsWith("chrome-extension://")) {
+        return { ok: true, text: async () => read("prompts/translation.md") };
+      }
+      providerCalls += 1;
+      return {
+        ok: true,
+        json: async () => ({
+          choices: [{
+            finish_reason: "stop",
+            message: {
+              content: '{"segments":[{"id":"segment-0-0","text":"仍然被截断',
+            },
+          }],
+        }),
+      };
+    },
+  });
+  const result = await helpers.handleTranslateContent(
+    { segments: [{ id: "segment-0-0", text: "English source sentence." }] },
+    "transcriptBatch",
+    "zh",
+    "Video",
+  );
+  assert.equal(result.success, false);
+  assert.equal(result.code, "INVALID_JSON");
+  assert.match(result.error, /JSON 不完整.*重试/);
+  assert.equal(providerCalls, 2, "malformed output recovery stays bounded");
+});
+
+test("long export translation batches receive a scaled output budget", async () => {
+  let body;
+  const helpers = loadBackgroundHelpers({
+    fetchImpl: async (url, options) => {
+      if (url.startsWith("chrome-extension://")) {
+        return { ok: true, text: async () => read("prompts/translation.md") };
+      }
+      body = JSON.parse(options.body);
+      return {
+        ok: true,
+        json: async () => ({
+          choices: [{
+            finish_reason: "stop",
+            message: {
+              content: JSON.stringify({
+                segments: Array.from({ length: 4 }, (_, index) => ({
+                  id: `s${index}`,
+                  text: `第${index + 1}段完整译文。`,
+                })),
+              }),
+            },
+          }],
+        }),
+      };
+    },
+  });
+  const result = await helpers.handleTranslateContent(
+    {
+      segments: Array.from({ length: 4 }, (_, index) => ({
+        id: `s${index}`,
+        text: "a".repeat(3000),
+      })),
+    },
+    "transcriptBatch",
+    "zh",
+    "Long video",
+  );
+  assert.equal(result.success, true);
+  assert.equal(body.max_tokens, 8192);
+});
+
 test("translation message watchdog rejects, clears its timer, and ignores late replies", async () => {
   let timeoutCallback;
   let timeoutDelay;
@@ -5283,6 +5680,34 @@ test("non-Chinese transcripts still enter the translation path", async () => {
     translateCalls: 1,
     mode: "bilingual",
   });
+});
+
+test("Bilibili original badge folds the language into the source label", () => {
+  const runtime = loadSidepanelRuntime();
+  const read = (code) => runtime.evaluate(code);
+  read(`currentTranscriptSource = "bilibili"; currentTranscriptLanguage = "zh-CN";`);
+
+  read(`currentMediaRef = { platform: "bilibili" };`);
+  assert.equal(runtime.helpers.currentPlatformIsBilibili(), true);
+  assert.equal(
+    runtime.helpers.transcriptOriginalBadgeText(),
+    "B 站视频字幕（zh-CN）",
+    "Bilibili badge must not append the redundant 原文 mode word",
+  );
+
+  // A missing / non-code language degrades to the plain source label.
+  read(`currentTranscriptLanguage = "";`);
+  assert.equal(runtime.helpers.transcriptOriginalBadgeText(), "B 站视频字幕");
+
+  // YouTube keeps its "<source> · 原文（<lang>）" form.
+  read(
+    `currentMediaRef = { platform: "youtube" }; currentTranscriptSource = ""; currentTranscriptLanguage = "en";`,
+  );
+  assert.equal(runtime.helpers.currentPlatformIsBilibili(), false);
+  assert.equal(
+    runtime.helpers.transcriptOriginalBadgeText(),
+    "来自视频字幕 · 原文（en）",
+  );
 });
 
 test("switching between bilingual and Chinese reuses active translation work", async () => {

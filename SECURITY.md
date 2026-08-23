@@ -25,7 +25,7 @@ There is no guaranteed response time or bug-bounty program. Please allow a reaso
 Examples include:
 
 - API keys or private content included in source, logs, screenshots, or release ZIPs;
-- requests to network origins outside the documented Bilibili, Bilibili subtitle-CDN, Supadata, and DeepSeek hosts;
+- requests to network origins outside the documented Bilibili, Bilibili subtitle-CDN, Supadata, and selectable AI provider hosts (DeepSeek, Zhipu GLM, Alibaba Bailian Qwen, SiliconFlow, and Fireworks);
 - script or HTML injection through transcript, metadata, service errors, or model output;
 - access to browsing data outside the documented supported YouTube and Bilibili video-page scope;
 - unintended transmission of notes, transcripts, or credentials;
@@ -35,7 +35,7 @@ Examples include:
 - note-backup validation bypasses, unsafe handling of imported fields, or a
   backup import that changes existing notes after validation fails;
 - a dependency or release-workflow compromise; and
-- bypasses of local data deletion or DeepSeek configuration controls.
+- bypasses of local data deletion or AI provider configuration controls, or a silent fallback from the selected provider to another.
 
 ## User security guidance
 
@@ -72,8 +72,13 @@ Examples include:
   it may be able to read the notes it contains.
 - Clearing extension data or removing the extension does not delete a downloaded
   backup. Delete all copies separately when they are no longer needed.
-- The current JSON file is a recovery backup for DigestDock notes. Markdown,
-  CSV, Anki, and other study-tool formats are separate future export ideas, not
-  formats accepted by this importer.
+- The JSON file remains the only recovery format accepted by the importer.
+  Markdown note exports and TXT transcript downloads are one-way reading
+  exports and are never accepted as restore input.
+- Original-language Markdown/TXT export is local-only. Chinese and bilingual
+  exports fail closed when translations are incomplete. Only the explicit
+  "Generate Chinese and export" action may call the selected AI provider; it
+  shows a conservative call bound, enforces video/unit/batch limits, can cancel
+  later batches, never calls Supadata, and never falls back to another provider.
 
 The release tooling uses an explicit file allowlist and scans public files for common credential patterns, but automated checks cannot detect every secret.

@@ -18,18 +18,30 @@ test("manifest uses minimized install-time permissions", () => {
   assert.ok(!manifest.permissions.includes("activeTab"));
   assert.ok(!manifest.permissions.includes("cookies"));
   assert.ok(!manifest.permissions.includes("downloads"));
+  // Install-time host access is the fixed platform surface plus exactly one
+  // origin per selectable AI provider, derived from the registry so the two can
+  // never silently drift. The fail-closed Tencent provider ships no
+  // hostPermission and must never widen install-time access.
+  const providers = require("../ai-providers.js");
+  const baseHosts = [
+    "https://*.bilivideo.com/*",
+    "https://*.hdslb.com/*",
+    "https://api.bilibili.com/*",
+    "https://api.supadata.ai/*",
+    "https://subtitle.bilibili.com/*",
+    "https://www.bilibili.com/*",
+    "https://www.youtube.com/*",
+  ];
+  const providerHosts = providers
+    .listSelectableProviders()
+    .map((provider) => provider.hostPermission);
   assert.deepEqual(
     [...manifest.host_permissions].sort(),
-    [
-      "https://*.bilivideo.com/*",
-      "https://*.hdslb.com/*",
-      "https://api.bilibili.com/*",
-      "https://api.deepseek.com/*",
-      "https://api.supadata.ai/*",
-      "https://subtitle.bilibili.com/*",
-      "https://www.bilibili.com/*",
-      "https://www.youtube.com/*",
-    ].sort(),
+    [...baseHosts, ...providerHosts].sort(),
+  );
+  assert.ok(
+    !manifest.host_permissions.some((host) => /tencentcloudapi\.com/.test(host)),
+    "the fail-closed Tencent provider must not appear in host_permissions",
   );
   const bilibiliContentScript = manifest.content_scripts.find((entry) =>
     entry.matches?.includes("https://www.bilibili.com/video/BV*"),
@@ -144,7 +156,7 @@ test("release copy documents current scope without em dashes", () => {
     readme,
     /Select the exact project folder you chose, which must contain `manifest\.json`/,
   );
-  assert.match(readme, /upstream issues and pull requests are not accepted/i);
+  assert.doesNotMatch(readme, /^## Remix it with your coding agent$/m);
   assert.doesNotMatch(readme, /^## Contributing$/m);
   assert.match(chineseReadme, /^# DigestDock$/m);
   assert.match(chineseReadme, /DigestDock 是一个基于 Manifest V3 的 Chrome 扩展/);
@@ -166,8 +178,7 @@ test("release copy documents current scope without em dashes", () => {
     chineseReadme,
     /选择你刚才确定的那个准确项目文件夹，其中必须包含 `manifest\.json`/,
   );
-  assert.match(chineseReadme, /不接受上游 Issue 或 Pull Request/);
-  assert.match(chineseReadme, /增加更多翻译语言/);
+  assert.doesNotMatch(chineseReadme, /^## 用编程 Agent 改造成自己的版本$/m);
   assert.match(readme, /choose \*\*Original\*\*, \*\*中文\*\*, or \*\*双语\*\*/);
   assert.match(chineseReadme, /可选择 \*\*原文\*\*、\*\*中文\*\*或\*\*双语\*\*/);
   assert.match(
@@ -237,51 +248,34 @@ test("release copy documents current scope without em dashes", () => {
   assert.match(optionsScript, /确认本次使用第三方 Supadata/);
   assert.match(optionsPage, /dash\.supadata\.ai\/auth\/sign-up/i);
   assert.match(optionsPage, /platform\.deepseek\.com\/api_keys/i);
+  // The provider picker is a custom ARIA combobox, not a native <select>, and
+  // no free-form endpoint/model/legacy-provider text inputs are exposed. The
+  // retired "本地改造" remix disclosure and its customization prompt are gone
+  // from the page, styles, and script.
   assert.doesNotMatch(optionsPage, /<select\b/i);
   assert.doesNotMatch(optionsPage, /id="(?:provider|aiBaseUrl|aiModel)"/);
-  const detailsTag = optionsPage.match(
-    /<details\b[^>]*class="card customization-card"[^>]*>/,
-  );
-  assert.ok(detailsTag, "Expected a native Local remix details disclosure");
-  assert.doesNotMatch(detailsTag[0], /\sopen(?:\s|=|>)/i);
-  assert.match(
+  assert.doesNotMatch(
     optionsPage,
-    /<summary class="customization-summary">[\s\S]*想使用其他 AI 模型？[\s\S]*编辑并复制一段可安全交给编程 Agent 的提示词[\s\S]*<\/summary>/,
+    /customization-card|customization-summary|customization-steps|prompt-reminder|copyCustomizationPromptBtn/,
   );
-  assert.match(
-    optionsPage,
-    /class="customization-steps"[\s\S]*在编程 Agent 中打开 DigestDock 解压后的项目文件夹[\s\S]*把 \[PROVIDER\] 和 \[MODEL\] 替换成[\s\S]*不要在提示词或聊天中加入 API 密钥[\s\S]*<\/ol>/,
+  assert.doesNotMatch(optionsStyles, /customization-summary|customization-card/);
+  assert.doesNotMatch(
+    optionsScript,
+    /clipboard\.writeText|Edited prompt copied\.|customizationPrompt/,
   );
-  assert.match(
-    optionsPage,
-    /class="prompt-reminder"[\s\S]*复制前，请先把 \[PROVIDER\] 和 \[MODEL\] 替换成/,
-  );
+  assert.match(optionsPage, /id="providerSelectButton"[\s\S]*?role="combobox"/);
+  assert.match(optionsPage, /id="providerSelectList"[\s\S]*?role="listbox"/);
+  assert.match(optionsStyles, /\.data-card\s*\{[^}]*margin-top:\s*36px;/);
+  // A one-time legacy-shape migration is still persisted exactly once.
+  assert.match(optionsScript, /migration\.migrated[\s\S]*storage\.set/);
   assert.doesNotMatch(optionsPage, /~\/Documents\/(?:youtube-digest|digest-dock)/);
   assert.doesNotMatch(optionsPage, /%USERPROFILE%\\Documents\\(?:youtube-digest|digest-dock)/);
-  assert.match(optionsPage, /id="copyCustomizationPromptBtn"/);
-  assert.match(optionsStyles, /\.customization-summary:hover\s*\{/);
-  assert.match(optionsStyles, /\.customization-summary:focus-visible\s*\{/);
-  assert.match(optionsStyles, /\.data-card\s*\{[^}]*margin-top:\s*36px;/);
-  assert.match(optionsScript, /clipboard\.writeText/);
-  assert.match(optionsScript, /Edited prompt copied\./);
-  assert.match(optionsScript, /migration\.migrated[\s\S]*storage\.set/);
 
-  const customizationPrompt = options.translate("zh-CN", "customizationPrompt");
-  assert.ok(optionsPage.includes(`>${customizationPrompt}</textarea>`));
-  assert.doesNotMatch(customizationPrompt, /Documents|USERPROFILE/);
-
-  assert.match(readme, /^## Remix it with your coding agent$/m);
-  assert.match(readme, /more translation languages/i);
-  assert.match(readme, /customized summary templates/i);
-  assert.match(readme, /vocabulary notebook/i);
-  assert.match(
-    readme,
-    /first open the exact DigestDock project folder that Chrome loaded through \*\*Load unpacked\*\* in your coding agent/,
-  );
-  assert.match(
-    chineseReadme,
-    /先在编程 Agent 中打开 Chrome 通过“加载已解压的扩展程序”使用的那个准确的 DigestDock 项目文件夹/,
-  );
+  assert.doesNotMatch(chineseReadme, /^## 用编程 Agent 改造成自己的版本$/m);
+  assert.match(readme, /exports the current video, all notes, or one source group as UTF-8 Markdown/i);
+  assert.match(chineseReadme, /当前视频、全部笔记和单个视频来源的 UTF-8 Markdown 导出/);
+  assert.match(readme, /Tencent Hunyuan Translation[\s\S]*unavailable/i);
+  assert.match(chineseReadme, /腾讯混元翻译[\s\S]*暂不可用/);
 
   const publishedDocs = [
     readme,
@@ -293,8 +287,21 @@ test("release copy documents current scope without em dashes", () => {
   assert.doesNotMatch(publishedDocs, /optional custom-origin/i);
   assert.doesNotMatch(publishedDocs, /chosen AI provider/i);
   assert.doesNotMatch(publishedDocs, /configure a different OpenAI-compatible/i);
-  assert.match(readme, /published version supports DeepSeek V4 Flash as its only AI provider/i);
-  assert.match(chineseReadme, /发布版本只支持 DeepSeek V4 Flash/);
+  // The retired remix mechanism and the DeepSeek-only claim are gone; the
+  // published build now ships a preset provider picker with DeepSeek as default.
+  assert.doesNotMatch(publishedDocs, /only AI provider/i);
+  assert.doesNotMatch(publishedDocs, /Copy customization prompt/i);
+  assert.match(readme, /select one AI provider from a preset list/i);
+  assert.match(chineseReadme, /从预设列表选择一个 AI 服务商/);
+  assert.match(readme, /DeepSeek is the default provider/i);
+  assert.match(chineseReadme, /DeepSeek 是默认服务商/);
+  for (const modelLabel of ["GLM-4.7-Flash", "Qwen3-8B", "Fireworks"]) {
+    assert.ok(readme.includes(modelLabel), `README should list ${modelLabel}`);
+    assert.ok(
+      chineseReadme.includes(modelLabel),
+      `zh-CN README should list ${modelLabel}`,
+    );
+  }
   assert.match(readme, /github\.com\/zarazhangrui\/youtube-digest/);
   assert.match(chineseReadme, /github\.com\/zarazhangrui\/youtube-digest/);
   assert.match(read("LICENSE"), /Copyright \(c\) 2026 Zara Zhang/);
@@ -362,6 +369,7 @@ test("runtime has no source-file credential dependency or retired model", () => 
     "sidepanel.js",
     "options.js",
     "settings.js",
+    "ai-providers.js",
   ]
     .map(read)
     .join("\n");
@@ -369,7 +377,8 @@ test("runtime has no source-file credential dependency or retired model", () => 
   assert.doesNotMatch(runtime, /\bCONFIG\./);
   assert.doesNotMatch(runtime, /importScripts\(["']config\.js/);
   assert.doesNotMatch(runtime, /\bdeepseek-chat\b/);
-  assert.match(runtime, /deepseek-v4-flash/);
+  // The current DeepSeek model id now lives once in the provider registry.
+  assert.match(read("ai-providers.js"), /deepseek-v4-flash/);
 });
 
 test("retired Remix and reader files are absent", () => {

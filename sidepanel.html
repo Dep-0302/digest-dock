@@ -220,6 +220,20 @@
                 </button>
               </div>
             </div>
+            <div
+              class="notes-export-precheck transcript-export-precheck"
+              id="transcriptExportPrecheck"
+              role="group"
+              aria-label="字幕导出预检"
+              hidden
+            ></div>
+            <p
+              class="notes-export-status"
+              id="transcriptExportStatus"
+              role="status"
+              aria-live="polite"
+              hidden
+            ></p>
             <div id="transcriptList"></div>
           </div>
         </div>
@@ -275,23 +289,75 @@
           <div class="section">
             <div class="section-header">
               <div class="section-title">已保存的笔记</div>
-              <div class="notes-filter">
-                <button
-                  class="enhance-btn active"
-                  id="notesFilterThis"
-                  aria-pressed="true"
-                >
-                  当前视频
-                </button>
-                <button
-                  class="enhance-btn"
-                  id="notesFilterAll"
-                  aria-pressed="false"
-                >
-                  全部笔记
-                </button>
+              <div class="notes-header-actions">
+                <div class="notes-filter">
+                  <button
+                    class="enhance-btn active"
+                    id="notesFilterThis"
+                    aria-pressed="true"
+                  >
+                    当前视频
+                  </button>
+                  <button
+                    class="enhance-btn"
+                    id="notesFilterAll"
+                    aria-pressed="false"
+                  >
+                    全部笔记
+                  </button>
+                </div>
+                <div class="notes-export" id="notesExport">
+                  <button
+                    class="enhance-btn"
+                    id="notesExportBtn"
+                    type="button"
+                    aria-haspopup="menu"
+                    aria-expanded="false"
+                    aria-controls="notesExportMenu"
+                  >
+                    导出笔记
+                  </button>
+                  <div
+                    class="notes-export-menu"
+                    id="notesExportMenu"
+                    role="menu"
+                    aria-label="导出笔记"
+                    hidden
+                  >
+                    <button
+                      class="notes-export-item"
+                      id="exportCurrentNotes"
+                      type="button"
+                      role="menuitem"
+                    >
+                      导出当前视频
+                    </button>
+                    <button
+                      class="notes-export-item"
+                      id="exportAllNotes"
+                      type="button"
+                      role="menuitem"
+                    >
+                      导出全部笔记
+                    </button>
+                  </div>
+                </div>
               </div>
             </div>
+            <div
+              class="notes-export-precheck"
+              id="notesExportPrecheck"
+              role="group"
+              aria-label="导出预检"
+              hidden
+            ></div>
+            <p
+              class="notes-export-status"
+              id="notesExportStatus"
+              role="status"
+              aria-live="polite"
+              hidden
+            ></p>
             <p class="notes-intro" id="notesIntro">
               将鼠标移到视频上，点击书签图标即可保存带时间戳的笔记；也可以在
               视频获得焦点时按 N 键。
@@ -322,6 +388,8 @@
 
     <script src="bilibili.js"></script>
     <script src="settings.js"></script>
+    <script src="note-export.js"></script>
+    <script src="note-sources.js"></script>
     <script src="sidepanel.js"></script>
   </body>
 </html>
