@@ -1,6 +1,6 @@
 # Privacy
 
-Effective: August 21, 2026
+Effective: August 23, 2026
 
 DigestDock is a GitHub-only, bring-your-own-key Chrome extension. It has no DigestDock account, developer-operated backend, analytics, advertising, or telemetry.
 
@@ -15,6 +15,12 @@ Depending on the feature you use, DigestDock handles:
 - transcript context around a timestamped note;
 - content you ask to translate;
 - notes you save;
+- per-video reading-export source records containing the title, channel, canonical
+  URL, description, complete transcript, source fingerprints, and any verified
+  Chinese translations already produced for those fields;
+- lightweight reading-export job metadata such as export scope, language mode,
+  stable unit identifiers, completed-unit identifiers, source revisions, round
+  position, and the selected provider/model snapshot;
 - note backup JSON files you select for import and backup files the extension
   prepares for download;
 - Supadata and AI provider configuration, including API keys; and
@@ -36,14 +42,17 @@ For a standard Bilibili BV video, the extension requests public video metadata a
 
 ### AI provider
 
-The published version sends AI feature content to the AI provider you select in Settings. DeepSeek is the default (DeepSeek V4 Flash at `https://api.deepseek.com`):
+DigestDock sends AI feature content to the AI provider you select in Settings. DeepSeek is the default (DeepSeek V4 Flash at `https://api.deepseek.com`):
 
 - transcript plus relevant title, channel, description, or duration for an overview;
 - selected text plus nearby transcript context for an explanation;
 - small semantic transcript batches currently needed for progressive Chinese
   translation, or requested source-language overview or explanation content;
-- nearby transcript context and video metadata when polishing a saved note; and
-- the polished English note and its video title when generating the separately stored Simplified Chinese note; and
+- nearby transcript context and video metadata when polishing a saved note;
+- the polished English note and its video title when generating the separately stored Simplified Chinese note;
+- only the still-missing title, note, description-chunk, or transcript-segment
+  units after you explicitly start or continue a Chinese/bilingual reading
+  export round; and
 - for a Bilibili Chinese source, the timestamped Chinese transcript context used to generate one Chinese overview or one polished Chinese note directly.
 
 You select one provider from a preset list and provide that provider's API key; the endpoint, model, request format, and capability limits are fixed per provider, and there is no Base URL or model field. The selectable providers and their fixed endpoints are DeepSeek (`https://api.deepseek.com`), Zhipu GLM (`https://open.bigmodel.cn`), Alibaba Bailian Qwen (`https://dashscope.aliyuncs.com`), SiliconFlow (`https://api.siliconflow.cn`), and Fireworks (`https://api.fireworks.ai`). Each provider's key is stored separately, and DigestDock never sends your content to a provider other than the one you selected, nor does it silently fall back to another provider.
@@ -63,6 +72,15 @@ DigestDock uses Chrome's local extension storage, not a DigestDock cloud service
 - Recent transcript, digest, and per-segment translation cache entries are stored
   locally. The cache is limited to 20 videos, and entries older than 30 days are
   removed when the side panel opens.
+- Reading-export source records are stored separately in
+  `ytd_note_sources_v2`. They may include the complete local transcript,
+  description, source fingerprints, and verified Chinese translations needed
+  to resume an export without translating unchanged material again. The older
+  `ytd_note_sources` format is read only when needed and lazily migrated; it is
+  not treated as a second writable source of truth.
+- Resumable export progress is stored in `ytd_note_export_jobs_v1`. Job records
+  contain frozen intent and progress metadata only. They do not contain an API
+  key, transcript or note bodies, description text, or translated text.
 - The Settings page can export saved notes to a versioned JSON recovery file and
   import that file later. The file contains backup-format metadata and saved
   note records only, including their stored original/English and Simplified
@@ -87,11 +105,17 @@ DigestDock uses Chrome's local extension storage, not a DigestDock cloud service
   saved title, channel, canonical URL, description, transcript, and note data.
 - Original-language reading exports never call a network service. If Chinese or
   bilingual content is incomplete, DigestDock shows the missing titles,
-  descriptions, transcript segments, and notes and does not substitute original
-  text as Chinese. Only an explicit "Generate Chinese and export" click may send
-  those missing text units to the currently selected AI provider. The action is
-  bounded, reports a conservative maximum request count, can stop later batches,
-  never calls Supadata, and never silently switches provider.
+  description chunks, transcript segments, and notes and does not substitute
+  original text as Chinese. Only an explicit "Generate Chinese and export" or
+  "Continue" click may send those still-missing units to the currently selected
+  AI provider. Each user-started round runs at most 20 task batches and a
+  conservative maximum of 100 provider calls, saves every valid completed batch
+  locally before continuing, and stops for another click instead of automatically
+  starting a new round. Cancelling stops later batches.
+  A response already in flight may still be cached if it matches the frozen video
+  and source revision, but it cannot start another batch, update a different
+  video, or trigger an automatic download. This path never calls Supadata and
+  never silently switches provider.
 - Reading exports are plain, unencrypted Markdown or TXT outside extension
   storage. Clearing or removing DigestDock does not delete files already
   downloaded by Chrome.
@@ -103,7 +127,7 @@ Downloaded note backups are plain, unencrypted JSON files outside the extension'
 To remove data:
 
 - delete individual saved notes in DigestDock;
-- use the Options page to clear cached digests, delete all notes, or reset all extension data;
+- use the Options page to clear cached digests, delete all notes, or reset all extension data; deleting all notes and resetting extension data also remove the reading-export source library and resumable export jobs;
 - remove the extension or clear its stored data from Chrome to delete all local settings, keys, notes, and cache entries;
 - manually delete any downloaded note backup files from the device and other locations where you copied them; and
 - revoke keys in the Supadata or your AI provider's dashboard to stop their future use.

@@ -5,6 +5,8 @@ const path = require("node:path");
 const vm = require("node:vm");
 
 const notesBackup = require("../notes-backup.js");
+const noteSources = require("../note-sources.js");
+const exportJobs = require("../export-jobs.js");
 const options = require("../options.js");
 
 const root = path.resolve(__dirname, "..");
@@ -146,6 +148,8 @@ function loadBackgroundBackupHelpers({
     clearTimeout,
     importScripts() {},
     YTD_NOTES_BACKUP: notesBackup,
+    YTD_NOTE_SOURCES: noteSources,
+    YTD_EXPORT_JOBS: exportJobs,
     YTD_SETTINGS: {
       STORAGE_KEY: "ytd_settings",
       normalize: (value) => value || {},

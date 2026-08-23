@@ -59,13 +59,43 @@ test("manifest uses minimized install-time permissions", () => {
 
 test("cross-platform runtime dependencies match the API-primary release surface", () => {
   const background = read("background.js");
+  const sidepanelPage = read("sidepanel.html");
   const optionsPage = read("options.html");
   const optionsStyles = read("options.css");
   const releaseCheck = read("scripts/check-release.sh");
   const brandIcon = read("icons/digestdock-icon-solid.svg");
+  const backgroundNoteSourcesIndex = background.indexOf(
+    'importScripts("note-sources.js")',
+  );
+  const backgroundExportJobsIndex = background.indexOf(
+    'importScripts("export-jobs.js")',
+  );
+  const panelNoteSourcesIndex = sidepanelPage.indexOf(
+    '<script src="note-sources.js"></script>',
+  );
+  const panelExportJobsIndex = sidepanelPage.indexOf(
+    '<script src="export-jobs.js"></script>',
+  );
+  const panelRuntimeIndex = sidepanelPage.indexOf(
+    '<script src="sidepanel.js"></script>',
+  );
 
   assert.doesNotMatch(background, /importScripts\("youtube-transcript\.js"\)/);
   assert.match(background, /importScripts\("notes-backup\.js"\)/);
+  assert.ok(
+    backgroundNoteSourcesIndex >= 0 &&
+      backgroundExportJobsIndex >= 0 &&
+      backgroundNoteSourcesIndex < backgroundExportJobsIndex,
+    "background.js must load note-sources.js before export-jobs.js",
+  );
+  assert.ok(
+    panelNoteSourcesIndex >= 0 &&
+      panelExportJobsIndex >= 0 &&
+      panelRuntimeIndex >= 0 &&
+      panelNoteSourcesIndex < panelExportJobsIndex &&
+      panelExportJobsIndex < panelRuntimeIndex,
+    "sidepanel.html must load note-sources.js, then export-jobs.js, then sidepanel.js",
+  );
   assert.ok(
     optionsPage.indexOf('<script src="notes-backup.js"></script>') <
       optionsPage.indexOf('<script src="options.js"></script>'),
@@ -74,6 +104,10 @@ test("cross-platform runtime dependencies match the API-primary release surface"
   assert.ok(
     (releaseCheck.match(/"notes-backup\.js"/g) || []).length >= 2,
     "notes-backup.js must be both allowlisted and required for release",
+  );
+  assert.ok(
+    (releaseCheck.match(/"export-jobs\.js"/g) || []).length >= 2,
+    "export-jobs.js must be both allowlisted and required for release",
   );
   for (const file of ["bilibili.js", "content-bilibili.js"]) {
     assert.ok(
@@ -323,9 +357,66 @@ test("release copy documents current scope without em dashes", () => {
   assert.match(read("options.js"), /PREVIEW_STORAGE_PREFIX = "youtubeDigestPreview:"/);
   assert.match(read("background.js"), /["']ytd_notes["']/);
   assert.match(
+    read("note-sources.js"),
+    /const STORAGE_KEY = "ytd_note_sources_v2"/,
+  );
+  assert.match(
+    read("note-sources.js"),
+    /const LEGACY_STORAGE_KEY = "ytd_note_sources"/,
+  );
+  assert.match(
+    read("export-jobs.js"),
+    /const STORAGE_KEY = "ytd_note_export_jobs_v1"/,
+  );
+  assert.match(
     read("notes-backup.js"),
     /const FORMAT = "youtube-digest-notes-backup"/,
   );
+});
+
+test("export jobs persist coordination metadata without credentials or content", () => {
+  const jobs = require("../export-jobs.js");
+  const sentinel = "private-credential-sentinel";
+  const job = jobs.createExportJob(
+    {
+      state: "planned",
+      intent: {
+        scope: "current_video",
+        mediaKeys: ["youtube:video-a"],
+        mode: "bilingual",
+        format: "markdown",
+        autoExport: true,
+      },
+      sourceRevisions: { "youtube:video-a": 2 },
+      notesRevision: "notes-r1",
+      orderedUnitKeys: ["transcript:youtube:video-a:segment-1"],
+      completedUnitKeys: [],
+      currentBatch: null,
+      cursor: 0,
+      roundBudget: { maxBatches: 20 },
+      providerSnapshot: {
+        providerId: "deepseek",
+        modelId: "deepseek-v4-flash",
+        routeKey: "deepseek:deepseek-v4-flash",
+        apiKey: sentinel,
+        requestBody: { text: "must not persist" },
+      },
+      sourceText: "full transcript must not persist",
+      translatedText: "完整译文不得写入任务",
+      exportClaim: null,
+      lastError: null,
+    },
+    { now: 1 },
+  );
+  const persisted = JSON.stringify(job);
+
+  assert.equal(jobs.STORAGE_KEY, "ytd_note_export_jobs_v1");
+  assert.equal(Object.hasOwn(job, "sourceText"), false);
+  assert.equal(Object.hasOwn(job, "translatedText"), false);
+  assert.equal(Object.hasOwn(job.providerSnapshot, "apiKey"), false);
+  assert.equal(Object.hasOwn(job.providerSnapshot, "requestBody"), false);
+  assert.doesNotMatch(persisted, new RegExp(sentinel));
+  assert.doesNotMatch(persisted, /full transcript|完整译文|must not persist/);
 });
 
 test("notes filters preserve selected contrast and expose pressed state", () => {

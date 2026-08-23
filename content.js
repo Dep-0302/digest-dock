@@ -916,6 +916,11 @@ function extractVideoInfo() {
     channelName: channelElement?.textContent?.trim() || "",
     duration: videoElement?.duration || 0,
     description: descriptionElement?.textContent?.trim() || "",
+    descriptionStatus: descriptionElement
+      ? descriptionElement.textContent?.trim()
+        ? "present"
+        : "confirmed-empty"
+      : "unknown",
   };
 }
 

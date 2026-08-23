@@ -32,6 +32,7 @@ public_allowlist=(
   "notes-backup.js"
   "note-export.js"
   "note-sources.js"
+  "export-jobs.js"
   "content.js"
   "bilibili.js"
   "content-bilibili.js"
@@ -73,6 +74,7 @@ required_public_files=(
   "notes-backup.js"
   "note-export.js"
   "note-sources.js"
+  "export-jobs.js"
   "icons/providers/PROVENANCE.md"
   "content.js"
   "bilibili.js"
@@ -359,6 +361,41 @@ if (aiIndex === -1 || settingsIndex === -1 || aiIndex > settingsIndex) {
 const background = read("background.js");
 if (!/importScripts\("ai-providers\.js"\)/.test(background)) {
   fail("background.js must importScripts ai-providers.js");
+}
+const noteSourcesImport = background.indexOf(
+  'importScripts("note-sources.js")',
+);
+const exportJobsImport = background.indexOf(
+  'importScripts("export-jobs.js")',
+);
+if (
+  noteSourcesImport === -1 ||
+  exportJobsImport === -1 ||
+  noteSourcesImport > exportJobsImport
+) {
+  fail("background.js must load note-sources.js before export-jobs.js");
+}
+
+const sidepanelPage = read("sidepanel.html");
+const noteSourcesScript = sidepanelPage.indexOf(
+  '<script src="note-sources.js"></script>',
+);
+const exportJobsScript = sidepanelPage.indexOf(
+  '<script src="export-jobs.js"></script>',
+);
+const sidepanelScript = sidepanelPage.indexOf(
+  '<script src="sidepanel.js"></script>',
+);
+if (
+  noteSourcesScript === -1 ||
+  exportJobsScript === -1 ||
+  sidepanelScript === -1 ||
+  noteSourcesScript > exportJobsScript ||
+  exportJobsScript > sidepanelScript
+) {
+  fail(
+    "sidepanel.html must load note-sources.js, then export-jobs.js, then sidepanel.js",
+  );
 }
 NODE
 

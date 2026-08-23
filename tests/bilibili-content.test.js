@@ -338,6 +338,7 @@ test("uses the standard Bilibili selectors and routes content messages", () => {
     title: "测试标题",
     channelName: "测试 UP",
     description: "测试简介",
+    descriptionStatus: "present",
     duration: 180,
   });
   assert.deepEqual(

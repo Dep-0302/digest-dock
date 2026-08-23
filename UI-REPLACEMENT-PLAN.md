@@ -137,7 +137,7 @@
 - 长视频章节时间不截断。
 - 原文／中文／双语切换不破坏卡片高度与选择态。
 
-## Phase 6：笔记、来源分组与导出（已实现，待文件验收）
+## Phase 6：笔记、来源分组与可恢复导出（本地工作树已实现，待文件与浏览器验收）
 
 ### 主要文件
 
@@ -152,14 +152,20 @@
 - 视频标题、笔记正文与导出统一支持 `原文 / 中文 / 双语`；标题翻译按媒体去重并进入 schema 3 备份。
 - 当前视频、全部笔记和单个来源容器均可导出 UTF-8 Markdown；包含标题、频道、网址、简介、字幕和笔记。
 - 字幕按钮导出完整 UTF-8 TXT，并使用当前字幕语言模式和语言后缀文件名。
-- 中文／双语存在缺口时先做只读预检；只有点击“生成中文并导出”才调用当前 AI Provider。任务最多覆盖 20 个视频、240 个单元、80 个任务批次和 100 次保守模型请求上限，并可取消后续批次；不调用 Supadata，不静默换 Provider。
+- 中文／双语存在缺口时先做只读预检；只有点击“生成中文并导出”或“继续补齐”才调用当前 AI Provider。原文导出始终零 AI 请求。
+- `ytd_note_sources_v2` 保存按原文指纹校验的视频标题、简介块与字幕段译文；旧 `ytd_note_sources` 只读惰性迁移。再次打开视频或重新导出时先回灌持久资料，只规划真正缺少的单元。
+- `ytd_note_export_jobs_v1` 保存轻量恢复状态，不保存 API Key、字幕／笔记正文或译文。导出范围、语言模式、来源版本与 Provider 快照在任务创建时冻结。
+- 总任务可超过旧 240 单元／80 批限制；每轮最多启动 20 个任务批次、最多 100 次保守模型请求。每批校验后立即写入来源资料和任务 checkpoint；一轮结束后必须再次点击，不能自动续跑。
+- 取消只停止后续批次。已发出的当前批次若仍匹配冻结来源版本可进入持久复用缓存，但不得继续下一批、污染当前页面或自动下载。
+- 补译不调用 Supadata，不静默换 Provider；保存 Key 不是持续授权。删除全部笔记或重置数据同时清理来源资料和导出任务。
 
 ### 验证
 
 - 当前视频与跨视频笔记标题都能正确截断和切换语言。
 - 复制文字、复制链接、播放、删除、来源导出与语言生成状态不回归。
 - Markdown/TXT 内容和文件名分别覆盖原文、中文、双语；中文导出不得以原文冒充。
-- 100 条上限、旧备份导入、缺失来源资料、超限补译、取消和失败状态可读。
+- 100 条笔记上限、旧备份导入、旧来源惰性迁移、缺失来源资料、长视频分轮补译、暂停／继续、取消和失败状态可读。
+- 完成若干批后关闭再打开侧栏，完成数不回退；已验证单元不再次进入翻译计划。
 
 ## Phase 7：设置页与多 Provider（主体已实现，腾讯保持安全禁用）
 
@@ -224,11 +230,13 @@ git diff --check
 1. YouTube 英文字幕与中文字幕视频：平台语言矩阵、卡片、时间跳转和三类笔记模式。
 2. B 站标准 BV 视频：字幕／概览隐藏语言控件，笔记保留三种模式。
 3. 当前视频、全部笔记、单个来源 Markdown，以及字幕 TXT 的三种语言输出。
-4. 设置页桌面和窄屏：六个图标、五个可选项、腾讯禁用态、键盘交互、导航活动态、独立滚动和固定保存栏。
-5. 断网图标复核；页面不得请求远程品牌图片。
-6. Supadata 未授权零请求；授权路径仍需用户当次确认且只作用于当前 YouTube 视频。
-7. Chrome 重新加载扩展后核对扩展 ID、加载路径、版本、错误面板和页面按钮，避免把另一个解压副本当成本工作树。
-8. 记录“自动测试通过”“浏览器已验证”“用户验收”为三个独立结果。
+4. 构造超过旧 240 单元上限的长视频缺口：首轮最多 20 批，取消后没有下一批或自动下载；关闭再打开后进度不回退，继续时不重复翻译已完成单元。
+5. 切换视频或原文版本后，旧任务不得写入当前页面；只有仍匹配冻结来源的在途结果可进入本地缓存。
+6. 设置页桌面和窄屏：六个图标、五个可选项、腾讯禁用态、键盘交互、导航活动态、独立滚动和固定保存栏。
+7. 断网图标复核；页面不得请求远程品牌图片。
+8. Supadata 未授权零请求；阅读导出补译始终零 Supadata 请求，字幕授权路径仍需用户当次确认且只作用于当前 YouTube 视频。
+9. Chrome 重新加载扩展后核对扩展 ID、加载路径、版本、错误面板和页面按钮，避免把另一个解压副本当成本工作树。
+10. 记录“自动测试通过”“浏览器已验证”“用户验收”为三个独立结果。
 
 没有真实页面证据时，不得写“端到端已验证”。
 
@@ -238,11 +246,11 @@ git diff --check
 | --- | --- |
 | 图标与 manifest | `icons/*`、`icons/providers/*`、`manifest.json` |
 | 页面入口 | `content.js`、`content-bilibili.js` |
-| 侧栏结构、分组与导出 | `sidepanel.html`、`sidepanel.css`、`sidepanel.js`、`note-export.js`、`note-sources.js` |
+| 侧栏结构、分组与导出 | `sidepanel.html`、`sidepanel.css`、`sidepanel.js`、`note-export.js`、`note-sources.js`、`export-jobs.js` |
 | 设置页 | `options.html`、`options.css`、`options.js` |
 | 字体与许可 | 新增 `fonts/*` 与许可证 |
 | Provider | `ai-providers.js`、`settings.js`、`background.js` |
-| 测试 | `tests/digest-button.test.js`、`tests/bilibili-content.test.js`、`tests/settings.test.js`、`tests/options-language.test.js`、`tests/notes-backup.test.js`、`tests/ai-providers.test.js`、`tests/note-export.test.js`、`tests/note-sources.test.js`、`tests/notes-presentation.test.js` |
+| 测试 | `tests/digest-button.test.js`、`tests/bilibili-content.test.js`、`tests/settings.test.js`、`tests/options-language.test.js`、`tests/notes-backup.test.js`、`tests/ai-providers.test.js`、`tests/note-export.test.js`、`tests/note-sources.test.js`、`tests/export-jobs.test.js`、`tests/notes-presentation.test.js`、`tests/translation.test.js` |
 | 发布检查 | `scripts/check-release.sh`、`tests/release.test.js`（如 allowlist 需要） |
 | 文档 | `DESIGN.md`、`UI-REPLACEMENT-PLAN.md`、README、PRIVACY、SECURITY；不得把本地实现写成已发布事实 |
 

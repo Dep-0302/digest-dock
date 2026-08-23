@@ -6,7 +6,7 @@
  */
 
 const DEBUG = false;
-const REQUIRED_RUNTIME_PROTOCOL_VERSION = 9;
+const REQUIRED_RUNTIME_PROTOCOL_VERSION = 10;
 const debugLog = (...args) => {
   if (DEBUG) console.log(...args);
 };
@@ -64,6 +64,7 @@ let currentVideoTitle = "";
 let currentChannelName = "";
 let currentVideoDescription = "";
 let currentVideoDescriptionZh = "";
+let currentVideoDescriptionState = "unknown";
 let currentVideoDuration = 0;
 let currentVideoSourceLanguage = "";
 let isAnalysisLoading = false; // Track if analysis is in progress
@@ -101,6 +102,8 @@ let transcriptScrollObserver = null;
 let transcriptParagraphCache = new Map();
 let exportTranslationGeneration = 0;
 let isExportTranslationRunning = false;
+let activeExportJobId = "";
+let currentPersistedNoteSource = null;
 const TRANSLATION_MESSAGE_TIMEOUT_MS = 130_000;
 const NOTES_MANUAL_RETRY_DEBOUNCE_MS = 400;
 const NOTE_TRANSLATION_VALIDATION_VERSION = 1;
@@ -868,6 +871,7 @@ async function runCheckCurrentTab(generation) {
     let nextVideoTitle = "";
     let nextChannelName = "";
     let nextVideoDescription = "";
+    let nextVideoDescriptionState = "unknown";
     let nextVideoDuration = 0;
     let nextSourceLanguage = "";
 
@@ -888,6 +892,13 @@ async function runCheckCurrentTab(generation) {
       nextVideoTitle = nextMediaRef.title || "";
       nextChannelName = nextMediaRef.channelName || "";
       nextVideoDescription = nextMediaRef.description || "";
+      nextVideoDescriptionState = ["unknown", "confirmed-empty", "present"].includes(
+        nextMediaRef.descriptionStatus,
+      )
+        ? nextMediaRef.descriptionStatus
+        : nextVideoDescription
+          ? "present"
+          : "unknown";
       nextVideoDuration = nextMediaRef.duration || 0;
     } else {
       let videoInfo = null;
@@ -921,6 +932,13 @@ async function runCheckCurrentTab(generation) {
       nextVideoTitle = videoInfo?.title || "";
       nextChannelName = videoInfo?.channelName || "";
       nextVideoDescription = videoInfo?.description || "";
+      nextVideoDescriptionState = ["unknown", "confirmed-empty", "present"].includes(
+        videoInfo?.descriptionStatus,
+      )
+        ? videoInfo.descriptionStatus
+        : nextVideoDescription
+          ? "present"
+          : "unknown";
       nextVideoDuration = videoInfo?.duration || 0;
       nextSourceLanguage = normalizeLanguageCode(videoInfo?.sourceLanguage);
     }
@@ -941,6 +959,7 @@ async function runCheckCurrentTab(generation) {
     currentVideoTitle = nextVideoTitle;
     currentChannelName = nextChannelName;
     currentVideoDescription = nextVideoDescription;
+    currentVideoDescriptionState = nextVideoDescriptionState;
     currentVideoDescriptionZh = "";
     currentVideoDuration = nextVideoDuration;
     currentVideoSourceLanguage = nextSourceLanguage;
@@ -998,8 +1017,10 @@ function startDigest(
     nextRouteKey !== currentRouteKey ||
     sourceTrackChanged;
   if (videoChanged) {
+    const previousExportJobId = activeExportJobId;
     digestGeneration += 1;
     translationGeneration += 1;
+    exportTranslationGeneration += 1;
     notesLoadGeneration += 1;
     notesTranslationGeneration += 1;
     isOverviewTranslationLoading = false;
@@ -1017,6 +1038,16 @@ function startDigest(
     currentTranscriptText = null;
     currentTranscriptTimestamped = null;
     currentTranscriptLanguage = null;
+    currentPersistedNoteSource = null;
+    activeExportJobId = "";
+    if (previousExportJobId) {
+      chrome.runtime
+        .sendMessage({
+          action: "cancelExportTranslationJob",
+          jobId: previousExportJobId,
+        })
+        .catch(() => {});
+    }
     currentOverviewMode = "zh";
     setOverviewModeButtons(currentOverviewMode);
     clearOverviewResults();
@@ -1151,6 +1182,8 @@ async function runDigestLoad(
         }
       }
     }
+    await hydrateCurrentVideoNoteSource();
+    if (!isCurrentDigest(videoId, generation, routeKey)) return;
 
     if (currentVideoTitle || currentChannelName) {
       const videoInfo = document.getElementById("videoInfo");
@@ -1301,6 +1334,9 @@ async function runDigestLoad(
     currentVideoSourceLanguage = currentTranscriptLanguage || "";
   }
   applyMediaLanguageDefaults();
+
+  await hydrateCurrentVideoNoteSource();
+  if (!isCurrentDigest(videoId, generation, routeKey)) return;
 
   // Render transcript immediately (no LLM needed)
   renderTranscript();
@@ -1864,6 +1900,110 @@ function transcriptExportMode() {
   return currentTranscriptMode === "bilingual" ? "bilingual" : currentTranscriptMode;
 }
 
+function currentTranscriptOriginalSegments() {
+  return groupTranscriptEntries(currentTranscript || []).map((segment) => ({
+    segmentId: segment.id,
+    start: segment.start,
+    text: segment.text,
+    sourceHash: YTD_NOTE_SOURCES.hashSourceText(segment.text),
+  }));
+}
+
+function applyPersistedSourceToCurrentVideo(source) {
+  const key = currentVideoId || currentMediaRef?.mediaKey || "";
+  const normalized = YTD_NOTE_SOURCES.normalizeNoteSource(source);
+  if (!normalized || normalized.mediaKey !== key) return false;
+
+  if (
+    currentVideoDescriptionState === "unknown" &&
+    normalized.descriptionStatus === "present" &&
+    normalized.descriptionOriginal
+  ) {
+    currentVideoDescription = normalized.descriptionOriginal;
+    currentVideoDescriptionState = "present";
+  } else if (
+    currentVideoDescriptionState === "unknown" &&
+    normalized.descriptionStatus === "confirmed-empty"
+  ) {
+    currentVideoDescriptionState = "confirmed-empty";
+  }
+
+  const currentDescriptionHash = currentVideoDescription
+    ? YTD_NOTE_SOURCES.hashSourceText(currentVideoDescription)
+    : "";
+  if (
+    normalized.descriptionZh &&
+    normalized.descriptionSourceHash &&
+    normalized.descriptionSourceHash === currentDescriptionHash
+  ) {
+    currentVideoDescriptionZh = normalized.descriptionZh;
+  }
+
+  const byIdentity = new Map();
+  const byStartHash = new Map();
+  normalized.transcriptZh.forEach((entry) => {
+    byIdentity.set(
+      `${entry.segmentId}\u0000${entry.startMs}\u0000${entry.sourceHash}`,
+      entry.text,
+    );
+    const fallback = `${entry.startMs}\u0000${entry.sourceHash}`;
+    const values = byStartHash.get(fallback) || [];
+    values.push(entry.text);
+    byStartHash.set(fallback, values);
+  });
+  getActiveTranscriptSegments().forEach((segment) => {
+    const startMs = Math.round((Number(segment.start) || 0) * 1000);
+    const sourceHash = YTD_NOTE_SOURCES.hashSourceText(segment.text);
+    const exact = byIdentity.get(
+      `${segment.id}\u0000${startMs}\u0000${sourceHash}`,
+    );
+    const fallback = byStartHash.get(`${startMs}\u0000${sourceHash}`) || [];
+    const translated = exact || (fallback.length === 1 ? fallback[0] : "");
+    if (translated) {
+      transcriptParagraphCache.set(
+        transcriptTranslationCacheKey(key, segment),
+        translated,
+      );
+    }
+  });
+  currentPersistedNoteSource = normalized;
+  return true;
+}
+
+async function hydrateCurrentVideoNoteSource() {
+  const key = currentVideoId || currentMediaRef?.mediaKey || "";
+  if (!key || !currentTranscript?.length) return null;
+  try {
+    const source = await YTD_NOTE_SOURCES.readNoteSource(
+      chrome.storage.local,
+      key,
+    );
+    if (key !== currentVideoId) return null;
+    if (source) applyPersistedSourceToCurrentVideo(source);
+    return source || null;
+  } catch (error) {
+    console.error("[DigestDock] Hydrate note source error:", error);
+    return null;
+  }
+}
+
+async function upsertNoteSourceInBackground(source) {
+  const result = await chrome.runtime.sendMessage({
+    action: "upsertNoteSource",
+    source,
+  });
+  if (!result?.success) {
+    const error = new Error(result?.message || "视频资料保存失败。");
+    error.code = result?.code || "SOURCE_WRITE_FAILED";
+    throw error;
+  }
+  const currentKey = currentVideoId || currentMediaRef?.mediaKey || "";
+  if (result.source?.mediaKey === currentKey) {
+    currentPersistedNoteSource = result.source;
+  }
+  return result.source || source;
+}
+
 /**
  * Resolves the current video's FULL, timecode-ordered original + Chinese
  * transcript segments for the requested mode, purely from the in-memory
@@ -1874,10 +2014,7 @@ function transcriptExportMode() {
  */
 function resolveCurrentVideoTranscript(mode) {
   const segments = groupTranscriptEntries(currentTranscript || []);
-  const transcriptOriginal = segments.map((segment) => ({
-    start: segment.start,
-    text: segment.text,
-  }));
+  const transcriptOriginal = currentTranscriptOriginalSegments();
   // A confirmed-Chinese track needs no translation: its "original" IS Chinese,
   // so the zh/bilingual assembly reuses the original text.
   const originalIsChinese =
@@ -1887,7 +2024,12 @@ function resolveCurrentVideoTranscript(mode) {
   let missingCount = 0;
   segments.forEach((segment) => {
     if (originalIsChinese) {
-      transcriptZh.push({ start: segment.start, text: segment.text });
+      transcriptZh.push({
+        segmentId: segment.id,
+        start: segment.start,
+        sourceHash: YTD_NOTE_SOURCES.hashSourceText(segment.text),
+        text: segment.text,
+      });
       return;
     }
     if (!needsTranslation) return;
@@ -1895,7 +2037,14 @@ function resolveCurrentVideoTranscript(mode) {
       transcriptTranslationCacheKey(currentVideoId, segment),
     );
     const text = typeof cached === "string" ? cached.trim() : "";
-    if (text) transcriptZh.push({ start: segment.start, text });
+    if (text) {
+      transcriptZh.push({
+        segmentId: segment.id,
+        start: segment.start,
+        sourceHash: YTD_NOTE_SOURCES.hashSourceText(segment.text),
+        text,
+      });
+    }
     else missingCount += 1;
   });
   return {
@@ -1932,6 +2081,7 @@ function buildTranscriptExportSource(mode) {
     titleZh: resolved.originalIsChinese ? currentVideoTitle || "" : "",
     channelName: currentChannelName || "",
     descriptionOriginal: currentVideoDescription || "",
+    descriptionStatus: currentVideoDescriptionState,
     descriptionZh: resolved.originalIsChinese
       ? currentVideoDescription || ""
       : currentVideoDescriptionZh,
@@ -1943,22 +2093,47 @@ function buildTranscriptExportSource(mode) {
   return { source, missingCount: resolved.missingCount, total: resolved.total };
 }
 
-function showTranscriptExportPrecheck(plan, missingCount, onGenerate) {
+function exportTranslationProgressText(plan) {
+  const progress = plan?.progress || {};
+  const completed = Number(progress.completedUnits) || 0;
+  const total = Math.max(
+    completed + (Number(progress.remainingUnits) || 0),
+    Number(progress.totalUnits) || 0,
+  );
+  return {
+    completed,
+    total,
+    remainingBatches:
+      Number(progress.remainingBatches) || Number(plan?.estimatedBatches) || 0,
+    roundMax: Number(progress.roundMaxBatches) || 20,
+    hasProgress: completed > 0,
+  };
+}
+
+function showTranscriptExportPrecheck(
+  plan,
+  missingCount,
+  onGenerate,
+  onExportOriginal,
+) {
   const panel = document.getElementById("transcriptExportPrecheck");
   if (!panel) return;
   panel.innerHTML = "";
   const summary = document.createElement("p");
   summary.className = "notes-export-precheck-text";
+  const progress = exportTranslationProgressText(plan);
   summary.textContent = plan.overLimit
-    ? `还有 ${missingCount} 段字幕未翻译。本次补译未启动：${plan.limitReasons.join("、")}。请先在中文模式分段完成翻译。`
-    : `还有 ${missingCount} 段字幕未翻译。生成完整中文后再导出，预计执行 ${plan.estimatedBatches} 个任务批次；错误恢复时最多 ${plan.maxProviderCalls} 次模型请求。`;
+    ? `还有 ${missingCount} 段字幕未翻译。本次补译未启动：${plan.limitReasons.join("、")}。请缩小导出范围。`
+    : `还有 ${missingCount} 段字幕未翻译。当前已完成 ${progress.completed}/${progress.total} 个翻译单元，剩余约 ${progress.remainingBatches} 批；每次确认最多继续 ${progress.roundMax} 批，全部完成后自动导出。`;
   panel.appendChild(summary);
   const actions = document.createElement("div");
   actions.className = "notes-export-precheck-actions";
   const generate = document.createElement("button");
   generate.type = "button";
   generate.className = "enhance-btn active";
-  generate.textContent = "生成中文并导出";
+  generate.textContent = progress.hasProgress
+    ? `继续补齐（本轮最多 ${progress.roundMax} 批）`
+    : `生成中文（本轮最多 ${progress.roundMax} 批）`;
   generate.disabled = plan.overLimit;
   generate.addEventListener("click", () => {
     if (!generate.disabled) void onGenerate();
@@ -1972,6 +2147,17 @@ function showTranscriptExportPrecheck(plan, missingCount, onGenerate) {
     setTranscriptExportStatus("已取消导出。");
   });
   actions.append(generate, cancel);
+  if (onExportOriginal) {
+    const original = document.createElement("button");
+    original.type = "button";
+    original.className = "enhance-btn";
+    original.textContent = "改为导出原文";
+    original.addEventListener("click", () => {
+      panel.hidden = true;
+      onExportOriginal();
+    });
+    actions.insertBefore(original, cancel);
+  }
   panel.appendChild(actions);
   panel.hidden = false;
 }
@@ -1985,7 +2171,25 @@ async function exportTranscript() {
     return;
   }
   const mode = transcriptExportMode();
-  const { source, missingCount } = buildTranscriptExportSource(mode);
+  let persistedSource = null;
+  try {
+    persistedSource = await persistCurrentVideoSourceForExport();
+  } catch (error) {
+    setTranscriptExportStatus(
+      error?.message || "无法保存字幕资料，请重试。",
+      true,
+    );
+    return;
+  }
+  const built = buildTranscriptExportSource(mode);
+  const source = persistedSource
+    ? {
+        ...persistedSource,
+        ...built.source,
+        descriptionZhChunks: persistedSource.descriptionZhChunks || [],
+      }
+    : built.source;
+  const missingCount = built.missingCount;
   // Never emit a file that claims to be complete Chinese while segments remain
   // untranslated. A user may explicitly authorize one bounded completion job.
   if (missingCount > 0) {
@@ -2006,18 +2210,65 @@ async function exportTranscript() {
       isChineseText: looksLikeLegacyChineseNote,
       includeTitles: false,
       includeNotes: false,
-      includeDescriptions: true,
+      includeDescriptions: false,
       includeTranscript: true,
     });
     showTranscriptExportPrecheck(plan, missingCount, async () => {
       try {
-        await runConfirmedExportTranslation({
+        const outcome = await runConfirmedExportTranslationRound({
           plan,
           sourcesByKey: sourceMap,
+          groups: [group],
+          scope: "transcript-current",
+          mode,
+          format: "txt",
           panelId: "transcriptExportPrecheck",
           setStatus: setTranscriptExportStatus,
         });
-        await exportTranscript();
+        if (!exportRunIsCurrent(outcome.owner)) throw exportCancelledError();
+        if (!outcome.complete) {
+          setTranscriptExportStatus(
+            `本轮已保存，仍有 ${outcome.remainingCount} 个翻译单元。再次点击导出即可继续。`,
+          );
+          return;
+        }
+        const latestSource = await YTD_NOTE_SOURCES.readNoteSource(
+          chrome.storage.local,
+          mediaKey,
+        );
+        assertFrozenExportOutcome(outcome, {
+          mediaKeys: [mediaKey],
+          mode,
+          format: "txt",
+        });
+        assertFrozenExportMaterial(
+          outcome,
+          [group],
+          latestSource ? { [mediaKey]: latestSource } : {},
+        );
+        const finalPlan = YTD_NOTE_SOURCES.buildExportTranslationPlan({
+          groups: [group],
+          sourcesByKey: latestSource ? { [mediaKey]: latestSource } : {},
+          mode,
+          isChineseText: looksLikeLegacyChineseNote,
+          includeTitles: false,
+          includeNotes: false,
+          includeDescriptions: false,
+          includeTranscript: true,
+        });
+        if (finalPlan.unitCount) {
+          throw new Error("字幕补译尚未完整写入，请再次点击导出继续。");
+        }
+        await finalizeExportJobDownload(outcome, () => {
+          assertExportRunCurrent(outcome.owner);
+          const text = YTD_NOTE_EXPORT.buildTranscriptText(latestSource, mode);
+          const filename = YTD_NOTE_EXPORT.transcriptExportFilename(
+            latestSource.titleOriginal || currentVideoTitle,
+            mode,
+          );
+          downloadTextFile(text, filename);
+        });
+        setTranscriptExportStatus("已导出完整字幕。");
       } catch (error) {
         const cancelled = error?.code === "EXPORT_TRANSLATION_CANCELLED";
         setTranscriptExportStatus(
@@ -2025,6 +2276,15 @@ async function exportTranscript() {
           !cancelled,
         );
       }
+    }, () => {
+      abandonActiveExportTranslation();
+      const text = YTD_NOTE_EXPORT.buildTranscriptText(source, "original");
+      const filename = YTD_NOTE_EXPORT.transcriptExportFilename(
+        source.titleOriginal || currentVideoTitle,
+        "original",
+      );
+      downloadTextFile(text, filename);
+      setTranscriptExportStatus("已导出原文字幕。");
     });
     return;
   }
@@ -2069,6 +2329,7 @@ function buildCurrentVideoSourceRecord() {
       : currentVideoTitleZh(),
     channelName: currentChannelName || "",
     descriptionOriginal: currentVideoDescription || "",
+    descriptionStatus: currentVideoDescriptionState,
     descriptionZh: resolved.originalIsChinese
       ? currentVideoDescription || ""
       : currentVideoDescriptionZh,
@@ -2086,21 +2347,33 @@ function buildCurrentVideoSourceRecord() {
  */
 async function persistCurrentVideoNoteSourceIfNoted() {
   const key = currentVideoId || currentMediaRef?.mediaKey || "";
-  if (!key || !currentTranscript || !currentTranscript.length) return;
+  if (!key || !currentTranscript || !currentTranscript.length) return null;
   try {
     const stored = await chrome.storage.local.get("ytd_notes");
     const notes = Array.isArray(stored.ytd_notes) ? stored.ytd_notes : [];
     const hasNote = notes.some(
       (note) => String(note?.mediaKey || note?.videoId || "") === key,
     );
-    if (!hasNote) return;
-    await YTD_NOTE_SOURCES.writeNoteSource(
-      chrome.storage.local,
+    if (!hasNote) return null;
+    const persisted = await upsertNoteSourceInBackground(
       buildCurrentVideoSourceRecord(),
     );
+    applyPersistedSourceToCurrentVideo(persisted);
+    return persisted;
   } catch (error) {
     console.error("[DigestDock] Persist note source error:", error);
+    return null;
   }
+}
+
+async function persistCurrentVideoSourceForExport() {
+  const key = currentVideoId || currentMediaRef?.mediaKey || "";
+  if (!key || !currentTranscript?.length) return null;
+  const persisted = await upsertNoteSourceInBackground(
+    buildCurrentVideoSourceRecord(),
+  );
+  applyPersistedSourceToCurrentVideo(persisted);
+  return persisted;
 }
 
 /**
@@ -2119,6 +2392,7 @@ function exportSourceForGroup(group, storedSource) {
         titleZh: "",
         channelName: "",
         descriptionOriginal: "",
+        descriptionStatus: "unknown",
         descriptionZh: "",
         transcriptOriginal: [],
         transcriptZh: [],
@@ -2132,19 +2406,44 @@ function exportSourceForGroup(group, storedSource) {
   });
 }
 
-/** No-network backfill of a source's Chinese transcript from a digest cache. */
-function resolveDigestTranscriptZh(mediaKey, digest) {
+async function persistExportSourceIdentityFromGroup(group, storedSource) {
+  if (!storedSource) return null;
+  const rep = group.representative || group.notes?.[0] || {};
+  return upsertNoteSourceInBackground({
+    ...storedSource,
+    titleOriginal: storedSource.titleOriginal || noteOriginalVideoTitle(rep),
+    titleZh: storedSource.titleZh || noteChineseVideoTitle(rep),
+    channelName: storedSource.channelName || rep.channelName || "",
+    canonicalUrl: storedSource.canonicalUrl || rep.canonicalUrl || "",
+  });
+}
+
+/** No-network backfill using one shared semantic grouping for original + zh. */
+function resolveDigestTranscriptMaterial(mediaKey, digest) {
   const segments = groupTranscriptEntries(
     Array.isArray(digest?.transcript) ? digest.transcript : [],
   );
   const cache = digest?.paragraphCache || {};
+  const original = segments.map((segment) => ({
+    segmentId: segment.id,
+    start: segment.start,
+    sourceHash: YTD_NOTE_SOURCES.hashSourceText(segment.text),
+    text: segment.text,
+  }));
   const zh = [];
   segments.forEach((segment) => {
     const value = cache[transcriptTranslationCacheKey(mediaKey, segment)];
     const text = typeof value === "string" ? value.trim() : "";
-    if (text) zh.push({ start: segment.start, text });
+    if (text) {
+      zh.push({
+        segmentId: segment.id,
+        start: segment.start,
+        sourceHash: YTD_NOTE_SOURCES.hashSourceText(segment.text),
+        text,
+      });
+    }
   });
-  return zh;
+  return { transcriptOriginal: original, transcriptZh: zh };
 }
 
 /**
@@ -2175,15 +2474,20 @@ async function collectAllNotesExport() {
           const backfilled = YTD_NOTE_SOURCES.sourceFromDigest(
             group.mediaKey,
             digest,
-            { transcriptZh: resolveDigestTranscriptZh(group.mediaKey, digest) },
+            resolveDigestTranscriptMaterial(group.mediaKey, digest),
           );
-          if (backfilled) sourcesByKey[group.mediaKey] = backfilled;
+          if (backfilled) {
+            sourcesByKey[group.mediaKey] = await upsertNoteSourceInBackground(
+              backfilled,
+            );
+          }
         }
       } catch (error) {
         console.error("[DigestDock] Backfill source error:", error);
       }
     }
     // Enrich (or synthesize a minimal source) with note-held identity + title.
+    const sourceWasAvailable = !!sourcesByKey[group.mediaKey];
     const source = sourcesByKey[group.mediaKey] || {
       mediaKey: group.mediaKey,
       platform: rep.platform === "bilibili" ? "bilibili" : "youtube",
@@ -2192,6 +2496,7 @@ async function collectAllNotesExport() {
       titleZh: "",
       channelName: "",
       descriptionOriginal: "",
+      descriptionStatus: "unknown",
       descriptionZh: "",
       transcriptOriginal: [],
       transcriptZh: [],
@@ -2201,9 +2506,31 @@ async function collectAllNotesExport() {
     if (!source.titleZh) source.titleZh = noteChineseVideoTitle(rep);
     source.channelName = source.channelName || rep.channelName || "";
     source.canonicalUrl = source.canonicalUrl || rep.canonicalUrl || "";
-    sourcesByKey[group.mediaKey] = source;
+    sourcesByKey[group.mediaKey] = sourceWasAvailable
+      ? await upsertNoteSourceInBackground(source)
+      : source;
   }
   return { notes, groups, sourcesByKey };
+}
+
+function requireKnownExportDescriptions(precheck) {
+  const videos = (precheck?.videos || []).map((video) => {
+    if (video.descriptionStatus !== "unknown") return video;
+    const existingReasons = video.blockingReasons || [];
+    const blockingReasons = existingReasons.some((reason) =>
+      String(reason).includes("简介"),
+    )
+      ? existingReasons
+      : [...existingReasons, "尚未读取视频简介"];
+    return { ...video, blocking: true, blockingReasons };
+  });
+  const blockingVideos = videos.filter((video) => video.blocking);
+  return {
+    ...precheck,
+    videos,
+    blockingVideos,
+    hasBlocking: blockingVideos.length > 0,
+  };
 }
 
 /** Human-readable summary of a precheck for the inline confirmation panel. */
@@ -2222,7 +2549,9 @@ function describeExportPrecheck(precheck) {
     const gaps = [];
     if (precheck.translationGaps.titles)
       gaps.push(`${precheck.translationGaps.titles} 个标题`);
-    if (precheck.translationGaps.descriptions)
+    if (precheck.translationGaps.descriptionChunks)
+      gaps.push(`${precheck.translationGaps.descriptionChunks} 段简介`);
+    else if (precheck.translationGaps.descriptions)
       gaps.push(`${precheck.translationGaps.descriptions} 个简介`);
     if (precheck.translationGaps.transcriptSegments)
       gaps.push(`${precheck.translationGaps.transcriptSegments} 段字幕`);
@@ -2264,6 +2593,17 @@ function exportCancelledError() {
   return error;
 }
 
+function abandonActiveExportTranslation() {
+  const jobId = activeExportJobId;
+  activeExportJobId = "";
+  exportTranslationGeneration += 1;
+  if (jobId) {
+    chrome.runtime
+      .sendMessage({ action: "cancelExportTranslationJob", jobId })
+      .catch(() => {});
+  }
+}
+
 function renderExportTranslationProgress(panel, message, generation, setStatus) {
   if (!panel) return;
   panel.innerHTML = "";
@@ -2279,10 +2619,16 @@ function renderExportTranslationProgress(panel, message, generation, setStatus) 
   cancel.textContent = "取消后续批次";
   cancel.addEventListener("click", () => {
     if (generation !== exportTranslationGeneration) return;
+    const jobId = activeExportJobId;
     exportTranslationGeneration += 1;
     cancel.disabled = true;
     summary.textContent = "正在停止；已经发送的当前批次可能仍会完成，但不会继续后续批次。";
     setStatus("正在取消补译…");
+    if (jobId) {
+      chrome.runtime
+        .sendMessage({ action: "cancelExportTranslationJob", jobId })
+        .catch(() => {});
+    }
   });
   actions.appendChild(cancel);
   panel.appendChild(actions);
@@ -2290,34 +2636,378 @@ function renderExportTranslationProgress(panel, message, generation, setStatus) 
 }
 
 function updateCurrentExportTranslations(source) {
-  const key = currentVideoId || currentMediaRef?.mediaKey || "";
-  if (!source || source.mediaKey !== key) return;
-  currentVideoDescriptionZh = source.descriptionZh || currentVideoDescriptionZh;
-  const zhByStart = new Map(
-    (source.transcriptZh || []).map((entry) => [
-      Math.floor(Number(entry.start) || 0),
-      String(entry.text || "").trim(),
-    ]),
-  );
-  getActiveTranscriptSegments().forEach((segment) => {
-    const translated = zhByStart.get(Math.floor(Number(segment.start) || 0));
-    if (translated) {
-      transcriptParagraphCache.set(
-        transcriptTranslationCacheKey(key, segment),
-        translated,
-      );
-    }
+  applyPersistedSourceToCurrentVideo(source);
+}
+
+function exportNoteUnitKey(note) {
+  return `note:${YTD_NOTE_SOURCES.hashSourceText(String(note?.id || ""))}:${YTD_NOTE_SOURCES.hashSourceText(note?.text || note?.rawText || "")}`;
+}
+
+function exportTitleUnitKey(title) {
+  return `title:${YTD_NOTE_SOURCES.hashSourceText(title?.mediaKey || "")}:${YTD_NOTE_SOURCES.hashSourceText(title?.title || "")}`;
+}
+
+function exportPlanUnitKeys(plan) {
+  return [
+    ...(plan?.noteBatches || []).flat().map(exportNoteUnitKey),
+    ...(plan?.titleBatches || []).flat().map(exportTitleUnitKey),
+    ...(plan?.sourceBatches || []).flat().map((unit) => unit.id),
+  ];
+}
+
+function exportPlanSourceRevisions(sourcesByKey, mediaKeys) {
+  const revisions = {};
+  (mediaKeys || []).forEach((mediaKey) => {
+    const source = YTD_NOTE_SOURCES.normalizeNoteSource(sourcesByKey?.[mediaKey]);
+    if (source?.sourceRevision) revisions[mediaKey] = source.sourceRevision;
   });
+  return revisions;
+}
+
+function exportNotesRevision(groups) {
+  const originals = (groups || [])
+    .flatMap((group) => group.notes || [])
+    .map((note) => [
+      String(note?.id || ""),
+      String(note?.mediaKey || note?.videoId || ""),
+      noteOriginalText(note),
+      noteOriginalVideoTitle(note),
+    ])
+    .sort((left, right) => left[0].localeCompare(right[0]));
+  return YTD_NOTE_SOURCES.hashSourceText(JSON.stringify(originals));
+}
+
+function exportProviderSnapshot(config) {
+  const provider = config?.provider || {};
+  return {
+    providerId: provider.id || "",
+    modelId: provider.modelId || "",
+    routeKey: provider.routeKey || "",
+    targetLanguage: "zh",
+    translationVersion: "export-v2",
+  };
+}
+
+function buildFrozenExportIntent({
+  scope,
+  mediaKeys,
+  mode,
+  format,
+  sourceRevisions,
+  notesRevision,
+  providerSnapshot,
+}) {
+  const canonicalSourceRevisions = Object.fromEntries(
+    Object.entries(sourceRevisions || {}).sort(([left], [right]) =>
+      left.localeCompare(right),
+    ),
+  );
+  const contractHash = YTD_NOTE_SOURCES.hashSourceText(
+    JSON.stringify({
+      sourceRevisions: canonicalSourceRevisions,
+      notesRevision,
+      providerSnapshot,
+    }),
+  );
+  return {
+    scope: `${scope}-${contractHash.replace(/[^A-Za-z0-9_-]/g, "-")}`,
+    mediaKeys,
+    mode,
+    format,
+    autoExport: true,
+  };
+}
+
+function exportJobCursor(job, additionalCompleted = []) {
+  const completed = new Set([
+    ...(job?.completedUnitKeys || []),
+    ...additionalCompleted,
+  ]);
+  const ordered = job?.orderedUnitKeys || [];
+  let cursor = 0;
+  while (cursor < ordered.length && completed.has(ordered[cursor])) cursor += 1;
+  return cursor;
+}
+
+function exportRunOwner(scope, mode, generation) {
+  return {
+    scope,
+    mode,
+    generation,
+    videoId: currentVideoId || "",
+    routeKey: currentRouteKey || "",
+    digestGeneration,
+  };
+}
+
+function exportRunIsCurrent(owner) {
+  if (
+    !owner ||
+    owner.generation !== exportTranslationGeneration ||
+    owner.videoId !== (currentVideoId || "") ||
+    owner.routeKey !== (currentRouteKey || "") ||
+    owner.digestGeneration !== digestGeneration
+  ) {
+    return false;
+  }
+  return owner.scope === "transcript-current"
+    ? transcriptExportMode() === owner.mode
+    : currentNotesMode === owner.mode;
+}
+
+function assertExportRunCurrent(owner) {
+  if (!exportRunIsCurrent(owner)) throw exportCancelledError();
+}
+
+function exportJobError(result, fallback) {
+  const error = new Error(result?.message || result?.error || fallback);
+  error.code = result?.code || "EXPORT_JOB_FAILED";
+  return error;
+}
+
+async function readExportJobFromBackground(jobId, { allowMissing = false } = {}) {
+  const result = await chrome.runtime.sendMessage({ action: "getExportJob", jobId });
+  if (result?.success && result.job) return result.job;
+  if (allowMissing && result?.code === "EXPORT_JOB_NOT_FOUND") return null;
+  throw exportJobError(result, "无法读取补译进度。");
+}
+
+async function checkpointExportJobInBackground(jobId, patch) {
+  const result = await chrome.runtime.sendMessage({
+    action: "checkpointExportJob",
+    jobId,
+    patch,
+  });
+  if (!result?.success || !result.job) {
+    throw exportJobError(result, "无法保存补译进度。");
+  }
+  return result.job;
+}
+
+function assertFrozenExportOutcome(outcome, { mediaKeys, mode, format }) {
+  assertExportRunCurrent(outcome?.owner);
+  const frozen = outcome?.intent;
+  const expectedKeys = [...(mediaKeys || [])].sort();
+  if (
+    !frozen ||
+    frozen.mode !== mode ||
+    frozen.format !== format ||
+    JSON.stringify([...(frozen.mediaKeys || [])].sort()) !==
+      JSON.stringify(expectedKeys)
+  ) {
+    const error = new Error("导出范围在补译期间发生变化，请重新确认。");
+    error.code = "EXPORT_JOB_FROZEN_MISMATCH";
+    throw error;
+  }
+}
+
+function assertFrozenExportMaterial(outcome, groups, sourcesByKey) {
+  if (exportNotesRevision(groups) !== outcome?.notesRevision) {
+    const error = new Error("笔记内容在补译期间发生变化，请重新确认。");
+    error.code = "EXPORT_JOB_NOTES_REVISION_MISMATCH";
+    throw error;
+  }
+  for (const [mediaKey, expectedRevision] of Object.entries(
+    outcome?.sourceRevisions || {},
+  )) {
+    const source = YTD_NOTE_SOURCES.normalizeNoteSource(sourcesByKey?.[mediaKey]);
+    if (!source || source.sourceRevision !== expectedRevision) {
+      const error = new Error("视频资料在补译期间发生变化，请重新确认。");
+      error.code = "EXPORT_JOB_SOURCE_REVISION_MISMATCH";
+      throw error;
+    }
+  }
+}
+
+async function finalizeExportJobDownload(outcome, download) {
+  assertExportRunCurrent(outcome?.owner);
+  const claim = {
+    claimId: `claim-${Date.now()}-${outcome.owner.generation}`,
+    ownerId: "sidepanel",
+    generation: outcome.owner.generation,
+    claimedAt: Date.now(),
+  };
+  let claimed = false;
+  try {
+    await checkpointExportJobInBackground(outcome.jobId, {
+      state: "ready_to_export",
+      exportClaim: claim,
+      lastError: null,
+    });
+    claimed = true;
+    assertExportRunCurrent(outcome.owner);
+    download();
+    await checkpointExportJobInBackground(outcome.jobId, {
+      state: "completed",
+      exportClaim: null,
+      lastError: null,
+    });
+    activeExportJobId = "";
+    return true;
+  } catch (error) {
+    if (claimed) {
+      await checkpointExportJobInBackground(outcome.jobId, {
+        state: "failed",
+        exportClaim: null,
+        lastError: {
+          code: error?.code || "EXPORT_FINALIZE_FAILED",
+          retryable: true,
+          at: Date.now(),
+        },
+      }).catch(() => null);
+    }
+    throw error;
+  }
+}
+
+function sourceBatchMessage(jobId, units) {
+  const first = units[0] || {};
+  return {
+    action: "translateExportSourceBatch",
+    jobId,
+    mediaKey: first.mediaKey,
+    sourceRevision: first.sourceRevision,
+    units: units.map((unit) => ({
+      unitKey: unit.id,
+      kind: unit.kind,
+      sourceHash: unit.sourceHash,
+      text: unit.text,
+      ...(unit.kind === "description"
+        ? { chunkIndex: unit.chunkIndex }
+        : {
+            segmentId: unit.segmentId,
+            start: unit.start,
+          }),
+    })),
+  };
+}
+
+function sameProviderSnapshot(left, right) {
+  return [
+    "providerId",
+    "modelId",
+    "routeKey",
+    "targetLanguage",
+    "translationVersion",
+  ].every((field) => String(left?.[field] || "") === String(right?.[field] || ""));
+}
+
+async function assertExportProviderStillCurrent(providerSnapshot) {
+  const config = await chrome.runtime.sendMessage({ action: "checkConfig" });
+  currentConfigStatus = config;
+  if (!config?.hasAiKey) {
+    throw new Error("尚未配置当前 AI 服务商的 API 密钥，请先打开设置。");
+  }
+  const current = exportProviderSnapshot(config);
+  if (!sameProviderSnapshot(current, providerSnapshot)) {
+    const error = new Error("AI 服务商或模型已发生变化，请重新确认后继续补译。");
+    error.code = "EXPORT_JOB_PROVIDER_MISMATCH";
+    throw error;
+  }
+}
+
+async function createOrResumeExportJobForRound({
+  intent,
+  plan,
+  sourcesByKey,
+  groups,
+  providerSnapshot,
+}) {
+  let activeIntent = intent;
+  let jobId = YTD_EXPORT_JOBS.jobIdForIntent(activeIntent);
+  let existing = await readExportJobFromBackground(jobId, {
+    allowMissing: true,
+  });
+  const missingKeys = new Set(exportPlanUnitKeys(plan));
+
+  // A completed/stale job with the same immutable originals but fresh gaps is
+  // an exceptional recovery case (for example, storage was restored). Give it
+  // a new frozen identity instead of mutating terminal job history.
+  if (
+    existing &&
+    ["ready_to_export", "completed", "stale"].includes(existing.state) &&
+    missingKeys.size
+  ) {
+    activeIntent = {
+      ...intent,
+      scope: `retry-${YTD_NOTE_SOURCES.hashSourceText(
+        `${intent.scope}\u0000${[...missingKeys].join("\u0001")}`,
+      )}`,
+    };
+    jobId = YTD_EXPORT_JOBS.jobIdForIntent(activeIntent);
+    existing = await readExportJobFromBackground(jobId, { allowMissing: true });
+  }
+
+  let candidate;
+  if (existing) {
+    const completed = new Set(existing.completedUnitKeys || []);
+    existing.orderedUnitKeys.forEach((key) => {
+      if (!missingKeys.has(key)) completed.add(key);
+    });
+    const completedUnitKeys = existing.orderedUnitKeys.filter((key) =>
+      completed.has(key),
+    );
+    candidate = {
+      ...existing,
+      state: "running",
+      completedUnitKeys,
+      currentBatch: null,
+      cursor: exportJobCursor(existing, completedUnitKeys),
+      exportClaim: null,
+      lastError: null,
+    };
+  } else {
+    const orderedUnitKeys = exportPlanUnitKeys(plan);
+    candidate = YTD_EXPORT_JOBS.createExportJob({
+      state: "running",
+      intent: activeIntent,
+      sourceRevisions: exportPlanSourceRevisions(
+        sourcesByKey,
+        activeIntent.mediaKeys,
+      ),
+      notesRevision: exportNotesRevision(groups),
+      orderedUnitKeys,
+      completedUnitKeys: [],
+      currentBatch: null,
+      cursor: 0,
+      roundBudget: { maxBatches: 20 },
+      providerSnapshot,
+      exportClaim: null,
+      lastError: null,
+    });
+  }
+  const result = await chrome.runtime.sendMessage({
+    action: "createOrResumeExportJob",
+    job: candidate,
+  });
+  if (!result?.success || !result.job) {
+    throw exportJobError(result, "无法创建或恢复补译任务。");
+  }
+  if (result.job.state !== "running") {
+    return checkpointExportJobInBackground(result.job.jobId, {
+      state: "running",
+      completedUnitKeys: candidate.completedUnitKeys,
+      currentBatch: null,
+      cursor: exportJobCursor(result.job, candidate.completedUnitKeys),
+      exportClaim: null,
+      lastError: null,
+    });
+  }
+  return result.job;
 }
 
 /**
- * Runs a user-confirmed, bounded export translation plan. The active provider
- * is checked again at click time. Cancellation invalidates late responses and
- * stops every subsequent batch; no implicit fallback provider is used.
+ * Runs exactly one user-confirmed export-translation round. Every source batch
+ * is translated + committed by the service worker, while note/title progress
+ * is checkpointed immediately after its own background persistence succeeds.
  */
-async function runConfirmedExportTranslation({
+async function runConfirmedExportTranslationRound({
   plan,
   sourcesByKey,
+  groups = [],
+  scope,
+  mode,
+  format,
   panelId,
   setStatus,
 }) {
@@ -2326,11 +3016,29 @@ async function runConfirmedExportTranslation({
   }
   if (!plan || plan.overLimit) {
     throw new Error(
-      `本次补译范围过大：${plan?.limitReasons?.join("、") || "超出安全上限"}。请缩小到单个视频后重试。`,
+      `本次补译范围过大：${plan?.limitReasons?.join("、") || "超出安全上限"}。请缩小导出范围后重试。`,
     );
   }
 
+  const invocation = {
+    videoId: currentVideoId || "",
+    routeKey: currentRouteKey || "",
+    digestGeneration,
+    mode,
+  };
   const config = await chrome.runtime.sendMessage({ action: "checkConfig" });
+  const modeStillCurrent =
+    scope === "transcript-current"
+      ? transcriptExportMode() === invocation.mode
+      : currentNotesMode === invocation.mode;
+  if (
+    invocation.videoId !== (currentVideoId || "") ||
+    invocation.routeKey !== (currentRouteKey || "") ||
+    invocation.digestGeneration !== digestGeneration ||
+    !modeStillCurrent
+  ) {
+    throw exportCancelledError();
+  }
   currentConfigStatus = config;
   if (!config?.hasAiKey) {
     throw new Error("尚未配置当前 AI 服务商的 API 密钥，请先打开设置。");
@@ -2339,111 +3047,231 @@ async function runConfirmedExportTranslation({
     throw new Error(`${config?.provider?.displayName || "当前服务商"}不支持翻译。`);
   }
 
-  const panel = document.getElementById(panelId);
   const generation = ++exportTranslationGeneration;
+  const owner = exportRunOwner(scope, mode, generation);
+  const providerSnapshot = exportProviderSnapshot(config);
+  if (
+    !providerSnapshot.providerId ||
+    !providerSnapshot.modelId ||
+    !providerSnapshot.routeKey
+  ) {
+    throw new Error("当前 AI 服务商配置不完整，请重新保存设置后重试。");
+  }
+  const mediaKeys = (groups || []).map((group) => group.mediaKey);
+  const sourceRevisions = exportPlanSourceRevisions(sourcesByKey, mediaKeys);
+  const notesRevision = exportNotesRevision(groups);
+  const intent = buildFrozenExportIntent({
+    scope,
+    mediaKeys,
+    mode,
+    format,
+    sourceRevisions,
+    notesRevision,
+    providerSnapshot,
+  });
+  const panel = document.getElementById(panelId);
   isExportTranslationRunning = true;
-  const translationsById = new Map();
-  const total = Math.max(1, plan.estimatedBatches);
-  let completed = 0;
-  const assertActive = () => {
-    if (generation !== exportTranslationGeneration) throw exportCancelledError();
-  };
+  const round = YTD_NOTE_SOURCES.takeExportTranslationRound(plan);
+  const total = Math.max(1, round.estimatedBatches);
+  let completedBatches = 0;
+  let job = null;
   const showProgress = (label) => {
     renderExportTranslationProgress(
       panel,
-      `${label}（${completed}/${total} 批）`,
+      `${label}（本轮 ${completedBatches}/${total} 批）`,
       generation,
       setStatus,
     );
-    setStatus(`${label}（${completed}/${total} 批）`);
+    setStatus(`${label}（本轮 ${completedBatches}/${total} 批）`);
   };
 
   try {
+    assertExportRunCurrent(owner);
+    job = await createOrResumeExportJobForRound({
+      intent,
+      plan,
+      sourcesByKey,
+      groups,
+      providerSnapshot,
+    });
+    const previousJobId = activeExportJobId;
+    activeExportJobId = job.jobId;
+    // Navigation may have happened while the background created the durable
+    // job, before the side panel knew its id. Bind first, then validate, so the
+    // cancellation path below can never leave that job running.
+    assertExportRunCurrent(owner);
+    if (previousJobId && previousJobId !== job.jobId) {
+      await chrome.runtime
+        .sendMessage({
+          action: "cancelExportTranslationJob",
+          jobId: previousJobId,
+        })
+        .catch(() => null);
+    }
     showProgress("准备补译");
-    for (const notes of plan.noteBatches) {
-      assertActive();
+    for (const notes of round.noteBatches) {
+      assertExportRunCurrent(owner);
+      await assertExportProviderStillCurrent(providerSnapshot);
       const result = await sendTranslationMessage({
-        action: "translateNotes",
+        action: "translateExportNotesBatch",
+        jobId: job.jobId,
+        unitKeys: notes.map(exportNoteUnitKey),
         notes,
         titles: [],
       });
-      assertActive();
-      if (!result?.success && !(result?.translations || []).length) {
+      assertExportRunCurrent(owner);
+      const translatedIds = new Set(
+        (result?.translations || [])
+          .filter((entry) => String(entry?.textZh || "").trim())
+          .map((entry) => String(entry.id || "")),
+      );
+      const completedUnitKeys = notes
+        .filter((note) => translatedIds.has(String(note.id || "")))
+        .map(exportNoteUnitKey);
+      if (completedUnitKeys.length) {
+        job = await checkpointExportJobInBackground(job.jobId, {
+          completedUnitKeys,
+          cursor: exportJobCursor(job, completedUnitKeys),
+          lastError: null,
+        });
+      }
+      if (completedUnitKeys.length !== notes.length) {
         throw new Error(result?.error || "笔记补译失败。");
       }
-      completed += 1;
+      completedBatches += 1;
       showProgress("正在生成中文笔记");
     }
 
-    for (const titles of plan.titleBatches) {
-      assertActive();
+    for (const titles of round.titleBatches) {
+      assertExportRunCurrent(owner);
+      await assertExportProviderStillCurrent(providerSnapshot);
       const result = await sendTranslationMessage({
-        action: "translateNotes",
+        action: "translateExportNotesBatch",
+        jobId: job.jobId,
+        unitKeys: titles.map(exportTitleUnitKey),
         notes: [],
         titles,
       });
-      assertActive();
-      if (!result?.success && !(result?.titles || []).length) {
+      assertExportRunCurrent(owner);
+      const translatedKeys = new Set(
+        (result?.titles || [])
+          .filter((entry) => String(entry?.titleZh || "").trim())
+          .map((entry) => String(entry.mediaKey || "")),
+      );
+      const completedUnitKeys = titles
+        .filter((title) => translatedKeys.has(String(title.mediaKey || "")))
+        .map(exportTitleUnitKey);
+      if (completedUnitKeys.length) {
+        job = await checkpointExportJobInBackground(job.jobId, {
+          completedUnitKeys,
+          cursor: exportJobCursor(job, completedUnitKeys),
+          lastError: null,
+        });
+      }
+      if (completedUnitKeys.length !== titles.length) {
         throw new Error(result?.error || "标题补译失败。");
       }
-      completed += 1;
+      completedBatches += 1;
       showProgress("正在生成中文标题");
     }
 
-    for (const units of plan.sourceBatches) {
-      assertActive();
-      const result = await sendTranslationMessage({
-        action: "translateContent",
-        content: {
-          segments: units.map(({ id, text }) => ({ id, text })),
-        },
-        contentType: "transcriptBatch",
-        targetLanguage: "zh",
-        videoTitle: units[0]?.videoTitle || "",
-      });
-      assertActive();
+    for (const units of round.sourceBatches) {
+      assertExportRunCurrent(owner);
+      const result = await sendTranslationMessage(
+        sourceBatchMessage(job.jobId, units),
+      );
+      assertExportRunCurrent(owner);
       if (!result?.success) {
-        throw new Error(result?.error || result?.message || "字幕或简介补译失败。");
+        throw exportJobError(result, "字幕或简介补译失败。");
       }
-      (result.translatedContent?.segments || []).forEach((segment) => {
-        const text = String(segment?.text || "").trim();
-        if (text) translationsById.set(segment.id, text);
-      });
-      completed += 1;
+      if (["cancelled", "cancel_requested"].includes(result.jobState)) {
+        throw exportCancelledError();
+      }
+      job = await readExportJobFromBackground(job.jobId);
+      const storedSource = await YTD_NOTE_SOURCES.readNoteSource(
+        chrome.storage.local,
+        units[0].mediaKey,
+      );
+      assertExportRunCurrent(owner);
+      if (storedSource) updateCurrentExportTranslations(storedSource);
+      completedBatches += 1;
       showProgress("正在生成中文简介与字幕");
     }
 
-    assertActive();
-    const applied = YTD_NOTE_SOURCES.applyExportSourceTranslations(
-      plan,
-      translationsById,
-      sourcesByKey,
+    assertExportRunCurrent(owner);
+    job = await readExportJobFromBackground(job.jobId);
+    const remainingCount = Math.max(
+      0,
+      job.orderedUnitKeys.length - job.completedUnitKeys.length,
     );
-    const protectedKeys = new Set(Object.keys(applied.sourcesByKey));
-    for (const [mediaKey, source] of Object.entries(applied.sourcesByKey)) {
-      if (!plan.sourceWorkByKey[mediaKey]) continue;
-      assertActive();
-      await YTD_NOTE_SOURCES.writeNoteSource(chrome.storage.local, source, {
-        protectedKeys,
-      });
-      updateCurrentExportTranslations(source);
-    }
-    assertActive();
-    if (applied.missingUnitIds.length) {
-      throw new Error(
-        `仍有 ${applied.missingUnitIds.length} 个内容单元未获得有效翻译，请重试。`,
-      );
-    }
-    await updateCache();
+    job = await checkpointExportJobInBackground(job.jobId, {
+      // Final file assembly owns the ready/claim/completed transition. Keep a
+      // fully translated job paused until latest storage has been revalidated.
+      state: "paused",
+      currentBatch: null,
+      cursor: exportJobCursor(job),
+      lastError: null,
+    });
+    assertExportRunCurrent(owner);
     if (panel) panel.hidden = true;
-    setStatus("补译完成，正在生成文件…");
+    if (remainingCount) {
+      setStatus(`本轮已保存，仍有 ${remainingCount} 个翻译单元；请继续补齐。`);
+    } else {
+      setStatus("补译完成，正在生成文件…");
+    }
+    return {
+      complete: remainingCount === 0,
+      remainingCount,
+      owner,
+      jobId: job.jobId,
+      intent: job.intent,
+      sourceRevisions: job.sourceRevisions,
+      notesRevision: job.notesRevision,
+    };
+  } catch (error) {
+    if (job?.jobId && error?.code === "EXPORT_TRANSLATION_CANCELLED") {
+      await chrome.runtime
+        .sendMessage({
+          action: "cancelExportTranslationJob",
+          jobId: job.jobId,
+        })
+        .catch(() => null);
+    }
+    if (job?.jobId && error?.code !== "EXPORT_TRANSLATION_CANCELLED") {
+      try {
+        const latest = await readExportJobFromBackground(job.jobId);
+        if (["planned", "running", "paused", "failed"].includes(latest.state)) {
+          await checkpointExportJobInBackground(job.jobId, {
+            state:
+              error?.code === "EXPORT_JOB_PROVIDER_MISMATCH"
+                ? "paused"
+                : "failed",
+            currentBatch: null,
+            lastError: {
+              code: error?.code || "EXPORT_TRANSLATION_FAILED",
+              retryable: true,
+              at: Date.now(),
+            },
+          });
+        }
+      } catch (_checkpointError) {
+        // Preserve the original provider/validation error for the user.
+      }
+    }
+    throw error;
   } finally {
     isExportTranslationRunning = false;
   }
 }
 
 /** Renders the export precheck; AI work is offered only by explicit click. */
-function showNoteExportPrecheck(precheck, onConfirm, onGenerate, plan) {
+function showNoteExportPrecheck(
+  precheck,
+  onConfirm,
+  onGenerate,
+  plan,
+  onExportOriginal,
+) {
   const panel = document.getElementById("notesExportPrecheck");
   if (!panel) {
     if (!precheck.hasTranslationGaps) onConfirm();
@@ -2452,10 +3280,11 @@ function showNoteExportPrecheck(precheck, onConfirm, onGenerate, plan) {
   panel.innerHTML = "";
   const summary = document.createElement("p");
   summary.className = "notes-export-precheck-text";
+  const progress = exportTranslationProgressText(plan);
   const planSummary = precheck.hasTranslationGaps
     ? plan?.overLimit
       ? `\n本次补译未启动：${plan.limitReasons.join("、")}。`
-      : `\n如选择生成，预计执行 ${plan?.estimatedBatches || 0} 个任务批次；错误恢复时最多 ${plan?.maxProviderCalls || 0} 次模型请求。`
+      : `\n当前已完成 ${progress.completed}/${progress.total} 个翻译单元，剩余约 ${progress.remainingBatches} 批；每次确认最多继续 ${progress.roundMax} 批。`
     : "";
   summary.textContent = `${describeExportPrecheck(precheck)}${planSummary}`;
   panel.appendChild(summary);
@@ -2466,7 +3295,9 @@ function showNoteExportPrecheck(precheck, onConfirm, onGenerate, plan) {
     const generateBtn = document.createElement("button");
     generateBtn.type = "button";
     generateBtn.className = "enhance-btn active";
-    generateBtn.textContent = "生成中文并导出";
+    generateBtn.textContent = progress.hasProgress
+      ? `继续补齐（本轮最多 ${progress.roundMax} 批）`
+      : `生成中文（本轮最多 ${progress.roundMax} 批）`;
     generateBtn.disabled = !onGenerate || !!plan?.overLimit;
     generateBtn.addEventListener("click", () => {
       if (!generateBtn.disabled) void onGenerate();
@@ -2484,6 +3315,17 @@ function showNoteExportPrecheck(precheck, onConfirm, onGenerate, plan) {
       onConfirm();
     });
     actions.appendChild(confirmBtn);
+  }
+  if (onExportOriginal) {
+    const originalBtn = document.createElement("button");
+    originalBtn.type = "button";
+    originalBtn.className = "enhance-btn";
+    originalBtn.textContent = "改为导出原文";
+    originalBtn.addEventListener("click", () => {
+      panel.hidden = true;
+      onExportOriginal();
+    });
+    actions.appendChild(originalBtn);
   }
   const cancelBtn = document.createElement("button");
   cancelBtn.type = "button";
@@ -2517,18 +3359,23 @@ async function exportCurrentVideoNotes() {
       setNoteExportStatus("当前视频还没有笔记。", true);
       return;
     }
-    await persistCurrentVideoNoteSourceIfNoted();
+    const persistedSource = await persistCurrentVideoNoteSourceIfNoted();
     const mode = currentNotesMode;
     const group = { mediaKey: key, representative: notes[0], notes };
-    const storedSource = buildCurrentVideoSourceRecord();
-    const precheck = YTD_NOTE_SOURCES.buildExportPrecheck({
+    const storedSource = await persistExportSourceIdentityFromGroup(
+      group,
+      persistedSource || buildCurrentVideoSourceRecord(),
+    );
+    const precheck = requireKnownExportDescriptions(
+      YTD_NOTE_SOURCES.buildExportPrecheck({
       groups: [group],
       sourcesByKey: { [key]: storedSource },
       mode,
       titleOf: () => noteVideoTitleSortKey(notes[0], mode),
       isChineseText: looksLikeLegacyChineseNote,
       resolveNote: resolveNoteExportEntry,
-    });
+      }),
+    );
     const translationPlan = YTD_NOTE_SOURCES.buildExportTranslationPlan({
       groups: [group],
       sourcesByKey: { [key]: storedSource },
@@ -2536,26 +3383,103 @@ async function exportCurrentVideoNotes() {
       isChineseText: looksLikeLegacyChineseNote,
       resolveNote: resolveNoteExportEntry,
     });
-    const doExport = () => {
+    const exportWithMode = (exportMode) => {
       const source = exportSourceForGroup(group, storedSource);
-      const md = YTD_NOTE_EXPORT.buildCurrentVideoMarkdown(source, mode);
+      const md = YTD_NOTE_EXPORT.buildCurrentVideoMarkdown(source, exportMode);
       const filename = YTD_NOTE_EXPORT.currentVideoNotesFilename(
         source.titleOriginal || currentVideoTitle,
-        mode,
+        exportMode,
       );
       downloadTextFile(md, filename, "text/markdown;charset=utf-8");
-      setNoteExportStatus("已导出当前视频笔记。");
+      setNoteExportStatus(
+        exportMode === "original"
+          ? "已导出当前视频原文笔记。"
+          : "已导出当前视频笔记。",
+      );
     };
+    const doExport = () => exportWithMode(mode);
     if (precheck.hasBlocking || precheck.hasTranslationGaps) {
       const generateAndExport = async () => {
         try {
-          await runConfirmedExportTranslation({
+          const outcome = await runConfirmedExportTranslationRound({
             plan: translationPlan,
             sourcesByKey: { [key]: storedSource },
+            groups: [group],
+            scope: "notes-current",
+            mode,
+            format: "markdown",
             panelId: "notesExportPrecheck",
             setStatus: setNoteExportStatus,
           });
-          await exportCurrentVideoNotes();
+          if (!exportRunIsCurrent(outcome.owner)) throw exportCancelledError();
+          if (!outcome.complete) {
+            setNoteExportStatus(
+              `本轮已保存，仍有 ${outcome.remainingCount} 个翻译单元。再次点击导出即可继续。`,
+            );
+            return;
+          }
+          const latestNotesResult = await chrome.runtime.sendMessage({
+            action: "getNotes",
+            videoId: key,
+          });
+          assertFrozenExportOutcome(outcome, {
+            mediaKeys: [key],
+            mode,
+            format: "markdown",
+          });
+          const latestSource = await YTD_NOTE_SOURCES.readNoteSource(
+            chrome.storage.local,
+            key,
+          );
+          assertExportRunCurrent(outcome.owner);
+          const latestNotes =
+            latestNotesResult?.success && Array.isArray(latestNotesResult.notes)
+              ? latestNotesResult.notes
+              : [];
+          if (!latestNotes.length) {
+            throw new Error("补译期间当前视频的笔记已发生变化，请重新导出。");
+          }
+          const latestGroup = {
+            mediaKey: key,
+            representative: latestNotes[0] || group.representative,
+            notes: latestNotes,
+          };
+          const latestSources = latestSource ? { [key]: latestSource } : {};
+          assertFrozenExportMaterial(outcome, [latestGroup], latestSources);
+          const finalPrecheck = requireKnownExportDescriptions(
+            YTD_NOTE_SOURCES.buildExportPrecheck({
+              groups: [latestGroup],
+              sourcesByKey: latestSources,
+              mode,
+              isChineseText: looksLikeLegacyChineseNote,
+              resolveNote: resolveNoteExportEntry,
+            }),
+          );
+          const finalPlan = YTD_NOTE_SOURCES.buildExportTranslationPlan({
+            groups: [latestGroup],
+            sourcesByKey: latestSources,
+            mode,
+            isChineseText: looksLikeLegacyChineseNote,
+            resolveNote: resolveNoteExportEntry,
+          });
+          if (finalPlan.unitCount || finalPrecheck.hasTranslationGaps) {
+            throw new Error("补译尚未完整写入，请再次点击导出继续。");
+          }
+          if (finalPrecheck.hasBlocking) {
+            setNoteExportStatus("补译已完成，但资料仍有缺失；请再次点击导出确认。", true);
+            return;
+          }
+          const finalSource = exportSourceForGroup(latestGroup, latestSource);
+          await finalizeExportJobDownload(outcome, () => {
+            assertExportRunCurrent(outcome.owner);
+            const md = YTD_NOTE_EXPORT.buildCurrentVideoMarkdown(finalSource, mode);
+            const filename = YTD_NOTE_EXPORT.currentVideoNotesFilename(
+              finalSource.titleOriginal || "video-notes",
+              mode,
+            );
+            downloadTextFile(md, filename, "text/markdown;charset=utf-8");
+          });
+          setNoteExportStatus("已导出当前视频笔记。");
         } catch (error) {
           const cancelled = error?.code === "EXPORT_TRANSLATION_CANCELLED";
           setNoteExportStatus(
@@ -2569,6 +3493,12 @@ async function exportCurrentVideoNotes() {
         doExport,
         generateAndExport,
         translationPlan,
+        mode !== "original"
+          ? () => {
+              abandonActiveExportTranslation();
+              exportWithMode("original");
+            }
+          : null,
       );
     } else {
       doExport();
@@ -2583,21 +3513,24 @@ async function exportAllNotes() {
   hideNoteExportMenu();
   setNoteExportStatus("");
   try {
+    await persistCurrentVideoNoteSourceIfNoted();
     const { groups, sourcesByKey } = await collectAllNotesExport();
     if (!groups.length) {
       setNoteExportStatus("还没有保存任何笔记。", true);
       return;
     }
     const mode = currentNotesMode;
-    const precheck = YTD_NOTE_SOURCES.buildExportPrecheck({
-      groups,
-      sourcesByKey,
-      mode,
-      titleOf: (group) =>
-        noteVideoTitleSortKey(group.representative || group.notes[0], mode),
-      isChineseText: looksLikeLegacyChineseNote,
-      resolveNote: resolveNoteExportEntry,
-    });
+    const precheck = requireKnownExportDescriptions(
+      YTD_NOTE_SOURCES.buildExportPrecheck({
+        groups,
+        sourcesByKey,
+        mode,
+        titleOf: (group) =>
+          noteVideoTitleSortKey(group.representative || group.notes[0], mode),
+        isChineseText: looksLikeLegacyChineseNote,
+        resolveNote: resolveNoteExportEntry,
+      }),
+    );
     const translationPlan = YTD_NOTE_SOURCES.buildExportTranslationPlan({
       groups,
       sourcesByKey,
@@ -2605,25 +3538,90 @@ async function exportAllNotes() {
       isChineseText: looksLikeLegacyChineseNote,
       resolveNote: resolveNoteExportEntry,
     });
-    const doExport = () => {
+    const exportWithMode = (exportMode) => {
       const sources = groups.map((group) =>
         exportSourceForGroup(group, sourcesByKey[group.mediaKey]),
       );
-      const md = YTD_NOTE_EXPORT.buildAllNotesMarkdown(sources, mode);
-      const filename = YTD_NOTE_EXPORT.allNotesFilename(mode);
+      const md = YTD_NOTE_EXPORT.buildAllNotesMarkdown(sources, exportMode);
+      const filename = YTD_NOTE_EXPORT.allNotesFilename(exportMode);
       downloadTextFile(md, filename, "text/markdown;charset=utf-8");
-      setNoteExportStatus(`已导出全部笔记（${groups.length} 个视频）。`);
+      setNoteExportStatus(
+        `已导出全部${exportMode === "original" ? "原文" : ""}笔记（${groups.length} 个视频）。`,
+      );
     };
+    const doExport = () => exportWithMode(mode);
     if (precheck.hasBlocking || precheck.hasTranslationGaps) {
       const generateAndExport = async () => {
         try {
-          await runConfirmedExportTranslation({
+          const outcome = await runConfirmedExportTranslationRound({
             plan: translationPlan,
             sourcesByKey,
+            groups,
+            scope: "notes-all",
+            mode,
+            format: "markdown",
             panelId: "notesExportPrecheck",
             setStatus: setNoteExportStatus,
           });
-          await exportAllNotes();
+          if (!exportRunIsCurrent(outcome.owner)) throw exportCancelledError();
+          if (!outcome.complete) {
+            setNoteExportStatus(
+              `本轮已保存，仍有 ${outcome.remainingCount} 个翻译单元。再次点击导出即可继续。`,
+            );
+            return;
+          }
+          const latest = await collectAllNotesExport();
+          assertFrozenExportOutcome(outcome, {
+            mediaKeys: latest.groups.map((candidate) => candidate.mediaKey),
+            mode,
+            format: "markdown",
+          });
+          assertFrozenExportMaterial(
+            outcome,
+            latest.groups,
+            latest.sourcesByKey,
+          );
+          const finalPrecheck = requireKnownExportDescriptions(
+            YTD_NOTE_SOURCES.buildExportPrecheck({
+              groups: latest.groups,
+              sourcesByKey: latest.sourcesByKey,
+              mode,
+              isChineseText: looksLikeLegacyChineseNote,
+              resolveNote: resolveNoteExportEntry,
+            }),
+          );
+          const finalPlan = YTD_NOTE_SOURCES.buildExportTranslationPlan({
+            groups: latest.groups,
+            sourcesByKey: latest.sourcesByKey,
+            mode,
+            isChineseText: looksLikeLegacyChineseNote,
+            resolveNote: resolveNoteExportEntry,
+          });
+          if (finalPlan.unitCount || finalPrecheck.hasTranslationGaps) {
+            throw new Error("补译尚未完整写入，请再次点击导出继续。");
+          }
+          if (finalPrecheck.hasBlocking) {
+            setNoteExportStatus("补译已完成，但资料仍有缺失；请再次点击导出确认。", true);
+            return;
+          }
+          const finalSources = latest.groups.map((candidate) =>
+            exportSourceForGroup(
+              candidate,
+              latest.sourcesByKey[candidate.mediaKey],
+            ),
+          );
+          await finalizeExportJobDownload(outcome, () => {
+            assertExportRunCurrent(outcome.owner);
+            const md = YTD_NOTE_EXPORT.buildAllNotesMarkdown(finalSources, mode);
+            downloadTextFile(
+              md,
+              YTD_NOTE_EXPORT.allNotesFilename(mode),
+              "text/markdown;charset=utf-8",
+            );
+          });
+          setNoteExportStatus(
+            `已导出全部笔记（${latest.groups.length} 个视频）。`,
+          );
         } catch (error) {
           const cancelled = error?.code === "EXPORT_TRANSLATION_CANCELLED";
           setNoteExportStatus(
@@ -2637,6 +3635,12 @@ async function exportAllNotes() {
         doExport,
         generateAndExport,
         translationPlan,
+        mode !== "original"
+          ? () => {
+              abandonActiveExportTranslation();
+              exportWithMode("original");
+            }
+          : null,
       );
     } else {
       doExport();
@@ -2665,8 +3669,9 @@ async function exportSingleSourceGroup(group) {
   try {
     let storedSource;
     if (key === (currentVideoId || currentMediaRef?.mediaKey) && currentTranscript) {
-      await persistCurrentVideoNoteSourceIfNoted();
-      storedSource = buildCurrentVideoSourceRecord();
+      storedSource =
+        (await persistCurrentVideoNoteSourceIfNoted()) ||
+        buildCurrentVideoSourceRecord();
     } else {
       const map = await YTD_NOTE_SOURCES.readAllSources(chrome.storage.local);
       storedSource = map[key];
@@ -2676,19 +3681,30 @@ async function exportSingleSourceGroup(group) {
         const digest = cached[cacheKey];
         if (digest) {
           storedSource = YTD_NOTE_SOURCES.sourceFromDigest(key, digest, {
-            transcriptZh: resolveDigestTranscriptZh(key, digest),
+            ...resolveDigestTranscriptMaterial(key, digest),
           });
+          if (storedSource) {
+            storedSource = await upsertNoteSourceInBackground(storedSource);
+          }
         }
       }
     }
-    const precheck = YTD_NOTE_SOURCES.buildExportPrecheck({
-      groups: [group],
-      sourcesByKey: storedSource ? { [key]: storedSource } : {},
-      mode,
-      titleOf: () => noteVideoTitleSortKey(group.representative, mode),
-      isChineseText: looksLikeLegacyChineseNote,
-      resolveNote: resolveNoteExportEntry,
-    });
+    if (storedSource) {
+      storedSource = await persistExportSourceIdentityFromGroup(
+        group,
+        storedSource,
+      );
+    }
+    const precheck = requireKnownExportDescriptions(
+      YTD_NOTE_SOURCES.buildExportPrecheck({
+        groups: [group],
+        sourcesByKey: storedSource ? { [key]: storedSource } : {},
+        mode,
+        titleOf: () => noteVideoTitleSortKey(group.representative, mode),
+        isChineseText: looksLikeLegacyChineseNote,
+        resolveNote: resolveNoteExportEntry,
+      }),
+    );
     const sourceMap = storedSource ? { [key]: storedSource } : {};
     const translationPlan = YTD_NOTE_SOURCES.buildExportTranslationPlan({
       groups: [group],
@@ -2697,28 +3713,49 @@ async function exportSingleSourceGroup(group) {
       isChineseText: looksLikeLegacyChineseNote,
       resolveNote: resolveNoteExportEntry,
     });
-    const doExport = () => {
+    const exportWithMode = (exportMode) => {
       const source = exportSourceForGroup(group, storedSource);
-      const md = YTD_NOTE_EXPORT.buildCurrentVideoMarkdown(source, mode);
+      const md = YTD_NOTE_EXPORT.buildCurrentVideoMarkdown(source, exportMode);
       const filename = YTD_NOTE_EXPORT.currentVideoNotesFilename(
         source.titleOriginal || noteOriginalVideoTitle(group.representative),
-        mode,
+        exportMode,
       );
       downloadTextFile(md, filename, "text/markdown;charset=utf-8");
-      setNoteExportStatus("已导出该视频笔记。");
+      setNoteExportStatus(
+        exportMode === "original"
+          ? "已导出该视频原文笔记。"
+          : "已导出该视频笔记。",
+      );
     };
+    const doExport = () => exportWithMode(mode);
     if (precheck.hasBlocking || precheck.hasTranslationGaps) {
       const generateAndExport = async () => {
         try {
-          await runConfirmedExportTranslation({
+          const outcome = await runConfirmedExportTranslationRound({
             plan: translationPlan,
             sourcesByKey: sourceMap,
+            groups: [group],
+            scope: "notes-source",
+            mode,
+            format: "markdown",
             panelId: "notesExportPrecheck",
             setStatus: setNoteExportStatus,
           });
+          if (!exportRunIsCurrent(outcome.owner)) throw exportCancelledError();
+          if (!outcome.complete) {
+            setNoteExportStatus(
+              `本轮已保存，仍有 ${outcome.remainingCount} 个翻译单元。再次点击导出即可继续。`,
+            );
+            return;
+          }
           const refreshed = await chrome.runtime.sendMessage({
             action: "getNotes",
             videoId: null,
+          });
+          assertFrozenExportOutcome(outcome, {
+            mediaKeys: [key],
+            mode,
+            format: "markdown",
           });
           const groups = sortNoteGroups(
             groupNotesBySource(
@@ -2729,7 +3766,50 @@ async function exportSingleSourceGroup(group) {
           );
           const freshGroup = groups.find((candidate) => candidate.mediaKey === key);
           if (!freshGroup) throw new Error("补译后未找到该视频的笔记。");
-          await exportSingleSourceGroup(freshGroup);
+          const latestSource = await YTD_NOTE_SOURCES.readNoteSource(
+            chrome.storage.local,
+            key,
+          );
+          assertExportRunCurrent(outcome.owner);
+          const latestSources = latestSource ? { [key]: latestSource } : {};
+          assertFrozenExportMaterial(outcome, [freshGroup], latestSources);
+          const finalPrecheck = requireKnownExportDescriptions(
+            YTD_NOTE_SOURCES.buildExportPrecheck({
+              groups: [freshGroup],
+              sourcesByKey: latestSources,
+              mode,
+              isChineseText: looksLikeLegacyChineseNote,
+              resolveNote: resolveNoteExportEntry,
+            }),
+          );
+          const finalPlan = YTD_NOTE_SOURCES.buildExportTranslationPlan({
+            groups: [freshGroup],
+            sourcesByKey: latestSources,
+            mode,
+            isChineseText: looksLikeLegacyChineseNote,
+            resolveNote: resolveNoteExportEntry,
+          });
+          if (finalPlan.unitCount || finalPrecheck.hasTranslationGaps) {
+            throw new Error("补译尚未完整写入，请再次点击导出继续。");
+          }
+          if (finalPrecheck.hasBlocking) {
+            setNoteExportStatus("补译已完成，但资料仍有缺失；请再次点击导出确认。", true);
+            return;
+          }
+          const finalSource = exportSourceForGroup(freshGroup, latestSource);
+          await finalizeExportJobDownload(outcome, () => {
+            assertExportRunCurrent(outcome.owner);
+            const md = YTD_NOTE_EXPORT.buildCurrentVideoMarkdown(finalSource, mode);
+            downloadTextFile(
+              md,
+              YTD_NOTE_EXPORT.currentVideoNotesFilename(
+                finalSource.titleOriginal || "video-notes",
+                mode,
+              ),
+              "text/markdown;charset=utf-8",
+            );
+          });
+          setNoteExportStatus("已导出该视频笔记。");
         } catch (error) {
           const cancelled = error?.code === "EXPORT_TRANSLATION_CANCELLED";
           setNoteExportStatus(
@@ -2743,6 +3823,12 @@ async function exportSingleSourceGroup(group) {
         doExport,
         generateAndExport,
         translationPlan,
+        mode !== "original"
+          ? () => {
+              abandonActiveExportTranslation();
+              exportWithMode("original");
+            }
+          : null,
       );
     } else {
       doExport();
@@ -3637,6 +4723,13 @@ function noteChineseVideoTitle(note) {
   if (videoTitleIsChinese(note)) return noteOriginalVideoTitle(note);
   const translated = String(note?.videoTitleZh || "").trim();
   if (!translated) return "";
+  const sourceHash = String(note?.videoTitleZhSourceHash || "").trim();
+  if (
+    sourceHash &&
+    sourceHash !== YTD_NOTE_SOURCES.hashSourceText(noteOriginalVideoTitle(note))
+  ) {
+    return "";
+  }
   return note?.videoTitleZhValidated === true &&
     note?.videoTitleZhValidationVersion ===
       NOTE_TITLE_TRANSLATION_VALIDATION_VERSION
@@ -4949,7 +6042,11 @@ globalThis.__YTD_TRANSCRIPT_TESTING__ = {
   transcriptExportMode,
   buildTranscriptExportSource,
   describeExportPrecheck,
-  runConfirmedExportTranslation,
+  runConfirmedExportTranslation: runConfirmedExportTranslationRound,
+  runConfirmedExportTranslationRound,
+  renderExportTranslationProgress,
+  exportRunIsCurrent,
+  sourceBatchMessage,
   collectMissingNoteTitleWork,
   applyNoteTitleTranslations,
   groupTranscriptEntries,

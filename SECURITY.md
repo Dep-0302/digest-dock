@@ -32,6 +32,10 @@ Examples include:
 - any direct mainline YouTube transcript-body request, or temporary signed Bilibili subtitle URLs written to storage or logs;
 - a note backup that unexpectedly includes API keys, settings, complete
   transcripts, or cached overview and summary data;
+- a resumable export-job record that includes an API key, transcript or note
+  body, description text, translated text, or another credential;
+- reuse of a stored translation after its video identity, exact segment identity,
+  source fingerprint, or frozen source revision no longer matches;
 - note-backup validation bypasses, unsafe handling of imported fields, or a
   backup import that changes existing notes after validation fails;
 - a dependency or release-workflow compromise; and
@@ -76,9 +80,19 @@ Examples include:
   Markdown note exports and TXT transcript downloads are one-way reading
   exports and are never accepted as restore input.
 - Original-language Markdown/TXT export is local-only. Chinese and bilingual
-  exports fail closed when translations are incomplete. Only the explicit
-  "Generate Chinese and export" action may call the selected AI provider; it
-  shows a conservative call bound, enforces video/unit/batch limits, can cancel
-  later batches, never calls Supadata, and never falls back to another provider.
+  exports fail closed when translations are incomplete. Only an explicit
+  "Generate Chinese and export" or "Continue" action may call the selected AI
+  provider. A saved key is not standing consent: each action starts at most 20
+  task batches and a conservative maximum of 100 provider calls, saves each
+  valid batch before continuing, and never starts the next round automatically.
+  Cancelling prevents later batches; a response
+  already in flight may enter the reusable cache only while the frozen media and
+  source revision still match, and it must not trigger another batch or download.
+  This path never calls Supadata and never falls back to another provider.
+- Persistent reading-export source data must validate exact segment identity and
+  source fingerprints before reusing translations. Export progress records are
+  metadata-only and must not duplicate keys or content. Deleting all notes or
+  resetting extension data must also clear source records and export jobs so
+  they do not become unmanaged residual data.
 
 The release tooling uses an explicit file allowlist and scans public files for common credential patterns, but automated checks cannot detect every secret.

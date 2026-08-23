@@ -1,28 +1,15 @@
 /**
- * Media-deduplicated "note source" library.
+ * Media-deduplicated note-source library.
  *
- * A note carries only its own timestamped text. The full material a reading
- * export needs — title, channel, canonical URL, video description, and the
- * complete transcript (original + Chinese) — is stored once per stable media
- * identity here, keyed by `mediaKey`, rather than duplicated onto every note.
- *
- * This module is pure logic plus a thin storage adapter. It never touches the
- * network, a provider, Supadata, or the DOM: callers hand it already-loaded
- * material (from the side panel's in-memory state, or from a no-network backfill
- * of the local `digest_<mediaKey>` cache) and it validates, de-duplicates,
- * bounds and persists it. The export precheck it builds is strictly read-only,
- * so a missing translation is reported as missing rather than silently fetched.
- *
- * Storage lives under a single `chrome.storage.local` key (`ytd_note_sources`),
- * mirroring how notes live under `ytd_notes`. Full transcripts are the heavy
- * part, so per-source and total byte caps keep the library from crowding the
- * settings, notes and digest caches out of the default local quota; we do NOT
- * request `unlimitedStorage`. When the cap is reached the least-recently-updated
- * source whose video has no note is evicted first.
+ * Schema 2 keeps exact millisecond transcript identity and resumable
+ * description/transcript translations. The current store has its own key so a
+ * downgraded build cannot overwrite schema-2 data. The schema-1 key is read
+ * only and lazily copied on first access.
  */
 var YTD_NOTE_SOURCES = (() => {
-  const STORAGE_KEY = "ytd_note_sources";
-  const SCHEMA_VERSION = 1;
+  const STORAGE_KEY = "ytd_note_sources_v2";
+  const LEGACY_STORAGE_KEY = "ytd_note_sources";
+  const SCHEMA_VERSION = 2;
 
   const MAX_SOURCES = 200;
   const MAX_TITLE = 500;
@@ -31,31 +18,50 @@ var YTD_NOTE_SOURCES = (() => {
   const MAX_DESCRIPTION = 20_000;
   const MAX_LANGUAGE_TAG = 100;
   const MAX_MEDIA_KEY = 64;
+  const MAX_SEGMENT_ID = 300;
+  const MAX_SOURCE_HASH = 100;
+  const MAX_TRANSLATION_VERSION = 100;
   const MAX_TRANSCRIPT_ENTRIES = 6000;
   const MAX_ENTRY_TEXT = 4000;
-  const MAX_START_SECONDS = 24 * 60 * 60; // a day; guards against absurd values
-  // Per-source and whole-library ceilings. chrome.storage.local defaults to
-  // ~10 MiB; leave headroom for notes, settings and the digest cache.
+  const MAX_START_SECONDS = 24 * 60 * 60;
   const MAX_SOURCE_BYTES = 1_500_000;
   const MAX_TOTAL_BYTES = 8_000_000;
 
-  // A user-confirmed "generate and export" job must stay bounded. These are
-  // product safety limits, not provider limits: they prevent one click on a
-  // large note library or multi-hour video from turning into an unbounded
-  // sequence of paid requests. The UI reports the exact over-limit reason and
-  // never starts a partial job.
+  // Total-work constants remain exported for compatibility and reporting, but
+  // only the per-round limits gate execution. A 395-row video is therefore a
+  // resumable job rather than a permanently disabled one.
   const EXPORT_TRANSLATION_MAX_VIDEOS = 20;
   const EXPORT_TRANSLATION_MAX_UNITS = 240;
   const EXPORT_TRANSLATION_MAX_BATCHES = 80;
   const EXPORT_TRANSLATION_MAX_PROVIDER_CALLS = 100;
+  const EXPORT_TRANSLATION_ROUND_MAX_BATCHES = 20;
+  const EXPORT_TRANSLATION_ROUND_MAX_PROVIDER_CALLS = 100;
   const EXPORT_TRANSLATION_BATCH_SIZE = 4;
   const EXPORT_DESCRIPTION_CHUNK_CHARS = 3000;
+  const DEFAULT_TRANSLATION_VERSION = "export-v2";
 
   const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/g;
+  const storageQueues = new WeakMap();
 
-  // Deliberately conservative: a fallback "already Chinese?" test used only when
-  // the caller does not inject the side panel's richer heuristic. Rejects
-  // Japanese/Korean scripts and requires Han characters to dominate any Latin.
+  function noteSourceSchemaError(code, message) {
+    const error = new Error(message);
+    error.code = code;
+    return error;
+  }
+
+  function assertNoFutureSourceSchema(input, context = "note source") {
+    if (!input || typeof input !== "object" || Array.isArray(input)) return;
+    if (
+      Number.isSafeInteger(input.schemaVersion) &&
+      input.schemaVersion > SCHEMA_VERSION
+    ) {
+      throw noteSourceSchemaError(
+        "UNSUPPORTED_NOTE_SOURCE_SCHEMA",
+        `${context} uses unsupported schema ${input.schemaVersion}.`,
+      );
+    }
+  }
+
   function defaultIsChineseText(value) {
     const text = String(value || "");
     if (/[\u3040-\u30ff\uac00-\ud7af]/.test(text)) return false;
@@ -82,41 +88,348 @@ var YTD_NOTE_SOURCES = (() => {
     return new TextEncoder().encode(text).byteLength;
   }
 
+  /** Small deterministic browser-safe hash; this is identity, not security. */
+  function hashSourceText(value) {
+    const text = cleanText(String(value || ""), Number.MAX_SAFE_INTEGER);
+    // Two independently-seeded 32-bit FNV streams give a compact 64-bit token;
+    // a single 32-bit stream has an avoidable collision rate on 6000-row media.
+    let left = 0x811c9dc5;
+    let right = 0x9e3779b9;
+    for (let index = 0; index < text.length; index += 1) {
+      const code = text.charCodeAt(index);
+      left ^= code;
+      left = Math.imul(left, 0x01000193) >>> 0;
+      right ^= code;
+      right = Math.imul(right, 0x85ebca6b) >>> 0;
+    }
+    return `fnv1a-${left.toString(16).padStart(8, "0")}${right
+      .toString(16)
+      .padStart(8, "0")}`;
+  }
+
+  function normalizeStart(value) {
+    const start = Number(value);
+    if (!Number.isFinite(start) || start < 0 || start > MAX_START_SECONDS) {
+      return null;
+    }
+    const startMs = Math.round(start * 1000);
+    return { start: startMs / 1000, startMs };
+  }
+
+  function transcriptIdentity(entry) {
+    return `${entry.segmentId}\u0000${entry.startMs}\u0000${entry.sourceHash}`;
+  }
+
   // ----------------------------------------------------------------
-  // Transcript normalization
+  // Transcript normalization and schema-1 migration
   // ----------------------------------------------------------------
 
-  function normalizeTranscript(entries) {
-    if (!Array.isArray(entries)) return [];
-    const cleaned = [];
-    for (const entry of entries) {
-      const start = Number(entry?.start);
-      if (!Number.isFinite(start) || start < 0 || start > MAX_START_SECONDS) {
-        continue;
-      }
+  function normalizeOriginalTranscript(entries) {
+    if (!Array.isArray(entries)) return { entries: [], truncated: false };
+    const valid = [];
+    for (let inputIndex = 0; inputIndex < entries.length; inputIndex += 1) {
+      const entry = entries[inputIndex];
+      const timing = normalizeStart(
+        entry?.startMs !== undefined ? Number(entry.startMs) / 1000 : entry?.start,
+      );
+      if (!timing) continue;
       const text = cleanText(entry?.text, MAX_ENTRY_TEXT);
       if (!text) continue;
-      cleaned.push({ start: Math.floor(start), text });
-      if (cleaned.length >= MAX_TRANSCRIPT_ENTRIES) break;
+      const sourceHash = hashSourceText(text);
+      const providedId = cleanText(
+        String(entry?.segmentId ?? entry?.id ?? ""),
+        MAX_SEGMENT_ID,
+      );
+      valid.push({
+        ...timing,
+        text,
+        sourceHash,
+        providedId,
+        inputIndex,
+      });
     }
-    return cleaned.sort((left, right) => left.start - right.start);
+
+    valid.sort(
+      (left, right) =>
+        left.startMs - right.startMs || left.inputIndex - right.inputIndex,
+    );
+    const truncated = valid.length > MAX_TRANSCRIPT_ENTRIES;
+    const bounded = valid.slice(0, MAX_TRANSCRIPT_ENTRIES);
+    const occurrenceByFallback = new Map();
+    const usedIdentities = new Map();
+    return {
+      truncated,
+      entries: bounded.map((entry) => {
+        const fallbackKey = `${entry.startMs}\u0000${entry.sourceHash}`;
+        const occurrence = occurrenceByFallback.get(fallbackKey) || 0;
+        occurrenceByFallback.set(fallbackKey, occurrence + 1);
+        let segmentId =
+          entry.providedId ||
+          `legacy-${entry.startMs}-${entry.sourceHash}-${occurrence}`;
+        const baseIdentity = `${segmentId}\u0000${entry.startMs}\u0000${entry.sourceHash}`;
+        const duplicate = usedIdentities.get(baseIdentity) || 0;
+        usedIdentities.set(baseIdentity, duplicate + 1);
+        if (duplicate) segmentId = `${segmentId}~${duplicate}`;
+        return {
+          segmentId,
+          start: entry.start,
+          startMs: entry.startMs,
+          text: entry.text,
+          sourceHash: entry.sourceHash,
+        };
+      }),
+    };
   }
 
   /**
-   * Counts original transcript segments that have no non-empty Chinese segment
-   * at the same start. Used by the export precheck; strictly read-only.
+   * Binds Chinese rows to the current originals. Schema-2 rows require their
+   * exact identity. Legacy rows without identity migrate only when exact start
+   * (including milliseconds) identifies one and only one original row.
    */
-  function countMissingTranscriptTranslations(transcriptOriginal, transcriptZh) {
-    const zhByStart = new Map(
-      (Array.isArray(transcriptZh) ? transcriptZh : [])
-        .filter((entry) => String(entry?.text || "").trim())
-        .map((entry) => [Math.floor(Number(entry?.start) || 0), true]),
-    );
-    let missing = 0;
-    for (const entry of Array.isArray(transcriptOriginal) ? transcriptOriginal : []) {
-      if (!zhByStart.has(Math.floor(Number(entry?.start) || 0))) missing += 1;
+  function normalizeTranscriptTranslations(entries, originals) {
+    if (!Array.isArray(entries) || !originals.length) return [];
+    const byIdentity = new Map();
+    const bySegmentStart = new Map();
+    const byStartHash = new Map();
+    const byStart = new Map();
+    const add = (map, key, value) => {
+      const values = map.get(key) || [];
+      values.push(value);
+      map.set(key, values);
+    };
+    originals.forEach((entry) => {
+      byIdentity.set(transcriptIdentity(entry), entry);
+      add(bySegmentStart, `${entry.segmentId}\u0000${entry.startMs}`, entry);
+      add(byStartHash, `${entry.startMs}\u0000${entry.sourceHash}`, entry);
+      add(byStart, String(entry.startMs), entry);
+    });
+
+    const translatedByIdentity = new Map();
+    for (const raw of entries) {
+      const text = cleanText(raw?.text ?? raw?.textZh, MAX_ENTRY_TEXT);
+      if (!text) continue;
+      const timing = normalizeStart(
+        raw?.startMs !== undefined ? Number(raw.startMs) / 1000 : raw?.start,
+      );
+      if (!timing) continue;
+      const segmentId = cleanText(
+        String(raw?.segmentId ?? raw?.id ?? ""),
+        MAX_SEGMENT_ID,
+      );
+      const suppliedHash = cleanText(
+        String(raw?.sourceHash || ""),
+        MAX_SOURCE_HASH,
+      );
+      let original = null;
+
+      if (segmentId && suppliedHash) {
+        original = byIdentity.get(
+          `${segmentId}\u0000${timing.startMs}\u0000${suppliedHash}`,
+        );
+        // A lazily migrated schema-1 row receives a deterministic legacy id.
+        // When a later live capture supplies the real semantic id, reuse the
+        // translation only if exact millisecond + source hash is unambiguous.
+        if (!original && segmentId.startsWith("legacy-")) {
+          const candidates =
+            byStartHash.get(`${timing.startMs}\u0000${suppliedHash}`) || [];
+          if (candidates.length === 1) original = candidates[0];
+        }
+      } else if (segmentId) {
+        const candidates =
+          bySegmentStart.get(`${segmentId}\u0000${timing.startMs}`) || [];
+        if (candidates.length === 1) original = candidates[0];
+      } else if (suppliedHash) {
+        const candidates =
+          byStartHash.get(`${timing.startMs}\u0000${suppliedHash}`) || [];
+        if (candidates.length === 1) original = candidates[0];
+      } else {
+        const candidates = byStart.get(String(timing.startMs)) || [];
+        if (candidates.length === 1) original = candidates[0];
+      }
+
+      if (!original || (suppliedHash && suppliedHash !== original.sourceHash)) {
+        continue;
+      }
+      const identity = transcriptIdentity(original);
+      if (translatedByIdentity.has(identity)) continue;
+      translatedByIdentity.set(identity, {
+        segmentId: original.segmentId,
+        start: original.start,
+        startMs: original.startMs,
+        sourceHash: original.sourceHash,
+        text,
+        translationVersion:
+          cleanText(
+            String(raw?.translationVersion || ""),
+            MAX_TRANSLATION_VERSION,
+          ) || DEFAULT_TRANSLATION_VERSION,
+      });
     }
-    return missing;
+    return originals
+      .map((entry) => translatedByIdentity.get(transcriptIdentity(entry)))
+      .filter(Boolean);
+  }
+
+  function normalizeTranscript(entries) {
+    return normalizeOriginalTranscript(entries).entries;
+  }
+
+  function countMissingTranscriptTranslations(transcriptOriginal, transcriptZh) {
+    const originals = normalizeOriginalTranscript(transcriptOriginal).entries;
+    const translations = normalizeTranscriptTranslations(
+      transcriptZh,
+      originals,
+    );
+    const translated = new Set(translations.map(transcriptIdentity));
+    return originals.reduce(
+      (count, entry) => count + (translated.has(transcriptIdentity(entry)) ? 0 : 1),
+      0,
+    );
+  }
+
+  // ----------------------------------------------------------------
+  // Description chunks
+  // ----------------------------------------------------------------
+
+  function splitTextForTranslation(
+    value,
+    maxChars = EXPORT_DESCRIPTION_CHUNK_CHARS,
+  ) {
+    const text = cleanText(value, MAX_DESCRIPTION);
+    if (!text) return [];
+    const chunks = [];
+    let rest = text;
+    while (rest.length > maxChars) {
+      const window = rest.slice(0, maxChars + 1);
+      const floor = Math.floor(maxChars * 0.55);
+      const candidates = [
+        window.lastIndexOf("\n\n"),
+        window.lastIndexOf("\n"),
+        Math.max(
+          window.lastIndexOf("。"),
+          window.lastIndexOf("！"),
+          window.lastIndexOf("？"),
+          window.lastIndexOf(". "),
+          window.lastIndexOf("! "),
+          window.lastIndexOf("? "),
+        ),
+        window.lastIndexOf(" "),
+      ];
+      const boundary = candidates.find((index) => index >= floor);
+      const cut =
+        Number.isInteger(boundary) && boundary >= floor
+          ? boundary + 1
+          : maxChars;
+      chunks.push(rest.slice(0, cut).trim());
+      rest = rest.slice(cut).trim();
+    }
+    if (rest) chunks.push(rest);
+    return chunks.filter(Boolean);
+  }
+
+  function descriptionSourceChunks(descriptionOriginal) {
+    return splitTextForTranslation(descriptionOriginal).map((text, index) => ({
+      index,
+      text,
+      sourceHash: hashSourceText(text),
+    }));
+  }
+
+  function normalizeDescriptionChunkTranslations(rawChunks, sourceChunks) {
+    if (!Array.isArray(rawChunks) || !sourceChunks.length) return [];
+    const availableByHash = new Map();
+    sourceChunks.forEach((chunk) => {
+      const list = availableByHash.get(chunk.sourceHash) || [];
+      list.push(chunk);
+      availableByHash.set(chunk.sourceHash, list);
+    });
+    const usedIndexes = new Set();
+    const translated = [];
+    rawChunks.forEach((raw) => {
+      const sourceHash = cleanText(
+        String(raw?.sourceHash || ""),
+        MAX_SOURCE_HASH,
+      );
+      const textZh = cleanText(raw?.textZh ?? raw?.text, MAX_DESCRIPTION);
+      if (!sourceHash || !textZh) return;
+      const candidates = availableByHash.get(sourceHash) || [];
+      let source = candidates.find(
+        (candidate) =>
+          candidate.index === Number(raw?.index) &&
+          !usedIndexes.has(candidate.index),
+      );
+      if (!source) {
+        source = candidates.find((candidate) => !usedIndexes.has(candidate.index));
+      }
+      if (!source) return;
+      usedIndexes.add(source.index);
+      translated.push({
+        index: source.index,
+        sourceHash: source.sourceHash,
+        textZh,
+        translationVersion:
+          cleanText(
+            String(raw?.translationVersion || ""),
+            MAX_TRANSLATION_VERSION,
+          ) || DEFAULT_TRANSLATION_VERSION,
+      });
+    });
+    return translated.sort((left, right) => left.index - right.index);
+  }
+
+  function normalizeDescriptionFields(input) {
+    const uncappedDescription = cleanText(
+      input?.descriptionOriginal,
+      Number.MAX_SAFE_INTEGER,
+    );
+    const descriptionOriginal = uncappedDescription.slice(0, MAX_DESCRIPTION);
+    const explicitStatus = String(input?.descriptionStatus || "");
+    const descriptionStatus = descriptionOriginal
+      ? "present"
+      : explicitStatus === "confirmed-empty"
+        ? "confirmed-empty"
+        : "unknown";
+    const sourceChunks = descriptionSourceChunks(descriptionOriginal);
+    const descriptionSourceHash = descriptionOriginal
+      ? hashSourceText(descriptionOriginal)
+      : "";
+    const descriptionZhChunks = normalizeDescriptionChunkTranslations(
+      input?.descriptionZhChunks,
+      sourceChunks,
+    );
+    const suppliedFullHash = cleanText(
+      String(input?.descriptionSourceHash || ""),
+      MAX_SOURCE_HASH,
+    );
+    let descriptionZh = cleanText(input?.descriptionZh, MAX_DESCRIPTION);
+    if (
+      descriptionZh &&
+      suppliedFullHash &&
+      suppliedFullHash !== descriptionSourceHash
+    ) {
+      descriptionZh = "";
+    }
+    if (!descriptionOriginal) descriptionZh = "";
+    if (!descriptionZh && sourceChunks.length) {
+      const byIndex = new Map(
+        descriptionZhChunks.map((chunk) => [chunk.index, chunk]),
+      );
+      if (sourceChunks.every((chunk) => byIndex.has(chunk.index))) {
+        descriptionZh = sourceChunks
+          .map((chunk) => byIndex.get(chunk.index).textZh)
+          .join("\n\n");
+      }
+    }
+    return {
+      descriptionOriginal,
+      descriptionStatus,
+      descriptionZh,
+      descriptionSourceHash: descriptionZh ? descriptionSourceHash : "",
+      descriptionZhChunks,
+      descriptionTruncated:
+        !!input?.descriptionTruncated ||
+        uncappedDescription.length > descriptionOriginal.length,
+    };
   }
 
   // ----------------------------------------------------------------
@@ -132,36 +445,77 @@ var YTD_NOTE_SOURCES = (() => {
     return value === "bilibili" ? "bilibili" : "youtube";
   }
 
-  /**
-   * Validates and bounds a source record. Returns null when the record lacks a
-   * usable media identity (the only hard requirement). Every other field is
-   * optional and simply bounded, because this data comes from our own runtime,
-   * not an untrusted import file.
-   */
   function normalizeNoteSource(input) {
     if (!input || typeof input !== "object") return null;
+    assertNoFutureSourceSchema(input);
     const mediaKey = normalizeMediaKey(input.mediaKey);
     if (!mediaKey) return null;
-    const transcriptOriginal = normalizeTranscript(input.transcriptOriginal);
-    const transcriptZh = normalizeTranscript(input.transcriptZh);
+    const normalizedOriginal = normalizeOriginalTranscript(
+      input.transcriptOriginal,
+    );
+    const transcriptOriginal = normalizedOriginal.entries;
+    const transcriptZh = normalizeTranscriptTranslations(
+      input.transcriptZh,
+      transcriptOriginal,
+    );
+    const transcriptTruncated =
+      !!input.transcriptTruncated || normalizedOriginal.truncated;
     const updatedAt =
       Number.isSafeInteger(input.updatedAt) && input.updatedAt > 0
         ? input.updatedAt
         : 0;
+    const description = normalizeDescriptionFields(input);
+    const titleOriginal = cleanText(input.titleOriginal, MAX_TITLE);
+    let titleZh = cleanText(input.titleZh, MAX_TITLE);
+    const currentTitleHash = titleOriginal
+      ? hashSourceText(titleOriginal)
+      : "";
+    const suppliedTitleHash = cleanText(
+      String(input.titleSourceHash || ""),
+      MAX_SOURCE_HASH,
+    );
+    if (
+      !titleOriginal ||
+      (suppliedTitleHash && suppliedTitleHash !== currentTitleHash)
+    ) {
+      titleZh = "";
+    }
+    const titleSourceHash = titleZh ? currentTitleHash : "";
+    const sourceRevision = hashSourceText(
+      JSON.stringify({
+        mediaKey,
+        titleOriginal,
+        sourceLanguage: cleanText(input.sourceLanguage, MAX_LANGUAGE_TAG),
+        descriptionStatus: description.descriptionStatus,
+        descriptionTruncated: description.descriptionTruncated,
+        descriptionOriginalHash: description.descriptionOriginal
+          ? hashSourceText(description.descriptionOriginal)
+          : "",
+        transcriptTruncated,
+        transcript: transcriptOriginal.map((entry) => [
+          entry.segmentId,
+          entry.startMs,
+          entry.sourceHash,
+        ]),
+      }),
+    );
     return {
       schemaVersion: SCHEMA_VERSION,
+      sourceRevision,
       mediaKey,
       platform: normalizePlatform(input.platform),
       canonicalUrl: cleanText(input.canonicalUrl, MAX_URL),
-      titleOriginal: cleanText(input.titleOriginal, MAX_TITLE),
-      titleZh: cleanText(input.titleZh, MAX_TITLE),
+      titleOriginal,
+      titleZh,
+      titleSourceHash,
       channelName: cleanText(input.channelName, MAX_CHANNEL),
-      descriptionOriginal: cleanText(input.descriptionOriginal, MAX_DESCRIPTION),
-      descriptionZh: cleanText(input.descriptionZh, MAX_DESCRIPTION),
+      ...description,
       sourceLanguage: cleanText(input.sourceLanguage, MAX_LANGUAGE_TAG),
       transcriptOriginal,
       transcriptZh,
+      transcriptTruncated,
       transcriptTranslationComplete:
+        !transcriptTruncated &&
         transcriptOriginal.length > 0 &&
         countMissingTranscriptTranslations(transcriptOriginal, transcriptZh) === 0,
       updatedAt,
@@ -172,48 +526,33 @@ var YTD_NOTE_SOURCES = (() => {
     return byteLength(JSON.stringify(source || {}));
   }
 
-  /**
-   * Enforces the per-source byte cap by trimming the heaviest field
-   * (transcripts) before the description. Keeps identity + title + URL intact so
-   * a very long video still exports its metadata and notes.
-   */
   function boundSourceSize(source) {
-    let bounded = source;
+    let bounded = normalizeNoteSource(source);
+    if (!bounded) return null;
     while (estimateSourceBytes(bounded) > MAX_SOURCE_BYTES) {
-      if (
-        bounded.transcriptZh.length > 0 ||
-        bounded.transcriptOriginal.length > 0
-      ) {
-        const nextOriginal = bounded.transcriptOriginal.slice(
-          0,
-          Math.floor(bounded.transcriptOriginal.length * 0.9),
-        );
-        const nextZh = bounded.transcriptZh.slice(
-          0,
-          Math.floor(bounded.transcriptZh.length * 0.9),
-        );
-        if (
-          nextOriginal.length === bounded.transcriptOriginal.length &&
-          nextZh.length === bounded.transcriptZh.length
-        ) {
-          bounded = { ...bounded, transcriptOriginal: [], transcriptZh: [] };
-        } else {
-          bounded = {
-            ...bounded,
-            transcriptOriginal: nextOriginal,
-            transcriptZh: nextZh,
-          };
-        }
-        bounded.transcriptTranslationComplete =
-          bounded.transcriptOriginal.length > 0 &&
-          countMissingTranscriptTranslations(
-            bounded.transcriptOriginal,
-            bounded.transcriptZh,
-          ) === 0;
+      if (bounded.transcriptOriginal.length > 0) {
+        const nextLength = Math.floor(bounded.transcriptOriginal.length * 0.9);
+        bounded = normalizeNoteSource({
+          ...bounded,
+          transcriptOriginal: bounded.transcriptOriginal.slice(0, nextLength),
+          transcriptZh: bounded.transcriptZh,
+          transcriptTruncated: true,
+        });
         continue;
       }
-      if (bounded.descriptionOriginal || bounded.descriptionZh) {
-        bounded = { ...bounded, descriptionOriginal: "", descriptionZh: "" };
+      if (
+        bounded.descriptionOriginal ||
+        bounded.descriptionZh ||
+        bounded.descriptionZhChunks.length
+      ) {
+        bounded = normalizeNoteSource({
+          ...bounded,
+          descriptionOriginal: "",
+          descriptionZh: "",
+          descriptionZhChunks: [],
+          descriptionStatus: "unknown",
+          descriptionTruncated: true,
+        });
         continue;
       }
       break;
@@ -221,12 +560,54 @@ var YTD_NOTE_SOURCES = (() => {
     return bounded;
   }
 
-  /**
-   * Idempotent merge of an incoming source into an existing one. Fills empty
-   * fields, upgrades a translation only from empty (never overwrites an existing
-   * non-empty translation with a different one), and replaces a transcript only
-   * when the incoming one is at least as complete. Returns { source, changed }.
-   */
+  function recordsEqual(left, right) {
+    return JSON.stringify({ ...left, updatedAt: 0 }) ===
+      JSON.stringify({ ...right, updatedAt: 0 });
+  }
+
+  function mergeDescription(prev, next, merged) {
+    let chosenOriginal = prev.descriptionOriginal;
+    let chosenStatus = prev.descriptionStatus;
+    if (
+      next.descriptionOriginal &&
+      (!chosenOriginal || next.descriptionOriginal.length >= chosenOriginal.length)
+    ) {
+      chosenOriginal = next.descriptionOriginal;
+      chosenStatus = "present";
+    } else if (
+      !chosenOriginal &&
+      chosenStatus === "unknown" &&
+      next.descriptionStatus === "confirmed-empty"
+    ) {
+      chosenStatus = "confirmed-empty";
+    }
+
+    const currentHash = chosenOriginal ? hashSourceText(chosenOriginal) : "";
+    const fullCandidate = [prev, next].find(
+      (source) =>
+        source.descriptionZh &&
+        source.descriptionSourceHash === currentHash,
+    );
+    Object.assign(
+      merged,
+      normalizeDescriptionFields({
+        descriptionOriginal: chosenOriginal,
+        descriptionStatus: chosenStatus,
+        descriptionZh: fullCandidate?.descriptionZh || "",
+        descriptionSourceHash: fullCandidate?.descriptionSourceHash || "",
+        descriptionZhChunks: [
+          ...(prev.descriptionZhChunks || []),
+          ...(next.descriptionZhChunks || []),
+        ],
+        descriptionTruncated:
+          (chosenOriginal === prev.descriptionOriginal &&
+            prev.descriptionTruncated) ||
+          (chosenOriginal === next.descriptionOriginal &&
+            next.descriptionTruncated),
+      }),
+    );
+  }
+
   function mergeNoteSource(existing, incoming, { now = Date.now() } = {}) {
     const next = normalizeNoteSource(incoming);
     if (!next) return { source: normalizeNoteSource(existing), changed: false };
@@ -242,11 +623,7 @@ var YTD_NOTE_SOURCES = (() => {
       return { source: prev, changed: false };
     }
 
-    let changed = false;
     const merged = { ...prev };
-
-    // Identity-ish scalars: fill when empty, refresh when a newer non-empty
-    // value differs (title/channel can legitimately update).
     for (const field of [
       "platform",
       "canonicalUrl",
@@ -257,106 +634,95 @@ var YTD_NOTE_SOURCES = (() => {
       if (next[field] && next[field] !== merged[field]) {
         if (!merged[field] || field === "titleOriginal" || field === "channelName") {
           merged[field] = next[field];
-          changed = true;
         }
       }
     }
+    const mergedTitleHash = merged.titleOriginal
+      ? hashSourceText(merged.titleOriginal)
+      : "";
+    const titleCandidate = [prev, next].find(
+      (source) =>
+        source.titleZh && source.titleSourceHash === mergedTitleHash,
+    );
+    merged.titleZh = titleCandidate?.titleZh || "";
+    merged.titleSourceHash = titleCandidate?.titleSourceHash || "";
+    mergeDescription(prev, next, merged);
 
-    // Description: prefer the longer original (more complete), fill Chinese.
-    if (
-      next.descriptionOriginal &&
-      next.descriptionOriginal.length > merged.descriptionOriginal.length
-    ) {
-      merged.descriptionOriginal = next.descriptionOriginal;
-      changed = true;
-    }
-    if (next.descriptionZh && !merged.descriptionZh) {
-      merged.descriptionZh = next.descriptionZh;
-      changed = true;
-    }
-
-    // Chinese title fills only from empty; a different validated title is the
-    // caller's job to resolve, never silently overwritten here.
-    if (next.titleZh && !merged.titleZh) {
-      merged.titleZh = next.titleZh;
-      changed = true;
-    }
-
-    // Transcripts: replace when the incoming copy is at least as long (more
-    // complete), so a fully-loaded reload upgrades a partial capture.
-    if (
-      next.transcriptOriginal.length >= merged.transcriptOriginal.length &&
-      next.transcriptOriginal.length > 0 &&
+    let transcriptOriginal = prev.transcriptOriginal;
+    let transcriptTruncated = prev.transcriptTruncated;
+    const originalsDiffer =
       JSON.stringify(next.transcriptOriginal) !==
-        JSON.stringify(merged.transcriptOriginal)
-    ) {
-      merged.transcriptOriginal = next.transcriptOriginal;
-      changed = true;
+      JSON.stringify(prev.transcriptOriginal);
+    const shouldUseNextOriginal =
+      next.transcriptOriginal.length > 0 &&
+      (!prev.transcriptOriginal.length ||
+        next.transcriptOriginal.length > prev.transcriptOriginal.length ||
+        (next.transcriptOriginal.length === prev.transcriptOriginal.length &&
+          originalsDiffer) ||
+        (prev.transcriptTruncated && !next.transcriptTruncated));
+    if (shouldUseNextOriginal) {
+      transcriptOriginal = next.transcriptOriginal;
+      transcriptTruncated = next.transcriptTruncated;
+      if (next.sourceLanguage) merged.sourceLanguage = next.sourceLanguage;
     }
-    if (
-      next.transcriptZh.length >= merged.transcriptZh.length &&
-      next.transcriptZh.length > 0 &&
-      JSON.stringify(next.transcriptZh) !== JSON.stringify(merged.transcriptZh)
-    ) {
-      merged.transcriptZh = next.transcriptZh;
-      changed = true;
-    }
-
+    merged.transcriptOriginal = transcriptOriginal;
+    merged.transcriptZh = normalizeTranscriptTranslations(
+      [...prev.transcriptZh, ...next.transcriptZh],
+      transcriptOriginal,
+    );
+    merged.transcriptTruncated = transcriptTruncated;
     merged.transcriptTranslationComplete =
-      merged.transcriptOriginal.length > 0 &&
+      !transcriptTruncated &&
+      transcriptOriginal.length > 0 &&
       countMissingTranscriptTranslations(
-        merged.transcriptOriginal,
+        transcriptOriginal,
         merged.transcriptZh,
       ) === 0;
 
-    if (changed) merged.updatedAt = now;
-    else
-      merged.updatedAt =
-        Math.max(prev.updatedAt, next.updatedAt) || prev.updatedAt;
-
-    return { source: boundSourceSize(merged), changed };
+    let bounded = boundSourceSize(merged);
+    const changed = !recordsEqual(prev, bounded);
+    bounded = {
+      ...bounded,
+      updatedAt: changed
+        ? now
+        : Math.max(prev.updatedAt, next.updatedAt) || prev.updatedAt,
+    };
+    return { source: bounded, changed };
   }
 
   /**
-   * Builds a source from a no-network `digest_<mediaKey>` cache entry. The
-   * digest cache never stored the video description, so descriptions come only
-   * from a live side-panel capture; a backfilled source reports its description
-   * as missing rather than inventing one.
-   *
-   * @param {string} mediaKey
-   * @param {object} digest the parsed digest cache value
-   * @param {{transcriptZh?: Array}} [extra] optional pre-resolved Chinese
-   *   segments (the side panel resolves these from the digest's paragraphCache)
+   * Builds a source from a no-network digest. `transcriptOriginal` lets callers
+   * pass the exact semantic grouping used for `transcriptZh`.
    */
-  function sourceFromDigest(mediaKey, digest, { transcriptZh = [] } = {}) {
+  function sourceFromDigest(
+    mediaKey,
+    digest,
+    { transcriptOriginal, transcriptZh = [] } = {},
+  ) {
     if (!digest || typeof digest !== "object") return null;
-    const platform = digest.mediaRef?.platform || "youtube";
     return normalizeNoteSource({
       mediaKey,
-      platform,
+      platform: digest.mediaRef?.platform || "youtube",
       canonicalUrl: digest.mediaRef?.canonicalUrl || "",
       titleOriginal: digest.videoTitle || "",
       channelName: digest.channelName || "",
+      descriptionStatus: "unknown",
       sourceLanguage:
         digest.transcriptLanguage || digest.transcriptRequestedLanguage || "",
-      transcriptOriginal: Array.isArray(digest.transcript)
-        ? digest.transcript
-        : [],
+      transcriptOriginal: Array.isArray(transcriptOriginal)
+        ? transcriptOriginal
+        : Array.isArray(digest.transcript)
+          ? digest.transcript
+          : [],
       transcriptZh,
       updatedAt: Number(digest.timestamp) || 0,
     });
   }
 
   // ----------------------------------------------------------------
-  // Export bridge: NoteSource + notes -> note-export.js "source" shape
+  // Export bridge and precheck
   // ----------------------------------------------------------------
 
-  /**
-   * Converts a stored source plus its notes into the shape note-export.js
-   * consumes. `resolveNote(note) => { original, zh }` lets the caller reuse the
-   * side panel's validated per-note language logic so on-screen and exported
-   * note text never diverge.
-   */
   function toExportSource(source, notes, { resolveNote } = {}) {
     const resolved = normalizeNoteSource(source) || {
       platform: "youtube",
@@ -366,8 +732,10 @@ var YTD_NOTE_SOURCES = (() => {
       channelName: "",
       descriptionOriginal: "",
       descriptionZh: "",
+      descriptionStatus: "unknown",
       transcriptOriginal: [],
       transcriptZh: [],
+      transcriptTruncated: false,
     };
     const resolver =
       typeof resolveNote === "function"
@@ -384,8 +752,10 @@ var YTD_NOTE_SOURCES = (() => {
       channelName: resolved.channelName,
       descriptionOriginal: resolved.descriptionOriginal,
       descriptionZh: resolved.descriptionZh,
+      descriptionStatus: resolved.descriptionStatus,
       transcriptOriginal: resolved.transcriptOriginal,
       transcriptZh: resolved.transcriptZh,
+      transcriptTruncated: resolved.transcriptTruncated,
       notes: (Array.isArray(notes) ? notes : []).map((note) => ({
         timestampSeconds: Number(note?.timestampSeconds) || 0,
         ...resolver(note),
@@ -393,21 +763,6 @@ var YTD_NOTE_SOURCES = (() => {
     };
   }
 
-  // ----------------------------------------------------------------
-  // Export precheck — strictly read-only report
-  // ----------------------------------------------------------------
-
-  /**
-   * Builds a read-only precheck for an export scope.
-   *
-   * @param {object} params
-   * @param {Array<{mediaKey: string, representative: object, notes: object[]}>}
-   *   params.groups notes grouped by source (from note-export.groupNotesBySource)
-   * @param {Object<string, object>} params.sourcesByKey stored sources by mediaKey
-   * @param {"original"|"zh"|"bilingual"} params.mode
-   * @param {(group: object) => string} [params.titleOf] visible title resolver
-   * @param {(text: string) => boolean} [params.isChineseText] "already Chinese?"
-   */
   function buildExportPrecheck({
     groups,
     sourcesByKey = {},
@@ -419,7 +774,7 @@ var YTD_NOTE_SOURCES = (() => {
     const wantsTranslation = mode === "zh" || mode === "bilingual";
     const videos = (Array.isArray(groups) ? groups : []).map((group) => {
       const rep = group.representative || (group.notes && group.notes[0]) || {};
-      const source = sourcesByKey[group.mediaKey] || null;
+      const source = normalizeNoteSource(sourcesByKey[group.mediaKey]);
       const platform = normalizePlatform(source?.platform || rep.platform);
       const titleOriginal = source?.titleOriginal || rep.videoTitle || "";
       const title =
@@ -432,15 +787,22 @@ var YTD_NOTE_SOURCES = (() => {
       const transcriptOriginal = source?.transcriptOriginal || [];
       const transcriptZh = source?.transcriptZh || [];
       const transcriptTotal = transcriptOriginal.length;
-
       const originalIsChinese =
         platform === "bilibili" || isChineseLanguageTag(source?.sourceLanguage);
-
-      const hasOriginalTranscript = transcriptTotal > 0;
+      const transcriptTruncated = !!source?.transcriptTruncated;
+      const hasOriginalTranscript = transcriptTotal > 0 && !transcriptTruncated;
       const hasUrl = !!canonicalUrl;
+      const descriptionStatus = source?.descriptionStatus || "unknown";
       const blockingReasons = [];
-      if (!hasOriginalTranscript) blockingReasons.push("缺少完整字幕");
+      if (!transcriptTotal) blockingReasons.push("缺少完整字幕");
+      else if (transcriptTruncated) blockingReasons.push("字幕资料已裁剪，不完整");
       if (!hasUrl) blockingReasons.push("缺少视频网址");
+      if (descriptionStatus === "unknown") {
+        blockingReasons.push("缺少视频简介状态");
+      }
+      if (source?.descriptionTruncated) {
+        blockingReasons.push("视频简介已裁剪，不完整");
+      }
 
       const needsTitleTranslation =
         wantsTranslation &&
@@ -448,12 +810,31 @@ var YTD_NOTE_SOURCES = (() => {
         !!titleOriginal &&
         !isChineseText(titleOriginal) &&
         !source?.titleZh;
+      const descriptionChunks = descriptionSourceChunks(descriptionOriginal);
+      const completedDescriptionChunks = new Set(
+        (source?.descriptionZhChunks || []).map((chunk) =>
+          `${chunk.index}\u0000${chunk.sourceHash}`,
+        ),
+      );
+      const descriptionMissingChunkCount =
+        wantsTranslation &&
+        !originalIsChinese &&
+        !!descriptionOriginal &&
+        !isChineseText(descriptionOriginal) &&
+        !source?.descriptionZh
+          ? descriptionChunks.filter(
+              (chunk) =>
+                !completedDescriptionChunks.has(
+                  `${chunk.index}\u0000${chunk.sourceHash}`,
+                ),
+            ).length
+          : 0;
       const needsDescriptionTranslation =
         wantsTranslation &&
         !originalIsChinese &&
         !!descriptionOriginal &&
         !isChineseText(descriptionOriginal) &&
-        !source?.descriptionZh;
+        descriptionMissingChunkCount > 0;
       const transcriptMissingCount =
         wantsTranslation && !originalIsChinese
           ? countMissingTranscriptTranslations(transcriptOriginal, transcriptZh)
@@ -483,11 +864,15 @@ var YTD_NOTE_SOURCES = (() => {
         hasTitle: !!titleOriginal,
         hasChannel: !!channelName,
         hasUrl,
-        hasDescription: !!descriptionOriginal,
+        hasDescription: descriptionStatus === "present",
+        descriptionStatus,
+        descriptionTruncated: !!source?.descriptionTruncated,
         hasOriginalTranscript,
+        transcriptTruncated,
         transcriptTotal,
         needsTitleTranslation,
         needsDescriptionTranslation,
+        descriptionMissingChunkCount,
         transcriptMissingCount,
         noteTranslationCount,
         blocking: blockingReasons.length > 0,
@@ -501,13 +886,20 @@ var YTD_NOTE_SOURCES = (() => {
         titles: totals.titles + (video.needsTitleTranslation ? 1 : 0),
         descriptions:
           totals.descriptions + (video.needsDescriptionTranslation ? 1 : 0),
+        descriptionChunks:
+          totals.descriptionChunks + video.descriptionMissingChunkCount,
         transcriptSegments:
           totals.transcriptSegments + video.transcriptMissingCount,
         notes: totals.notes + video.noteTranslationCount,
       }),
-      { titles: 0, descriptions: 0, transcriptSegments: 0, notes: 0 },
+      {
+        titles: 0,
+        descriptions: 0,
+        descriptionChunks: 0,
+        transcriptSegments: 0,
+        notes: 0,
+      },
     );
-
     return {
       mode,
       videoCount: videos.length,
@@ -518,7 +910,7 @@ var YTD_NOTE_SOURCES = (() => {
       translationGaps,
       hasTranslationGaps:
         translationGaps.titles +
-          translationGaps.descriptions +
+          translationGaps.descriptionChunks +
           translationGaps.transcriptSegments +
           translationGaps.notes >
         0,
@@ -526,40 +918,8 @@ var YTD_NOTE_SOURCES = (() => {
   }
 
   // ----------------------------------------------------------------
-  // User-confirmed export translation planning
+  // Resumable export translation planning
   // ----------------------------------------------------------------
-
-  function splitTextForTranslation(value, maxChars = EXPORT_DESCRIPTION_CHUNK_CHARS) {
-    const text = cleanText(value, MAX_DESCRIPTION);
-    if (!text) return [];
-    const chunks = [];
-    let rest = text;
-    while (rest.length > maxChars) {
-      const window = rest.slice(0, maxChars + 1);
-      const floor = Math.floor(maxChars * 0.55);
-      const candidates = [
-        window.lastIndexOf("\n\n"),
-        window.lastIndexOf("\n"),
-        Math.max(
-          window.lastIndexOf("。"),
-          window.lastIndexOf("！"),
-          window.lastIndexOf("？"),
-          window.lastIndexOf(". "),
-          window.lastIndexOf("! "),
-          window.lastIndexOf("? "),
-        ),
-        window.lastIndexOf(" "),
-      ];
-      const boundary = candidates.find((index) => index >= floor);
-      const cut = Number.isInteger(boundary) && boundary >= floor
-        ? boundary + 1
-        : maxChars;
-      chunks.push(rest.slice(0, cut).trim());
-      rest = rest.slice(cut).trim();
-    }
-    if (rest) chunks.push(rest);
-    return chunks.filter(Boolean);
-  }
 
   function chunkArray(values, size) {
     const chunks = [];
@@ -569,12 +929,40 @@ var YTD_NOTE_SOURCES = (() => {
     return chunks;
   }
 
-  /**
-   * Builds a deterministic, bounded plan for a user-confirmed export
-   * translation. No network/storage/DOM work happens here. Notes and titles use
-   * the existing validated note translation endpoint; descriptions and missing
-   * transcript rows use the stable-ID transcript batch endpoint.
-   */
+  function sourceUnitId(mediaKey, kind, identity) {
+    const prefix = kind === "description" ? "d" : "t";
+    return `${prefix}:${hashSourceText(mediaKey)}:${identity}`;
+  }
+
+  function buildSourceBatches(sourceUnits) {
+    const batches = [];
+    const byMedia = new Map();
+    sourceUnits.forEach((unit) => {
+      const list = byMedia.get(unit.mediaKey) || [];
+      list.push(unit);
+      byMedia.set(unit.mediaKey, list);
+    });
+    for (const mediaUnits of byMedia.values()) {
+      let pending = [];
+      let pendingCharacters = 0;
+      mediaUnits.forEach((unit) => {
+        const length = unit.text.length;
+        if (
+          pending.length >= EXPORT_TRANSLATION_BATCH_SIZE ||
+          (pending.length && pendingCharacters + length > 12000)
+        ) {
+          batches.push(pending);
+          pending = [];
+          pendingCharacters = 0;
+        }
+        pending.push(unit);
+        pendingCharacters += length;
+      });
+      if (pending.length) batches.push(pending);
+    }
+    return batches;
+  }
+
   function buildExportTranslationPlan({
     groups,
     sourcesByKey = {},
@@ -593,7 +981,8 @@ var YTD_NOTE_SOURCES = (() => {
     const sourceUnits = [];
     const sourceWorkByKey = {};
     const seenTitles = new Set();
-    let unitSequence = 0;
+    let totalUnitCount = 0;
+    let completedUnitCount = 0;
 
     if (wantsTranslation) {
       safeGroups.forEach((group) => {
@@ -603,19 +992,20 @@ var YTD_NOTE_SOURCES = (() => {
         const originalIsChinese =
           platform === "bilibili" || isChineseLanguageTag(source?.sourceLanguage);
         if (originalIsChinese) return;
-
         const titleOriginal = String(
           source?.titleOriginal || rep.videoTitle || "",
         ).trim();
+
         if (
           includeTitles &&
           titleOriginal &&
-          !source?.titleZh &&
           !isChineseText(titleOriginal) &&
           !seenTitles.has(group.mediaKey)
         ) {
           seenTitles.add(group.mediaKey);
-          titles.push({ mediaKey: group.mediaKey, title: titleOriginal });
+          totalUnitCount += 1;
+          if (source?.titleZh) completedUnitCount += 1;
+          else titles.push({ mediaKey: group.mediaKey, title: titleOriginal });
         }
 
         (includeNotes ? group.notes || [] : []).forEach((note) => {
@@ -628,13 +1018,20 @@ var YTD_NOTE_SOURCES = (() => {
                 };
           const original = String(pair?.original || "").trim();
           const zh = String(pair?.zh || "").trim();
-          if (!original || zh || isChineseText(original)) return;
+          if (!original || isChineseText(original)) return;
+          totalUnitCount += 1;
+          if (zh) {
+            completedUnitCount += 1;
+            return;
+          }
           notes.push({
             id: String(note?.id || ""),
             text: original,
             videoTitle: titleOriginal,
             rawText: String(note?.rawText || ""),
-            sourceLanguage: String(note?.sourceLanguage || source?.sourceLanguage || ""),
+            sourceLanguage: String(
+              note?.sourceLanguage || source?.sourceLanguage || "",
+            ),
             platform,
             textLanguage: String(note?.textLanguage || ""),
           });
@@ -646,49 +1043,78 @@ var YTD_NOTE_SOURCES = (() => {
           descriptionUnitIds: [],
           transcriptUnits: [],
         };
-
         if (
           includeDescriptions &&
           source.descriptionOriginal &&
-          !source.descriptionZh &&
           !isChineseText(source.descriptionOriginal)
         ) {
-          splitTextForTranslation(source.descriptionOriginal).forEach(
-            (text, chunkIndex) => {
-              const id = `u${unitSequence++}`;
-              work.descriptionUnitIds.push(id);
-              sourceUnits.push({
-                id,
-                mediaKey: group.mediaKey,
-                kind: "description",
-                chunkIndex,
-                text,
-                videoTitle: titleOriginal,
-              });
-            },
+          const chunks = descriptionSourceChunks(source.descriptionOriginal);
+          const translatedChunks = new Set(
+            source.descriptionZhChunks.map(
+              (chunk) => `${chunk.index}\u0000${chunk.sourceHash}`,
+            ),
           );
+          chunks.forEach((chunk) => {
+            totalUnitCount += 1;
+            if (
+              source.descriptionZh ||
+              translatedChunks.has(`${chunk.index}\u0000${chunk.sourceHash}`)
+            ) {
+              completedUnitCount += 1;
+              return;
+            }
+            const id = sourceUnitId(
+              group.mediaKey,
+              "description",
+              `${chunk.index}:${chunk.sourceHash}`,
+            );
+            work.descriptionUnitIds.push(id);
+            sourceUnits.push({
+              id,
+              mediaKey: group.mediaKey,
+              sourceRevision: source.sourceRevision,
+              kind: "description",
+              chunkIndex: chunk.index,
+              sourceHash: chunk.sourceHash,
+              text: chunk.text,
+              videoTitle: titleOriginal,
+            });
+          });
         }
 
-        const zhByStart = new Map(
-          source.transcriptZh
-            .filter((entry) => String(entry?.text || "").trim())
-            .map((entry) => [Math.floor(Number(entry.start) || 0), true]),
+        const translatedTranscript = new Set(
+          source.transcriptZh.map(transcriptIdentity),
         );
-        (includeTranscript ? source.transcriptOriginal : []).forEach((entry, transcriptIndex) => {
-          const start = Math.floor(Number(entry.start) || 0);
-          if (zhByStart.has(start) || isChineseText(entry.text)) return;
-          const id = `u${unitSequence++}`;
-          work.transcriptUnits.push({ id, start, transcriptIndex });
-          sourceUnits.push({
-            id,
-            mediaKey: group.mediaKey,
-            kind: "transcript",
-            start,
-            transcriptIndex,
-            text: entry.text,
-            videoTitle: titleOriginal,
-          });
-        });
+        (includeTranscript ? source.transcriptOriginal : []).forEach(
+          (entry, transcriptIndex) => {
+            if (isChineseText(entry.text)) return;
+            totalUnitCount += 1;
+            if (translatedTranscript.has(transcriptIdentity(entry))) {
+              completedUnitCount += 1;
+              return;
+            }
+            const id = sourceUnitId(
+              group.mediaKey,
+              "transcript",
+              `${hashSourceText(entry.segmentId)}:${entry.startMs}:${entry.sourceHash}`,
+            );
+            const unit = {
+              id,
+              mediaKey: group.mediaKey,
+              sourceRevision: source.sourceRevision,
+              kind: "transcript",
+              segmentId: entry.segmentId,
+              start: entry.start,
+              startMs: entry.startMs,
+              sourceHash: entry.sourceHash,
+              transcriptIndex,
+              text: entry.text,
+              videoTitle: titleOriginal,
+            };
+            work.transcriptUnits.push({ ...unit });
+            sourceUnits.push(unit);
+          },
+        );
         if (work.descriptionUnitIds.length || work.transcriptUnits.length) {
           sourceWorkByKey[group.mediaKey] = work;
         }
@@ -697,30 +1123,10 @@ var YTD_NOTE_SOURCES = (() => {
 
     const noteBatches = chunkArray(notes, 10);
     const titleBatches = chunkArray(titles, 10);
-    const sourceBatches = [];
-    let pending = [];
-    let pendingCharacters = 0;
-    sourceUnits.forEach((unit) => {
-      const length = unit.text.length;
-      if (
-        pending.length >= EXPORT_TRANSLATION_BATCH_SIZE ||
-        (pending.length && pendingCharacters + length > 12000)
-      ) {
-        sourceBatches.push(pending);
-        pending = [];
-        pendingCharacters = 0;
-      }
-      pending.push(unit);
-      pendingCharacters += length;
-    });
-    if (pending.length) sourceBatches.push(pending);
-
+    const sourceBatches = buildSourceBatches(sourceUnits);
     const unitCount = notes.length + titles.length + sourceUnits.length;
     const estimatedBatches =
       noteBatches.length + titleBatches.length + sourceBatches.length;
-    // Note/title jobs have an internal five-call recovery budget; a transcript
-    // batch may retry once only for a provider's empty JSON response. Expose the
-    // conservative maximum so the confirmation copy does not understate cost.
     const maxProviderCalls =
       (noteBatches.length + titleBatches.length) * 5 +
       sourceBatches.length * 2;
@@ -728,18 +1134,17 @@ var YTD_NOTE_SOURCES = (() => {
     if (safeGroups.length > EXPORT_TRANSLATION_MAX_VIDEOS) {
       limitReasons.push(`超过 ${EXPORT_TRANSLATION_MAX_VIDEOS} 个视频`);
     }
-    if (unitCount > EXPORT_TRANSLATION_MAX_UNITS) {
-      limitReasons.push(`超过 ${EXPORT_TRANSLATION_MAX_UNITS} 个待翻译单元`);
-    }
-    if (estimatedBatches > EXPORT_TRANSLATION_MAX_BATCHES) {
-      limitReasons.push(`超过 ${EXPORT_TRANSLATION_MAX_BATCHES} 个请求批次`);
-    }
-    if (maxProviderCalls > EXPORT_TRANSLATION_MAX_PROVIDER_CALLS) {
-      limitReasons.push(
-        `错误恢复上限超过 ${EXPORT_TRANSLATION_MAX_PROVIDER_CALLS} 次模型请求`,
-      );
-    }
-
+    const progress = {
+      totalUnits: totalUnitCount,
+      completedUnits: completedUnitCount,
+      remainingUnits: unitCount,
+      percent:
+        totalUnitCount > 0
+          ? Math.round((completedUnitCount / totalUnitCount) * 100)
+          : 100,
+      remainingBatches: estimatedBatches,
+      roundMaxBatches: EXPORT_TRANSLATION_ROUND_MAX_BATCHES,
+    };
     return {
       mode,
       videoCount: safeGroups.length,
@@ -748,108 +1153,562 @@ var YTD_NOTE_SOURCES = (() => {
       sourceBatches,
       sourceWorkByKey,
       unitCount,
+      totalUnitCount,
+      completedUnitCount,
       estimatedBatches,
       maxProviderCalls,
       overLimit: limitReasons.length > 0,
       limitReasons,
+      progress,
     };
   }
 
-  /** Applies validated stable-ID source translations to cloned source records. */
-  function applyExportSourceTranslations(plan, translationsById, sourcesByKey = {}) {
-    const translated =
-      translationsById instanceof Map
-        ? translationsById
-        : new Map(Object.entries(translationsById || {}));
-    const next = { ...sourcesByKey };
-    const missingUnitIds = [];
+  /** Selects a deterministic user-authorized round without mutating the plan. */
+  function takeExportTranslationRound(
+    plan,
+    {
+      maxBatches = EXPORT_TRANSLATION_ROUND_MAX_BATCHES,
+      maxProviderCalls = EXPORT_TRANSLATION_ROUND_MAX_PROVIDER_CALLS,
+    } = {},
+  ) {
+    const safeMaxBatches = Math.max(0, Math.floor(Number(maxBatches) || 0));
+    const safeMaxCalls = Math.max(
+      0,
+      Math.floor(Number(maxProviderCalls) || 0),
+    );
+    const queue = [
+      ...(plan?.noteBatches || []).map((batch) => ({
+        kind: "note",
+        batch,
+        calls: 5,
+      })),
+      ...(plan?.titleBatches || []).map((batch) => ({
+        kind: "title",
+        batch,
+        calls: 5,
+      })),
+      ...(plan?.sourceBatches || []).map((batch) => ({
+        kind: "source",
+        batch,
+        calls: 2,
+      })),
+    ];
+    const selected = [];
+    let providerCalls = 0;
+    for (const item of queue) {
+      if (selected.length >= safeMaxBatches) break;
+      if (providerCalls + item.calls > safeMaxCalls) break;
+      selected.push(item);
+      providerCalls += item.calls;
+    }
+    const noteBatches = selected
+      .filter((item) => item.kind === "note")
+      .map((item) => item.batch);
+    const titleBatches = selected
+      .filter((item) => item.kind === "title")
+      .map((item) => item.batch);
+    const sourceBatches = selected
+      .filter((item) => item.kind === "source")
+      .map((item) => item.batch);
+    const selectedSourceIds = new Set(
+      sourceBatches.flat().map((unit) => unit.id),
+    );
+    const sourceWorkByKey = {};
+    for (const [mediaKey, work] of Object.entries(
+      plan?.sourceWorkByKey || {},
+    )) {
+      const descriptionUnitIds = work.descriptionUnitIds.filter((id) =>
+        selectedSourceIds.has(id),
+      );
+      const transcriptUnits = work.transcriptUnits.filter((unit) =>
+        selectedSourceIds.has(unit.id),
+      );
+      if (descriptionUnitIds.length || transcriptUnits.length) {
+        sourceWorkByKey[mediaKey] = {
+          mediaKey,
+          descriptionUnitIds,
+          transcriptUnits,
+        };
+      }
+    }
+    const selectedUnitCount =
+      noteBatches.flat().length +
+      titleBatches.flat().length +
+      sourceBatches.flat().length;
+    const totalBatches = Number(plan?.estimatedBatches) || queue.length;
+    return {
+      ...(plan || {}),
+      noteBatches,
+      titleBatches,
+      sourceBatches,
+      sourceWorkByKey,
+      estimatedBatches: selected.length,
+      maxProviderCalls: providerCalls,
+      totalEstimatedBatches: totalBatches,
+      totalMaxProviderCalls: Number(plan?.maxProviderCalls) || 0,
+      round: {
+        batchCount: selected.length,
+        unitCount: selectedUnitCount,
+        maxProviderCalls: providerCalls,
+        remainingBatches: Math.max(0, totalBatches - selected.length),
+        remainingUnits: Math.max(
+          0,
+          (Number(plan?.unitCount) || 0) - selectedUnitCount,
+        ),
+        hasMore: selected.length < totalBatches,
+      },
+      progress: {
+        ...(plan?.progress || {}),
+        selectedBatches: selected.length,
+        selectedUnits: selectedUnitCount,
+        remainingAfterRound: Math.max(
+          0,
+          (Number(plan?.unitCount) || 0) - selectedUnitCount,
+        ),
+      },
+    };
+  }
 
-    for (const [mediaKey, work] of Object.entries(plan?.sourceWorkByKey || {})) {
-      const source = normalizeNoteSource(sourcesByKey[mediaKey]);
-      if (!source) continue;
+  function translationsMap(value) {
+    return value instanceof Map
+      ? value
+      : new Map(Object.entries(value || {}));
+  }
+
+  /**
+   * Resolves untrusted planned units back to the current source. The returned
+   * units are canonical copies built from stored source text, so callers never
+   * send caller-forged text to a paid provider.
+   */
+  function validateExportSourceTranslationUnits(
+    sourceInput,
+    { mediaKey, sourceRevision, units } = {},
+  ) {
+    const source = normalizeNoteSource(sourceInput);
+    const safeUnits = Array.isArray(units) ? units : [];
+    if (!source) return { valid: false, code: "SOURCE_MISSING", units: [] };
+    if (!mediaKey || source.mediaKey !== mediaKey) {
+      return { valid: false, code: "MEDIA_MISMATCH", units: [] };
+    }
+    if (!sourceRevision || source.sourceRevision !== sourceRevision) {
+      return { valid: false, code: "REVISION_MISMATCH", units: [] };
+    }
+    if (!safeUnits.length) {
+      return { valid: false, code: "EMPTY_BATCH", units: [] };
+    }
+    const canonical = [];
+    const seenUnitIds = new Set();
+    for (const unit of safeUnits) {
+      if (
+        unit?.mediaKey !== mediaKey ||
+        unit?.sourceRevision !== sourceRevision
+      ) {
+        return { valid: false, code: "UNIT_SCOPE_MISMATCH", units: [] };
+      }
+      if (unit.kind === "description") {
+        const chunk = descriptionSourceChunks(source.descriptionOriginal).find(
+          (candidate) =>
+            candidate.index === Number(unit.chunkIndex) &&
+            candidate.sourceHash === unit.sourceHash,
+        );
+        const expectedId = chunk
+          ? sourceUnitId(
+              mediaKey,
+              "description",
+              `${chunk.index}:${chunk.sourceHash}`,
+            )
+          : "";
+        if (
+          !chunk ||
+          unit.id !== expectedId ||
+          cleanText(unit.text, MAX_DESCRIPTION) !== chunk.text ||
+          seenUnitIds.has(expectedId)
+        ) {
+          return { valid: false, code: "INVALID_UNIT", units: [] };
+        }
+        seenUnitIds.add(expectedId);
+        canonical.push({
+          id: expectedId,
+          mediaKey,
+          sourceRevision,
+          kind: "description",
+          chunkIndex: chunk.index,
+          sourceHash: chunk.sourceHash,
+          text: chunk.text,
+          videoTitle: source.titleOriginal,
+        });
+        continue;
+      }
+      if (unit.kind === "transcript") {
+        const original = source.transcriptOriginal.find(
+          (entry) =>
+            entry.segmentId === unit.segmentId &&
+            entry.startMs === Number(unit.startMs) &&
+            entry.sourceHash === unit.sourceHash,
+        );
+        const expectedId = original
+          ? sourceUnitId(
+              mediaKey,
+              "transcript",
+              `${hashSourceText(original.segmentId)}:${original.startMs}:${original.sourceHash}`,
+            )
+          : "";
+        if (
+          !original ||
+          unit.id !== expectedId ||
+          cleanText(unit.text, MAX_ENTRY_TEXT) !== original.text ||
+          seenUnitIds.has(expectedId)
+        ) {
+          return { valid: false, code: "INVALID_UNIT", units: [] };
+        }
+        seenUnitIds.add(expectedId);
+        canonical.push({
+          id: expectedId,
+          mediaKey,
+          sourceRevision,
+          kind: "transcript",
+          segmentId: original.segmentId,
+          start: original.start,
+          startMs: original.startMs,
+          sourceHash: original.sourceHash,
+          text: original.text,
+          videoTitle: source.titleOriginal,
+        });
+        continue;
+      }
+      return { valid: false, code: "INVALID_UNIT", units: [] };
+    }
+    return { valid: true, code: "OK", units: canonical, source };
+  }
+
+  /**
+   * Applies one validated source batch. Callers can persist each changed source
+   * immediately, so a later cancellation/failure never loses completed work.
+   */
+  function applyExportSourceTranslationBatch(
+    units,
+    translationsById,
+    sourcesByKey = {},
+  ) {
+    const translated = translationsMap(translationsById);
+    const next = { ...sourcesByKey };
+    const safeUnits = Array.isArray(units) ? units : [];
+    const mediaKeys = new Set(safeUnits.map((unit) => unit?.mediaKey));
+    const revisions = new Set(safeUnits.map((unit) => unit?.sourceRevision));
+    if (mediaKeys.size !== 1 || revisions.size !== 1) {
+      return {
+        sourcesByKey: next,
+        missingUnitIds: safeUnits.map((unit) => unit?.id).filter(Boolean),
+        appliedUnitIds: [],
+        changedMediaKeys: [],
+        stale: false,
+        code: "UNIT_SCOPE_MISMATCH",
+      };
+    }
+    const mediaKey = [...mediaKeys][0];
+    const sourceRevision = [...revisions][0];
+    const validation = validateExportSourceTranslationUnits(next[mediaKey], {
+      mediaKey,
+      sourceRevision,
+      units: safeUnits,
+    });
+    if (!validation.valid) {
+      return {
+        sourcesByKey: next,
+        missingUnitIds: safeUnits.map((unit) => unit?.id).filter(Boolean),
+        appliedUnitIds: [],
+        changedMediaKeys: [],
+        stale: validation.code === "REVISION_MISMATCH",
+        code: validation.code,
+      };
+    }
+    const missingUnitIds = validation.units
+      .filter((unit) => !cleanText(String(translated.get(unit.id) || ""),
+        unit.kind === "description" ? MAX_DESCRIPTION : MAX_ENTRY_TEXT))
+      .map((unit) => unit.id);
+    // A provider response is one atomic source batch. Partial or malformed
+    // results are rejected in full; the caller may retry without guessing.
+    if (missingUnitIds.length) {
+      return {
+        sourcesByKey: next,
+        missingUnitIds,
+        appliedUnitIds: [],
+        changedMediaKeys: [],
+        stale: false,
+        code: "MISSING_TRANSLATIONS",
+      };
+    }
+    const appliedUnitIds = [];
+    const changedMediaKeys = new Set();
+    {
+      const source = validation.source;
+      const mediaUnits = validation.units;
       const updated = {
         ...source,
-        transcriptOriginal: source.transcriptOriginal.map((entry) => ({ ...entry })),
+        descriptionZhChunks: source.descriptionZhChunks.map((chunk) => ({
+          ...chunk,
+        })),
+        transcriptOriginal: source.transcriptOriginal.map((entry) => ({
+          ...entry,
+        })),
         transcriptZh: source.transcriptZh.map((entry) => ({ ...entry })),
       };
-
-      if (work.descriptionUnitIds.length) {
-        const chunks = work.descriptionUnitIds.map((id) =>
-          String(translated.get(id) || "").trim(),
+      for (const unit of mediaUnits) {
+        const value = cleanText(
+          String(translated.get(unit.id) || ""),
+          unit.kind === "description" ? MAX_DESCRIPTION : MAX_ENTRY_TEXT,
         );
-        chunks.forEach((value, index) => {
-          if (!value) missingUnitIds.push(work.descriptionUnitIds[index]);
-        });
-        if (chunks.every(Boolean)) updated.descriptionZh = chunks.join("\n\n");
+        if (unit.kind === "description") {
+          const chunks = descriptionSourceChunks(updated.descriptionOriginal);
+          const chunk = chunks.find(
+            (candidate) =>
+              candidate.index === Number(unit.chunkIndex) &&
+              candidate.sourceHash === unit.sourceHash,
+          );
+          if (!chunk) {
+            return {
+              sourcesByKey: next,
+              missingUnitIds: safeUnits.map((candidate) => candidate.id),
+              appliedUnitIds: [],
+              changedMediaKeys: [],
+              stale: true,
+              code: "REVISION_MISMATCH",
+            };
+          }
+          const already = updated.descriptionZhChunks.some(
+            (candidate) =>
+              candidate.index === chunk.index &&
+              candidate.sourceHash === chunk.sourceHash,
+          );
+          if (!already) {
+            updated.descriptionZhChunks.push({
+              index: chunk.index,
+              sourceHash: chunk.sourceHash,
+              textZh: value,
+              translationVersion: DEFAULT_TRANSLATION_VERSION,
+            });
+            changedMediaKeys.add(mediaKey);
+          }
+          appliedUnitIds.push(unit.id);
+          continue;
+        }
+        if (unit.kind === "transcript") {
+          const original = updated.transcriptOriginal.find(
+            (entry) =>
+              entry.segmentId === unit.segmentId &&
+              entry.startMs === Number(unit.startMs) &&
+              entry.sourceHash === unit.sourceHash,
+          );
+          if (!original) {
+            return {
+              sourcesByKey: next,
+              missingUnitIds: safeUnits.map((candidate) => candidate.id),
+              appliedUnitIds: [],
+              changedMediaKeys: [],
+              stale: true,
+              code: "REVISION_MISMATCH",
+            };
+          }
+          const identity = transcriptIdentity(original);
+          const already = updated.transcriptZh.some(
+            (entry) => transcriptIdentity(entry) === identity,
+          );
+          if (!already) {
+            updated.transcriptZh.push({
+              segmentId: original.segmentId,
+              start: original.start,
+              startMs: original.startMs,
+              sourceHash: original.sourceHash,
+              text: value,
+              translationVersion: DEFAULT_TRANSLATION_VERSION,
+            });
+            changedMediaKeys.add(mediaKey);
+          }
+          appliedUnitIds.push(unit.id);
+          continue;
+        }
       }
-
-      const zhByStart = new Map(
-        updated.transcriptZh.map((entry) => [Math.floor(entry.start), entry.text]),
-      );
-      work.transcriptUnits.forEach(({ id, start }) => {
-        const value = String(translated.get(id) || "").trim();
-        if (value) zhByStart.set(Math.floor(start), value);
-        else missingUnitIds.push(id);
-      });
-      updated.transcriptZh = updated.transcriptOriginal
-        .map((entry) => ({
-          start: Math.floor(entry.start),
-          text: zhByStart.get(Math.floor(entry.start)) || "",
-        }))
-        .filter((entry) => entry.text);
       next[mediaKey] = normalizeNoteSource(updated);
     }
-    return { sourcesByKey: next, missingUnitIds };
+    return {
+      sourcesByKey: next,
+      missingUnitIds,
+      appliedUnitIds,
+      changedMediaKeys: [...changedMediaKeys],
+      stale: false,
+      code: "OK",
+    };
+  }
+
+  /** Backward-compatible whole-plan helper, implemented batch-by-batch. */
+  function applyExportSourceTranslations(plan, translationsById, sourcesByKey = {}) {
+    let next = { ...sourcesByKey };
+    const missingUnitIds = [];
+    const appliedUnitIds = [];
+    const changed = new Set();
+    for (const batch of plan?.sourceBatches || []) {
+      const result = applyExportSourceTranslationBatch(
+        batch,
+        translationsById,
+        next,
+      );
+      next = result.sourcesByKey;
+      missingUnitIds.push(...result.missingUnitIds);
+      appliedUnitIds.push(...result.appliedUnitIds);
+      result.changedMediaKeys.forEach((key) => changed.add(key));
+    }
+    return {
+      sourcesByKey: next,
+      missingUnitIds,
+      appliedUnitIds,
+      changedMediaKeys: [...changed],
+    };
   }
 
   // ----------------------------------------------------------------
-  // Storage adapter (chrome.storage.local-shaped: async get/set)
+  // Storage adapter — all migration/write/remove work shares one queue
   // ----------------------------------------------------------------
 
-  async function readAllSources(storage) {
-    const stored = await storage.get(STORAGE_KEY);
-    const raw = stored && stored[STORAGE_KEY];
+  function enqueueStorageOperation(storage, operation) {
+    if (!storage || typeof storage !== "object") {
+      return Promise.reject(new TypeError("A storage adapter is required."));
+    }
+    const previous = storageQueues.get(storage) || Promise.resolve();
+    const current = previous.catch(() => {}).then(operation);
+    storageQueues.set(storage, current.catch(() => {}));
+    return current;
+  }
+
+  function normalizeLegacyStoredMap(raw) {
     const map = {};
-    if (raw && typeof raw === "object") {
+    if (raw && typeof raw === "object" && !Array.isArray(raw)) {
       for (const value of Object.values(raw)) {
+        assertNoFutureSourceSchema(value, "legacy note-source record");
         const source = normalizeNoteSource(value);
-        if (source) map[source.mediaKey] = source;
+        if (source) map[source.mediaKey] = boundSourceSize(source);
       }
     }
     return map;
   }
 
-  /**
-   * Drops the least-recently-updated sources until the library is within the
-   * source-count and total-byte caps. Sources whose mediaKey is in
-   * `protectedKeys` (still referenced by a note, or just written) are kept.
-   */
+  function decodeCurrentStoredMap(raw) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      throw noteSourceSchemaError(
+        "INVALID_NOTE_SOURCE_STORAGE",
+        "The schema-2 note-source store is malformed.",
+      );
+    }
+    // A future build may replace the current map with a versioned library
+    // envelope. Detect its root version before interpreting any values as
+    // records; an older build must never normalize and overwrite it.
+    assertNoFutureSourceSchema(raw, "note-source library");
+    const map = {};
+    for (const [storedKey, value] of Object.entries(raw)) {
+      if (!value || typeof value !== "object" || Array.isArray(value)) {
+        throw noteSourceSchemaError(
+          "INVALID_NOTE_SOURCE_STORAGE",
+          `Stored note source ${storedKey} is malformed.`,
+        );
+      }
+      assertNoFutureSourceSchema(value, `stored note source ${storedKey}`);
+      if (value.schemaVersion !== SCHEMA_VERSION) {
+        throw noteSourceSchemaError(
+          "INVALID_NOTE_SOURCE_STORAGE",
+          `Stored note source ${storedKey} is not schema ${SCHEMA_VERSION}.`,
+        );
+      }
+      const source = normalizeNoteSource(value);
+      if (!source || source.mediaKey !== storedKey) {
+        throw noteSourceSchemaError(
+          "INVALID_NOTE_SOURCE_STORAGE",
+          `Stored note source ${storedKey} has an invalid identity.`,
+        );
+      }
+      map[source.mediaKey] = boundSourceSize(source);
+    }
+    return map;
+  }
+
+  async function readStorageSnapshot(storage) {
+    const currentStored = await storage.get(STORAGE_KEY);
+    if (
+      currentStored &&
+      Object.prototype.hasOwnProperty.call(currentStored, STORAGE_KEY)
+    ) {
+      return {
+        map: decodeCurrentStoredMap(currentStored[STORAGE_KEY]),
+        needsMigration: false,
+      };
+    }
+    const legacyStored = await storage.get(LEGACY_STORAGE_KEY);
+    const hasLegacy =
+      legacyStored &&
+      Object.prototype.hasOwnProperty.call(legacyStored, LEGACY_STORAGE_KEY) &&
+      legacyStored[LEGACY_STORAGE_KEY] &&
+      typeof legacyStored[LEGACY_STORAGE_KEY] === "object";
+    return {
+      map: normalizeLegacyStoredMap(
+        hasLegacy ? legacyStored[LEGACY_STORAGE_KEY] : {},
+      ),
+      needsMigration: !!hasLegacy,
+    };
+  }
+
+  async function preflightNoteSourceStorage(storage) {
+    return enqueueStorageOperation(storage, async () => {
+      await readStorageSnapshot(storage);
+      return { valid: true };
+    });
+  }
+
   function evictToCap(map, protectedKeys = new Set()) {
     const entries = Object.values(map);
-    const overCount = entries.length - MAX_SOURCES;
-    const overBytes = byteLength(JSON.stringify(map)) - MAX_TOTAL_BYTES;
-    if (overCount <= 0 && overBytes <= 0) return map;
-
+    if (
+      entries.length <= MAX_SOURCES &&
+      byteLength(JSON.stringify(map)) <= MAX_TOTAL_BYTES
+    ) {
+      return map;
+    }
     const evictable = entries
       .filter((source) => !protectedKeys.has(source.mediaKey))
       .sort((left, right) => left.updatedAt - right.updatedAt);
-
     const next = { ...map };
-    let remainingCount = entries.length;
     for (const source of evictable) {
-      const withinCount = remainingCount <= MAX_SOURCES;
-      const withinBytes = byteLength(JSON.stringify(next)) <= MAX_TOTAL_BYTES;
-      if (withinCount && withinBytes) break;
+      if (
+        Object.keys(next).length <= MAX_SOURCES &&
+        byteLength(JSON.stringify(next)) <= MAX_TOTAL_BYTES
+      ) {
+        break;
+      }
       delete next[source.mediaKey];
-      remainingCount -= 1;
     }
     return next;
   }
 
-  /**
-   * Upserts a source (idempotent merge) and persists the whole map. Returns
-   * { changed }. `protectedKeys` keeps referenced sources from being evicted.
-   */
+  async function readAllSources(storage) {
+    return enqueueStorageOperation(storage, async () => {
+      const snapshot = await readStorageSnapshot(storage);
+      const bounded = evictToCap(snapshot.map);
+      if (snapshot.needsMigration) {
+        await storage.set({ [STORAGE_KEY]: bounded });
+      }
+      return bounded;
+    });
+  }
+
+  async function readNoteSource(storage, mediaKey) {
+    const key = normalizeMediaKey(mediaKey);
+    if (!key) return null;
+    return enqueueStorageOperation(storage, async () => {
+      const snapshot = await readStorageSnapshot(storage);
+      const bounded = evictToCap(snapshot.map);
+      if (snapshot.needsMigration) {
+        await storage.set({ [STORAGE_KEY]: bounded });
+      }
+      return bounded[key] || null;
+    });
+  }
+
   async function writeNoteSource(
     storage,
     incoming,
@@ -857,21 +1716,28 @@ var YTD_NOTE_SOURCES = (() => {
   ) {
     const candidate = normalizeNoteSource(incoming);
     if (!candidate) return { changed: false };
-    const map = await readAllSources(storage);
-    const { source, changed } = mergeNoteSource(
-      map[candidate.mediaKey],
-      candidate,
-      { now },
-    );
-    if (!source) return { changed: false };
-    if (!changed && map[candidate.mediaKey]) return { changed: false };
-    map[candidate.mediaKey] = source;
-    const keep =
-      protectedKeys instanceof Set ? new Set(protectedKeys) : new Set();
-    keep.add(candidate.mediaKey);
-    const bounded = evictToCap(map, keep);
-    await storage.set({ [STORAGE_KEY]: bounded });
-    return { changed: true };
+    return enqueueStorageOperation(storage, async () => {
+      const snapshot = await readStorageSnapshot(storage);
+      const map = snapshot.map;
+      const { source, changed } = mergeNoteSource(
+        map[candidate.mediaKey],
+        candidate,
+        { now },
+      );
+      if (!source) return { changed: false };
+      if (!changed && map[candidate.mediaKey]) {
+        if (snapshot.needsMigration) {
+          await storage.set({ [STORAGE_KEY]: evictToCap(map) });
+        }
+        return { changed: false };
+      }
+      map[candidate.mediaKey] = source;
+      const keep =
+        protectedKeys instanceof Set ? new Set(protectedKeys) : new Set();
+      keep.add(candidate.mediaKey);
+      await storage.set({ [STORAGE_KEY]: evictToCap(map, keep) });
+      return { changed: true };
+    });
   }
 
   async function removeNoteSources(storage, mediaKeys) {
@@ -881,20 +1747,181 @@ var YTD_NOTE_SOURCES = (() => {
         .filter(Boolean),
     );
     if (!keys.size) return { changed: false };
-    const map = await readAllSources(storage);
-    let changed = false;
-    for (const key of keys) {
-      if (map[key]) {
-        delete map[key];
-        changed = true;
+    return enqueueStorageOperation(storage, async () => {
+      const snapshot = await readStorageSnapshot(storage);
+      const map = snapshot.map;
+      let changed = false;
+      for (const key of keys) {
+        if (map[key]) {
+          delete map[key];
+          changed = true;
+        }
+      }
+      if (changed || snapshot.needsMigration) {
+        await storage.set({ [STORAGE_KEY]: map });
+      }
+      return { changed };
+    });
+  }
+
+  function assertClearableStoredSchema(raw, storageKey) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return;
+    const versions = [];
+    if (Number.isSafeInteger(raw.schemaVersion)) {
+      versions.push(raw.schemaVersion);
+    }
+    for (const value of Object.values(raw)) {
+      if (value && typeof value === "object" && !Array.isArray(value)) {
+        if (Number.isSafeInteger(value.schemaVersion)) {
+          versions.push(value.schemaVersion);
+        }
       }
     }
-    if (changed) await storage.set({ [STORAGE_KEY]: map });
-    return { changed };
+    if (versions.some((version) => version > SCHEMA_VERSION)) {
+      const error = new Error(
+        `Stored note sources at ${storageKey} use a future schema.`,
+      );
+      error.code = "UNSUPPORTED_NOTE_SOURCE_SCHEMA";
+      throw error;
+    }
+  }
+
+  /**
+   * Clears both schema-2 and legacy source stores in the mutation queue. A
+   * future schema is never deleted by an older build. Background callers use
+   * this same queue as source-batch commits, so a queued commit cannot restore
+   * the whole-map store after clear has completed.
+   */
+  async function clearNoteSources(storage) {
+    return enqueueStorageOperation(storage, async () => {
+      const currentStored = await storage.get(STORAGE_KEY);
+      const legacyStored = await storage.get(LEGACY_STORAGE_KEY);
+      const hasCurrent =
+        !!currentStored &&
+        Object.prototype.hasOwnProperty.call(currentStored, STORAGE_KEY);
+      const hasLegacy =
+        !!legacyStored &&
+        Object.prototype.hasOwnProperty.call(legacyStored, LEGACY_STORAGE_KEY);
+      if (hasCurrent) decodeCurrentStoredMap(currentStored[STORAGE_KEY]);
+      assertClearableStoredSchema(
+        hasLegacy ? legacyStored[LEGACY_STORAGE_KEY] : undefined,
+        LEGACY_STORAGE_KEY,
+      );
+      if (!hasCurrent && !hasLegacy) return { changed: false };
+      if (typeof storage.remove === "function") {
+        await storage.remove([STORAGE_KEY, LEGACY_STORAGE_KEY]);
+      } else {
+        await storage.set({
+          [STORAGE_KEY]: {},
+          [LEGACY_STORAGE_KEY]: {},
+        });
+      }
+      return { changed: true };
+    });
+  }
+
+  /**
+   * Atomically re-reads, revision-checks, applies and persists one source batch.
+   * `sourceRevision` is content-derived from original material; adding Chinese
+   * translations does not change it, so subsequent batches from the same
+   * frozen plan remain valid. Any original-source change creates a new token.
+   */
+  async function commitExportSourceTranslationBatch(
+    storage,
+    {
+      mediaKey,
+      expectedRevision,
+      sourceRevision,
+      units,
+      translationsById,
+    } = {},
+    { now = Date.now(), protectedKeys } = {},
+  ) {
+    const key = normalizeMediaKey(mediaKey);
+    const revision = String(expectedRevision || sourceRevision || "");
+    const safeUnits = Array.isArray(units) ? units : [];
+    if (!key || !revision || !safeUnits.length) {
+      return {
+        changed: false,
+        stale: false,
+        code: "INVALID_BATCH",
+        sourceRevision: "",
+        appliedUnitIds: [],
+        missingUnitIds: safeUnits.map((unit) => unit?.id).filter(Boolean),
+        source: null,
+      };
+    }
+    return enqueueStorageOperation(storage, async () => {
+      const snapshot = await readStorageSnapshot(storage);
+      const current = snapshot.map[key] || null;
+      if (!current) {
+        if (snapshot.needsMigration) {
+          await storage.set({ [STORAGE_KEY]: evictToCap(snapshot.map) });
+        }
+        return {
+          changed: false,
+          stale: true,
+          code: "SOURCE_MISSING",
+          sourceRevision: "",
+          appliedUnitIds: [],
+          missingUnitIds: safeUnits.map((unit) => unit?.id).filter(Boolean),
+          source: null,
+        };
+      }
+      if (current.sourceRevision !== revision) {
+        return {
+          changed: false,
+          stale: true,
+          code: "REVISION_MISMATCH",
+          sourceRevision: current.sourceRevision,
+          appliedUnitIds: [],
+          missingUnitIds: safeUnits.map((unit) => unit?.id).filter(Boolean),
+          source: current,
+        };
+      }
+      const result = applyExportSourceTranslationBatch(
+        safeUnits,
+        translationsById,
+        { [key]: current },
+      );
+      if (result.code !== "OK" || result.missingUnitIds.length) {
+        return {
+          changed: false,
+          stale: !!result.stale,
+          code: result.code,
+          sourceRevision: current.sourceRevision,
+          appliedUnitIds: [],
+          missingUnitIds: result.missingUnitIds,
+          source: current,
+        };
+      }
+      const applied = result.sourcesByKey[key];
+      const changed = result.changedMediaKeys.includes(key);
+      if (changed) {
+        const map = snapshot.map;
+        map[key] = { ...applied, updatedAt: now };
+        const keep =
+          protectedKeys instanceof Set ? new Set(protectedKeys) : new Set();
+        keep.add(key);
+        await storage.set({ [STORAGE_KEY]: evictToCap(map, keep) });
+      } else if (snapshot.needsMigration) {
+        await storage.set({ [STORAGE_KEY]: evictToCap(snapshot.map) });
+      }
+      return {
+        changed,
+        stale: false,
+        code: "OK",
+        sourceRevision: applied.sourceRevision,
+        appliedUnitIds: result.appliedUnitIds,
+        missingUnitIds: [],
+        source: changed ? { ...applied, updatedAt: now } : applied,
+      };
+    });
   }
 
   return {
     STORAGE_KEY,
+    LEGACY_STORAGE_KEY,
     SCHEMA_VERSION,
     MAX_SOURCES,
     MAX_SOURCE_BYTES,
@@ -904,7 +1931,10 @@ var YTD_NOTE_SOURCES = (() => {
     EXPORT_TRANSLATION_MAX_UNITS,
     EXPORT_TRANSLATION_MAX_BATCHES,
     EXPORT_TRANSLATION_MAX_PROVIDER_CALLS,
+    EXPORT_TRANSLATION_ROUND_MAX_BATCHES,
+    EXPORT_TRANSLATION_ROUND_MAX_PROVIDER_CALLS,
     isChineseLanguageTag,
+    hashSourceText,
     normalizeTranscript,
     normalizeNoteSource,
     countMissingTranscriptTranslations,
@@ -915,10 +1945,18 @@ var YTD_NOTE_SOURCES = (() => {
     buildExportPrecheck,
     splitTextForTranslation,
     buildExportTranslationPlan,
+    takeExportTranslationRound,
+    validateExportSourceTranslationUnits,
+    applyExportSourceTranslationBatch,
+    applyExportSourceBatchTranslations: applyExportSourceTranslationBatch,
     applyExportSourceTranslations,
     readAllSources,
+    readNoteSource,
+    preflightNoteSourceStorage,
     writeNoteSource,
     removeNoteSources,
+    clearNoteSources,
+    commitExportSourceTranslationBatch,
   };
 })();
 

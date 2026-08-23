@@ -142,7 +142,9 @@ Treat every imported JSON file as untrusted input, even when its filename looks 
 
 Backups exported before the rename, including files named `youtube-digest-notes-YYYY-MM-DD.json`, remain importable. DigestDock validates the JSON content rather than trusting the filename.
 
-JSON is the recovery backup format for DigestDock notes and remains separate from reading exports. The Notes tab also exports the current video, all notes, or one source group as UTF-8 Markdown. Each video section includes title, channel, URL, description, complete transcript, and timecode-sorted notes. The Transcript tab downloads UTF-8 TXT in the current original, Chinese, or bilingual mode. When Chinese material is incomplete, DigestDock lists the gaps and never substitutes original text as if it were Chinese. Only an explicit **Generate Chinese and export** click may use the selected AI provider, with a visible task-batch estimate, conservative maximum model-call count, and an option to cancel later batches.
+JSON is the recovery backup format for DigestDock notes and remains separate from reading exports. The Notes tab also exports the current video, all notes, or one source group as UTF-8 Markdown. Each video section includes title, channel, URL, description, complete transcript, and timecode-sorted notes. The Transcript tab downloads UTF-8 TXT in the current original, Chinese, or bilingual mode.
+
+Original-language reading exports use local material only and make no AI or Supadata request. When Chinese material is incomplete, DigestDock lists the missing titles, description chunks, transcript segments, and notes and never substitutes original text as if it were Chinese. Only an explicit **Generate Chinese and export** or **Continue** click may use the selected AI provider. A long export can span multiple user-started rounds: each click starts at most 20 task batches, every valid completed batch is saved locally immediately, and the next round never starts automatically. Closing the panel, cancelling later batches, or returning another day keeps completed translations available, so unchanged material is not translated again. A currently in-flight response may still enter the reusable local cache after cancellation if it still matches the frozen video and source version, but it cannot start another batch or trigger an automatic download. This export-completion path never calls Supadata and never switches AI providers silently.
 
 ## What works today
 
@@ -159,6 +161,7 @@ JSON is the recovery backup format for DigestDock notes and remains separate fro
 - For Bilibili Chinese subtitles, the overview and polished note are generated directly in Chinese with one AI request each; no English round-trip is made.
 - Local notes, versioned JSON note backup and restore, and a local cache for recent transcript and digest results.
 - All notes grouped by source video and ordered within each source strictly by timecode, plus Markdown note exports and language-aware TXT transcript downloads.
+- Resumable Chinese and bilingual reading exports for long videos. Verified per-video title, description-chunk, transcript-segment, and note translations are reused from local storage; each explicit round runs at most 20 batches and persists every valid batch before continuing.
 - A preset AI provider you select in Settings powers all AI features: DeepSeek V4 Flash (default), Zhipu GLM-4.7-Flash, Alibaba Bailian Qwen Flash, SiliconFlow Qwen3-8B, or Fireworks DeepSeek V4 Flash. Each provider's endpoint and model are fixed, keys are stored per provider, and there is no custom-endpoint field.
 - The provider picker also shows the official Tencent Hunyuan Translation icon as unavailable. Tencent documents `hunyuan-translation-lite`, but does not document that model on the extension's current single-key OpenAI-compatible route, so DigestDock does not guess the endpoint, model routing, or authentication.
 
@@ -194,7 +197,7 @@ A measured 20-minute English talk contained **2,935 spoken English words** and 1
 
 If all input is billed as cache miss, input costs about $0.0046 and output costs about $0.0010 to $0.0013, for a total of about $0.0056 to $0.0059. When much of the repeated system prompt hits DeepSeek's automatic best-effort cache, a realistic lower end is about $0.002 to $0.003. A practical estimate for fully translating this talk is therefore **$0.002 to $0.006 USD, about ¥0.02 to ¥0.04**.
 
-Interactive translation is lazy and progressive. Cached segments are reused, and only rows you request by scrolling into them incur calls. The separate **Generate Chinese and export** action is the only path that may complete missing off-screen rows in bounded batches after an explicit confirmation. Retries, provider behavior, and pricing changes can increase the final cost.
+Interactive translation is lazy and progressive. Cached segments are reused, and only rows you request by scrolling into them incur calls. The separate **Generate Chinese and export** action is the only path that may complete missing off-screen rows after an explicit confirmation. Long exports are divided into user-started rounds of at most 20 task batches; valid batches are saved immediately and later rounds plan only the remaining source-version-matched units. No round continues automatically. Retries, provider behavior, and pricing changes can increase the final cost.
 
 ## Privacy and data flow
 
@@ -204,7 +207,9 @@ DigestDock makes network requests directly from the extension:
 2. On a new or expired YouTube cache entry, the side panel asks for one-time authorization. Only after you click the Supadata action may DigestDock send the canonical watch URL and your key to Supadata for a `mode=native` transcript request. Clear login, age, membership, region, and unavailable states stop before that request.
 3. For Bilibili, it requests the current video's metadata and existing subtitle track directly from Bilibili while reusing the browser's current session; it does not read or store cookie values.
 4. It sends the transcript and relevant video metadata to the AI provider you selected in Settings when you request AI features. Focused features send only the content they need, such as selected text with context or small transcript batches for translation.
-5. It stores keys, settings, notes, and recent cache entries locally in Chrome. Temporary signed Bilibili subtitle URLs are used only for the immediate request and are not stored or logged.
+5. It stores keys, settings, notes, recent caches, reusable per-video export translations, and lightweight export-progress metadata locally in Chrome. Export jobs do not store API keys, transcript or note bodies, or translated text; those texts remain in their existing note or per-video source records. Temporary signed Bilibili subtitle URLs are used only for the immediate request and are not stored or logged.
+
+Deleting all notes or resetting extension data also clears the per-video reading-export source library and pending export jobs. It does not delete Markdown, TXT, or JSON files that Chrome already downloaded.
 
 There is no DigestDock account system, advertising, analytics, or telemetry. YouTube, Bilibili, optional Supadata, and your selected AI provider still process requests under their own terms and privacy policies. See [PRIVACY.md](PRIVACY.md) for details.
 

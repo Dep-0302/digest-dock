@@ -12,6 +12,15 @@ function loadSidepanelRuntime({
   sendMessage = () => Promise.resolve({}),
   setTimeoutImpl = () => 0,
   clearTimeoutImpl = () => {},
+  storageLocal = {
+    get: async () => ({}),
+    set: async () => {},
+    remove: async () => {},
+    clear: async () => {},
+  },
+  documentImpl,
+  noteSourcesImpl = require("../note-sources.js"),
+  exportJobsImpl = require("../export-jobs.js"),
 } = {}) {
   const listeners = { addListener() {} };
   const tabUpdatedListeners = [];
@@ -28,7 +37,7 @@ function loadSidepanelRuntime({
     IntersectionObserver: class {},
     CSS: { escape: (value) => value },
     window: { getSelection: () => null, close() {} },
-    document: {
+    document: documentImpl || {
       addEventListener() {},
       querySelectorAll: () => [],
       querySelector: () => null,
@@ -50,6 +59,7 @@ function loadSidepanelRuntime({
       },
     },
     chrome: {
+      storage: { local: storageLocal },
       runtime: { onMessage: listeners, sendMessage },
       windows: { getCurrent: () => Promise.resolve({ id: 1 }) },
       tabs: {
@@ -68,7 +78,8 @@ function loadSidepanelRuntime({
     YTD_SETTINGS: {},
     BILIBILI_ADAPTER: bilibiliAdapter,
     YTD_NOTE_EXPORT: require("../note-export.js"),
-    YTD_NOTE_SOURCES: require("../note-sources.js"),
+    YTD_NOTE_SOURCES: noteSourcesImpl,
+    YTD_EXPORT_JOBS: exportJobsImpl,
   };
   sandbox.globalThis = sandbox;
   const context = vm.createContext(sandbox);
@@ -98,8 +109,12 @@ function loadBackgroundHelpers({
   clearTimeoutImpl = () => {},
   storageGetImpl,
   storageSetImpl = async () => {},
+  storageRemoveImpl = async () => {},
+  storageClearImpl = async () => {},
   tabsImpl = {},
   bilibiliAdapterImpl = bilibiliAdapter,
+  noteSourcesImpl = require("../note-sources.js"),
+  exportJobsImpl = require("../export-jobs.js"),
 } = {}) {
   const listeners = { addListener() {} };
   const runtimeMessageListeners = [];
@@ -121,6 +136,8 @@ function loadBackgroundHelpers({
             storageGetImpl ||
             (async () => ({ ytd_settings: settings })),
           set: storageSetImpl,
+          remove: storageRemoveImpl,
+          clear: storageClearImpl,
         },
       },
       action: { onClicked: listeners },
@@ -150,6 +167,8 @@ function loadBackgroundHelpers({
     YTD_AI_PROVIDERS: require("../ai-providers.js"),
     YTD_SETTINGS: require("../settings.js"),
     YTD_NOTES_BACKUP: require("../notes-backup.js"),
+    YTD_NOTE_SOURCES: noteSourcesImpl,
+    YTD_EXPORT_JOBS: exportJobsImpl,
     BILIBILI_ADAPTER: bilibiliAdapterImpl,
   };
   sandbox.globalThis = sandbox;
@@ -215,6 +234,27 @@ function streamingResponse(chunks, { ok = true, status = 200 } = {}) {
 const encode = (value) => new TextEncoder().encode(value);
 const nextTurn = () => new Promise((resolve) => setImmediate(resolve));
 
+function createAsyncGate() {
+  let enteredResolve;
+  let releaseResolve;
+  const entered = new Promise((resolve) => {
+    enteredResolve = resolve;
+  });
+  const blocked = new Promise((resolve) => {
+    releaseResolve = resolve;
+  });
+  return {
+    entered,
+    enter() {
+      enteredResolve();
+      return blocked;
+    },
+    release() {
+      releaseResolve();
+    },
+  };
+}
+
 test("export precheck names every translation gap and forbids original-text substitution", () => {
   const helpers = loadSidepanelHelpers();
   const summary = helpers.describeExportPrecheck({
@@ -238,56 +278,102 @@ test("export precheck names every translation gap and forbids original-text subs
   assert.doesNotMatch(summary, /缺失部分将以原文呈现/);
 });
 
-test("cancelling an export translation prevents every later request batch", async () => {
-  const calls = [];
-  let releaseFirstBatch;
+test("one confirmed export round starts at most 20 batches and never auto-downloads", async () => {
+  const controller = createSidepanelJobController();
+  const documentImpl = createInteractiveDocument();
+  const fixture = makeNoteRoundFixture(21);
   const runtime = loadSidepanelRuntime({
-    sendMessage(message) {
-      calls.push(message.action);
-      if (message.action === "checkConfig") {
-        return Promise.resolve({
-          hasAiKey: true,
-          provider: { displayName: "Test", capabilities: ["translate"] },
-        });
-      }
-      if (message.action === "translateNotes") {
-        return new Promise((resolve) => {
-          releaseFirstBatch = resolve;
-        });
-      }
-      return Promise.resolve({ success: true });
-    },
+    sendMessage: controller.sendMessage,
+    documentImpl,
+    exportJobsImpl: createExportJobsBridge(),
   });
-  const plan = {
-    overLimit: false,
-    estimatedBatches: 2,
-    noteBatches: [
-      [{ id: "n1", text: "one" }],
-      [{ id: "n2", text: "two" }],
-    ],
-    titleBatches: [],
-    sourceBatches: [],
-    sourceWorkByKey: {},
+  let downloadCount = 0;
+  runtime.sandbox.__downloadProbe = () => {
+    downloadCount += 1;
   };
-  const task = runtime.helpers.runConfirmedExportTranslation({
-    plan,
+  runtime.evaluate("downloadTextFile = () => globalThis.__downloadProbe() ");
+
+  const outcome = await runtime.helpers.runConfirmedExportTranslation({
+    plan: fixture.plan,
     sourcesByKey: {},
-    panelId: "missing",
+    groups: fixture.groups,
+    scope: "notes-current",
+    mode: "bilingual",
+    format: "markdown",
+    panelId: "notesExportPrecheck",
     setStatus() {},
   });
+
+  assert.equal(outcome.complete, false);
+  assert.equal(outcome.remainingCount, 1);
+  assert.equal(
+    controller.actions.filter(
+      (action) => action === "translateExportNotesBatch",
+    ).length,
+    20,
+  );
+  assert.equal(controller.translatedNoteIds.length, 20);
+  assert.equal(controller.translatedNoteIds.includes("round-note-21"), false);
+  assert.equal(controller.job().state, "paused");
+  assert.equal(downloadCount, 0, "an incomplete round never creates a file");
+});
+
+test("the real progress cancel button cancels the durable job and starts no later batch", async () => {
+  const controller = createSidepanelJobController({
+    holdFirstTranslation: true,
+  });
+  const documentImpl = createInteractiveDocument();
+  const fixture = makeNoteRoundFixture(2);
+  const runtime = loadSidepanelRuntime({
+    sendMessage: controller.sendMessage,
+    documentImpl,
+    exportJobsImpl: createExportJobsBridge(),
+  });
+  const task = runtime.helpers.runConfirmedExportTranslation({
+    plan: fixture.plan,
+    sourcesByKey: {},
+    groups: fixture.groups,
+    scope: "notes-current",
+    mode: "bilingual",
+    format: "markdown",
+    panelId: "notesExportPrecheck",
+    setStatus() {},
+  });
+  for (
+    let attempt = 0;
+    attempt < 20 && !controller.hasPendingTranslation();
+    attempt += 1
+  ) {
+    await nextTurn();
+  }
+  assert.equal(controller.hasPendingTranslation(), true);
+  const cancel = documentImpl.findButton(
+    "notesExportPrecheck",
+    "取消后续批次",
+  );
+  assert.ok(cancel, "the rendered progress panel exposes a real cancel button");
+  cancel.click();
   await nextTurn();
-  assert.deepEqual(calls, ["checkConfig", "translateNotes"]);
-  runtime.evaluate("exportTranslationGeneration += 1");
-  releaseFirstBatch({ success: true, translations: [] });
+  assert.equal(
+    controller.actions.filter(
+      (action) => action === "cancelExportTranslationJob",
+    ).length,
+    1,
+  );
+
+  controller.releaseFirstTranslation();
   await assert.rejects(task, (error) => {
     assert.equal(error.code, "EXPORT_TRANSLATION_CANCELLED");
     return true;
   });
-  assert.deepEqual(
-    calls,
-    ["checkConfig", "translateNotes"],
-    "the second batch is never started",
+  assert.equal(
+    controller.actions.filter(
+      (action) => action === "translateExportNotesBatch",
+    ).length,
+    1,
+    "cancellation never starts the second batch",
   );
+  assert.equal(controller.job().state, "cancelled");
 });
 
 function dispatchBackgroundMessage(background, message, sender = {}) {
@@ -302,6 +388,1507 @@ function dispatchBackgroundMessage(background, message, sender = {}) {
     }
   });
 }
+
+function createMemoryStorage(initial = {}) {
+  const clone = (value) => JSON.parse(JSON.stringify(value));
+  const state = clone(initial);
+  return {
+    async get(keys) {
+      if (keys === null || keys === undefined) return clone(state);
+      if (typeof keys === "string") {
+        return Object.hasOwn(state, keys) ? { [keys]: clone(state[keys]) } : {};
+      }
+      if (Array.isArray(keys)) {
+        return Object.fromEntries(
+          keys
+            .filter((key) => Object.hasOwn(state, key))
+            .map((key) => [key, clone(state[key])]),
+        );
+      }
+      if (keys && typeof keys === "object") {
+        return Object.fromEntries(
+          Object.entries(keys).map(([key, fallback]) => [
+            key,
+            Object.hasOwn(state, key) ? clone(state[key]) : clone(fallback),
+          ]),
+        );
+      }
+      return {};
+    },
+    async set(items) {
+      Object.entries(items || {}).forEach(([key, value]) => {
+        state[key] = clone(value);
+      });
+    },
+    async remove(keys) {
+      (Array.isArray(keys) ? keys : [keys]).forEach((key) => delete state[key]);
+    },
+    async clear() {
+      Object.keys(state).forEach((key) => delete state[key]);
+    },
+    snapshot() {
+      return clone(state);
+    },
+  };
+}
+
+const clonePlain = (value) => JSON.parse(JSON.stringify(value));
+
+function createNoteSourcesBridge(
+  noteSources = require("../note-sources.js"),
+) {
+  return {
+    ...noteSources,
+    normalizeNoteSource: (value) =>
+      noteSources.normalizeNoteSource(clonePlain(value)),
+    readNoteSource: (adapter, key) => noteSources.readNoteSource(adapter, key),
+    writeNoteSource: (adapter, value, options) =>
+      noteSources.writeNoteSource(adapter, clonePlain(value), {
+        ...clonePlain(options || {}),
+        protectedKeys: new Set(options?.protectedKeys || []),
+      }),
+    preflightNoteSourceStorage: (adapter) =>
+      noteSources.preflightNoteSourceStorage(adapter),
+    clearNoteSources: (adapter) => noteSources.clearNoteSources(adapter),
+    validateExportSourceTranslationUnits: (storedSource, request) =>
+      noteSources.validateExportSourceTranslationUnits(
+        clonePlain(storedSource),
+        clonePlain(request),
+      ),
+    commitExportSourceTranslationBatch: (adapter, payload, options) =>
+      noteSources.commitExportSourceTranslationBatch(
+        adapter,
+        {
+          ...clonePlain(payload),
+          translationsById: Object.fromEntries(payload.translationsById || []),
+        },
+        clonePlain({
+          ...options,
+          protectedKeys: [...(options?.protectedKeys || [])],
+        }),
+      ),
+  };
+}
+
+function createExportJobsBridge(
+  exportJobs = require("../export-jobs.js"),
+) {
+  return {
+    ...exportJobs,
+    normalizeExportJob: (value) =>
+      exportJobs.normalizeExportJob(clonePlain(value)),
+    createExportJob: (value) =>
+      exportJobs.createExportJob(clonePlain(value)),
+    readExportJob: (adapter, id) => exportJobs.readExportJob(adapter, id),
+    upsertExportJob: (adapter, value, options) =>
+      exportJobs.upsertExportJob(
+        adapter,
+        clonePlain(value),
+        clonePlain(options || {}),
+      ),
+    preflightExportJobs: (adapter) => exportJobs.preflightExportJobs(adapter),
+    clearExportJobs: (adapter) => exportJobs.clearExportJobs(adapter),
+    checkpointExportJob: (adapter, id, patch, options) =>
+      exportJobs.checkpointExportJob(
+        adapter,
+        id,
+        clonePlain(patch),
+        clonePlain(options || {}),
+      ),
+  };
+}
+
+function createInteractiveDocument() {
+  const elements = new Map();
+  const createElement = (tagName = "div") => {
+    let text = "";
+    const listeners = {};
+    return {
+      tagName: String(tagName).toUpperCase(),
+      children: [],
+      hidden: false,
+      disabled: false,
+      className: "",
+      style: {},
+      classList: { toggle() {}, contains() { return false; } },
+      setAttribute() {},
+      addEventListener(type, listener) {
+        listeners[type] = listener;
+      },
+      appendChild(child) {
+        this.children.push(child);
+        return child;
+      },
+      append(...children) {
+        this.children.push(...children);
+      },
+      click() {
+        if (this.disabled) return undefined;
+        return listeners.click?.();
+      },
+      set textContent(value) {
+        text = String(value);
+      },
+      get textContent() {
+        return text;
+      },
+      set innerHTML(value) {
+        text = String(value);
+        this.children = [];
+      },
+      get innerHTML() {
+        return text;
+      },
+    };
+  };
+  const element = (id) => {
+    if (!elements.has(id)) {
+      const node = createElement("div");
+      node.id = id;
+      elements.set(id, node);
+    }
+    return elements.get(id);
+  };
+  return {
+    addEventListener() {},
+    querySelectorAll: () => [],
+    querySelector: () => null,
+    getElementById: element,
+    createElement,
+    element,
+    findButton(id, text) {
+      const queue = [...element(id).children];
+      while (queue.length) {
+        const node = queue.shift();
+        if (node.tagName === "BUTTON" && node.textContent === text) return node;
+        queue.push(...(node.children || []));
+      }
+      return null;
+    },
+  };
+}
+
+function createSidepanelJobController({ holdFirstTranslation = false } = {}) {
+  const actions = [];
+  const translatedNoteIds = [];
+  let job = null;
+  let releaseFirstTranslation;
+  const deepClone = (value) => (value === null ? null : clonePlain(value));
+  const sendMessage = async (message) => {
+    actions.push(message.action);
+    if (message.action === "checkConfig") {
+      return {
+        hasAiKey: true,
+        provider: {
+          id: "deepseek",
+          displayName: "DeepSeek",
+          modelId: "deepseek-v4-flash",
+          routeKey: "deepseek:deepseek-v4-flash",
+          capabilities: ["translate"],
+        },
+      };
+    }
+    if (message.action === "getExportJob") {
+      return job
+        ? { success: true, code: "OK", job: deepClone(job) }
+        : { success: false, code: "EXPORT_JOB_NOT_FOUND" };
+    }
+    if (message.action === "createOrResumeExportJob") {
+      if (!job) job = deepClone(message.job);
+      return { success: true, code: "OK", job: deepClone(job) };
+    }
+    if (message.action === "checkpointExportJob") {
+      assert.ok(job, "checkpoint requires a persisted job");
+      const patch = deepClone(message.patch || {});
+      if (patch.completedUnitKeys) {
+        const completed = new Set([
+          ...(job.completedUnitKeys || []),
+          ...patch.completedUnitKeys,
+        ]);
+        job.completedUnitKeys = job.orderedUnitKeys.filter((key) =>
+          completed.has(key),
+        );
+      }
+      for (const field of [
+        "state",
+        "currentBatch",
+        "cursor",
+        "exportClaim",
+        "lastError",
+      ]) {
+        if (Object.hasOwn(patch, field)) job[field] = patch[field];
+      }
+      return { success: true, code: "OK", job: deepClone(job) };
+    }
+    if (message.action === "cancelExportTranslationJob") {
+      if (job) {
+        job.state = "cancelled";
+        job.currentBatch = null;
+        job.exportClaim = null;
+      }
+      return {
+        success: true,
+        code: "EXPORT_JOB_CANCELLED",
+        jobState: "cancelled",
+      };
+    }
+    if (message.action === "translateExportNotesBatch") {
+      if (holdFirstTranslation && !releaseFirstTranslation) {
+        await new Promise((resolve) => {
+          releaseFirstTranslation = resolve;
+        });
+      }
+      const translations = (message.notes || []).map((note) => {
+        translatedNoteIds.push(String(note.id));
+        return { id: note.id, textZh: `中文 ${note.id}` };
+      });
+      const titles = (message.titles || []).map((title) => ({
+        mediaKey: title.mediaKey,
+        titleZh: `中文 ${title.mediaKey}`,
+      }));
+      return { success: true, translations, titles };
+    }
+    throw new Error(`Unexpected sidepanel action: ${message.action}`);
+  };
+  return {
+    sendMessage,
+    actions,
+    translatedNoteIds,
+    job: () => deepClone(job),
+    hasPendingTranslation: () => typeof releaseFirstTranslation === "function",
+    releaseFirstTranslation: () => {
+      assert.equal(
+        typeof releaseFirstTranslation,
+        "function",
+        "first translation must be pending",
+      );
+      const release = releaseFirstTranslation;
+      releaseFirstTranslation = null;
+      release();
+    },
+  };
+}
+
+function makeNoteRoundFixture(batchCount) {
+  const notes = Array.from({ length: batchCount }, (_, index) => ({
+    id: `round-note-${index + 1}`,
+    mediaKey: "round-video",
+    videoId: "round-video",
+    videoTitle: "Round test",
+    text: `English note ${index + 1}`,
+  }));
+  return {
+    notes,
+    groups: [{ mediaKey: "round-video", notes }],
+    plan: {
+      overLimit: false,
+      estimatedBatches: batchCount,
+      maxProviderCalls: batchCount * 5,
+      unitCount: batchCount,
+      progress: {
+        totalUnits: batchCount,
+        completedUnits: 0,
+        remainingUnits: batchCount,
+        remainingBatches: batchCount,
+        roundMaxBatches: 20,
+      },
+      noteBatches: notes.map((note) => [note]),
+      titleBatches: [],
+      sourceBatches: [],
+      sourceWorkByKey: {},
+    },
+  };
+}
+
+function makeExportNotesBackground({ switchProviderBeforeFetch = false } = {}) {
+  const noteSources = require("../note-sources.js");
+  const exportJobs = require("../export-jobs.js");
+  const mediaKey = "canonical-note-video";
+  const note = {
+    id: "canonical-note-1",
+    mediaKey,
+    videoId: mediaKey,
+    platform: "youtube",
+    videoTitle: "Canonical Stored Video Title",
+    text: "Canonical stored English note body.",
+    rawText: "Canonical stored English note body.",
+    sourceLanguage: "en",
+    textLanguage: "en",
+    translatedText: "",
+  };
+  const noteUnitKey = `note:${noteSources.hashSourceText(note.id)}:${noteSources.hashSourceText(note.text)}`;
+  const titleUnitKey = `title:${noteSources.hashSourceText(mediaKey)}:${noteSources.hashSourceText(note.videoTitle)}`;
+  const notesRevision = noteSources.hashSourceText(
+    JSON.stringify([[note.id, mediaKey, note.text, note.videoTitle]]),
+  );
+  const intent = {
+    scope: "notes-current",
+    mediaKeys: [mediaKey],
+    mode: "bilingual",
+    format: "markdown",
+    autoExport: true,
+  };
+  const job = exportJobs.createExportJob({
+    state: "running",
+    intent,
+    sourceRevisions: {},
+    notesRevision,
+    orderedUnitKeys: [noteUnitKey, titleUnitKey],
+    completedUnitKeys: [],
+    currentBatch: null,
+    cursor: 0,
+    roundBudget: { maxBatches: 20 },
+    providerSnapshot: {
+      providerId: "deepseek",
+      modelId: "deepseek-v4-flash",
+      routeKey: "deepseek:deepseek-v4-flash",
+      targetLanguage: "zh",
+      translationVersion: "export-v2",
+    },
+    exportClaim: null,
+    lastError: null,
+  });
+  const deepseekSettings = {
+    provider: "deepseek",
+    aiApiKeys: {
+      deepseek: "deepseek-test-key-never-returned",
+      zhipu: "zhipu-test-key-never-returned",
+      dashscope: "",
+      "tencent-hymt": "",
+      siliconflow: "",
+      fireworks: "",
+    },
+  };
+  const zhipuSettings = { ...deepseekSettings, provider: "zhipu" };
+  const storage = createMemoryStorage({
+    ytd_settings: deepseekSettings,
+    ytd_notes: [note],
+    [exportJobs.STORAGE_KEY]: {
+      schemaVersion: exportJobs.SCHEMA_VERSION,
+      jobs: { [job.jobId]: job },
+    },
+  });
+  let settingsReads = 0;
+  let providerCalls = 0;
+  const providerInputs = [];
+  const background = loadBackgroundHelpers({
+    storageGetImpl: async (keys) => {
+      if (keys === "ytd_settings") {
+        settingsReads += 1;
+        return {
+          ytd_settings:
+            switchProviderBeforeFetch && settingsReads >= 2
+              ? zhipuSettings
+              : deepseekSettings,
+        };
+      }
+      return storage.get(keys);
+    },
+    storageSetImpl: storage.set,
+    storageRemoveImpl: storage.remove,
+    storageClearImpl: storage.clear,
+    noteSourcesImpl: createNoteSourcesBridge(noteSources),
+    exportJobsImpl: createExportJobsBridge(exportJobs),
+    fetchImpl: async (url, options = {}) => {
+      if (String(url).startsWith("chrome-extension://")) {
+        return { ok: true, text: async () => read("prompts/translation.md") };
+      }
+      providerCalls += 1;
+      const body = JSON.parse(options.body);
+      const input = JSON.parse(body.messages.at(-1).content);
+      providerInputs.push(input);
+      const content = Array.isArray(input.notes)
+        ? JSON.stringify({
+            notes: input.notes.map((item) => ({
+              id: item.id,
+              textZh: "持久保存的中文笔记。",
+            })),
+          })
+        : JSON.stringify({
+            titles: input.titles.map((item) => ({
+              mediaKey: item.mediaKey,
+              titleZh: "持久保存的中文标题",
+            })),
+          });
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [
+            {
+              finish_reason: "stop",
+              message: { content },
+            },
+          ],
+        }),
+      };
+    },
+  });
+  return {
+    background,
+    storage,
+    exportJobs,
+    job,
+    mediaKey,
+    note,
+    noteUnitKey,
+    titleUnitKey,
+    providerCalls: () => providerCalls,
+    providerInputs,
+  };
+}
+
+function publicExportSourceUnit(unit) {
+  const common = {
+    unitKey: unit.id,
+    sourceHash: unit.sourceHash,
+    text: unit.text,
+    kind: unit.kind,
+  };
+  return unit.kind === "description"
+    ? { ...common, chunkIndex: unit.chunkIndex }
+    : {
+        ...common,
+        segmentId: unit.segmentId,
+        start: unit.start,
+      };
+}
+
+function makeExportSourceProvider({
+  holdFirst = false,
+  holdPrompt = false,
+  partialFirst = false,
+  errorPayload = null,
+  errorStatus = 500,
+} = {}) {
+  let providerCalls = 0;
+  let releaseFirst;
+  let releasePrompt;
+  let promptPending = false;
+  const fetchImpl = async (url, options = {}) => {
+    if (String(url).startsWith("chrome-extension://")) {
+      if (holdPrompt && !promptPending && !releasePrompt) {
+        promptPending = true;
+        await new Promise((resolve) => {
+          releasePrompt = resolve;
+        });
+      }
+      return { ok: true, text: async () => read("prompts/translation.md") };
+    }
+    providerCalls += 1;
+    const body = JSON.parse(options.body);
+    const userPayload = JSON.parse(body.messages.at(-1).content);
+    if (holdFirst && providerCalls === 1) {
+      await new Promise((resolve) => {
+        releaseFirst = resolve;
+      });
+    }
+    if (errorPayload) {
+      return streamingResponse([encode(JSON.stringify(errorPayload))], {
+        ok: false,
+        status: errorStatus,
+      });
+    }
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        choices: [
+          {
+            finish_reason: "stop",
+            message: {
+              content: JSON.stringify({
+                segments: userPayload.segments
+                  .map((segment, index) => ({
+                    id: segment.id,
+                    text: `第 ${providerCalls} 批第 ${index + 1} 段中文译文。`,
+                  }))
+                  .filter(
+                    (_segment, index) =>
+                      !(partialFirst && providerCalls === 1 && index > 0),
+                  ),
+              }),
+            },
+          },
+        ],
+      }),
+    };
+  };
+  return {
+    fetchImpl,
+    calls: () => providerCalls,
+    promptPending: () => promptPending,
+    releasePrompt: () => {
+      assert.equal(typeof releasePrompt, "function", "prompt load is pending");
+      const release = releasePrompt;
+      releasePrompt = null;
+      release();
+    },
+    releaseFirst: () => {
+      assert.equal(typeof releaseFirst, "function", "first provider call is pending");
+      releaseFirst();
+    },
+  };
+}
+
+function makeExportSourceBackground({
+  segmentCount = 5,
+  holdFirst = false,
+  holdPrompt = false,
+  descriptionOriginal = "",
+  partialFirst = false,
+  providerErrorPayload = null,
+  providerErrorStatus = 500,
+} = {}) {
+  const noteSources = require("../note-sources.js");
+  const exportJobs = require("../export-jobs.js");
+  const mediaKey = "export-video-1";
+  const titleOriginal = "Resumable export source translation";
+  const source = noteSources.normalizeNoteSource({
+    mediaKey,
+    platform: "youtube",
+    titleOriginal,
+    descriptionOriginal,
+    descriptionStatus: descriptionOriginal ? "present" : "confirmed-empty",
+    transcriptOriginal: Array.from({ length: segmentCount }, (_, index) => ({
+      segmentId: `segment-${index}`,
+      start: index + 0.125,
+      text: `English source segment ${index + 1} contains enough words for a real translation check.`,
+    })),
+    transcriptTruncated: false,
+    updatedAt: 10,
+  });
+  const plan = noteSources.buildExportTranslationPlan({
+    groups: [
+      {
+        mediaKey,
+        representative: { videoTitle: titleOriginal },
+        notes: [],
+      },
+    ],
+    sourcesByKey: { [mediaKey]: source },
+    mode: "bilingual",
+    includeTitles: false,
+    includeNotes: false,
+    includeDescriptions: true,
+    includeTranscript: true,
+  });
+  assert.ok(plan.sourceBatches.length >= 1, "fixture must create source batches");
+  const orderedUnitKeys = plan.sourceBatches.flat().map((unit) => unit.id);
+  const intent = {
+    scope: "current",
+    mediaKeys: [mediaKey],
+    mode: "bilingual",
+    format: "markdown",
+    autoExport: true,
+  };
+  const job = exportJobs.createExportJob(
+    {
+      state: "running",
+      intent,
+      sourceRevisions: { [mediaKey]: source.sourceRevision },
+      notesRevision: null,
+      orderedUnitKeys,
+      completedUnitKeys: [],
+      currentBatch: null,
+      cursor: 0,
+      roundBudget: { maxBatches: 20 },
+      providerSnapshot: {
+        providerId: "deepseek",
+        modelId: "deepseek-v4-flash",
+        routeKey: "deepseek:deepseek-v4-flash",
+        targetLanguage: "zh",
+        translationVersion: "export-v2",
+      },
+      exportClaim: null,
+      lastError: null,
+    },
+    { now: 20 },
+  );
+  const settings = {
+    provider: "deepseek",
+    aiApiKey: "test-key-never-returned",
+    aiBaseUrl: "https://api.deepseek.com",
+    aiModel: "deepseek-v4-flash",
+  };
+  const storage = createMemoryStorage({
+    ytd_settings: settings,
+    [noteSources.STORAGE_KEY]: { [mediaKey]: source },
+    [exportJobs.STORAGE_KEY]: {
+      schemaVersion: exportJobs.SCHEMA_VERSION,
+      jobs: { [job.jobId]: job },
+    },
+  });
+  const provider = makeExportSourceProvider({
+    holdFirst,
+    holdPrompt,
+    partialFirst,
+    errorPayload: providerErrorPayload,
+    errorStatus: providerErrorStatus,
+  });
+  // background.js executes in a vm realm while CommonJS modules execute in the
+  // Node realm. Bridge structured inputs so the modules' strict plain-object
+  // checks model one Chromium service-worker realm instead of rejecting test
+  // objects solely because their prototypes come from different realms.
+  const noteSourcesBridge = createNoteSourcesBridge(noteSources);
+  const exportJobsBridge = createExportJobsBridge(exportJobs);
+  const background = loadBackgroundHelpers({
+    settings,
+    storageGetImpl: storage.get,
+    storageSetImpl: storage.set,
+    storageRemoveImpl: storage.remove,
+    storageClearImpl: storage.clear,
+    fetchImpl: provider.fetchImpl,
+    noteSourcesImpl: noteSourcesBridge,
+    exportJobsImpl: exportJobsBridge,
+  });
+  const messageForBatch = (index) => ({
+    action: "translateExportSourceBatch",
+    jobId: job.jobId,
+    mediaKey,
+    sourceRevision: source.sourceRevision,
+    units: plan.sourceBatches[index].map(publicExportSourceUnit),
+    videoTitle: titleOriginal,
+  });
+  return {
+    background,
+    storage,
+    provider,
+    noteSources,
+    exportJobs,
+    mediaKey,
+    source,
+    plan,
+    job,
+    messageForBatch,
+  };
+}
+
+async function waitForProviderCall(provider, count = 1) {
+  for (let attempt = 0; attempt < 20 && provider.calls() < count; attempt += 1) {
+    await nextTurn();
+  }
+  assert.equal(provider.calls(), count, `expected ${count} mocked provider call(s)`);
+}
+
+async function waitForPromptGate(provider) {
+  for (let attempt = 0; attempt < 20 && !provider.promptPending(); attempt += 1) {
+    await nextTurn();
+  }
+  assert.equal(provider.promptPending(), true, "expected prompt load gate");
+}
+
+test("export source batch duplicate submissions share one provider call and one commit", async () => {
+  const fixture = makeExportSourceBackground({
+    segmentCount: 2,
+    holdFirst: true,
+  });
+  const message = fixture.messageForBatch(0);
+  const first = dispatchBackgroundMessage(fixture.background, message);
+  const duplicate = dispatchBackgroundMessage(fixture.background, {
+    ...message,
+    units: message.units.map((unit) => ({ ...unit })),
+  });
+  await waitForProviderCall(fixture.provider);
+  fixture.provider.releaseFirst();
+  const [firstResult, duplicateResult] = await Promise.all([first, duplicate]);
+
+  assert.equal(firstResult.success, true);
+  assert.deepEqual(firstResult, duplicateResult);
+  assert.equal(firstResult.actualProviderCalls, 1);
+  assert.equal(fixture.provider.calls(), 1, "single-flight spends one mocked request");
+  assert.doesNotMatch(JSON.stringify(firstResult), /test-key-never-returned/);
+  assert.doesNotMatch(JSON.stringify(firstResult), /中文译文/);
+
+  const snapshot = fixture.storage.snapshot();
+  const persistedSource =
+    snapshot[fixture.noteSources.STORAGE_KEY][fixture.mediaKey];
+  const persistedJob =
+    snapshot[fixture.exportJobs.STORAGE_KEY].jobs[fixture.job.jobId];
+  assert.equal(persistedSource.transcriptZh.length, 2);
+  assert.deepEqual(persistedJob.completedUnitKeys, fixture.job.orderedUnitKeys);
+  assert.equal(persistedJob.currentBatch, null);
+});
+
+test("description chunks use the same background commit path as transcript units", async () => {
+  const fixture = makeExportSourceBackground({
+    segmentCount: 0,
+    descriptionOriginal:
+      "This full video description is already present on the page and only needs its reusable Chinese translation.",
+  });
+  const result = await dispatchBackgroundMessage(
+    fixture.background,
+    fixture.messageForBatch(0),
+  );
+  assert.equal(result.success, true);
+  assert.equal(result.actualProviderCalls, 1);
+  const snapshot = fixture.storage.snapshot();
+  const persistedSource =
+    snapshot[fixture.noteSources.STORAGE_KEY][fixture.mediaKey];
+  assert.equal(persistedSource.descriptionZhChunks.length, 1);
+  assert.match(persistedSource.descriptionZh, /中文译文/);
+});
+
+test("completed job progress cannot override a changed source revision", async () => {
+  const fixture = makeExportSourceBackground({ segmentCount: 1 });
+  const first = await dispatchBackgroundMessage(
+    fixture.background,
+    fixture.messageForBatch(0),
+  );
+  assert.equal(first.success, true);
+  const changedSource = fixture.noteSources.normalizeNoteSource({
+    ...fixture.source,
+    transcriptOriginal: [
+      {
+        ...fixture.source.transcriptOriginal[0],
+        text: `${fixture.source.transcriptOriginal[0].text} Updated original.`,
+      },
+    ],
+    transcriptZh: [],
+  });
+  await fixture.storage.set({
+    [fixture.noteSources.STORAGE_KEY]: {
+      [fixture.mediaKey]: changedSource,
+    },
+  });
+  const repeated = await dispatchBackgroundMessage(
+    fixture.background,
+    fixture.messageForBatch(0),
+  );
+  assert.equal(repeated.success, false);
+  assert.equal(repeated.code, "EXPORT_SOURCE_STALE");
+  assert.equal(repeated.actualProviderCalls, 0);
+  assert.equal(fixture.provider.calls(), 1);
+  const snapshot = fixture.storage.snapshot();
+  assert.equal(
+    snapshot[fixture.exportJobs.STORAGE_KEY].jobs[fixture.job.jobId].state,
+    "stale",
+  );
+});
+
+test("export source translations commit after every batch instead of at round end", async () => {
+  const fixture = makeExportSourceBackground({ segmentCount: 5 });
+  assert.equal(fixture.plan.sourceBatches.length, 2);
+
+  const first = await dispatchBackgroundMessage(
+    fixture.background,
+    fixture.messageForBatch(0),
+  );
+  assert.equal(first.success, true, JSON.stringify(first));
+  assert.equal(first.actualProviderCalls, 1);
+  assert.equal(first.remainingCount, 1);
+  let snapshot = fixture.storage.snapshot();
+  let persistedSource =
+    snapshot[fixture.noteSources.STORAGE_KEY][fixture.mediaKey];
+  let persistedJob =
+    snapshot[fixture.exportJobs.STORAGE_KEY].jobs[fixture.job.jobId];
+  assert.equal(persistedSource.transcriptZh.length, 4);
+  assert.equal(persistedJob.completedUnitKeys.length, 4);
+  assert.equal(persistedJob.currentBatch, null);
+
+  const second = await dispatchBackgroundMessage(
+    fixture.background,
+    fixture.messageForBatch(1),
+  );
+  assert.equal(second.success, true);
+  assert.equal(second.remainingCount, 0);
+  assert.equal(fixture.provider.calls(), 2);
+  snapshot = fixture.storage.snapshot();
+  persistedSource = snapshot[fixture.noteSources.STORAGE_KEY][fixture.mediaKey];
+  persistedJob = snapshot[fixture.exportJobs.STORAGE_KEY].jobs[fixture.job.jobId];
+  assert.equal(persistedSource.transcriptZh.length, 5);
+  assert.equal(persistedJob.completedUnitKeys.length, 5);
+
+  const repeated = await dispatchBackgroundMessage(
+    fixture.background,
+    fixture.messageForBatch(1),
+  );
+  assert.equal(repeated.success, true);
+  assert.equal(repeated.code, "EXPORT_BATCH_ALREADY_COMPLETED");
+  assert.equal(repeated.actualProviderCalls, 0);
+  assert.equal(fixture.provider.calls(), 2, "completed units are never retranslated");
+});
+
+test("reopening from persisted source skips completed units and resumes at the first gap", async () => {
+  const fixture = makeExportSourceBackground({ segmentCount: 5 });
+  const firstRound = await dispatchBackgroundMessage(
+    fixture.background,
+    fixture.messageForBatch(0),
+  );
+  assert.equal(firstRound.success, true);
+  assert.equal(fixture.provider.calls(), 1);
+
+  // Rebuild exclusively from the durable storage snapshot, like reopening the
+  // side panel after the service worker and page-local state have disappeared.
+  const persisted = await fixture.noteSources.readNoteSource(
+    fixture.storage,
+    fixture.mediaKey,
+  );
+  assert.equal(persisted.transcriptZh.length, 4);
+  const resumedPlan = fixture.noteSources.buildExportTranslationPlan({
+    groups: [
+      {
+        mediaKey: fixture.mediaKey,
+        representative: { videoTitle: persisted.titleOriginal },
+        notes: [],
+      },
+    ],
+    sourcesByKey: { [fixture.mediaKey]: persisted },
+    mode: "bilingual",
+    includeTitles: false,
+    includeNotes: false,
+    includeDescriptions: true,
+    includeTranscript: true,
+  });
+  const resumedUnits = resumedPlan.sourceBatches.flat();
+  assert.equal(resumedUnits.length, 1);
+  assert.equal(resumedUnits[0].id, fixture.plan.sourceBatches[1][0].id);
+  assert.equal(
+    resumedUnits.some((unit) =>
+      fixture.plan.sourceBatches[0].some((completed) => completed.id === unit.id),
+    ),
+    false,
+  );
+
+  const resumed = await dispatchBackgroundMessage(fixture.background, {
+    action: "translateExportSourceBatch",
+    jobId: fixture.job.jobId,
+    mediaKey: fixture.mediaKey,
+    sourceRevision: persisted.sourceRevision,
+    units: resumedUnits.map(publicExportSourceUnit),
+    videoTitle: persisted.titleOriginal,
+  });
+  assert.equal(resumed.success, true);
+  assert.equal(resumed.actualProviderCalls, 1);
+  assert.equal(fixture.provider.calls(), 2);
+  const complete = await fixture.noteSources.readNoteSource(
+    fixture.storage,
+    fixture.mediaKey,
+  );
+  assert.equal(complete.transcriptZh.length, 5);
+});
+
+test("cancelling an in-flight export batch caches its valid response but starts no next batch", async () => {
+  const fixture = makeExportSourceBackground({
+    segmentCount: 5,
+    holdFirst: true,
+  });
+  const current = dispatchBackgroundMessage(
+    fixture.background,
+    fixture.messageForBatch(0),
+  );
+  await waitForProviderCall(fixture.provider);
+  const cancelled = await dispatchBackgroundMessage(fixture.background, {
+    action: "cancelExportTranslationJob",
+    jobId: fixture.job.jobId,
+  });
+  assert.equal(cancelled.success, true);
+  assert.equal(cancelled.jobState, "cancelled");
+
+  fixture.provider.releaseFirst();
+  const currentResult = await current;
+  assert.equal(currentResult.success, true);
+  assert.equal(currentResult.code, "EXPORT_CANCELLED_BATCH_COMMITTED");
+  assert.equal(currentResult.jobState, "cancelled");
+
+  const later = await dispatchBackgroundMessage(
+    fixture.background,
+    fixture.messageForBatch(1),
+  );
+  assert.equal(later.success, false);
+  assert.equal(later.code, "EXPORT_JOB_NOT_RUNNING");
+  assert.equal(fixture.provider.calls(), 1, "cancellation prevents the next request");
+
+  const snapshot = fixture.storage.snapshot();
+  const persistedSource =
+    snapshot[fixture.noteSources.STORAGE_KEY][fixture.mediaKey];
+  const persistedJob =
+    snapshot[fixture.exportJobs.STORAGE_KEY].jobs[fixture.job.jobId];
+  assert.equal(persistedSource.transcriptZh.length, 4);
+  assert.equal(persistedJob.completedUnitKeys.length, 4);
+  assert.equal(persistedJob.state, "cancelled");
+  assert.equal(persistedJob.exportClaim, null);
+});
+
+test("cancellation after batch claim but before fetch starts zero provider calls", async () => {
+  const fixture = makeExportSourceBackground({
+    segmentCount: 2,
+    holdPrompt: true,
+  });
+  const pending = dispatchBackgroundMessage(
+    fixture.background,
+    fixture.messageForBatch(0),
+  );
+  await waitForPromptGate(fixture.provider);
+  const cancelled = await dispatchBackgroundMessage(fixture.background, {
+    action: "cancelExportTranslationJob",
+    jobId: fixture.job.jobId,
+  });
+  assert.equal(cancelled.success, true);
+  fixture.provider.releasePrompt();
+  const result = await pending;
+  assert.equal(result.success, false);
+  assert.equal(result.code, "EXPORT_JOB_NOT_RUNNING");
+  assert.equal(result.actualProviderCalls, 0);
+  assert.equal(fixture.provider.calls(), 0);
+  const snapshot = fixture.storage.snapshot();
+  const persistedJob =
+    snapshot[fixture.exportJobs.STORAGE_KEY].jobs[fixture.job.jobId];
+  assert.equal(persistedJob.state, "cancelled");
+  assert.equal(persistedJob.currentBatch, null);
+});
+
+test("provider route changes after confirmation fail closed before the request", async () => {
+  const fixture = makeExportSourceBackground({ segmentCount: 1 });
+  await fixture.storage.set({
+    ytd_settings: {
+      provider: "zhipu",
+      aiApiKeys: {
+        deepseek: "test-key-never-returned",
+        zhipu: "zhipu-test-key-never-returned",
+        dashscope: "",
+        "tencent-hymt": "",
+        siliconflow: "",
+        fireworks: "",
+      },
+      supadataApiKey: "",
+    },
+  });
+  const result = await dispatchBackgroundMessage(
+    fixture.background,
+    fixture.messageForBatch(0),
+  );
+  assert.equal(result.success, false);
+  assert.equal(result.code, "EXPORT_JOB_PROVIDER_MISMATCH");
+  assert.equal(result.actualProviderCalls, 0);
+  assert.equal(fixture.provider.calls(), 0);
+  assert.doesNotMatch(JSON.stringify(result), /zhipu-test-key-never-returned/);
+  const snapshot = fixture.storage.snapshot();
+  const persistedJob =
+    snapshot[fixture.exportJobs.STORAGE_KEY].jobs[fixture.job.jobId];
+  assert.equal(persistedJob.state, "paused");
+  assert.equal(persistedJob.currentBatch, null);
+  assert.equal(persistedJob.lastError.code, "EXPORT_JOB_PROVIDER_MISMATCH");
+});
+
+test("provider error bodies and non-typical secret keys never enter job snapshots", async () => {
+  const rawMessage = "provider body credential=RAW_BODY_SECRET_7a91";
+  const unusualSecret = "UNUSUAL_SECRET_VALUE_9931";
+  const fixture = makeExportSourceBackground({
+    segmentCount: 1,
+    providerErrorPayload: {
+      error: { message: rawMessage },
+      "x-vendor-private-credential": unusualSecret,
+      nested: { signing_material: "NESTED_SECRET_4432" },
+    },
+    providerErrorStatus: 500,
+  });
+  const result = await dispatchBackgroundMessage(
+    fixture.background,
+    fixture.messageForBatch(0),
+  );
+  assert.equal(result.success, false);
+  assert.equal(result.code, "EXPORT_SOURCE_PROVIDER_FAILED");
+  assert.equal(result.actualProviderCalls, 1);
+  const serializedResult = JSON.stringify(result);
+  const snapshot = fixture.storage.snapshot();
+  const persistedJob =
+    snapshot[fixture.exportJobs.STORAGE_KEY].jobs[fixture.job.jobId];
+  const serializedJob = JSON.stringify(persistedJob);
+  for (const secret of [rawMessage, unusualSecret, "NESTED_SECRET_4432"]) {
+    assert.doesNotMatch(serializedResult, new RegExp(secret));
+    assert.doesNotMatch(serializedJob, new RegExp(secret));
+  }
+  assert.deepEqual(Object.keys(persistedJob.lastError).sort(), [
+    "at",
+    "code",
+    "message",
+    "retryable",
+  ]);
+  assert.equal(persistedJob.lastError.code, "EXPORT_SOURCE_PROVIDER_FAILED");
+});
+
+test("an incomplete provider batch writes nothing and leaves a resumable failed job", async () => {
+  const fixture = makeExportSourceBackground({
+    segmentCount: 2,
+    partialFirst: true,
+  });
+  const result = await dispatchBackgroundMessage(
+    fixture.background,
+    fixture.messageForBatch(0),
+  );
+  assert.equal(result.success, false);
+  assert.equal(result.code, "EXPORT_SOURCE_BATCH_PARTIAL");
+  assert.equal(result.actualProviderCalls, 1);
+  const snapshot = fixture.storage.snapshot();
+  const persistedSource =
+    snapshot[fixture.noteSources.STORAGE_KEY][fixture.mediaKey];
+  const persistedJob =
+    snapshot[fixture.exportJobs.STORAGE_KEY].jobs[fixture.job.jobId];
+  assert.equal(persistedSource.transcriptZh.length, 0);
+  assert.equal(persistedJob.state, "failed");
+  assert.equal(persistedJob.currentBatch, null);
+});
+
+test("clearing notes removes source/job state and a late response cannot recreate it", async () => {
+  const fixture = makeExportSourceBackground({
+    segmentCount: 2,
+    holdFirst: true,
+  });
+  await fixture.storage.set({
+    ytd_notes: [
+      {
+        id: "note-clear-1",
+        mediaKey: fixture.mediaKey,
+        videoId: fixture.mediaKey,
+        text: "Saved note",
+      },
+    ],
+  });
+  const pending = dispatchBackgroundMessage(
+    fixture.background,
+    fixture.messageForBatch(0),
+  );
+  await waitForProviderCall(fixture.provider);
+  const cleared = await dispatchBackgroundMessage(fixture.background, {
+    action: "clearAllNotes",
+  });
+  assert.equal(cleared.success, true);
+  fixture.provider.releaseFirst();
+  const late = await pending;
+  assert.equal(late.success, false);
+  assert.equal(late.code, "EXPORT_JOB_NOT_FOUND");
+  assert.equal(late.actualProviderCalls, 1);
+  await nextTurn();
+  const snapshot = fixture.storage.snapshot();
+  assert.equal(Object.hasOwn(snapshot, "ytd_notes"), false);
+  assert.equal(Object.hasOwn(snapshot, fixture.noteSources.STORAGE_KEY), false);
+  assert.equal(Object.hasOwn(snapshot, fixture.exportJobs.STORAGE_KEY), false);
+});
+
+test("clearAllNotes generation barrier rejects a concurrent source upsert without resurrection", async () => {
+  const fixture = makeExportSourceBackground({ segmentCount: 1 });
+  const gate = createAsyncGate();
+  let holdNotesRead = true;
+  const storage = createMemoryStorage({
+    ytd_settings: {
+      provider: "deepseek",
+      aiApiKey: "test-key-never-returned",
+      aiBaseUrl: "https://api.deepseek.com",
+      aiModel: "deepseek-v4-flash",
+    },
+    ytd_notes: [
+      {
+        id: "clear-race-note",
+        mediaKey: fixture.mediaKey,
+        videoId: fixture.mediaKey,
+        text: "Saved note",
+      },
+    ],
+    [fixture.noteSources.STORAGE_KEY]: {
+      [fixture.mediaKey]: fixture.source,
+    },
+    [fixture.exportJobs.STORAGE_KEY]: {
+      schemaVersion: fixture.exportJobs.SCHEMA_VERSION,
+      jobs: { [fixture.job.jobId]: fixture.job },
+    },
+  });
+  const background = loadBackgroundHelpers({
+    storageGetImpl: async (keys) => {
+      if (keys === "ytd_notes" && holdNotesRead) {
+        holdNotesRead = false;
+        await gate.enter();
+      }
+      return storage.get(keys);
+    },
+    storageSetImpl: storage.set,
+    storageRemoveImpl: storage.remove,
+    storageClearImpl: storage.clear,
+    noteSourcesImpl: createNoteSourcesBridge(fixture.noteSources),
+    exportJobsImpl: createExportJobsBridge(fixture.exportJobs),
+  });
+  const incoming = fixture.noteSources.normalizeNoteSource({
+    ...fixture.source,
+    channelName: "must never return after clear",
+    updatedAt: 80,
+  });
+  const pendingUpsert = dispatchBackgroundMessage(background, {
+    action: "upsertNoteSource",
+    source: incoming,
+  });
+  await gate.entered;
+  const cleared = await dispatchBackgroundMessage(background, {
+    action: "clearAllNotes",
+  });
+  assert.equal(cleared.success, true);
+  gate.release();
+  const late = await pendingUpsert;
+  assert.equal(late.success, false);
+  assert.equal(late.code, "EXPORT_JOB_NOT_FOUND");
+  const snapshot = storage.snapshot();
+  assert.equal(Object.hasOwn(snapshot, "ytd_notes"), false);
+  assert.equal(Object.hasOwn(snapshot, fixture.noteSources.STORAGE_KEY), false);
+  assert.equal(Object.hasOwn(snapshot, fixture.exportJobs.STORAGE_KEY), false);
+});
+
+test("reset generation barrier rejects a concurrent job create without resurrection", async () => {
+  const fixture = makeExportSourceBackground({ segmentCount: 1 });
+  const gate = createAsyncGate();
+  const storage = createMemoryStorage({
+    ytd_settings: {
+      provider: "deepseek",
+      aiApiKey: "test-key-never-returned",
+      aiBaseUrl: "https://api.deepseek.com",
+      aiModel: "deepseek-v4-flash",
+    },
+    ytd_notes: [],
+    [fixture.noteSources.STORAGE_KEY]: {
+      [fixture.mediaKey]: fixture.source,
+    },
+    [fixture.exportJobs.STORAGE_KEY]: {
+      schemaVersion: fixture.exportJobs.SCHEMA_VERSION,
+      jobs: { [fixture.job.jobId]: fixture.job },
+    },
+  });
+  const exportJobsBridge = createExportJobsBridge(fixture.exportJobs);
+  let holdJobRead = true;
+  const baseReadExportJob = exportJobsBridge.readExportJob;
+  exportJobsBridge.readExportJob = async (adapter, jobId) => {
+    if (holdJobRead) {
+      holdJobRead = false;
+      await gate.enter();
+    }
+    return baseReadExportJob(adapter, jobId);
+  };
+  const background = loadBackgroundHelpers({
+    storageGetImpl: storage.get,
+    storageSetImpl: storage.set,
+    storageRemoveImpl: storage.remove,
+    storageClearImpl: storage.clear,
+    noteSourcesImpl: createNoteSourcesBridge(fixture.noteSources),
+    exportJobsImpl: exportJobsBridge,
+  });
+  const pendingCreate = dispatchBackgroundMessage(background, {
+    action: "createOrResumeExportJob",
+    job: fixture.job,
+  });
+  await gate.entered;
+  const reset = await dispatchBackgroundMessage(background, {
+    action: "resetAllExtensionData",
+    preferredLanguage: "zh-CN",
+  });
+  assert.equal(reset.success, true);
+  gate.release();
+  const late = await pendingCreate;
+  assert.equal(late.success, false);
+  assert.equal(late.code, "EXPORT_JOB_NOT_FOUND");
+  assert.deepEqual(storage.snapshot(), { ytd_options_language: "zh-CN" });
+});
+
+test("clearAllNotes is all-or-nothing when either export store has a future schema", async () => {
+  const noteSources = require("../note-sources.js");
+  const exportJobs = require("../export-jobs.js");
+  const cases = [
+    {
+      label: "future jobs",
+      sources: {},
+      jobs: { schemaVersion: exportJobs.SCHEMA_VERSION + 1, jobs: {} },
+      expectedCode: "UNSUPPORTED_EXPORT_JOBS_SCHEMA",
+    },
+    {
+      label: "future sources",
+      sources: { schemaVersion: noteSources.SCHEMA_VERSION + 1 },
+      jobs: { schemaVersion: exportJobs.SCHEMA_VERSION, jobs: {} },
+      expectedCode: "UNSUPPORTED_NOTE_SOURCE_SCHEMA",
+    },
+  ];
+  for (const item of cases) {
+    const initial = {
+      ytd_settings: {
+        provider: "deepseek",
+        aiApiKey: "test-key-never-returned",
+      },
+      ytd_notes: [{ id: `note-${item.label}`, text: "must survive" }],
+      [noteSources.STORAGE_KEY]: item.sources,
+      [exportJobs.STORAGE_KEY]: item.jobs,
+    };
+    const storage = createMemoryStorage(initial);
+    const background = loadBackgroundHelpers({
+      storageGetImpl: storage.get,
+      storageSetImpl: storage.set,
+      storageRemoveImpl: storage.remove,
+      storageClearImpl: storage.clear,
+      noteSourcesImpl: createNoteSourcesBridge(noteSources),
+      exportJobsImpl: createExportJobsBridge(exportJobs),
+    });
+    const result = await dispatchBackgroundMessage(background, {
+      action: "clearAllNotes",
+    });
+    assert.equal(result.success, false, item.label);
+    assert.equal(result.code, item.expectedCode, item.label);
+    assert.deepEqual(storage.snapshot(), initial, item.label);
+  }
+});
+
+test("note source writes are available through the shared background queue action", async () => {
+  const fixture = makeExportSourceBackground({ segmentCount: 1 });
+  const incoming = fixture.noteSources.normalizeNoteSource({
+    ...fixture.source,
+    channelName: "Background-owned source queue",
+    updatedAt: 40,
+  });
+  const result = await dispatchBackgroundMessage(fixture.background, {
+    action: "upsertNoteSource",
+    source: incoming,
+  });
+  assert.equal(result.success, true);
+  assert.equal(result.mediaKey, fixture.mediaKey);
+  assert.equal(result.sourceRevision, fixture.source.sourceRevision);
+  const snapshot = fixture.storage.snapshot();
+  assert.equal(
+    snapshot[fixture.noteSources.STORAGE_KEY][fixture.mediaKey].channelName,
+    "Background-owned source queue",
+  );
+});
+
+test("export job create/resume and checkpoint mutations stay in the background realm", async () => {
+  const fixture = makeExportSourceBackground({ segmentCount: 1 });
+  const paused = await dispatchBackgroundMessage(fixture.background, {
+    action: "checkpointExportJob",
+    jobId: fixture.job.jobId,
+    patch: { state: "paused", currentBatch: null },
+  });
+  assert.equal(paused.success, true);
+  assert.equal(paused.job.state, "paused");
+
+  const resumed = await dispatchBackgroundMessage(fixture.background, {
+    action: "createOrResumeExportJob",
+    job: {
+      ...fixture.job,
+      state: "running",
+      updatedAt: Date.now() + 1000,
+    },
+  });
+  assert.equal(resumed.success, true);
+  assert.equal(resumed.job.state, "running");
+  assert.doesNotMatch(JSON.stringify(resumed), /test-key-never-returned/);
+
+  const rejected = await dispatchBackgroundMessage(fixture.background, {
+    action: "checkpointExportJob",
+    jobId: fixture.job.jobId,
+    patch: { sourceText: "must never enter job metadata" },
+  });
+  assert.equal(rejected.success, false);
+  assert.equal(rejected.code, "INVALID_EXPORT_JOB_PATCH");
+});
+
+test("duplicate create or resume preserves a running job's current batch lease", async () => {
+  const fixture = makeExportSourceBackground({ segmentCount: 1 });
+  const currentBatch = {
+    batchId: "active-batch-lease",
+    unitKeys: [...fixture.job.orderedUnitKeys],
+    leaseUntil: Date.now() + 60_000,
+  };
+  const claimed = await dispatchBackgroundMessage(fixture.background, {
+    action: "checkpointExportJob",
+    jobId: fixture.job.jobId,
+    patch: { currentBatch },
+  });
+  assert.equal(claimed.success, true);
+  assert.deepEqual(clonePlain(claimed.job.currentBatch), currentBatch);
+
+  const duplicate = await dispatchBackgroundMessage(fixture.background, {
+    action: "createOrResumeExportJob",
+    job: {
+      ...fixture.job,
+      state: "running",
+      currentBatch: null,
+      updatedAt: Date.now() + 120_000,
+    },
+  });
+  assert.equal(duplicate.success, true);
+  assert.deepEqual(clonePlain(duplicate.job.currentBatch), currentBatch);
+  const snapshot = fixture.storage.snapshot();
+  assert.deepEqual(
+    snapshot[fixture.exportJobs.STORAGE_KEY].jobs[fixture.job.jobId].currentBatch,
+    currentBatch,
+  );
+});
+
+test("job-aware note and title batches use canonical storage and persist validated translations", async () => {
+  const fixture = makeExportNotesBackground();
+  const noteResult = await dispatchBackgroundMessage(fixture.background, {
+    action: "translateExportNotesBatch",
+    jobId: fixture.job.jobId,
+    unitKeys: [fixture.noteUnitKey],
+    notes: [
+      {
+        id: fixture.note.id,
+        text: "SPOOFED CALLER NOTE MUST NOT REACH PROVIDER",
+        videoTitle: "Spoofed caller title",
+      },
+    ],
+    titles: [],
+  });
+  assert.equal(noteResult.success, true, JSON.stringify(noteResult));
+  assert.equal(noteResult.translations[0].textZh, "持久保存的中文笔记。");
+  assert.equal(fixture.providerCalls(), 1);
+  assert.match(
+    JSON.stringify(fixture.providerInputs[0]),
+    /Canonical stored English note body/,
+  );
+  assert.doesNotMatch(JSON.stringify(fixture.providerInputs[0]), /SPOOFED CALLER/);
+
+  const titleResult = await dispatchBackgroundMessage(fixture.background, {
+    action: "translateExportNotesBatch",
+    jobId: fixture.job.jobId,
+    unitKeys: [fixture.titleUnitKey],
+    notes: [],
+    titles: [
+      {
+        mediaKey: fixture.mediaKey,
+        title: "SPOOFED CALLER TITLE MUST NOT REACH PROVIDER",
+      },
+    ],
+  });
+  assert.equal(titleResult.success, true, JSON.stringify(titleResult));
+  assert.equal(titleResult.titles[0].titleZh, "持久保存的中文标题");
+  assert.equal(fixture.providerCalls(), 2);
+  assert.match(
+    JSON.stringify(fixture.providerInputs[1]),
+    /Canonical Stored Video Title/,
+  );
+  assert.doesNotMatch(JSON.stringify(fixture.providerInputs[1]), /SPOOFED CALLER/);
+
+  const persisted = fixture.storage.snapshot().ytd_notes[0];
+  assert.equal(persisted.translatedText, "持久保存的中文笔记。");
+  assert.equal(persisted.translatedValidated, true);
+  assert.equal(persisted.videoTitleZh, "持久保存的中文标题");
+  assert.equal(persisted.videoTitleZhValidated, true);
+  assert.equal(
+    persisted.videoTitleZhSourceHash,
+    fixture.noteSources.hashSourceText("Canonical Stored Video Title"),
+  );
+});
+
+test("job-aware note translation rechecks the frozen route before provider fetch", async () => {
+  const fixture = makeExportNotesBackground({
+    switchProviderBeforeFetch: true,
+  });
+  const result = await dispatchBackgroundMessage(fixture.background, {
+    action: "translateExportNotesBatch",
+    jobId: fixture.job.jobId,
+    unitKeys: [fixture.noteUnitKey],
+    notes: [{ id: fixture.note.id, text: fixture.note.text }],
+    titles: [],
+  });
+  assert.equal(result.success, false);
+  assert.equal(result.code, "EXPORT_JOB_PROVIDER_MISMATCH");
+  assert.equal(fixture.providerCalls(), 0);
+  const persistedJob =
+    fixture.storage.snapshot()[fixture.exportJobs.STORAGE_KEY].jobs[
+      fixture.job.jobId
+    ];
+  const serializedJob = JSON.stringify(persistedJob);
+  assert.doesNotMatch(serializedJob, /deepseek-test-key-never-returned/);
+  assert.doesNotMatch(serializedJob, /zhipu-test-key-never-returned/);
+  assert.doesNotMatch(serializedJob, /Canonical stored English note body/);
+});
+
+test("a late export response writes nothing after the source revision changes", async () => {
+  const fixture = makeExportSourceBackground({
+    segmentCount: 2,
+    holdFirst: true,
+  });
+  const pending = dispatchBackgroundMessage(
+    fixture.background,
+    fixture.messageForBatch(0),
+  );
+  await waitForProviderCall(fixture.provider);
+
+  const changedSource = fixture.noteSources.normalizeNoteSource({
+    ...fixture.source,
+    transcriptOriginal: fixture.source.transcriptOriginal.map((entry, index) =>
+      index === 0
+        ? { ...entry, text: `${entry.text} The original source changed.` }
+        : entry,
+    ),
+    transcriptZh: [],
+    updatedAt: 30,
+  });
+  assert.notEqual(changedSource.sourceRevision, fixture.source.sourceRevision);
+  await fixture.storage.set({
+    [fixture.noteSources.STORAGE_KEY]: {
+      [fixture.mediaKey]: changedSource,
+    },
+  });
+
+  fixture.provider.releaseFirst();
+  const result = await pending;
+  assert.equal(result.success, false);
+  assert.equal(result.code, "EXPORT_SOURCE_STALE");
+  assert.equal(result.actualProviderCalls, 1);
+  await nextTurn();
+  const snapshot = fixture.storage.snapshot();
+  const persistedSource =
+    snapshot[fixture.noteSources.STORAGE_KEY][fixture.mediaKey];
+  const persistedJob =
+    snapshot[fixture.exportJobs.STORAGE_KEY].jobs[fixture.job.jobId];
+  assert.equal(persistedSource.sourceRevision, changedSource.sourceRevision);
+  assert.equal(persistedSource.transcriptZh.length, 0);
+  assert.equal(persistedJob.completedUnitKeys.length, 0);
+  assert.equal(persistedJob.state, "stale");
+  assert.equal(persistedJob.currentBatch, null);
+});
+
+test("export source action enforces four-unit and 12000-character hard limits", () => {
+  const fixture = makeExportSourceBackground({ segmentCount: 1 });
+  const base = fixture.messageForBatch(0);
+  const makeUnit = (index, text = base.units[0].text) => ({
+    ...base.units[0],
+    unitKey: `t:fnv1a-0000000000000001:${index}:fnv1a-0000000000000002`,
+    segmentId: `bounded-${index}`,
+    start: index + 0.25,
+    text,
+  });
+  assert.throws(
+    () =>
+      fixture.background.validateExportSourceBatchRequest({
+        ...base,
+        units: Array.from({ length: 5 }, (_, index) => makeUnit(index)),
+      }),
+    (error) => error.code === "INVALID_EXPORT_SOURCE_BATCH",
+  );
+  assert.throws(
+    () =>
+      fixture.background.validateExportSourceBatchRequest({
+        ...base,
+        units: Array.from({ length: 4 }, (_, index) =>
+          makeUnit(index, "a".repeat(3001)),
+        ),
+      }),
+    (error) => error.code === "INVALID_EXPORT_SOURCE_BATCH",
+  );
+});
+
+test("export source action rejects supplied credentials before any provider request", async () => {
+  const fixture = makeExportSourceBackground({ segmentCount: 1 });
+  const config = await dispatchBackgroundMessage(fixture.background, {
+    action: "checkConfig",
+  });
+  assert.equal(config.provider.modelId, "deepseek-v4-flash");
+  assert.equal(config.provider.routeKey, "deepseek:deepseek-v4-flash");
+  assert.doesNotMatch(JSON.stringify(config), /test-key-never-returned/);
+  const result = await dispatchBackgroundMessage(fixture.background, {
+    ...fixture.messageForBatch(0),
+    ["api" + "Key"]: "must-not-be-accepted",
+  });
+  assert.equal(result.success, false);
+  assert.equal(result.code, "INVALID_EXPORT_SOURCE_BATCH");
+  assert.equal(result.actualProviderCalls, 0);
+  assert.equal(fixture.provider.calls(), 0);
+  assert.doesNotMatch(JSON.stringify(result), /must-not-be-accepted/);
+});
 
 function installSidepanelDigestFixture(runtime) {
   return runtime.evaluate(`
@@ -574,14 +2161,14 @@ test("Header exposes tab-specific transcript, overview, and notes language modes
     js,
     /function ensureNotesChinese\(\)[\s\S]*?await sendTranslationMessage\(\{[\s\S]*?action: "translateNotes"/,
   );
-  assert.match(js, /const REQUIRED_RUNTIME_PROTOCOL_VERSION = 9/);
+  assert.match(js, /const REQUIRED_RUNTIME_PROTOCOL_VERSION = 10/);
   assert.match(
     js,
     /runtimeProtocolVersion\s*!==\s*REQUIRED_RUNTIME_PROTOCOL_VERSION[\s\S]*?showRuntimeVersionError\(\)/,
   );
   assert.match(js, /扩展后台未响应原文翻译请求，请重新加载扩展/);
   const backgroundSource = read("background.js");
-  assert.match(backgroundSource, /const RUNTIME_PROTOCOL_VERSION = 9/);
+  assert.match(backgroundSource, /const RUNTIME_PROTOCOL_VERSION = 10/);
   assert.match(
     backgroundSource,
     /runtimeProtocolVersion: RUNTIME_PROTOCOL_VERSION/,
@@ -4462,7 +6049,7 @@ test("concurrent requests for the same note serialize and call the API once", as
     background.handleTranslateNotes(request),
     background.handleTranslateNotes(request),
   ]);
-  assert.equal(first.success, true);
+  assert.equal(first.success, true, JSON.stringify(first));
   assert.equal(second.success, true);
   assert.equal(apiCalls, 1);
   assert.equal(storedNotes[0].translatedText, "中文笔记。");
