@@ -8,6 +8,41 @@ const root = path.resolve(__dirname, "..");
 const read = (file) => fs.readFileSync(path.join(root, file), "utf8");
 const bilibiliAdapter = require("../bilibili.js");
 
+function createMemoryStorageArea(initial = {}) {
+  const values = JSON.parse(JSON.stringify(initial));
+  const clone = (value) => JSON.parse(JSON.stringify(value));
+  return {
+    async get(keys) {
+      if (keys === null || keys === undefined) return clone(values);
+      if (typeof keys === "object" && !Array.isArray(keys)) {
+        const result = clone(keys);
+        for (const key of Object.keys(keys)) {
+          if (Object.hasOwn(values, key)) result[key] = clone(values[key]);
+        }
+        return result;
+      }
+      const requested = Array.isArray(keys) ? keys : [keys];
+      return Object.fromEntries(
+        requested
+          .filter((key) => Object.hasOwn(values, key))
+          .map((key) => [key, clone(values[key])]),
+      );
+    },
+    async set(next) {
+      Object.assign(values, clone(next));
+    },
+    async remove(keys) {
+      for (const key of Array.isArray(keys) ? keys : [keys]) delete values[key];
+    },
+    async clear() {
+      for (const key of Object.keys(values)) delete values[key];
+    },
+    snapshot() {
+      return clone(values);
+    },
+  };
+}
+
 function loadSidepanelRuntime({
   sendMessage = () => Promise.resolve({}),
   setTimeoutImpl = () => 0,
@@ -18,6 +53,7 @@ function loadSidepanelRuntime({
     remove: async () => {},
     clear: async () => {},
   },
+  storageSession = createMemoryStorageArea(),
   documentImpl,
   noteSourcesImpl = require("../note-sources.js"),
   exportJobsImpl = require("../export-jobs.js"),
@@ -59,7 +95,7 @@ function loadSidepanelRuntime({
       },
     },
     chrome: {
-      storage: { local: storageLocal },
+      storage: { local: storageLocal, session: storageSession },
       runtime: { onMessage: listeners, sendMessage },
       windows: { getCurrent: () => Promise.resolve({ id: 1 }) },
       tabs: {
@@ -2213,6 +2249,363 @@ function installSidepanelDigestFixture(runtime) {
   `);
 }
 
+/**
+ * Exercises saved-note navigation through the real side-panel entry points.
+ * The fixture intentionally does not inspect the implementation's pending
+ * intent object: it observes only browser navigation, background messages and
+ * visible panel state so the regression contract stays implementation-agnostic.
+ */
+function installNoteNavigationFixture(runtime, options = {}) {
+  const targetPlatform =
+    options.targetPlatform === "bilibili" ? "bilibili" : "youtube";
+  const targetVideoId = String(
+    options.targetVideoId ||
+      (targetPlatform === "bilibili" ? "BV1e3411j7ZM" : "target-video"),
+  );
+  const targetMediaKey = String(
+    options.targetMediaKey ||
+      (targetPlatform === "bilibili"
+        ? `bilibili:${targetVideoId}:200`
+        : targetVideoId),
+  );
+  const targetUrl = String(
+    options.targetUrl ||
+      (targetPlatform === "bilibili"
+        ? `https://www.bilibili.com/video/${targetVideoId}/?p=2&t=56`
+        : `https://www.youtube.com/watch?v=${targetVideoId}&t=56s`),
+  );
+  const fixtureOptions = JSON.stringify({
+    targetPlatform,
+    targetVideoId,
+    targetMediaKey,
+    targetUrl,
+    hasAiKey: options.hasAiKey !== false,
+  });
+  return runtime.evaluate(`
+    (() => {
+      const fixtureOptions = ${fixtureOptions};
+      const sourceVideoId = "source-video";
+      const targetPlatform = fixtureOptions.targetPlatform;
+      const targetVideoId = fixtureOptions.targetVideoId;
+      const targetMediaKey = fixtureOptions.targetMediaKey;
+      const targetUrl = fixtureOptions.targetUrl;
+      const targetLocator = extractMediaLocator(targetUrl);
+      const targetRouteKey = targetLocator.routeKey;
+      const messages = [];
+      const openedUrls = [];
+      const createdTabs = [];
+      const updatedTabs = [];
+      const renderedNotes = [];
+      const elements = new Map();
+      let panelClosed = false;
+      let activeUrlValue =
+        "https://www.youtube.com/watch?v=" + sourceVideoId;
+      let activeTabId = 101;
+      let nextCreatedTabId = 202;
+      const createdTabById = new Map();
+
+      const element = (id) => {
+        if (!elements.has(id)) {
+          elements.set(id, {
+            id,
+            style: { display: id === "resultsState" ? "block" : "none" },
+            hidden: false,
+            innerHTML: "",
+            textContent: "",
+            disabled: false,
+            classList: {
+              toggle() {},
+              add() {},
+              remove() {},
+              contains() { return false; },
+            },
+            setAttribute() {},
+            addEventListener() {},
+            removeEventListener() {},
+            focus() {},
+          });
+        }
+        return elements.get(id);
+      };
+
+      const tabElements = ["transcript", "overview", "notes"].map((name) => {
+        const entry = {
+          dataset: { tab: name },
+          active: name === "notes",
+          classList: {
+            toggle(className, force) {
+              if (className === "active") entry.active = Boolean(force);
+            },
+          },
+        };
+        return entry;
+      });
+      const panelElements = ["transcript", "overview", "notes"].map((name) => ({
+        dataset: { panel: name },
+        classList: { toggle() {} },
+      }));
+
+      document.getElementById = element;
+      document.querySelectorAll = (selector) => {
+        if (selector === ".tab") return tabElements;
+        if (selector === ".tab-panel") return panelElements;
+        return [];
+      };
+      document.querySelector = (selector) => {
+        if (selector === ".tab.active") {
+          return tabElements.find((entry) => entry.active) || null;
+        }
+        return null;
+      };
+      window.close = () => {
+        panelClosed = true;
+      };
+
+      renderNotes = (notes, filterVideoId) => {
+        renderedNotes.push({
+          filterVideoId: filterVideoId === undefined ? "undefined" : filterVideoId,
+          ids: notes.map((note) => note.id),
+        });
+      };
+      renderTranscript = () => {};
+      renderAnalysisResults = () => {};
+      highlightMomentsOnPage = () => {};
+      setupExplainFeature = () => {};
+      translateTranscript = () => {};
+      loadFromCache = async () => null;
+      saveToCache = async () => {};
+
+      const targetNote = {
+        id: "target-note",
+        platform: targetPlatform,
+        mediaKey: targetMediaKey,
+        videoId: targetPlatform === "bilibili" ? targetMediaKey : targetVideoId,
+        videoTitle: "Target video",
+        videoTitleZh: "目标视频",
+        videoTitleZhValidated: true,
+        videoTitleZhValidationVersion: 1,
+        channelName: "Target channel",
+        timestamp: "0:56",
+        timestampSeconds: 56,
+        canonicalUrl: targetLocator.canonicalUrl,
+        timestampedUrl: targetUrl,
+        text: "Saved English note.",
+        rawText: "Saved English note.",
+        translatedText: "已保存的中文笔记。",
+        translatedValidated: true,
+        translatedValidationVersion: 1,
+        sourceLanguage: targetPlatform === "bilibili" ? "zh-CN" : "en",
+      };
+
+      const activeTab = () => ({
+        id: activeTabId,
+        active: true,
+        windowId: 1,
+        url: activeUrlValue,
+      });
+      chrome.tabs.create = async ({ url, active = true }) => {
+        openedUrls.push(url);
+        const parsed = extractMediaLocator(url);
+        const created = {
+          id: nextCreatedTabId++,
+          active: active !== false,
+          windowId: 1,
+          pendingUrl: url,
+          url,
+          routeKey: parsed?.routeKey || "",
+        };
+        createdTabById.set(created.id, created);
+        createdTabs.push({ id: created.id, active: created.active, url });
+        if (created.active) {
+          activeTabId = created.id;
+          activeUrlValue = created.url;
+        }
+        return { ...created };
+      };
+      chrome.tabs.update = async (tabId, changes) => {
+        const created = createdTabById.get(tabId);
+        if (!created) throw new Error("Unknown created tab: " + tabId);
+        Object.assign(created, changes);
+        updatedTabs.push({ tabId, ...changes });
+        if (changes.active === true) {
+          activeTabId = tabId;
+          activeUrlValue = created.url;
+        }
+        return { ...created };
+      };
+      chrome.tabs.query = async () => [activeTab()];
+      chrome.tabs.get = async () => activeTab();
+      chrome.tabs.sendMessage = async (tabId, payload) => {
+        messages.push({ action: "tabs.sendMessage", tabId, payload });
+        return { success: true };
+      };
+      chrome.runtime.sendMessage = async (message) => {
+        messages.push(JSON.parse(JSON.stringify(message)));
+        if (message.action === "relayToContent") {
+          const activeLocator = extractMediaLocator(activeUrlValue);
+          return {
+            success: true,
+            response: {
+              title: activeLocator?.routeKey === targetRouteKey
+                ? "Target video"
+                : "Unrelated video",
+              channelName: "Target channel",
+              description: "Video description",
+              descriptionStatus: "present",
+              duration: 1800,
+              sourceLanguage: "en",
+            },
+          };
+        }
+        if (message.action === "resolveBilibiliMedia") {
+          return {
+            success: true,
+            mediaRef: {
+              ...targetLocator,
+              platform: "bilibili",
+              bvid: targetVideoId,
+              page: 2,
+              cid: 200,
+              mediaKey: targetMediaKey,
+              title: "Target video",
+              channelName: "Target channel",
+              description: "Video description",
+              descriptionStatus: "present",
+              duration: 1800,
+            },
+          };
+        }
+        if (message.action === "getNotes") {
+          return { success: true, notes: [targetNote] };
+        }
+        if (message.action === "fetchTranscript") {
+          return {
+            success: false,
+            error: "SUPADATA_CONSENT_REQUIRED",
+            message: "Choose whether to use Supadata.",
+          };
+        }
+        if (message.action === "cancelExportTranslationJob") {
+          return { success: true };
+        }
+        return { success: true };
+      };
+
+      currentConfigStatus = { hasAiKey: fixtureOptions.hasAiKey };
+      currentVideoId = sourceVideoId;
+      currentVideoUrl =
+        "https://www.youtube.com/watch?v=" + sourceVideoId;
+      currentMediaRef = {
+        platform: "youtube",
+        videoId: sourceVideoId,
+        mediaKey: sourceVideoId,
+        routeKey: "youtube:" + sourceVideoId,
+      };
+      currentRouteKey = "youtube:" + sourceVideoId;
+      currentVideoTitle = "Source video";
+      currentChannelName = "Source channel";
+      currentVideoDescription = "Source description";
+      currentVideoDescriptionState = "present";
+      currentVideoDuration = 1200;
+      currentVideoSourceLanguage = "en";
+      currentTranscript = [{ start: 0, text: "Source transcript" }];
+      currentTranscriptText = "Source transcript";
+      currentTranscriptTimestamped = "[0:00] Source transcript";
+      currentTranscriptLanguage = "en";
+      videoTabId = 101;
+      notesFilterShowAll = true;
+      currentNotesFilterVideoId = null;
+      showState("results");
+      setNotesFilter(true);
+
+      const fetchCount = () =>
+        messages.filter((message) => message.action === "fetchTranscript").length;
+      const noteLoadMessages = () =>
+        messages.filter((message) => message.action === "getNotes");
+      return {
+        targetVideoId,
+        targetMediaKey,
+        targetRouteKey,
+        targetUrl,
+        playTarget: () => playNote(targetNote),
+        inspectActive: () => checkCurrentTab(),
+        openTranscript: () => switchTab("transcript"),
+        navigateFront: (url) => handleFrontTabUrl(url),
+        setActiveVideo: (videoId) => {
+          activeUrlValue =
+            "https://www.youtube.com/watch?v=" + videoId +
+            (videoId === targetVideoId ? "&t=56s" : "");
+          activeTabId += 1;
+        },
+        setActiveTab: (url, tabId) => {
+          activeUrlValue = url;
+          activeTabId = tabId;
+        },
+        setHasAiKey: (value) => {
+          currentConfigStatus = { hasAiKey: value === true };
+        },
+        setCurrentVideo: (videoId) => {
+          currentVideoId = videoId;
+          currentRouteKey = "youtube:" + videoId;
+          currentMediaRef = {
+            platform: "youtube",
+            videoId,
+            mediaKey: videoId,
+            routeKey: currentRouteKey,
+          };
+          videoTabId = activeTabId;
+        },
+        snapshot: () => JSON.stringify({
+          activeTab: tabElements.find((entry) => entry.active)?.dataset.tab || null,
+          currentVideoId,
+          currentRouteKey,
+          videoTabId,
+          currentMediaRef: currentMediaRef
+            ? {
+                platform: currentMediaRef.platform,
+                mediaKey: currentMediaRef.mediaKey,
+                bvid: currentMediaRef.bvid || "",
+                cid: currentMediaRef.cid || 0,
+                page: currentMediaRef.page || 0,
+              }
+            : null,
+          notesFilterShowAll,
+          currentNotesFilterVideoId:
+            currentNotesFilterVideoId === undefined
+              ? "undefined"
+              : currentNotesFilterVideoId,
+          resultsVisible: element("resultsState").style.display !== "none",
+          panelClosed,
+          errorTitle: element("errorTitle").textContent,
+          fetchCount: fetchCount(),
+          noteLoadCount: noteLoadMessages().length,
+          noteLoadVideoIds: noteLoadMessages().map((message) =>
+            message.videoId === undefined ? "undefined" : message.videoId),
+          openedUrls,
+          createdTabs,
+          updatedTabs,
+          sessionKeys: Object.keys(
+            chrome.storage.session.snapshot?.() || {},
+          ).sort(),
+          backgroundActions: messages.map((message) => message.action),
+          renderedNotes,
+          tabSeekCount: messages.filter(
+            (message) => message.action === "tabs.sendMessage",
+          ).length,
+          tabSeekTabIds: messages
+            .filter((message) => message.action === "tabs.sendMessage")
+            .map((message) => message.tabId),
+          runtimeSeekCount: messages.filter(
+            (message) =>
+              message.action === "relayToContent" &&
+              message.payload?.action === "seekTo",
+          ).length,
+        }),
+      };
+    })()
+  `);
+}
+
 test("Header exposes tab-specific transcript, overview, and notes language modes", () => {
   const html = read("sidepanel.html");
   const css = read("sidepanel.css");
@@ -2434,6 +2827,256 @@ test("duplicate digest starts for the same video share one in-flight task", asyn
   assert.equal(await videoB, "b");
   assert.equal(await videoA, "a");
   assert.equal(await duplicateVideoA, "a");
+});
+
+test("opening another video's saved note stays in All Notes without requesting Supadata", async () => {
+  const runtime = loadSidepanelRuntime();
+  const fixture = installNoteNavigationFixture(runtime);
+
+  await fixture.playTarget();
+  await fixture.inspectActive();
+  await nextTurn();
+
+  const snapshot = JSON.parse(fixture.snapshot());
+  assert.equal(snapshot.fetchCount, 0);
+  assert.equal(snapshot.errorTitle, "");
+  assert.equal(snapshot.activeTab, "notes");
+  assert.equal(snapshot.resultsVisible, true);
+  assert.equal(snapshot.currentVideoId, fixture.targetVideoId);
+  assert.equal(snapshot.currentRouteKey, `youtube:${fixture.targetVideoId}`);
+  assert.equal(snapshot.notesFilterShowAll, true);
+  assert.equal(snapshot.currentNotesFilterVideoId, null);
+  assert.deepEqual(snapshot.noteLoadVideoIds, [null]);
+  assert.deepEqual(snapshot.openedUrls, [
+    `https://www.youtube.com/watch?v=${fixture.targetVideoId}&t=56s`,
+  ]);
+  assert.deepEqual(snapshot.createdTabs.map(({ active }) => active), [false]);
+  assert.deepEqual(snapshot.updatedTabs, [
+    { tabId: snapshot.createdTabs[0].id, active: true },
+  ]);
+  assert.equal(snapshot.sessionKeys.length, 1);
+});
+
+test("duplicate navigation events stay note-only until transcript is requested explicitly", async () => {
+  const runtime = loadSidepanelRuntime();
+  const fixture = installNoteNavigationFixture(runtime);
+
+  await fixture.playTarget();
+  await fixture.inspectActive();
+  // New tabs commonly emit activation, URL and complete events. A consumed
+  // one-shot intent must therefore leave a route-scoped note-only state; a
+  // second automatic inspection must not immediately reopen Supadata consent.
+  await fixture.inspectActive();
+  await nextTurn();
+  assert.equal(JSON.parse(fixture.snapshot()).fetchCount, 0);
+
+  await fixture.openTranscript();
+  await nextTurn();
+  await nextTurn();
+  const afterExplicitTranscript = JSON.parse(fixture.snapshot());
+  assert.equal(afterExplicitTranscript.fetchCount, 1);
+  assert.equal(afterExplicitTranscript.activeTab, "transcript");
+  assert.equal(
+    afterExplicitTranscript.errorTitle,
+    "是否使用 Supadata 获取字幕？",
+  );
+});
+
+test("saved-note navigation suppression is bound to one target route and is not reused", async () => {
+  const unrelatedRuntime = loadSidepanelRuntime();
+  const unrelated = installNoteNavigationFixture(unrelatedRuntime);
+  await unrelated.playTarget();
+  unrelated.setActiveVideo("unrelated-video");
+  await unrelated.inspectActive();
+  await nextTurn();
+  assert.equal(
+    JSON.parse(unrelated.snapshot()).fetchCount,
+    1,
+    "a pending target-video note intent must not suppress another video",
+  );
+
+  const oneShotRuntime = loadSidepanelRuntime();
+  const oneShot = installNoteNavigationFixture(oneShotRuntime);
+  await oneShot.playTarget();
+  await oneShot.inspectActive();
+  await nextTurn();
+  assert.equal(JSON.parse(oneShot.snapshot()).fetchCount, 0);
+
+  // Leaving the matched route ends its note-only navigation session. Returning
+  // later without another saved-note click must use the ordinary transcript
+  // flow rather than reusing the old intent.
+  oneShot.setActiveVideo("later-video");
+  await oneShot.inspectActive();
+  oneShot.setActiveVideo(oneShot.targetVideoId);
+  await oneShot.inspectActive();
+  await nextTurn();
+  assert.equal(JSON.parse(oneShot.snapshot()).fetchCount, 2);
+});
+
+test("playing a saved note for the current video still seeks without opening a tab", async () => {
+  const runtime = loadSidepanelRuntime();
+  const fixture = installNoteNavigationFixture(runtime);
+  fixture.setActiveTab(fixture.targetUrl, 303);
+  fixture.setCurrentVideo(fixture.targetVideoId);
+
+  await fixture.playTarget();
+  await nextTurn();
+
+  const snapshot = JSON.parse(fixture.snapshot());
+  assert.deepEqual(snapshot.openedUrls, []);
+  assert.equal(snapshot.fetchCount, 0);
+  assert.equal(snapshot.tabSeekCount + snapshot.runtimeSeekCount, 1);
+  assert.deepEqual(snapshot.tabSeekTabIds, [303]);
+});
+
+test("an active saved-note context survives side-panel reconstruction without fetching a transcript", async () => {
+  const sharedSession = createMemoryStorageArea();
+  const firstRuntime = loadSidepanelRuntime({ storageSession: sharedSession });
+  const first = installNoteNavigationFixture(firstRuntime);
+
+  await first.playTarget();
+  await first.inspectActive();
+  await nextTurn();
+  const firstSnapshot = JSON.parse(first.snapshot());
+  assert.equal(firstSnapshot.fetchCount, 0);
+  assert.equal(Object.values(sharedSession.snapshot())[0]?.phase, "active");
+
+  // A newly constructed side panel starts with no in-memory intent. It must
+  // hydrate the active tab+route context from chrome.storage.session and keep
+  // the local All Notes view instead of treating reconstruction as a new visit.
+  const rebuiltRuntime = loadSidepanelRuntime({ storageSession: sharedSession });
+  const rebuilt = installNoteNavigationFixture(rebuiltRuntime);
+  rebuilt.setActiveTab(
+    first.targetUrl,
+    firstSnapshot.createdTabs[0].id,
+  );
+  await rebuilt.inspectActive();
+  await nextTurn();
+
+  const rebuiltSnapshot = JSON.parse(rebuilt.snapshot());
+  assert.equal(rebuiltSnapshot.fetchCount, 0);
+  assert.equal(rebuiltSnapshot.errorTitle, "");
+  assert.equal(rebuiltSnapshot.activeTab, "notes");
+  assert.equal(rebuiltSnapshot.currentVideoId, first.targetMediaKey);
+  assert.equal(rebuiltSnapshot.notesFilterShowAll, true);
+  assert.deepEqual(rebuiltSnapshot.noteLoadVideoIds, [null]);
+});
+
+test("a Bilibili P2 note jump preserves its CID media identity and stays local without an AI key", async () => {
+  const runtime = loadSidepanelRuntime();
+  const fixture = installNoteNavigationFixture(runtime, {
+    targetPlatform: "bilibili",
+    targetVideoId: "BV1e3411j7ZM",
+    targetMediaKey: "bilibili:BV1e3411j7ZM:200",
+    targetUrl: "https://www.bilibili.com/video/BV1e3411j7ZM/?p=2&t=56",
+    hasAiKey: false,
+  });
+
+  await fixture.playTarget();
+  await fixture.inspectActive();
+  await nextTurn();
+
+  const snapshot = JSON.parse(fixture.snapshot());
+  assert.equal(snapshot.fetchCount, 0);
+  assert.equal(snapshot.errorTitle, "");
+  assert.equal(snapshot.currentVideoId, "bilibili:BV1e3411j7ZM:200");
+  assert.equal(snapshot.currentRouteKey, "bilibili:BV1e3411j7ZM:p2");
+  assert.equal(snapshot.currentMediaRef.platform, "bilibili");
+  assert.equal(
+    snapshot.currentMediaRef.mediaKey,
+    "bilibili:BV1e3411j7ZM:200",
+  );
+  assert.equal(snapshot.currentMediaRef.bvid, "BV1e3411j7ZM");
+  assert.equal(snapshot.currentMediaRef.page, 2);
+  assert.equal(snapshot.activeTab, "notes");
+  assert.equal(snapshot.notesFilterShowAll, true);
+  assert.deepEqual(snapshot.noteLoadVideoIds, [null]);
+  assert.deepEqual(snapshot.backgroundActions, ["getNotes"]);
+});
+
+test("a matching saved-note jump can read local notes when no AI provider key is configured", async () => {
+  const runtime = loadSidepanelRuntime();
+  const fixture = installNoteNavigationFixture(runtime, { hasAiKey: false });
+
+  await fixture.playTarget();
+  await fixture.inspectActive();
+  await nextTurn();
+
+  const snapshot = JSON.parse(fixture.snapshot());
+  assert.equal(snapshot.fetchCount, 0);
+  assert.equal(snapshot.errorTitle, "");
+  assert.equal(snapshot.resultsVisible, true);
+  assert.equal(snapshot.activeTab, "notes");
+  assert.deepEqual(snapshot.noteLoadVideoIds, [null]);
+  assert.deepEqual(snapshot.backgroundActions, ["getNotes"]);
+});
+
+test("leaving an active saved-note route for an unsupported page clears the session context", async () => {
+  const sharedSession = createMemoryStorageArea();
+  const runtime = loadSidepanelRuntime({ storageSession: sharedSession });
+  const fixture = installNoteNavigationFixture(runtime);
+
+  await fixture.playTarget();
+  await fixture.inspectActive();
+  assert.equal(Object.values(sharedSession.snapshot())[0]?.phase, "active");
+
+  fixture.navigateFront("https://example.com/not-a-video");
+  await nextTurn();
+  await nextTurn();
+
+  const snapshot = JSON.parse(fixture.snapshot());
+  assert.equal(snapshot.panelClosed, true);
+  assert.deepEqual(snapshot.sessionKeys, []);
+  assert.deepEqual(sharedSession.snapshot(), {});
+});
+
+test("activating the same video in another tab clears note-only state and rebinds later seeks", async () => {
+  const timers = new Map();
+  let nextTimerId = 1;
+  const runtime = loadSidepanelRuntime({
+    setTimeoutImpl(callback, delay) {
+      const id = nextTimerId++;
+      timers.set(id, { callback, delay, cancelled: false });
+      return id;
+    },
+    clearTimeoutImpl(id) {
+      if (timers.has(id)) timers.get(id).cancelled = true;
+    },
+  });
+  const fixture = installNoteNavigationFixture(runtime);
+
+  await fixture.playTarget();
+  await fixture.inspectActive();
+  const noteOnly = JSON.parse(fixture.snapshot());
+  assert.equal(noteOnly.fetchCount, 0);
+  assert.equal(noteOnly.videoTabId, noteOnly.createdTabs[0].id);
+  assert.equal(noteOnly.sessionKeys.length, 1);
+
+  const secondTabId = 909;
+  fixture.setActiveTab(fixture.targetUrl, secondTabId);
+  await runtime.tabActivatedListeners[0]({ tabId: secondTabId, windowId: 1 });
+  await nextTurn();
+
+  const afterActivation = JSON.parse(fixture.snapshot());
+  assert.deepEqual(afterActivation.sessionKeys, []);
+  const scheduledRefreshes = [...timers.values()].filter(
+    (timer) => !timer.cancelled,
+  );
+  assert.equal(scheduledRefreshes.length, 1);
+  assert.equal(scheduledRefreshes[0].delay, 600);
+
+  scheduledRefreshes[0].callback();
+  await nextTurn();
+  await nextTurn();
+  const afterRefresh = JSON.parse(fixture.snapshot());
+  assert.equal(afterRefresh.videoTabId, secondTabId);
+  assert.equal(afterRefresh.fetchCount, 1);
+
+  await fixture.playTarget();
+  await nextTurn();
+  const afterPlay = JSON.parse(fixture.snapshot());
+  assert.deepEqual(afterPlay.tabSeekTabIds, [secondTabId]);
+  assert.equal(afterPlay.openedUrls.length, 1);
 });
 
 test("Supadata is requested only after the user confirms the third-party action", async () => {

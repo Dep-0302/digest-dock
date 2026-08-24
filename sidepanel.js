@@ -76,6 +76,20 @@ let errorSecondaryAction = null;
 let tabCheckGeneration = 0;
 let digestGeneration = 0;
 
+// A cross-video click from the saved-notes library means "open this note",
+// not "start acquiring subtitles".  Keep that intent in session storage so
+// it survives Chrome swapping/recreating the global side-panel document while
+// the new tab is activated.  The pending phase is short-lived and exact-tab
+// bound; after it matches, the active phase lasts only while that tab remains
+// on the same media route or until the user explicitly requests a digest tab.
+const NOTE_NAVIGATION_SESSION_KEY = "ytd_note_navigation";
+const NOTE_NAVIGATION_SCHEMA_VERSION = 1;
+const NOTE_NAVIGATION_PENDING_TTL_MS = 15_000;
+let pendingNoteNavigation = null;
+let activeNotesOnlyContext = null;
+let noteNavigationResumePromise = null;
+let noteNavigationStorageQueue = Promise.resolve();
+
 // --- Translation state ---
 // The public transcript control intentionally supports only the original
 // subtitles, Chinese, and an aligned source + Chinese view.
@@ -476,7 +490,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     // seen this video before (no API calls); fetched fresh otherwise.
     // (This used to force-clear the cache on every click, which silently
     // burned a transcript credit + analysis tokens per click.)
-    checkCurrentTab();
+    // A page-level Digest click is an explicit request to leave a local-only
+    // saved-note jump and load the video's digest. It may therefore reach the
+    // ordinary per-attempt Supadata consent gate if no local transcript exists.
+    void clearNoteNavigationState()
+      .then(() => checkCurrentTab())
+      .catch((error) => {
+        console.error("[DigestDock Panel] Digest button retry error:", error);
+      });
     sendResponse({ success: true });
   }
   if (message.action === "transcriptProgress") {
@@ -568,6 +589,233 @@ function extractMediaLocator(url) {
   }
 }
 
+function noteNavigationStorage() {
+  return chrome.storage?.session || null;
+}
+
+function queueNoteNavigationStorage(task) {
+  const queued = noteNavigationStorageQueue.then(task, task);
+  noteNavigationStorageQueue = queued.catch(() => undefined);
+  return queued;
+}
+
+function normalizeNoteNavigationState(value) {
+  if (!value || typeof value !== "object") return null;
+  const phase = value.phase === "active" ? "active" : "pending";
+  const token = String(value.token || "").trim().slice(0, 120);
+  const routeKey = String(value.routeKey || "").trim().slice(0, 220);
+  const mediaKey = String(value.mediaKey || "").trim().slice(0, 220);
+  const platform = value.platform === "bilibili" ? "bilibili" : "youtube";
+  const tabId = Number(value.tabId);
+  const createdAt = Number(value.createdAt);
+  const expiresAt = Number(value.expiresAt);
+  if (
+    value.schemaVersion !== NOTE_NAVIGATION_SCHEMA_VERSION ||
+    !token ||
+    !routeKey ||
+    !mediaKey ||
+    !Number.isInteger(tabId) ||
+    tabId < 0 ||
+    !Number.isFinite(createdAt) ||
+    createdAt <= 0
+  ) {
+    return null;
+  }
+  if (
+    phase === "pending" &&
+    (!Number.isFinite(expiresAt) || expiresAt <= Date.now())
+  ) {
+    return null;
+  }
+  return {
+    schemaVersion: NOTE_NAVIGATION_SCHEMA_VERSION,
+    phase,
+    token,
+    tabId,
+    routeKey,
+    mediaKey,
+    platform,
+    canonicalUrl: String(value.canonicalUrl || "").trim().slice(0, 2_000),
+    timestampedUrl: String(value.timestampedUrl || "").trim().slice(0, 2_000),
+    videoTitle: String(value.videoTitle || "").trim().slice(0, 500),
+    channelName: String(value.channelName || "").trim().slice(0, 300),
+    sourceLanguage: normalizeLanguageCode(value.sourceLanguage),
+    duration: Math.max(0, Number(value.duration) || 0),
+    showAll: value.showAll === true,
+    createdAt,
+    expiresAt: phase === "pending" ? expiresAt : 0,
+    activatedAt:
+      phase === "active" ? Math.max(0, Number(value.activatedAt) || 0) : 0,
+  };
+}
+
+async function persistNoteNavigationState(state) {
+  const normalized = normalizeNoteNavigationState(state);
+  if (!normalized) return false;
+  if (normalized.phase === "active") {
+    activeNotesOnlyContext = normalized;
+    pendingNoteNavigation = null;
+  } else {
+    pendingNoteNavigation = normalized;
+    activeNotesOnlyContext = null;
+  }
+  const storage = noteNavigationStorage();
+  if (!storage?.set) return true;
+  await queueNoteNavigationStorage(async () => {
+    try {
+      await storage.set({ [NOTE_NAVIGATION_SESSION_KEY]: normalized });
+    } catch (error) {
+      // The in-memory state still protects the current global panel instance.
+      console.warn("[DigestDock] Could not persist note navigation:", error);
+    }
+  });
+  return true;
+}
+
+async function hydrateNoteNavigationState() {
+  if (activeNotesOnlyContext || pendingNoteNavigation) return;
+  const storage = noteNavigationStorage();
+  if (!storage?.get) return;
+  await queueNoteNavigationStorage(async () => {
+    if (activeNotesOnlyContext || pendingNoteNavigation) return;
+    try {
+      const stored = await storage.get(NOTE_NAVIGATION_SESSION_KEY);
+      if (activeNotesOnlyContext || pendingNoteNavigation) return;
+      const normalized = normalizeNoteNavigationState(
+        stored?.[NOTE_NAVIGATION_SESSION_KEY],
+      );
+      if (!normalized) {
+        if (stored?.[NOTE_NAVIGATION_SESSION_KEY] && storage.remove) {
+          await storage.remove(NOTE_NAVIGATION_SESSION_KEY);
+        }
+        return;
+      }
+      if (normalized.phase === "active") {
+        activeNotesOnlyContext = normalized;
+      } else {
+        pendingNoteNavigation = normalized;
+      }
+    } catch (error) {
+      console.warn("[DigestDock] Could not restore note navigation:", error);
+    }
+  });
+}
+
+async function clearNoteNavigationState(expectedToken = "") {
+  const token = String(expectedToken || "");
+  if (
+    token &&
+    activeNotesOnlyContext?.token !== token &&
+    pendingNoteNavigation?.token !== token
+  ) {
+    return false;
+  }
+  activeNotesOnlyContext = null;
+  pendingNoteNavigation = null;
+  const storage = noteNavigationStorage();
+  if (!storage?.remove) return true;
+  return queueNoteNavigationStorage(async () => {
+    try {
+      if (token && storage.get) {
+        const stored = await storage.get(NOTE_NAVIGATION_SESSION_KEY);
+        const storedToken = String(
+          stored?.[NOTE_NAVIGATION_SESSION_KEY]?.token || "",
+        );
+        if (storedToken && storedToken !== token) return false;
+      }
+      await storage.remove(NOTE_NAVIGATION_SESSION_KEY);
+    } catch (error) {
+      console.warn("[DigestDock] Could not clear note navigation:", error);
+    }
+    return true;
+  });
+}
+
+function noteNavigationMatches(state, tab, locator) {
+  if (!state || !tab || !locator) return false;
+  if (state.tabId !== tab.id || state.routeKey !== locator.routeKey) return false;
+  if (state.platform !== locator.platform) return false;
+  if (locator.platform === "youtube" && state.mediaKey !== locator.mediaKey) {
+    return false;
+  }
+  return true;
+}
+
+async function resolveNoteNavigationForTab(tab, locator) {
+  await hydrateNoteNavigationState();
+
+  if (activeNotesOnlyContext) {
+    if (noteNavigationMatches(activeNotesOnlyContext, tab, locator)) {
+      return activeNotesOnlyContext;
+    }
+    // Once activated, leaving the exact tab or media route ends notes-only
+    // mode. Returning later is an ordinary video visit and may request a
+    // transcript only through the existing consent flow.
+    await clearNoteNavigationState(activeNotesOnlyContext.token);
+    return null;
+  }
+
+  const pending = normalizeNoteNavigationState(pendingNoteNavigation);
+  if (!pending) {
+    if (pendingNoteNavigation) {
+      await clearNoteNavigationState(pendingNoteNavigation.token);
+    }
+    return null;
+  }
+  pendingNoteNavigation = pending;
+  if (!noteNavigationMatches(pending, tab, locator)) return null;
+
+  const active = {
+    ...pending,
+    phase: "active",
+    expiresAt: 0,
+    activatedAt: Date.now(),
+  };
+  await persistNoteNavigationState(active);
+  return activeNotesOnlyContext;
+}
+
+function buildNoteNavigationIntent(note, tabId) {
+  const timestampedUrl = String(
+    note?.timestampedUrl || note?.canonicalUrl || "",
+  ).trim();
+  const locator = extractMediaLocator(timestampedUrl);
+  const mediaKey = String(note?.mediaKey || note?.videoId || "").trim();
+  if (!locator || !mediaKey || !Number.isInteger(tabId)) return null;
+  if (locator.platform === "youtube" && mediaKey !== locator.mediaKey) {
+    return null;
+  }
+  const now = Date.now();
+  return {
+    schemaVersion: NOTE_NAVIGATION_SCHEMA_VERSION,
+    phase: "pending",
+    token: `${now.toString(36)}:${Math.random().toString(36).slice(2)}`,
+    tabId,
+    routeKey: locator.routeKey,
+    mediaKey,
+    platform: locator.platform,
+    canonicalUrl: String(note?.canonicalUrl || locator.canonicalUrl || ""),
+    timestampedUrl,
+    videoTitle: noteOriginalVideoTitle(note),
+    channelName: String(note?.channelName || ""),
+    sourceLanguage: String(note?.sourceLanguage || ""),
+    duration: Number(note?.duration) || 0,
+    showAll: notesFilterShowAll,
+    createdAt: now,
+    expiresAt: now + NOTE_NAVIGATION_PENDING_TTL_MS,
+    activatedAt: 0,
+  };
+}
+
+function isActiveNotesOnlyContext() {
+  return (
+    !!activeNotesOnlyContext &&
+    activeNotesOnlyContext.tabId === videoTabId &&
+    activeNotesOnlyContext.routeKey === currentRouteKey &&
+    activeNotesOnlyContext.mediaKey === currentVideoId
+  );
+}
+
 function isBilibiliChineseMedia() {
   return (
     currentMediaRef?.platform === "bilibili" &&
@@ -643,17 +891,39 @@ function updateHeaderLanguageControlsVisibility() {
  * Reacts to the URL now in front of the panel: close on non-YouTube,
  * refresh the digest when the video changed.
  */
-function handleFrontTabUrl(url) {
+function handleFrontTabUrl(url, tabId = null) {
   const locator = extractMediaLocator(url);
   if (!locator) {
-    window.close();
+    const activeToken = activeNotesOnlyContext?.token || "";
+    if (activeToken) {
+      void clearNoteNavigationState(activeToken).finally(() => window.close());
+    } else {
+      window.close();
+    }
     return;
   }
 
   const newRouteKey = locator.routeKey;
+  const exactTabChanged =
+    Number.isInteger(tabId) &&
+    Number.isInteger(videoTabId) &&
+    tabId !== videoTabId;
+  if (
+    activeNotesOnlyContext &&
+    (activeNotesOnlyContext.routeKey !== newRouteKey ||
+      (Number.isInteger(tabId) && activeNotesOnlyContext.tabId !== tabId))
+  ) {
+    void clearNoteNavigationState(activeNotesOnlyContext.token);
+  }
   // Refresh when the video changed, or when we're not currently showing
-  // results (e.g. user went home, then clicked back into the same video).
-  if (newRouteKey !== currentRouteKey || !panelIsShowingResults()) {
+  // results (e.g. user went home, then clicked back into the same video), or
+  // when another tab shows the same route. The latter must rebind videoTabId so
+  // note seek/play messages never target a background copy of the video.
+  if (
+    newRouteKey !== currentRouteKey ||
+    exactTabChanged ||
+    !panelIsShowingResults()
+  ) {
     scheduleDigestRefresh();
   }
 }
@@ -663,7 +933,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (!tab.active) return;
   if (panelWindowId !== null && tab.windowId !== panelWindowId) return;
   if (changeInfo.url) {
-    handleFrontTabUrl(changeInfo.url);
+    handleFrontTabUrl(changeInfo.url, tabId);
     return;
   }
   if (changeInfo.status === "complete" && tabId === videoTabId) {
@@ -679,9 +949,16 @@ chrome.tabs.onActivated.addListener(async ({ tabId, windowId }) => {
     const tab = await chrome.tabs.get(tabId);
     // Brand-new tabs may not have committed their URL yet — fall back to
     // the pending one so we judge where the tab is actually going.
-    handleFrontTabUrl(tab.pendingUrl || tab.url || "");
+    handleFrontTabUrl(tab.pendingUrl || tab.url || "", tabId);
   } catch (e) {
     // Tab closed before we could read it — nothing to do.
+  }
+});
+
+chrome.tabs.onRemoved?.addListener((tabId) => {
+  const state = activeNotesOnlyContext || pendingNoteNavigation;
+  if (state?.tabId === tabId) {
+    void clearNoteNavigationState(state.token);
   }
 });
 
@@ -820,7 +1097,10 @@ async function runCheckCurrentTab(generation) {
       lastFocusedWindow: true,
     });
     if (!isLatestCheck()) return;
-    if (extractMediaLocator(tabs[0]?.url)) tab = tabs[0];
+    const frontTabUrl = tabs[0]?.pendingUrl || tabs[0]?.url || "";
+    if (extractMediaLocator(frontTabUrl)) {
+      tab = { ...tabs[0], url: frontTabUrl };
+    }
 
     if (!tab) {
       tabs = await chrome.tabs.query({
@@ -852,9 +1132,20 @@ async function runCheckCurrentTab(generation) {
       return;
     }
 
-    const locator = extractMediaLocator(tab.url);
+    const locator = extractMediaLocator(tab.pendingUrl || tab.url);
     if (!locator) {
       showState("welcome");
+      return;
+    }
+
+    // Capture the exact supported tab before any navigation-intent lookup or
+    // content relay. Viewing an already-saved note is a local action and must
+    // remain available even when no AI key is configured.
+    videoTabId = tab.id;
+    const noteNavigation = await resolveNoteNavigationForTab(tab, locator);
+    if (!isLatestCheck()) return;
+    if (noteNavigation) {
+      await enterNotesOnlyView(noteNavigation, tab, locator);
       return;
     }
 
@@ -862,10 +1153,6 @@ async function runCheckCurrentTab(generation) {
       showConfigError(currentConfigStatus || {});
       return;
     }
-
-    // Capture the exact supported tab before any content relay so a
-    // refresh-required response can reload the tab that actually failed.
-    videoTabId = tab.id;
 
     let nextMediaRef = locator;
     let nextVideoUrl = tab.url;
@@ -995,6 +1282,94 @@ async function runCheckCurrentTab(generation) {
 // DIGEST PIPELINE
 // ============================================================
 
+function resetDigestStateForVideo(videoId, videoUrl, mediaRef, routeKey) {
+  const previousExportJobId = activeExportJobId;
+  digestGeneration += 1;
+  translationGeneration += 1;
+  exportTranslationGeneration += 1;
+  notesLoadGeneration += 1;
+  notesTranslationGeneration += 1;
+  isOverviewTranslationLoading = false;
+  isAnalysisLoading = false;
+  isNotesLoading = false;
+  isNotesTranslationLoading = false;
+  if (transcriptScrollObserver) transcriptScrollObserver.disconnect();
+  transcriptScrollObserver = null;
+  currentVideoId = videoId;
+  currentVideoUrl = videoUrl;
+  currentMediaRef = mediaRef;
+  currentRouteKey = routeKey;
+  currentAnalysis = null;
+  currentTranscript = null;
+  currentTranscriptText = null;
+  currentTranscriptTimestamped = null;
+  currentTranscriptLanguage = null;
+  currentTranscriptSource = "";
+  currentTranscriptSelectedTrack = null;
+  currentTranscriptSourceAttempt = "";
+  currentPersistedNoteSource = null;
+  activeExportJobId = "";
+  if (previousExportJobId) {
+    chrome.runtime
+      .sendMessage({
+        action: "cancelExportTranslationJob",
+        jobId: previousExportJobId,
+      })
+      .catch(() => {});
+  }
+  currentOverviewMode = "zh";
+  setOverviewModeButtons(currentOverviewMode);
+  clearOverviewResults();
+}
+
+async function enterNotesOnlyView(context, tab, locator) {
+  if (!noteNavigationMatches(context, tab, locator)) return false;
+  const mediaRef = {
+    ...locator,
+    platform: context.platform,
+    mediaKey: context.mediaKey,
+    canonicalUrl: context.canonicalUrl || locator.canonicalUrl,
+  };
+  const videoChanged =
+    context.mediaKey !== currentVideoId ||
+    context.routeKey !== currentRouteKey;
+
+  currentVideoTitle = context.videoTitle || "";
+  currentChannelName = context.channelName || "";
+  currentVideoDescription = "";
+  currentVideoDescriptionZh = "";
+  currentVideoDescriptionState = "unknown";
+  currentVideoDuration = context.duration || 0;
+  currentVideoSourceLanguage = context.sourceLanguage || "";
+
+  if (videoChanged) {
+    resetDigestStateForVideo(
+      context.mediaKey,
+      tab.pendingUrl || tab.url || context.timestampedUrl,
+      mediaRef,
+      context.routeKey,
+    );
+    applyMediaLanguageDefaults();
+  } else {
+    currentVideoUrl = tab.pendingUrl || tab.url || context.timestampedUrl;
+    currentMediaRef = mediaRef;
+    currentRouteKey = context.routeKey;
+  }
+
+  const videoInfo = document.getElementById("videoInfo");
+  const videoTitle = document.getElementById("videoTitle");
+  if (videoTitle) videoTitle.textContent = currentVideoTitle;
+  updateVideoMetaLine();
+  if (videoInfo) videoInfo.style.display = "block";
+
+  showState("results");
+  switchTab("notes");
+  await loadNotes(context.showAll ? null : context.mediaKey, {
+    translateMissing: false,
+  });
+  return true;
+}
+
 function startDigest(
   videoId,
   videoUrl,
@@ -1018,40 +1393,12 @@ function startDigest(
     nextRouteKey !== currentRouteKey ||
     sourceTrackChanged;
   if (videoChanged) {
-    const previousExportJobId = activeExportJobId;
-    digestGeneration += 1;
-    translationGeneration += 1;
-    exportTranslationGeneration += 1;
-    notesLoadGeneration += 1;
-    notesTranslationGeneration += 1;
-    isOverviewTranslationLoading = false;
-    isAnalysisLoading = false;
-    isNotesLoading = false;
-    isNotesTranslationLoading = false;
-    if (transcriptScrollObserver) transcriptScrollObserver.disconnect();
-    transcriptScrollObserver = null;
-    currentVideoId = videoId;
-    currentVideoUrl = videoUrl;
-    currentMediaRef = nextMediaRef;
-    currentRouteKey = nextRouteKey;
-    currentAnalysis = null;
-    currentTranscript = null;
-    currentTranscriptText = null;
-    currentTranscriptTimestamped = null;
-    currentTranscriptLanguage = null;
-    currentPersistedNoteSource = null;
-    activeExportJobId = "";
-    if (previousExportJobId) {
-      chrome.runtime
-        .sendMessage({
-          action: "cancelExportTranslationJob",
-          jobId: previousExportJobId,
-        })
-        .catch(() => {});
-    }
-    currentOverviewMode = "zh";
-    setOverviewModeButtons(currentOverviewMode);
-    clearOverviewResults();
+    resetDigestStateForVideo(
+      videoId,
+      videoUrl,
+      nextMediaRef,
+      nextRouteKey,
+    );
   } else {
     currentVideoUrl = videoUrl;
     currentMediaRef = nextMediaRef;
@@ -1205,8 +1552,10 @@ async function runDigestLoad(
     showState("results");
     document.getElementById("tabsNav").style.display = "flex";
 
-    // Load notes for this video
-    loadNotes(videoId);
+    // Respect the user's explicit All Notes filter. A saved-note navigation
+    // must not silently collapse the library back to the current video after
+    // they later request Transcript or Overview.
+    loadNotes(notesFilterShowAll ? null : videoId);
 
     // Setup explain feature
     setupExplainFeature();
@@ -1344,8 +1693,8 @@ async function runDigestLoad(
   showState("results");
   document.getElementById("tabsNav").style.display = "flex";
 
-  // Load notes for this video
-  loadNotes(videoId);
+  // Preserve an explicitly selected All Notes view across digest loading.
+  loadNotes(notesFilterShowAll ? null : videoId);
 
   // Setup explain feature for text selection
   setupExplainFeature();
@@ -4044,6 +4393,31 @@ function showRuntimeVersionError() {
 // TAB SWITCHING
 // ============================================================
 
+function resumeDigestFromNotesOnly(tabName) {
+  if (noteNavigationResumePromise) return noteNavigationResumePromise;
+  const context = activeNotesOnlyContext;
+  if (!context) return Promise.resolve();
+
+  showState("loading");
+  updateLoading(
+    tabName === "overview" ? "正在准备概览" : "正在获取字幕",
+    "",
+  );
+  noteNavigationResumePromise = clearNoteNavigationState(context.token)
+    .then(() => checkCurrentTab())
+    .catch((error) => {
+      console.error("[DigestDock Panel] Resume digest error:", error);
+      showError(
+        "无法打开摘要",
+        error?.message || "读取当前视频失败，请刷新页面后重试。",
+      );
+    })
+    .finally(() => {
+      noteNavigationResumePromise = null;
+    });
+  return noteNavigationResumePromise;
+}
+
 function switchTab(tabName) {
   document.querySelectorAll(".tab").forEach((tab) => {
     tab.classList.toggle("active", tab.dataset.tab === tabName);
@@ -4053,6 +4427,18 @@ function switchTab(tabName) {
     panel.classList.toggle("active", panel.dataset.panel === tabName);
   });
   updateHeaderLanguageControlsVisibility();
+
+  // A saved-note jump intentionally performs no transcript acquisition. The
+  // user's explicit switch to Transcript or Overview is the point at which we
+  // leave that local-only state and resume the ordinary digest/consent flow.
+  if (
+    (tabName === "transcript" || tabName === "overview") &&
+    isActiveNotesOnlyContext() &&
+    !currentTranscript
+  ) {
+    void resumeDigestFromNotesOnly(tabName);
+    return;
+  }
 
   // Start/stop playback tracking based on which tab is active
   if (tabName === "transcript") {
@@ -4204,13 +4590,31 @@ async function seekTo(seconds) {
  *   current player would jump to the wrong content, so we open that video in a
  *   new tab at the right timestamp instead.
  */
-function playNote(note) {
+async function playNote(note) {
   const noteMediaKey = note?.mediaKey || note?.videoId;
   if (noteMediaKey && noteMediaKey === currentVideoId) {
-    seekTo(note.timestampSeconds);
-  } else {
-    // note.timestampedUrl already includes the &t=<seconds>s anchor
-    chrome.tabs.create({ url: note.timestampedUrl });
+    await seekTo(note.timestampSeconds);
+    return;
+  }
+
+  const targetUrl = String(note?.timestampedUrl || note?.canonicalUrl || "");
+  if (!targetUrl) return;
+
+  let createdTab = null;
+  let intent = null;
+  try {
+    // Create the tab in the background first so the navigation intent can be
+    // bound to its exact tabId before Chrome emits onActivated. This removes a
+    // race where an unrelated active tab could otherwise consume the intent.
+    createdTab = await chrome.tabs.create({ url: targetUrl, active: false });
+    intent = buildNoteNavigationIntent(note, createdTab?.id);
+    if (intent) await persistNoteNavigationState(intent);
+    if (Number.isInteger(createdTab?.id) && chrome.tabs.update) {
+      await chrome.tabs.update(createdTab.id, { active: true });
+    }
+  } catch (error) {
+    if (intent) await clearNoteNavigationState(intent.token);
+    console.error("[DigestDock Panel] Open saved note error:", error);
   }
 }
 
