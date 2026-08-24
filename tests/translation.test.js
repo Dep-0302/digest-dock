@@ -391,7 +391,7 @@ test("one confirmed export round starts at most 20 batches and never auto-downlo
   assert.ok(
     documentImpl.findButton(
       "notesExportPrecheck",
-      "补充导出",
+      "继续完整导出",
     ),
     "durable progress is re-presented as an actionable continuation",
   );
@@ -427,7 +427,7 @@ test("a completed notes batch claims, downloads once, and finishes the durable j
   assert.equal(controller.job().exportClaim, null);
 });
 
-test("notes precheck exposes four explicit actions and local fallbacks start no completion", () => {
+test("notes precheck exposes one complete action and one direct fallback", () => {
   const documentImpl = createInteractiveDocument();
   const actions = [];
   const runtime = loadSidepanelRuntime({
@@ -439,7 +439,6 @@ test("notes precheck exposes four explicit actions and local fallbacks start no 
   });
   let generated = 0;
   let exportedDirect = 0;
-  let exportedOriginal = 0;
   runtime.helpers.showNoteExportPrecheck(
     {
       videoCount: 1,
@@ -471,39 +470,33 @@ test("notes precheck exposes four explicit actions and local fallbacks start no 
         roundMaxBatches: 20,
       },
     },
-    () => {
-      exportedOriginal += 1;
-    },
+    null,
   );
-  const original = documentImpl.findButton(
+  const complete = documentImpl.findButton(
     "notesExportPrecheck",
-    "导出原文",
-  );
-  const supplement = documentImpl.findButton(
-    "notesExportPrecheck",
-    "补充导出",
+    "完整导出",
   );
   const direct = documentImpl.findButton(
     "notesExportPrecheck",
     "直接导出",
   );
-  const abandon = documentImpl.findButton(
+  const cancel = documentImpl.findButton(
     "notesExportPrecheck",
-    "放弃导出",
+    "取消",
   );
-  assert.ok(supplement);
+  assert.ok(complete);
   assert.ok(direct);
-  assert.ok(original);
-  assert.ok(abandon);
+  assert.ok(cancel);
+  assert.equal(documentImpl.findButton("notesExportPrecheck", "导出原文"), null);
+  assert.equal(documentImpl.findButton("notesExportPrecheck", "补充导出"), null);
+  complete.click();
+  assert.equal(generated, 1);
   direct.click();
   assert.equal(exportedDirect, 1);
-  original.click();
-  assert.equal(exportedOriginal, 1);
-  assert.equal(generated, 0);
   assert.deepEqual(actions, []);
 });
 
-test("blocking note export stays in the guide until metadata is actually complete", async () => {
+test("metadata workspace exposes one next-video action and a direct fallback", async () => {
   const documentImpl = createInteractiveDocument();
   const messages = [];
   const runtime = loadSidepanelRuntime({
@@ -513,8 +506,8 @@ test("blocking note export stays in the guide until metadata is actually complet
       return Promise.resolve({ success: true });
     },
   });
-  let rechecks = 0;
-  runtime.helpers.showNoteExportSupplementGuide(
+  let directExports = 0;
+  runtime.helpers.showNoteExportMetadataWorkspace(
     {
       hasTranslationGaps: false,
       blockingVideos: [
@@ -537,76 +530,1295 @@ test("blocking note export stays in the guide until metadata is actually complet
         notes: [],
       },
     ],
-    () => {
-      rechecks += 1;
+    { mediaKeys: ["video-a"], mode: "bilingual" },
+    {
+      autoOpenMetadata: false,
+      onDirect() {
+        directExports += 1;
+      },
     },
   );
 
-  assert.ok(documentImpl.findButton("notesExportPrecheck", "打开补充"));
-  const recheck = documentImpl.findButton(
-    "notesExportPrecheck",
-    "重新检查并导出",
+  assert.ok(documentImpl.findButton("notesExportPrecheck", "打开并补齐"));
+  const direct = documentImpl.findButton("notesExportPrecheck", "直接导出");
+  assert.ok(direct);
+  assert.ok(documentImpl.findButton("notesExportPrecheck", "取消"));
+  assert.equal(
+    documentImpl.findButton("notesExportPrecheck", "重新检查并导出"),
+    null,
   );
-  assert.ok(recheck);
-  assert.ok(documentImpl.findButton("notesExportPrecheck", "放弃导出"));
-  await recheck.click();
-  assert.equal(rechecks, 0);
-  assert.match(
-    documentImpl.element("notesExportStatus").textContent,
-    /资料仍未补充完成/,
-  );
-  assert.deepEqual(messages, [], "rendering and rechecking the guide starts no provider");
+  direct.click();
+  assert.equal(directExports, 1);
+  assert.deepEqual(messages, [], "rendering the workspace starts no provider");
 });
 
-test("metadata supplement guide rechecks only after the persisted source is complete", async () => {
-  const storageLocal = createMemoryStorageArea();
+test("metadata workspace shows a single next action for a multi-video queue", async () => {
+  const documentImpl = createInteractiveDocument();
+  const runtime = loadSidepanelRuntime({ documentImpl });
+  runtime.helpers.showNoteExportMetadataWorkspace(
+    {
+      hasTranslationGaps: false,
+      blockingVideos: [
+        {
+          mediaKey: "video-a",
+          title: "Video A",
+          blockingReasons: ["缺少视频简介状态"],
+        },
+        {
+          mediaKey: "video-b",
+          title: "Video B",
+          blockingReasons: ["缺少频道名称"],
+        },
+      ],
+    },
+    [
+      {
+        mediaKey: "video-a",
+        representative: {
+          mediaKey: "video-a",
+          videoId: "video-a",
+          videoTitle: "Video A",
+          timestampedUrl: "https://www.youtube.com/watch?v=video-a&t=5s",
+        },
+        notes: [],
+      },
+      {
+        mediaKey: "video-b",
+        representative: {
+          mediaKey: "video-b",
+          videoId: "video-b",
+          videoTitle: "Video B",
+          timestampedUrl: "https://www.youtube.com/watch?v=video-b&t=5s",
+        },
+        notes: [],
+      },
+    ],
+    { mediaKeys: ["video-a", "video-b"], mode: "bilingual" },
+    { autoOpenMetadata: false },
+  );
+  assert.ok(documentImpl.findButton(
+    "notesExportPrecheck",
+    "打开下一个（还剩 2 个）",
+  ));
+  assert.equal(
+    documentImpl.findButton("notesExportPrecheck", "重新检查并导出"),
+    null,
+  );
+});
+
+test("metadata workspace restores its retry action when a video tab cannot open", async () => {
+  const documentImpl = createInteractiveDocument();
+  const runtime = loadSidepanelRuntime({ documentImpl });
+  runtime.sandbox.chrome.tabs.create = async () => {
+    throw new Error("tab creation rejected");
+  };
+  runtime.helpers.showNoteExportMetadataWorkspace(
+    {
+      hasTranslationGaps: false,
+      blockingVideos: [
+        {
+          mediaKey: "video-open-failure",
+          title: "Video open failure",
+          blockingReasons: ["缺少视频简介状态"],
+        },
+      ],
+    },
+    [
+      {
+        mediaKey: "video-open-failure",
+        representative: {
+          mediaKey: "video-open-failure",
+          videoId: "video-open-failure",
+          videoTitle: "Video open failure",
+          timestampedUrl:
+            "https://www.youtube.com/watch?v=video-open-failure&t=5s",
+        },
+        notes: [],
+      },
+    ],
+    { mediaKeys: ["video-open-failure"], mode: "bilingual" },
+    { autoOpenMetadata: false },
+  );
+
+  const open = documentImpl.findButton(
+    "notesExportPrecheck",
+    "打开并补齐",
+  );
+  assert.ok(open);
+  open.click();
+  await nextTurn();
+  await nextTurn();
+
+  assert.equal(open.disabled, false);
+  assert.equal(open.textContent, "重试当前视频");
+  assert.match(
+    documentImpl.element("notesExportStatus").textContent,
+    /页面资料尚未就绪/,
+  );
+});
+
+test("metadata workspace restores its retry action when the new tab cannot activate", async () => {
+  const documentImpl = createInteractiveDocument();
+  const runtime = loadSidepanelRuntime({ documentImpl });
+  const removedTabs = [];
+  runtime.sandbox.chrome.tabs.create = async ({ url }) => ({
+    id: 88,
+    url,
+    pendingUrl: url,
+  });
+  runtime.sandbox.chrome.tabs.update = async () => {
+    throw new Error("tab activation rejected");
+  };
+  runtime.sandbox.chrome.tabs.remove = async (tabId) => {
+    removedTabs.push(tabId);
+  };
+  runtime.helpers.showNoteExportMetadataWorkspace(
+    {
+      hasTranslationGaps: false,
+      blockingVideos: [
+        {
+          mediaKey: "video-activation-failure",
+          title: "Video activation failure",
+          blockingReasons: ["缺少视频简介状态"],
+        },
+      ],
+    },
+    [
+      {
+        mediaKey: "video-activation-failure",
+        representative: {
+          mediaKey: "video-activation-failure",
+          videoId: "video-activation-failure",
+          videoTitle: "Video activation failure",
+          timestampedUrl:
+            "https://www.youtube.com/watch?v=video-activation-failure&t=5s",
+        },
+        notes: [],
+      },
+    ],
+    { mediaKeys: ["video-activation-failure"], mode: "bilingual" },
+    { autoOpenMetadata: false },
+  );
+
+  const open = documentImpl.findButton(
+    "notesExportPrecheck",
+    "打开并补齐",
+  );
+  open.click();
+  await nextTurn();
+  await nextTurn();
+
+  assert.equal(open.disabled, false);
+  assert.equal(open.textContent, "重试当前视频");
+  assert.deepEqual(removedTabs, [88]);
+});
+
+test("metadata workspace restores its retry action when the current page is not ready", async () => {
+  const documentImpl = createInteractiveDocument();
+  const mediaKey = "current-page-not-ready";
+  const runtime = loadSidepanelRuntime({
+    documentImpl,
+    async sendMessage(message) {
+      if (message.action === "relayToContent") {
+        return {
+          success: false,
+          error: "PAGE_REFRESH_REQUIRED",
+          message: "请刷新当前视频页后重试。",
+        };
+      }
+      throw new Error(`Unexpected action: ${message.action}`);
+    },
+  });
+  runtime.sandbox.chrome.tabs.get = async () => ({
+    id: 77,
+    url: `https://www.youtube.com/watch?v=${mediaKey}`,
+  });
+  runtime.evaluate(`
+    currentVideoId = ${JSON.stringify(mediaKey)};
+    currentRouteKey = ${JSON.stringify(`youtube:${mediaKey}`)};
+    currentVideoUrl = ${JSON.stringify(
+      `https://www.youtube.com/watch?v=${mediaKey}`,
+    )};
+    currentMediaRef = {
+      platform: "youtube",
+      mediaKey: ${JSON.stringify(mediaKey)},
+      videoId: ${JSON.stringify(mediaKey)},
+      routeKey: ${JSON.stringify(`youtube:${mediaKey}`)},
+      canonicalUrl: currentVideoUrl,
+    };
+    currentVideoTitle = "Current page not ready";
+    videoTabId = 77;
+  `);
+  runtime.helpers.showNoteExportMetadataWorkspace(
+    {
+      hasTranslationGaps: false,
+      blockingVideos: [
+        {
+          mediaKey,
+          title: "Current page not ready",
+          blockingReasons: ["缺少视频简介状态"],
+        },
+      ],
+    },
+    [
+      {
+        mediaKey,
+        representative: {
+          mediaKey,
+          videoId: mediaKey,
+          videoTitle: "Current page not ready",
+          timestampedUrl: `https://www.youtube.com/watch?v=${mediaKey}&t=5s`,
+        },
+        notes: [],
+      },
+    ],
+    { mediaKeys: [mediaKey], mode: "bilingual" },
+    { autoOpenMetadata: false },
+  );
+
+  const open = documentImpl.findButton(
+    "notesExportPrecheck",
+    "打开并补齐",
+  );
+  open.click();
+  await nextTurn();
+  await nextTurn();
+
+  assert.equal(open.disabled, false);
+  assert.equal(open.textContent, "重试当前视频");
+  assert.match(
+    documentImpl.element("notesExportStatus").textContent,
+    /刷新当前视频页后重试/,
+  );
+});
+
+test("export picker shows ready, metadata, and translation preparation before submit", () => {
+  const documentImpl = createInteractiveDocument();
+  const runtime = loadSidepanelRuntime({ documentImpl });
+  runtime.evaluate(
+    'currentConfigStatus = { provider: { displayName: "DeepSeek" } }',
+  );
+  const groups = [
+    {
+      mediaKey: "ready-video",
+      representative: {
+        mediaKey: "ready-video",
+        videoTitle: "已就绪",
+        channelName: "频道",
+        sourceLanguage: "zh-CN",
+      },
+      notes: [{ id: "r", text: "中文笔记", sourceLanguage: "zh-CN" }],
+    },
+    {
+      mediaKey: "metadata-video",
+      representative: {
+        mediaKey: "metadata-video",
+        videoTitle: "缺资料",
+        channelName: "频道",
+      },
+      notes: [{ id: "m", text: "English note" }],
+    },
+    {
+      mediaKey: "translation-video",
+      representative: {
+        mediaKey: "translation-video",
+        videoTitle: "Needs translation",
+        channelName: "Channel",
+      },
+      notes: [{ id: "t", text: "English note" }],
+    },
+  ];
+  const sourcesByKey = {
+    "ready-video": {
+      mediaKey: "ready-video",
+      platform: "youtube",
+      canonicalUrl: "https://www.youtube.com/watch?v=ready-video",
+      titleOriginal: "已就绪",
+      channelName: "频道",
+      descriptionOriginal: "中文简介",
+      descriptionStatus: "present",
+      sourceLanguage: "zh-CN",
+    },
+    "translation-video": {
+      mediaKey: "translation-video",
+      platform: "youtube",
+      canonicalUrl: "https://www.youtube.com/watch?v=translation-video",
+      titleOriginal: "Needs translation",
+      channelName: "Channel",
+      descriptionOriginal: "English description",
+      descriptionStatus: "present",
+      sourceLanguage: "en",
+    },
+  };
+
+  runtime.helpers.renderNoteExportPicker(
+    groups,
+    sourcesByKey,
+    groups.map((group) => group.mediaKey),
+  );
+
+  const list = documentImpl.element("notesExportPickerList");
+  const statuses = list.children.map((label) => label.children.at(-1).textContent);
+  assert.deepEqual(statuses, ["可导出", "需补资料", "需补译 3 项"]);
+  assert.equal(
+    documentImpl.element("confirmNotesExportSelection").textContent,
+    "完整导出（3）",
+  );
+  assert.equal(
+    documentImpl.element("directNotesExportSelection").textContent,
+    "直接导出（3）",
+  );
+  assert.match(
+    documentImpl.element("notesExportPickerDisclosure").textContent,
+    /范围：3 个视频；模式：双语.*页面资料：1 个需访问原视频补充.*AI 补译：当前可识别 4 项，服务为DeepSeek.*单轮最多 20 批/,
+  );
+
+  runtime.evaluate('currentNotesMode = "original"');
+  runtime.helpers.renderNoteExportPicker(
+    groups,
+    sourcesByKey,
+    groups.map((group) => group.mediaKey),
+  );
+  assert.match(
+    documentImpl.element("notesExportPickerDisclosure").textContent,
+    /范围：3 个视频；模式：原文.*AI 补译：不使用/,
+  );
+});
+
+test("export picker event wiring freezes the same sorted selection for complete and direct export", async () => {
+  const documentImpl = createInteractiveDocument();
+  const runtime = loadSidepanelRuntime({
+    documentImpl,
+    sendMessage: async () => ({ runtimeProtocolVersion: 0 }),
+  });
+  runtime.sandbox.__pickerExportCalls = [];
+  runtime.evaluate(`
+    exportAllNotes = (mediaKeys, options = {}) => {
+      globalThis.__pickerExportCalls.push({
+        mediaKeys: [...mediaKeys],
+        options: { ...options },
+      });
+      return Promise.resolve();
+    };
+  `);
+
+  await documentImpl.dispatchEvent({ type: "DOMContentLoaded" });
+
+  const groups = ["video-z", "video-a", "video-m"].map((mediaKey) => ({
+    mediaKey,
+    representative: {
+      mediaKey,
+      videoTitle: mediaKey,
+      channelName: "Channel",
+      sourceLanguage: "en",
+    },
+    notes: [{ id: `note-${mediaKey}`, text: "Saved note", sourceLanguage: "en" }],
+  }));
+  const sourcesByKey = Object.fromEntries(
+    groups.map(({ mediaKey }) => [
+      mediaKey,
+      {
+        mediaKey,
+        platform: "youtube",
+        canonicalUrl: `https://www.youtube.com/watch?v=${mediaKey}`,
+        titleOriginal: mediaKey,
+        channelName: "Channel",
+        descriptionOriginal: "Description",
+        descriptionStatus: "present",
+        sourceLanguage: "en",
+      },
+    ]),
+  );
+  runtime.helpers.renderNoteExportPicker(groups, sourcesByKey, []);
+
+  const inputs = documentImpl
+    .element("notesExportPickerList")
+    .children.map((label) => label.children[0]);
+  for (const input of inputs.filter((candidate) =>
+    ["video-z", "video-a"].includes(candidate.value),
+  )) {
+    input.checked = true;
+    input.dispatchEvent({ type: "change" });
+  }
+
+  const submitEvent = { type: "submit", preventDefaultCalled: false };
+  submitEvent.preventDefault = () => {
+    submitEvent.preventDefaultCalled = true;
+  };
+  documentImpl.element("notesExportPicker").dispatchEvent(submitEvent);
+  documentImpl.element("directNotesExportSelection").click();
+
+  assert.equal(submitEvent.preventDefaultCalled, true);
+  assert.deepEqual(clonePlain(runtime.sandbox.__pickerExportCalls), [
+    {
+      mediaKeys: ["video-a", "video-z"],
+      options: { grantAuthorization: true, autoOpenMetadata: true },
+    },
+    {
+      mediaKeys: ["video-a", "video-z"],
+      options: { direct: true },
+    },
+  ]);
+});
+
+test("direct selected export downloads once with missing markers and starts no provider", async () => {
   const noteSources = require("../note-sources.js");
+  const storageLocal = createMemoryStorageArea();
+  const mediaKey = "direct-video";
   await noteSources.writeNoteSource(storageLocal, {
-    mediaKey: "video-a",
+    mediaKey,
     platform: "youtube",
-    canonicalUrl: "https://www.youtube.com/watch?v=video-a",
-    titleOriginal: "Video A",
-    channelName: "Channel A",
-    descriptionOriginal: "Complete description",
+    canonicalUrl: `https://www.youtube.com/watch?v=${mediaKey}`,
+    titleOriginal: "Direct video",
+    channelName: "Channel",
+    descriptionStatus: "unknown",
+    sourceLanguage: "en",
+  });
+  const note = {
+    id: "direct-note",
+    mediaKey,
+    videoId: mediaKey,
+    platform: "youtube",
+    canonicalUrl: `https://www.youtube.com/watch?v=${mediaKey}`,
+    videoTitle: "Direct video",
+    channelName: "Channel",
+    timestampSeconds: 7,
+    text: "English saved note.",
+    translatedText: "",
+    sourceLanguage: "en",
+  };
+  const messages = [];
+  const documentImpl = createInteractiveDocument();
+  const runtime = loadSidepanelRuntime({
+    documentImpl,
+    storageLocal,
+    async sendMessage(message) {
+      messages.push(JSON.parse(JSON.stringify(message)));
+      if (message.action === "getNotes") return { success: true, notes: [note] };
+      if (message.action === "upsertNoteSource") {
+        const write = await noteSources.writeNoteSource(storageLocal, message.source);
+        return {
+          success: true,
+          changed: write.changed,
+          source: await noteSources.readNoteSource(storageLocal, mediaKey),
+        };
+      }
+      if (message.action === "cancelExportTranslationJob") {
+        return { success: true };
+      }
+      throw new Error(`Unexpected background action: ${message.action}`);
+    },
+  });
+  const downloads = [];
+  runtime.sandbox.__downloadProbe = (text, filename) => {
+    downloads.push({ text, filename });
+  };
+  runtime.evaluate(
+    "downloadTextFile = (text, filename) => globalThis.__downloadProbe(text, filename)",
+  );
+
+  await runtime.helpers.exportAllNotes([mediaKey], { direct: true });
+
+  assert.equal(downloads.length, 1);
+  assert.match(downloads[0].text, /缺失：原文视频简介/);
+  assert.equal(downloads[0].filename.endsWith(".txt"), true);
+  assert.equal(
+    messages.some((message) =>
+      [
+        "translateExportNotesBatch",
+        "translateExportSourceBatch",
+        "fetchTranscript",
+        "relayToContent",
+      ].includes(message.action),
+    ),
+    false,
+  );
+});
+
+test("opening the picker can recover a frozen retry selection without resuming work", async () => {
+  const actions = [];
+  const runtime = loadSidepanelRuntime({
+    async sendMessage(message) {
+      actions.push(message.action);
+      if (message.action === "listExportJobs") {
+        return {
+          success: true,
+          jobs: [
+            {
+              state: "paused",
+              updatedAt: 20,
+              intent: {
+                scope: "notes-retry-v4-test",
+                mediaKeys: ["video-b", "video-a"],
+                mode: "bilingual",
+              },
+            },
+          ],
+        };
+      }
+      throw new Error(`Unexpected action: ${message.action}`);
+    },
+  });
+
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(await runtime.helpers.recoverNotesExportSelection())),
+    ["video-a", "video-b"],
+  );
+  assert.deepEqual(actions, ["listExportJobs"]);
+});
+
+test("cross-page complete-export authorization freezes provider, notes, and complete sources", async () => {
+  const noteSources = require("../note-sources.js");
+  let provider = {
+    id: "deepseek",
+    displayName: "DeepSeek",
+    modelId: "deepseek-v4-flash",
+    routeKey: "deepseek:deepseek-v4-flash",
+  };
+  const actions = [];
+  const runtime = loadSidepanelRuntime({
+    async sendMessage(message) {
+      actions.push(message.action);
+      if (message.action === "checkConfig") {
+        return { hasAiKey: true, provider: { ...provider } };
+      }
+      throw new Error(`Unexpected action: ${message.action}`);
+    },
+  });
+  const note = {
+    id: "authorization-note",
+    mediaKey: "authorization-video",
+    videoId: "authorization-video",
+    videoTitle: "Authorization video",
+    text: "Saved English note.",
+    sourceLanguage: "en",
+  };
+  const groups = [
+    {
+      mediaKey: note.mediaKey,
+      representative: note,
+      notes: [note],
+    },
+  ];
+  const source = noteSources.normalizeNoteSource({
+    mediaKey: note.mediaKey,
+    platform: "youtube",
+    canonicalUrl: `https://www.youtube.com/watch?v=${note.mediaKey}`,
+    titleOriginal: note.videoTitle,
+    channelName: "Channel",
+    descriptionOriginal: "Complete description.",
     descriptionStatus: "present",
     sourceLanguage: "en",
   });
-  const documentImpl = createInteractiveDocument();
-  const runtime = loadSidepanelRuntime({ documentImpl, storageLocal });
-  let rechecks = 0;
-  runtime.helpers.showNoteExportSupplementGuide(
+  const sourcesByKey = { [note.mediaKey]: source };
+  const precheck = runtime.helpers.buildNotesExportPrecheck(
+    groups,
+    sourcesByKey,
+    "bilingual",
+  );
+  const continuation = runtime.helpers.createNoteExportContinuation([
+    note.mediaKey,
+  ]);
+
+  await runtime.helpers.grantNoteExportAuthorization(continuation, {
+    groups,
+    sourcesByKey,
+    precheck,
+  });
+  provider = {
+    id: "zhipu",
+    displayName: "智谱 GLM",
+    modelId: "glm-4.7-flash",
+    routeKey: "zhipu:glm-4.7-flash",
+  };
+  assert.equal(
+    await runtime.helpers.validateNoteExportAuthorization(continuation, {
+      groups,
+      sourcesByKey,
+      precheck,
+    }),
+    false,
+    "a provider change invalidates the disclosed click",
+  );
+
+  provider = {
+    id: "deepseek",
+    displayName: "DeepSeek",
+    modelId: "deepseek-v4-flash",
+    routeKey: "deepseek:deepseek-v4-flash",
+  };
+  await runtime.helpers.grantNoteExportAuthorization(continuation, {
+    groups,
+    sourcesByKey,
+    precheck,
+  });
+  const changedGroups = [
     {
-      hasTranslationGaps: false,
-      blockingVideos: [
-        {
-          mediaKey: "video-a",
-          title: "Video A",
-          blockingReasons: ["缺少视频简介状态"],
-        },
-      ],
+      ...groups[0],
+      notes: [{ ...note, text: "Changed note after confirmation." }],
     },
-    [
-      {
-        mediaKey: "video-a",
-        representative: {
-          mediaKey: "video-a",
-          videoId: "video-a",
-          videoTitle: "Video A",
-          timestampedUrl: "https://www.youtube.com/watch?v=video-a&t=5s",
-        },
-        notes: [],
+  ];
+  assert.equal(
+    await runtime.helpers.validateNoteExportAuthorization(continuation, {
+      groups: changedGroups,
+      sourcesByKey,
+      precheck,
+    }),
+    false,
+    "a note change requires another confirmation",
+  );
+
+  await runtime.helpers.grantNoteExportAuthorization(continuation, {
+    groups,
+    sourcesByKey,
+    precheck,
+  });
+  const changedSource = noteSources.normalizeNoteSource({
+    ...source,
+    descriptionOriginal: "Changed complete description.",
+  });
+  assert.equal(
+    await runtime.helpers.validateNoteExportAuthorization(continuation, {
+      groups,
+      sourcesByKey: { [note.mediaKey]: changedSource },
+      precheck: runtime.helpers.buildNotesExportPrecheck(
+        groups,
+        { [note.mediaKey]: changedSource },
+        "bilingual",
+      ),
+    }),
+    false,
+    "a source that was complete at confirmation is frozen",
+  );
+  assert.equal(
+    actions.some((action) => action.startsWith("translateExport")),
+    false,
+  );
+});
+
+test("authorized metadata completion is accepted once and its new revision is then frozen", async () => {
+  const noteSources = require("../note-sources.js");
+  const runtime = loadSidepanelRuntime({
+    async sendMessage(message) {
+      if (message.action === "checkConfig") {
+        return {
+          hasAiKey: true,
+          provider: {
+            id: "deepseek",
+            modelId: "deepseek-v4-flash",
+            routeKey: "deepseek:deepseek-v4-flash",
+          },
+        };
+      }
+      throw new Error(`Unexpected action: ${message.action}`);
+    },
+  });
+  const note = {
+    id: "metadata-authorization-note",
+    mediaKey: "metadata-authorization-video",
+    videoId: "metadata-authorization-video",
+    videoTitle: "Metadata authorization video",
+    text: "Saved English note.",
+    sourceLanguage: "en",
+  };
+  const groups = [
+    { mediaKey: note.mediaKey, representative: note, notes: [note] },
+  ];
+  const incompleteSource = noteSources.normalizeNoteSource({
+    mediaKey: note.mediaKey,
+    platform: "youtube",
+    canonicalUrl: `https://www.youtube.com/watch?v=${note.mediaKey}`,
+    titleOriginal: note.videoTitle,
+    channelName: "Channel",
+    descriptionStatus: "unknown",
+    sourceLanguage: "en",
+  });
+  const initialSources = { [note.mediaKey]: incompleteSource };
+  const initialPrecheck = runtime.helpers.buildNotesExportPrecheck(
+    groups,
+    initialSources,
+    "bilingual",
+  );
+  const continuation = runtime.helpers.createNoteExportContinuation([
+    note.mediaKey,
+  ]);
+  await runtime.helpers.grantNoteExportAuthorization(continuation, {
+    groups,
+    sourcesByKey: initialSources,
+    precheck: initialPrecheck,
+  });
+
+  const completedSource = noteSources.normalizeNoteSource({
+    ...incompleteSource,
+    descriptionOriginal: "Captured complete description.",
+    descriptionStatus: "present",
+  });
+  const completedSources = { [note.mediaKey]: completedSource };
+  const completedPrecheck = runtime.helpers.buildNotesExportPrecheck(
+    groups,
+    completedSources,
+    "bilingual",
+  );
+  assert.equal(
+    await runtime.helpers.validateNoteExportAuthorization(continuation, {
+      groups,
+      sourcesByKey: completedSources,
+      precheck: completedPrecheck,
+    }),
+    true,
+  );
+
+  const changedAgain = noteSources.normalizeNoteSource({
+    ...completedSource,
+    descriptionOriginal: "Changed after metadata completion.",
+  });
+  assert.equal(
+    await runtime.helpers.validateNoteExportAuthorization(continuation, {
+      groups,
+      sourcesByKey: { [note.mediaKey]: changedAgain },
+      precheck: runtime.helpers.buildNotesExportPrecheck(
+        groups,
+        { [note.mediaKey]: changedAgain },
+        "bilingual",
+      ),
+    }),
+    false,
+  );
+});
+
+test("cancel and direct export both revoke a pending complete-export grant", async () => {
+  for (const actionText of ["取消", "直接导出"]) {
+    let resolveConfig;
+    const documentImpl = createInteractiveDocument();
+    const runtime = loadSidepanelRuntime({
+      documentImpl,
+      async sendMessage(message) {
+        if (message.action === "checkConfig") {
+          return new Promise((resolve) => {
+            resolveConfig = resolve;
+          });
+        }
+        throw new Error(`Unexpected action: ${message.action}`);
       },
-    ],
-    () => {
-      rechecks += 1;
+    });
+    const note = {
+      id: `pending-${actionText}`,
+      mediaKey: `pending-video-${actionText}`,
+      videoId: `pending-video-${actionText}`,
+      videoTitle: "Pending authorization",
+      text: "English note.",
+      sourceLanguage: "en",
+    };
+    const groups = [
+      { mediaKey: note.mediaKey, representative: note, notes: [note] },
+    ];
+    const sourcesByKey = {
+      [note.mediaKey]: require("../note-sources.js").normalizeNoteSource({
+        mediaKey: note.mediaKey,
+        platform: "youtube",
+        canonicalUrl: `https://www.youtube.com/watch?v=${encodeURIComponent(note.mediaKey)}`,
+        titleOriginal: note.videoTitle,
+        channelName: "Channel",
+        descriptionOriginal: "English description.",
+        descriptionStatus: "present",
+        sourceLanguage: "en",
+      }),
+    };
+    const precheck = runtime.helpers.buildNotesExportPrecheck(
+      groups,
+      sourcesByKey,
+      "bilingual",
+    );
+    const continuation = runtime.helpers.createNoteExportContinuation([
+      note.mediaKey,
+    ]);
+    let grantPromise = null;
+    runtime.helpers.showNoteExportPrecheck(
+      precheck,
+      () => {},
+      () => {
+        grantPromise = runtime.helpers.grantNoteExportAuthorization(
+          continuation,
+          { groups, sourcesByKey, precheck },
+        );
+      },
+      { overLimit: false, estimatedBatches: 1 },
+    );
+
+    documentImpl.findButton("notesExportPrecheck", "完整导出").click();
+    await nextTurn();
+    assert.ok(grantPromise, "the deferred grant has started");
+    documentImpl.findButton("notesExportPrecheck", actionText).click();
+    resolveConfig({
+      hasAiKey: true,
+      provider: {
+        id: "deepseek",
+        modelId: "deepseek-v4-flash",
+        routeKey: "deepseek:deepseek-v4-flash",
+      },
+    });
+    assert.equal(await grantPromise, null);
+    assert.equal(
+      runtime.helpers.noteExportContinuationIsAuthorized(continuation),
+      false,
+    );
+  }
+});
+
+test("cancelling while authorization validation waits cannot return a stale true", async () => {
+  let deferValidation = false;
+  let resolveValidation;
+  const runtime = loadSidepanelRuntime({
+    async sendMessage(message) {
+      if (message.action !== "checkConfig") {
+        throw new Error(`Unexpected action: ${message.action}`);
+      }
+      const config = {
+        hasAiKey: true,
+        provider: {
+          id: "deepseek",
+          modelId: "deepseek-v4-flash",
+          routeKey: "deepseek:deepseek-v4-flash",
+        },
+      };
+      if (!deferValidation) return config;
+      return new Promise((resolve) => {
+        resolveValidation = () => resolve(config);
+      });
     },
+  });
+  const note = {
+    id: "validation-cancel-note",
+    mediaKey: "validation-cancel-video",
+    videoId: "validation-cancel-video",
+    videoTitle: "Validation cancel video",
+    text: "English note.",
+    sourceLanguage: "en",
+  };
+  const groups = [
+    { mediaKey: note.mediaKey, representative: note, notes: [note] },
+  ];
+  const sourcesByKey = {
+    [note.mediaKey]: require("../note-sources.js").normalizeNoteSource({
+      mediaKey: note.mediaKey,
+      platform: "youtube",
+      canonicalUrl: `https://www.youtube.com/watch?v=${note.mediaKey}`,
+      titleOriginal: note.videoTitle,
+      channelName: "Channel",
+      descriptionOriginal: "English description.",
+      descriptionStatus: "present",
+      sourceLanguage: "en",
+    }),
+  };
+  const precheck = runtime.helpers.buildNotesExportPrecheck(
+    groups,
+    sourcesByKey,
+    "bilingual",
   );
-  const recheck = documentImpl.findButton(
+  const continuation = runtime.helpers.createNoteExportContinuation([
+    note.mediaKey,
+  ]);
+  await runtime.helpers.grantNoteExportAuthorization(continuation, {
+    groups,
+    sourcesByKey,
+    precheck,
+  });
+
+  deferValidation = true;
+  const validation = runtime.helpers.validateNoteExportAuthorization(
+    continuation,
+    { groups, sourcesByKey, precheck },
+  );
+  await nextTurn();
+  runtime.helpers.revokeNoteExportAuthorization();
+  resolveValidation();
+  await assert.rejects(validation, {
+    code: "NOTE_EXPORT_AUTHORIZATION_CANCELLED",
+  });
+});
+
+test("a provider change between the disclosed click and first round starts zero work", async () => {
+  const actions = [];
+  const runtime = loadSidepanelRuntime({
+    async sendMessage(message) {
+      actions.push(message.action);
+      if (message.action === "checkConfig") {
+        return {
+          hasAiKey: true,
+          provider: {
+            id: "zhipu",
+            displayName: "智谱 GLM",
+            modelId: "glm-4.7-flash",
+            routeKey: "zhipu:glm-4.7-flash",
+            capabilities: ["translate"],
+          },
+        };
+      }
+      throw new Error(`Unexpected action: ${message.action}`);
+    },
+  });
+  const fixture = makeNoteRoundFixture(1);
+
+  await assert.rejects(
+    runtime.helpers.runConfirmedExportTranslation({
+      plan: fixture.plan,
+      sourcesByKey: {},
+      groups: fixture.groups,
+      scope: "notes-selected",
+      mode: "bilingual",
+      format: "txt",
+      panelId: "notesExportPrecheck",
+      setStatus() {},
+      expectedProviderSnapshot: {
+        providerId: "deepseek",
+        modelId: "deepseek-v4-flash",
+        routeKey: "deepseek:deepseek-v4-flash",
+        targetLanguage: "zh",
+        translationVersion: "export-v2",
+      },
+    }),
+    { code: "EXPORT_JOB_PROVIDER_MISMATCH" },
+  );
+  assert.deepEqual(actions, ["checkConfig"]);
+});
+
+test("provider mismatch refreshes the confirmation copy before another click", async () => {
+  const noteSources = require("../note-sources.js");
+  const storageLocal = createMemoryStorageArea();
+  const documentImpl = createInteractiveDocument();
+  const mediaKey = "provider-disclosure-refresh";
+  const note = {
+    id: "provider-disclosure-note",
+    mediaKey,
+    videoId: mediaKey,
+    videoTitle: "Provider disclosure video",
+    channelName: "Channel",
+    text: "English note that needs translation.",
+    sourceLanguage: "en",
+  };
+  await noteSources.writeNoteSource(storageLocal, {
+    mediaKey,
+    platform: "youtube",
+    canonicalUrl: `https://www.youtube.com/watch?v=${mediaKey}`,
+    titleOriginal: note.videoTitle,
+    channelName: note.channelName,
+    descriptionOriginal: "English description that needs translation.",
+    descriptionStatus: "present",
+    sourceLanguage: "en",
+  });
+  const deepseek = {
+    id: "deepseek",
+    displayName: "DeepSeek",
+    modelId: "deepseek-v4-flash",
+    routeKey: "deepseek:deepseek-v4-flash",
+    capabilities: ["translate"],
+  };
+  const zhipu = {
+    id: "zhipu",
+    displayName: "智谱 GLM",
+    modelId: "glm-4.7-flash",
+    routeKey: "zhipu:glm-4.7-flash",
+    capabilities: ["translate"],
+  };
+  let configReads = 0;
+  const actions = [];
+  const runtime = loadSidepanelRuntime({
+    storageLocal,
+    documentImpl,
+    async sendMessage(message) {
+      actions.push(message.action);
+      if (message.action === "getNotes") return { success: true, notes: [note] };
+      if (message.action === "upsertNoteSource") {
+        await noteSources.writeNoteSource(storageLocal, message.source);
+        return {
+          success: true,
+          source: await noteSources.readNoteSource(storageLocal, mediaKey),
+        };
+      }
+      if (message.action === "checkConfig") {
+        configReads += 1;
+        return {
+          hasAiKey: true,
+          provider: configReads === 1 ? deepseek : zhipu,
+        };
+      }
+      throw new Error(`Unexpected action: ${message.action}`);
+    },
+  });
+  runtime.evaluate(
+    `currentConfigStatus = { hasAiKey: true, provider: ${JSON.stringify(deepseek)} }`,
+  );
+
+  await runtime.helpers.exportAllNotes([mediaKey]);
+  const panel = documentImpl.element("notesExportPrecheck");
+  assert.match(panel.children[0].textContent, /DeepSeek/);
+  documentImpl.findButton("notesExportPrecheck", "完整导出").click();
+  for (let index = 0; index < 8; index += 1) await nextTurn();
+
+  assert.match(panel.children[0].textContent, /智谱 GLM/);
+  assert.ok(documentImpl.findButton("notesExportPrecheck", "完整导出"));
+  assert.equal(
+    actions.some((action) =>
+      [
+        "createOrResumeExportJob",
+        "translateExportNotesBatch",
+        "translateExportSourceBatch",
+      ].includes(action),
+    ),
+    false,
+  );
+});
+
+test("a rebuilt side panel restores the frozen scope but never resumes AI without a fresh click", async () => {
+  const noteSources = require("../note-sources.js");
+  const storageLocal = createMemoryStorageArea();
+  const mediaKey = "rebuild-video";
+  await noteSources.writeNoteSource(storageLocal, {
+    mediaKey,
+    platform: "youtube",
+    canonicalUrl: `https://www.youtube.com/watch?v=${mediaKey}`,
+    titleOriginal: "Rebuild video",
+    channelName: "Channel",
+    descriptionOriginal: "English description.",
+    descriptionStatus: "present",
+    sourceLanguage: "en",
+  });
+  const note = {
+    id: "rebuild-note",
+    mediaKey,
+    videoId: mediaKey,
+    videoTitle: "Rebuild video",
+    channelName: "Channel",
+    text: "English note.",
+    sourceLanguage: "en",
+  };
+  const actions = [];
+  const documentImpl = createInteractiveDocument();
+  const runtime = loadSidepanelRuntime({
+    storageLocal,
+    documentImpl,
+    async sendMessage(message) {
+      actions.push(message.action);
+      if (message.action === "getNotes") return { success: true, notes: [note] };
+      if (message.action === "upsertNoteSource") {
+        await noteSources.writeNoteSource(storageLocal, message.source);
+        return {
+          success: true,
+          source: await noteSources.readNoteSource(storageLocal, mediaKey),
+        };
+      }
+      if (message.action === "cancelExportTranslationJob") {
+        return { success: true };
+      }
+      throw new Error(`Unexpected action: ${message.action}`);
+    },
+  });
+
+  await runtime.helpers.resumeNoteExportContinuation({
+    mediaKeys: [mediaKey],
+    mode: "bilingual",
+  });
+
+  assert.ok(
+    documentImpl.findButton("notesExportPrecheck", "完整导出"),
+    "rebuild returns to confirmation instead of silently calling AI",
+  );
+  assert.equal(
+    actions.some((action) => action.startsWith("translateExport")),
+    false,
+  );
+  assert.equal(actions.includes("checkConfig"), false);
+});
+
+test("changing the notes language revokes the old grant and resumes only at confirmation", async () => {
+  const noteSources = require("../note-sources.js");
+  const storageLocal = createMemoryStorageArea();
+  const mediaKey = "mode-change-video";
+  await noteSources.writeNoteSource(storageLocal, {
+    mediaKey,
+    platform: "youtube",
+    canonicalUrl: `https://www.youtube.com/watch?v=${mediaKey}`,
+    titleOriginal: "Mode change video",
+    channelName: "Channel",
+    descriptionOriginal: "English description.",
+    descriptionStatus: "present",
+    sourceLanguage: "en",
+  });
+  const note = {
+    id: "mode-change-note",
+    mediaKey,
+    videoId: mediaKey,
+    videoTitle: "Mode change video",
+    channelName: "Channel",
+    text: "English note.",
+    sourceLanguage: "en",
+  };
+  const actions = [];
+  const documentImpl = createInteractiveDocument();
+  const runtime = loadSidepanelRuntime({
+    storageLocal,
+    documentImpl,
+    async sendMessage(message) {
+      actions.push(message.action);
+      if (message.action === "checkConfig") {
+        return {
+          hasAiKey: true,
+          provider: {
+            id: "deepseek",
+            modelId: "deepseek-v4-flash",
+            routeKey: "deepseek:deepseek-v4-flash",
+          },
+        };
+      }
+      if (message.action === "getNotes") return { success: true, notes: [note] };
+      if (message.action === "upsertNoteSource") {
+        await noteSources.writeNoteSource(storageLocal, message.source);
+        return {
+          success: true,
+          source: await noteSources.readNoteSource(storageLocal, mediaKey),
+        };
+      }
+      throw new Error(`Unexpected action: ${message.action}`);
+    },
+  });
+  const groups = [{ mediaKey, representative: note, notes: [note] }];
+  const sourcesByKey = {
+    [mediaKey]: await noteSources.readNoteSource(storageLocal, mediaKey),
+  };
+  const continuation = runtime.helpers.createNoteExportContinuation([mediaKey]);
+  const precheck = runtime.helpers.buildNotesExportPrecheck(
+    groups,
+    sourcesByKey,
+    "bilingual",
+  );
+  await runtime.helpers.grantNoteExportAuthorization(continuation, {
+    groups,
+    sourcesByKey,
+    precheck,
+  });
+  actions.length = 0;
+
+  runtime.helpers.handleNotesModeChange("original");
+  await runtime.helpers.resumeNoteExportContinuation({
+    mediaKeys: [mediaKey],
+    mode: "original",
+  });
+
+  assert.equal(
+    runtime.helpers.noteExportContinuationIsAuthorized(continuation),
+    false,
+  );
+  assert.ok(documentImpl.findButton("notesExportPrecheck", "完整导出"));
+  assert.equal(actions.includes("checkConfig"), false);
+  assert.equal(
+    actions.some((action) => action.startsWith("translateExport")),
+    false,
+  );
+});
+
+test("fresh confirmation for a ready original export downloads without AI configuration", async () => {
+  const noteSources = require("../note-sources.js");
+  const storageLocal = createMemoryStorageArea();
+  const storageSession = createMemoryStorageArea();
+  const mediaKey = "ready-original-video";
+  await noteSources.writeNoteSource(storageLocal, {
+    mediaKey,
+    platform: "youtube",
+    canonicalUrl: `https://www.youtube.com/watch?v=${mediaKey}`,
+    titleOriginal: "Ready original video",
+    channelName: "Channel",
+    descriptionOriginal: "Complete original description.",
+    descriptionStatus: "present",
+    sourceLanguage: "en",
+  });
+  const note = {
+    id: "ready-original-note",
+    mediaKey,
+    videoId: mediaKey,
+    videoTitle: "Ready original video",
+    channelName: "Channel",
+    text: "Original note.",
+    sourceLanguage: "en",
+  };
+  const actions = [];
+  const downloads = [];
+  const documentImpl = createInteractiveDocument();
+  const firstRuntime = loadSidepanelRuntime({ storageSession });
+  await firstRuntime.helpers.persistNoteNavigationState({
+    schemaVersion: 1,
+    phase: "active",
+    token: "ready-original-continuation",
+    tabId: 77,
+    routeKey: `youtube:${mediaKey}`,
+    mediaKey,
+    platform: "youtube",
+    canonicalUrl: `https://www.youtube.com/watch?v=${mediaKey}`,
+    timestampedUrl: `https://www.youtube.com/watch?v=${mediaKey}&t=5s`,
+    videoTitle: note.videoTitle,
+    channelName: note.channelName,
+    sourceLanguage: "en",
+    duration: 120,
+    showAll: true,
+    captureMetadata: false,
+    exportContinuation: { mediaKeys: [mediaKey], mode: "original" },
+    createdAt: Date.now(),
+    expiresAt: 0,
+    activatedAt: Date.now(),
+  });
+  const runtime = loadSidepanelRuntime({
+    storageLocal,
+    storageSession,
+    documentImpl,
+    async sendMessage(message) {
+      actions.push(message.action);
+      if (message.action === "getNotes") return { success: true, notes: [note] };
+      if (message.action === "upsertNoteSource") {
+        await noteSources.writeNoteSource(storageLocal, message.source);
+        return {
+          success: true,
+          source: await noteSources.readNoteSource(storageLocal, mediaKey),
+        };
+      }
+      throw new Error(`Unexpected action: ${message.action}`);
+    },
+  });
+  runtime.sandbox.__downloadProbe = (text, filename) => {
+    downloads.push({ text, filename });
+  };
+  runtime.evaluate(`
+    downloadTextFile = (text, filename) =>
+      globalThis.__downloadProbe(text, filename);
+  `);
+  await runtime.helpers.hydrateNoteNavigationState();
+  const restored = JSON.parse(
+    runtime.evaluate(
+      "JSON.stringify((activeNotesOnlyContext || pendingNoteNavigation)?.exportContinuation || null)",
+    ),
+  );
+  assert.equal(restored.mode, "original");
+
+  await runtime.helpers.resumeNoteExportContinuation(restored);
+  assert.equal(runtime.evaluate("currentNotesMode"), "original");
+  assert.match(
+    documentImpl.element("notesExportPrecheck").children[0].textContent,
+    /范围：1 个视频、1 条笔记/,
+  );
+  const complete = documentImpl.findButton(
     "notesExportPrecheck",
-    "重新检查并导出",
+    "完整导出",
   );
-  await recheck.click();
-  assert.equal(rechecks, 1);
+  assert.ok(complete);
+  complete.click();
+  await nextTurn();
+  await nextTurn();
+
+  assert.equal(downloads.length, 1);
+  assert.equal(downloads[0].filename.endsWith(".txt"), true);
+  assert.equal(actions.includes("checkConfig"), false);
+  assert.equal(
+    actions.some((action) => action.startsWith("translateExport")),
+    false,
+  );
 });
 
 test("notes export job identity includes the v4 TXT content contract", () => {
@@ -839,9 +2051,29 @@ function createExportJobsBridge(
 
 function createInteractiveDocument() {
   const elements = new Map();
+  const documentListeners = {};
+  const dispatchToListeners = (listeners, event, currentTarget) => {
+    const normalizedEvent = {
+      type: String(event?.type || ""),
+      target: currentTarget,
+      currentTarget,
+      defaultPrevented: false,
+      preventDefault() {
+        this.defaultPrevented = true;
+      },
+      stopPropagation() {},
+      ...(event || {}),
+    };
+    let result;
+    for (const listener of listeners[normalizedEvent.type] || []) {
+      result = listener(normalizedEvent);
+    }
+    return result;
+  };
   const createElement = (tagName = "div") => {
     let text = "";
     const listeners = {};
+    const classes = new Set();
     return {
       tagName: String(tagName).toUpperCase(),
       children: [],
@@ -849,10 +2081,27 @@ function createInteractiveDocument() {
       disabled: false,
       className: "",
       style: {},
-      classList: { toggle() {}, contains() { return false; } },
+      classList: {
+        toggle(name, force) {
+          const enabled = force === undefined ? !classes.has(name) : !!force;
+          if (enabled) classes.add(name);
+          else classes.delete(name);
+          return enabled;
+        },
+        add(...names) {
+          names.forEach((name) => classes.add(name));
+        },
+        remove(...names) {
+          names.forEach((name) => classes.delete(name));
+        },
+        contains(name) {
+          return classes.has(name);
+        },
+      },
       setAttribute() {},
       addEventListener(type, listener) {
-        listeners[type] = listener;
+        if (!listeners[type]) listeners[type] = [];
+        listeners[type].push(listener);
       },
       appendChild(child) {
         this.children.push(child);
@@ -863,7 +2112,10 @@ function createInteractiveDocument() {
       },
       click() {
         if (this.disabled) return undefined;
-        return listeners.click?.();
+        return this.dispatchEvent({ type: "click" });
+      },
+      dispatchEvent(event) {
+        return dispatchToListeners(listeners, event, this);
       },
       set textContent(value) {
         text = String(value);
@@ -889,7 +2141,13 @@ function createInteractiveDocument() {
     return elements.get(id);
   };
   return {
-    addEventListener() {},
+    addEventListener(type, listener) {
+      if (!documentListeners[type]) documentListeners[type] = [];
+      documentListeners[type].push(listener);
+    },
+    dispatchEvent(event) {
+      return dispatchToListeners(documentListeners, event, this);
+    },
     querySelectorAll: () => [],
     querySelector: () => null,
     getElementById: element,
@@ -1983,7 +3241,7 @@ test("note source writes are available through the shared background queue actio
   });
   assert.equal(result.success, true);
   assert.equal(result.mediaKey, fixture.mediaKey);
-  assert.equal(result.sourceRevision, fixture.source.sourceRevision);
+  assert.equal(result.sourceRevision, incoming.sourceRevision);
   const snapshot = fixture.storage.snapshot();
   assert.equal(
     snapshot[fixture.noteSources.STORAGE_KEY][fixture.mediaKey].channelName,
@@ -2020,6 +3278,17 @@ test("export job create/resume and checkpoint mutations stay in the background r
   });
   assert.equal(rejected.success, false);
   assert.equal(rejected.code, "INVALID_EXPORT_JOB_PATCH");
+});
+
+test("recoverable export jobs can be listed without exposing provider keys or content", async () => {
+  const fixture = makeExportNotesBackground();
+  const result = await fixture.background.handleListExportTranslationJobs();
+  assert.equal(result.success, true);
+  assert.equal(result.jobs.length, 1);
+  assert.equal(result.jobs[0].jobId, fixture.job.jobId);
+  const serialized = JSON.stringify(result.jobs);
+  assert.doesNotMatch(serialized, /test-key|Canonical stored English note body/);
+  assert.deepEqual(result.jobs[0].intent.mediaKeys, [fixture.mediaKey]);
 });
 
 test("duplicate create or resume preserves a running job's current batch lease", async () => {
@@ -2467,6 +3736,7 @@ function installNoteNavigationFixture(runtime, options = {}) {
       const createdTabs = [];
       const updatedTabs = [];
       const renderedNotes = [];
+      let noteExportDownloads = 0;
       const elements = new Map();
       let panelClosed = false;
       let activeUrlValue =
@@ -2547,6 +3817,7 @@ function installNoteNavigationFixture(runtime, options = {}) {
       renderTranscript = () => {};
       renderAnalysisResults = () => {};
       highlightMomentsOnPage = () => {};
+      downloadTextFile = () => { noteExportDownloads += 1; };
       setupExplainFeature = () => {};
       translateTranscript = () => {};
       loadFromCache = async (videoId) => {
@@ -2787,6 +4058,34 @@ function installNoteNavigationFixture(runtime, options = {}) {
         playTarget: () => playNote(targetNote),
         playTargetForSupplement: () =>
           playNote(targetNote, { captureMetadata: true }),
+        playTargetForCompleteExport: async () => {
+          currentNotesMode = "original";
+          const exportContinuation = createNoteExportContinuation([
+            targetMediaKey,
+          ]);
+          const groups = [
+            {
+              mediaKey: targetMediaKey,
+              representative: targetNote,
+              notes: [targetNote],
+            },
+          ];
+          const sourcesByKey = {};
+          const precheck = buildNotesExportPrecheck(
+            groups,
+            sourcesByKey,
+            currentNotesMode,
+          );
+          await grantNoteExportAuthorization(exportContinuation, {
+            groups,
+            sourcesByKey,
+            precheck,
+          });
+          return playNote(targetNote, {
+            captureMetadata: true,
+            exportContinuation,
+          });
+        },
         inspectActive: () => checkCurrentTab(),
         waitForMetadataRelay: () => metadataRelayStarted,
         releaseMetadataRelay: () => {
@@ -2849,6 +4148,7 @@ function installNoteNavigationFixture(runtime, options = {}) {
           errorSecondaryHidden: element("errorSecondaryBtn").hidden,
           noteExportStatus: element("notesExportStatus").textContent,
           fetchCount: fetchCount(),
+          noteExportDownloads,
           metadataRelayCount: messages.filter(
             (message) =>
               message.action === "relayToContent" &&
@@ -2989,14 +4289,14 @@ test("Header exposes tab-specific transcript, overview, and notes language modes
     js,
     /function ensureNotesChinese\(\)[\s\S]*?await sendTranslationMessage\(\{[\s\S]*?action: "translateNotes"/,
   );
-  assert.match(js, /const REQUIRED_RUNTIME_PROTOCOL_VERSION = 10/);
+  assert.match(js, /const REQUIRED_RUNTIME_PROTOCOL_VERSION = 11/);
   assert.match(
     js,
     /runtimeProtocolVersion\s*!==\s*REQUIRED_RUNTIME_PROTOCOL_VERSION[\s\S]*?showRuntimeVersionError\(\)/,
   );
   assert.match(js, /扩展后台未响应原文翻译请求，请重新加载扩展/);
   const backgroundSource = read("background.js");
-  assert.match(backgroundSource, /const RUNTIME_PROTOCOL_VERSION = 10/);
+  assert.match(backgroundSource, /const RUNTIME_PROTOCOL_VERSION = 11/);
   assert.match(
     backgroundSource,
     /runtimeProtocolVersion: RUNTIME_PROTOCOL_VERSION/,
@@ -3171,41 +4471,31 @@ test("supplementing a YouTube note reads page metadata once and never fetches su
   assert.equal(repeated.metadataRelayCount, 1, "completed capture is not repeated");
   assert.equal(repeated.fetchCount, 0);
 
-  const documentImpl = createInteractiveDocument();
-  const guideRuntime = loadSidepanelRuntime({ documentImpl, storageLocal });
-  let rechecks = 0;
-  guideRuntime.helpers.showNoteExportSupplementGuide(
-    {
-      hasTranslationGaps: false,
-      blockingVideos: [
-        {
-          mediaKey: fixture.targetMediaKey,
-          title: "Target video",
-          blockingReasons: ["缺少视频简介状态"],
-        },
-      ],
-    },
-    [
-      {
-        mediaKey: fixture.targetMediaKey,
-        representative: {
-          mediaKey: fixture.targetMediaKey,
-          videoId: fixture.targetVideoId,
-          videoTitle: "Target video",
-          timestampedUrl: fixture.targetUrl,
-        },
-        notes: [],
-      },
-    ],
-    () => {
-      rechecks += 1;
-    },
+  const persisted = await require("../note-sources.js").readNoteSource(
+    storageLocal,
+    fixture.targetMediaKey,
   );
-  await documentImpl
-    .findButton("notesExportPrecheck", "重新检查并导出")
-    .click();
-  assert.equal(rechecks, 1, "persisted capture exits the guide exactly once");
+  assert.equal(persisted.descriptionStatus, "present");
+  assert.equal(persisted.descriptionTruncated, false);
   assert.equal(JSON.parse(fixture.snapshot()).fetchCount, 0);
+});
+
+test("one complete-export click captures missing metadata and automatically downloads", async () => {
+  const storageLocal = createMemoryStorageArea();
+  const runtime = loadSidepanelRuntime({ storageLocal });
+  const fixture = installNoteNavigationFixture(runtime, { hasAiKey: false });
+
+  await fixture.playTargetForCompleteExport();
+  await fixture.inspectActive();
+  for (let index = 0; index < 5; index += 1) await nextTurn();
+
+  const snapshot = JSON.parse(fixture.snapshot());
+  assert.equal(snapshot.metadataRelayCount, 1);
+  assert.equal(snapshot.upsertCount >= 1, true);
+  assert.equal(snapshot.noteExportDownloads, 1);
+  assert.equal(snapshot.fetchCount, 0);
+  assert.equal(snapshot.supadataConsents.length, 0);
+  assert.equal(snapshot.sessionCaptureMetadata, false);
 });
 
 test("metadata supplement requires a refreshed content script even when a legacy title matches", async () => {
@@ -5914,6 +7204,167 @@ test("a note saved before the first caption uses the first line instead of the l
   assert.equal(storedNotes.length, 1);
   assert.equal(storedNotes[0].rawText, "第一条字幕。");
   assert.match(storedNotes[0].text, /^第一条字幕/);
+});
+
+test("saving a YouTube note also freezes exact page metadata for later export", async () => {
+  const videoId = "save-source-yt";
+  const noteSources = require("../note-sources.js");
+  const storage = createMemoryStorage({
+    ytd_settings: {},
+    ytd_notes: [],
+    [`digest_${videoId}`]: {
+      transcriptSourcePolicyVersion: 4,
+      transcriptSource: "supadata",
+      transcriptLanguage: "zh-CN",
+      transcript: [
+        { start: 0, text: "保存笔记时同时保存页面资料。", language: "zh-CN" },
+      ],
+    },
+  });
+  const background = loadBackgroundHelpers({
+    storageGetImpl: storage.get,
+    storageSetImpl: storage.set,
+    storageRemoveImpl: storage.remove,
+    storageClearImpl: storage.clear,
+    scriptingImpl: {
+      async executeScript() {
+        return [{
+          result: {
+            videoId,
+            title: "精确页面标题",
+            channelName: "精确频道",
+            description: "这是完整的视频简介。",
+            descriptionStatus: "present",
+            descriptionTruncated: false,
+            duration: 900,
+            sourceLanguage: "en",
+          },
+        }];
+      },
+    },
+  });
+
+  const result = await background.handleSaveNote(
+    videoId,
+    1,
+    "按钮标题",
+    "按钮频道",
+    `https://www.youtube.com/watch?v=${videoId}`,
+    77,
+  );
+
+  assert.equal(result.success, true);
+  const source = await noteSources.readNoteSource(storage, videoId);
+  assert.equal(source.titleOriginal, "精确页面标题");
+  assert.equal(source.channelName, "精确频道");
+  assert.equal(source.canonicalUrl, `https://www.youtube.com/watch?v=${videoId}`);
+  assert.equal(source.descriptionOriginal, "这是完整的视频简介。");
+  assert.equal(source.descriptionStatus, "present");
+  assert.equal(source.descriptionTruncated, false);
+  assert.equal(source.sourceLanguage, "zh-CN", "actual caption language wins");
+  assert.equal(source.transcriptOriginal.length, 1);
+});
+
+test("a stale YouTube player cannot block the note or attach another video's source", async () => {
+  const videoId = "save-source-current";
+  const noteSources = require("../note-sources.js");
+  const storage = createMemoryStorage({
+    ytd_settings: {},
+    ytd_notes: [],
+    [`digest_${videoId}`]: {
+      transcriptSourcePolicyVersion: 4,
+      transcriptSource: "supadata",
+      transcriptLanguage: "zh-CN",
+      transcript: [{ start: 0, text: "当前视频字幕。", language: "zh-CN" }],
+    },
+  });
+  const background = loadBackgroundHelpers({
+    storageGetImpl: storage.get,
+    storageSetImpl: storage.set,
+    storageRemoveImpl: storage.remove,
+    storageClearImpl: storage.clear,
+    scriptingImpl: {
+      async executeScript() {
+        return [{
+          result: {
+            videoId: "different-video",
+            title: "错误视频",
+            channelName: "错误频道",
+            description: "错误简介",
+            descriptionStatus: "present",
+            descriptionTruncated: false,
+          },
+        }];
+      },
+    },
+  });
+
+  const result = await background.handleSaveNote(
+    videoId,
+    1,
+    "当前视频",
+    "当前频道",
+    `https://www.youtube.com/watch?v=${videoId}`,
+    78,
+  );
+
+  assert.equal(result.success, true);
+  assert.equal((await storage.get("ytd_notes")).ytd_notes.length, 1);
+  assert.equal(await noteSources.readNoteSource(storage, videoId), null);
+  assert.equal(await noteSources.readNoteSource(storage, "different-video"), null);
+});
+
+test("source persistence failure never reverses a successful note save", async () => {
+  const videoId = "save-source-failure";
+  const noteSources = require("../note-sources.js");
+  const storage = createMemoryStorage({
+    ytd_settings: {},
+    ytd_notes: [],
+    [`digest_${videoId}`]: {
+      transcriptSourcePolicyVersion: 4,
+      transcriptSource: "supadata",
+      transcriptLanguage: "zh-CN",
+      transcript: [{ start: 0, text: "笔记应继续保存。", language: "zh-CN" }],
+    },
+  });
+  const background = loadBackgroundHelpers({
+    storageGetImpl: storage.get,
+    storageSetImpl: storage.set,
+    storageRemoveImpl: storage.remove,
+    storageClearImpl: storage.clear,
+    noteSourcesImpl: {
+      ...noteSources,
+      async writeNoteSource() {
+        throw new Error("simulated source storage failure");
+      },
+    },
+    scriptingImpl: {
+      async executeScript() {
+        return [{
+          result: {
+            videoId,
+            title: "视频",
+            channelName: "频道",
+            description: "简介",
+            descriptionStatus: "present",
+            descriptionTruncated: false,
+          },
+        }];
+      },
+    },
+  });
+
+  const result = await background.handleSaveNote(
+    videoId,
+    1,
+    "视频",
+    "频道",
+    `https://www.youtube.com/watch?v=${videoId}`,
+    79,
+  );
+
+  assert.equal(result.success, true);
+  assert.equal((await storage.get("ytd_notes")).ytd_notes.length, 1);
 });
 
 test("new polished Chinese notes display cleaned text while legacy notes keep raw text", () => {

@@ -377,13 +377,26 @@
                   class="notes-export-picker-list"
                   id="notesExportPickerList"
                 ></div>
+                <p
+                  class="notes-export-picker-disclosure"
+                  id="notesExportPickerDisclosure"
+                  aria-live="polite"
+                >选择视频后将显示导出准备情况。</p>
                 <div class="notes-export-picker-actions">
                   <button
-                    class="enhance-btn"
+                    class="enhance-btn notes-export-cancel"
                     id="cancelNotesExportSelection"
                     type="button"
                   >
                     取消
+                  </button>
+                  <button
+                    class="enhance-btn"
+                    id="directNotesExportSelection"
+                    type="button"
+                    disabled
+                  >
+                    直接导出（0）
                   </button>
                   <button
                     class="enhance-btn active"
@@ -391,7 +404,7 @@
                     type="submit"
                     disabled
                   >
-                    导出所选（0）
+                    完整导出（0）
                   </button>
                 </div>
               </fieldset>

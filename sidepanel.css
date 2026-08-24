@@ -1492,6 +1492,38 @@ body {
   min-width: 0;
   display: grid;
   gap: 2px;
+  flex: 1 1 auto;
+}
+
+.notes-export-picker-option-status {
+  flex: 0 0 auto;
+  padding: 2px 7px;
+  font-size: 10.5px;
+  font-weight: 650;
+  line-height: 1.4;
+  color: var(--text-muted);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.notes-export-picker-option-status.is-ready {
+  color: var(--success);
+  border-color: color-mix(in srgb, var(--success) 28%, var(--border));
+  background: color-mix(in srgb, var(--success) 7%, var(--surface));
+}
+
+.notes-export-picker-option-status.is-metadata {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 24%, var(--border));
+  background: color-mix(in srgb, var(--danger) 6%, var(--surface));
+}
+
+.notes-export-picker-option-status.is-translation {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 24%, var(--border));
+  background: color-mix(in srgb, var(--accent) 6%, var(--surface));
 }
 
 .notes-export-picker-option-title {
@@ -1513,9 +1545,25 @@ body {
 
 .notes-export-picker-actions {
   display: flex;
+  flex-wrap: wrap;
   justify-content: flex-end;
   gap: 8px;
   margin-top: 10px;
+}
+
+.notes-export-picker-disclosure {
+  margin: 10px 0 0;
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-secondary);
+  background: color-mix(in srgb, var(--surface-raised) 78%, transparent);
+}
+
+.notes-export-cancel {
+  margin-right: auto;
 }
 
 .notes-export-item {

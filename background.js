@@ -25,7 +25,7 @@ importScripts("export-jobs.js");
 
 const DEBUG = false;
 const ANALYSIS_SCHEMA_VERSION = 3;
-const RUNTIME_PROTOCOL_VERSION = 10;
+const RUNTIME_PROTOCOL_VERSION = 11;
 const ANALYSIS_BASE_LANGUAGE = "zh-Hans";
 const TRANSCRIPT_SOURCE_POLICY_VERSION = 4;
 const AI_PROVIDER_IDLE_TIMEOUT_MS = 50_000;
@@ -724,6 +724,11 @@ function normalizeBilibiliMediaRef(mediaRef) {
   const rawDuration = Number(
     mediaRef.duration || mediaRef.metadata?.duration,
   );
+  const rawDescription = safeString(
+    mediaRef.description || mediaRef.metadata?.description,
+    Number.MAX_SAFE_INTEGER,
+  );
+  const description = rawDescription.slice(0, 10_000);
   const metadata = {
     title,
     channelName,
@@ -731,15 +736,16 @@ function normalizeBilibiliMediaRef(mediaRef) {
       mediaRef.creator || mediaRef.metadata?.creator || channelName,
       300,
     ),
-    description: safeString(
-      mediaRef.description || mediaRef.metadata?.description,
-      10_000,
-    ),
+    description,
     descriptionStatus: ["unknown", "confirmed-empty", "present"].includes(
       mediaRef.descriptionStatus || mediaRef.metadata?.descriptionStatus,
     )
       ? mediaRef.descriptionStatus || mediaRef.metadata?.descriptionStatus
       : "unknown",
+    descriptionTruncated:
+      mediaRef.descriptionTruncated === true ||
+      mediaRef.metadata?.descriptionTruncated === true ||
+      rawDescription.length > description.length,
     duration:
       Number.isFinite(rawDuration) && rawDuration > 0 ? rawDuration : 0,
     partTitle: safeString(
@@ -1064,6 +1070,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message.action === "getExportJob") {
     handleGetExportTranslationJob(message.jobId)
+      .then(sendResponse)
+      .catch((error) => sendResponse(exportSourceBatchFailure(error)));
+    return true;
+  }
+
+  if (message.action === "listExportJobs") {
+    handleListExportTranslationJobs()
       .then(sendResponse)
       .catch((error) => sendResponse(exportSourceBatchFailure(error)));
     return true;
@@ -2518,6 +2531,7 @@ async function handleSaveNote(
   preferredLanguage = "",
 ) {
   const saveGeneration = noteStorageGeneration;
+  const sourceStorageGeneration = exportSourceStorageGeneration;
   try {
     const mediaRef = await resolveMediaRef(mediaInput, sourceUrl);
     const mediaKey = mediaRef.mediaKey || mediaRef.videoId;
@@ -2752,6 +2766,23 @@ async function handleSaveNote(
       };
     }
 
+    // A note and the material needed to export it belong to the same user
+    // action. Persist the source immediately while the exact video tab is
+    // still available, instead of relying on a later side-panel lifecycle.
+    // This is deliberately best-effort: the note is already durable, and a
+    // transient page/storage failure must never turn a successful save into a
+    // failed note. No transcript/provider call is made here; `transcript` is
+    // the local material already used to create the note.
+    await persistSavedNoteSourceBestEffort({
+      mediaRef,
+      note,
+      transcript,
+      tabId,
+      sourceLanguage: storedSourceLanguage,
+      expectedNoteGeneration: saveGeneration,
+      expectedSourceGeneration: sourceStorageGeneration,
+    });
+
     // Chinese generation is triggered by the Notes panel after this save
     // notification. Keeping one owner prevents a failed save-time translation
     // from being retried immediately by noteSaved -> loadNotes.
@@ -2763,6 +2794,106 @@ async function handleSaveNote(
   } catch (error) {
     console.error("[DigestDock] Save note error:", error);
     return { success: false, error: error.message };
+  }
+}
+
+/**
+ * Best-effort source persistence for one successfully saved note.
+ *
+ * YouTube metadata is accepted only from the exact tab/player video identity;
+ * stale SPA state therefore cannot be attached to another note. Bilibili's
+ * resolved media reference already carries the API-backed metadata and is
+ * reused without another request.
+ *
+ * The final write is serialized with note clear/reset. Holding the shared note
+ * queue while calling the existing note-source upsert means a later clear runs
+ * after this write and removes it, while an earlier clear changes the captured
+ * generations and prevents this write from resurrecting cleared data.
+ */
+async function persistSavedNoteSourceBestEffort({
+  mediaRef,
+  note,
+  transcript,
+  tabId,
+  sourceLanguage = "",
+  expectedNoteGeneration,
+  expectedSourceGeneration,
+}) {
+  try {
+    let metadata = null;
+    if (mediaRef?.platform === "youtube") {
+      if (!Number.isInteger(tabId)) return null;
+      const playerDetails = await getPlayerVideoDetails(tabId);
+      const expectedVideoId = String(mediaRef.videoId || "").trim();
+      const actualVideoId = String(playerDetails?.videoId || "").trim();
+      if (!expectedVideoId || actualVideoId !== expectedVideoId) {
+        debugLog(
+          "[DigestDock] Skipping note source: YouTube player identity changed",
+        );
+        return null;
+      }
+      metadata = playerDetails;
+    } else if (mediaRef?.platform === "bilibili") {
+      metadata = mediaRef;
+    } else {
+      return null;
+    }
+
+    const description = String(
+      metadata.description || metadata.metadata?.description || "",
+    ).trim();
+    const explicitDescriptionStatus =
+      metadata.descriptionStatus || metadata.metadata?.descriptionStatus;
+    const descriptionStatus = [
+      "present",
+      "confirmed-empty",
+      "unknown",
+    ].includes(explicitDescriptionStatus)
+      ? explicitDescriptionStatus
+      : description
+        ? "present"
+        : "unknown";
+    const source = YTD_NOTE_SOURCES.normalizeNoteSource({
+      mediaKey: note.mediaKey,
+      platform: note.platform,
+      canonicalUrl: note.canonicalUrl,
+      titleOriginal: String(metadata.title || note.videoTitle || "").trim(),
+      channelName: String(
+        metadata.channelName ||
+          metadata.metadata?.channelName ||
+          note.channelName ||
+          "",
+      ).trim(),
+      descriptionOriginal: description,
+      descriptionStatus,
+      descriptionTruncated:
+        metadata.descriptionTruncated === true ||
+        metadata.metadata?.descriptionTruncated === true,
+      sourceLanguage: String(
+        sourceLanguage || note.sourceLanguage || metadata.sourceLanguage || "",
+      ).trim(),
+      transcriptOriginal: Array.isArray(transcript) ? transcript : [],
+      transcriptZh: [],
+      transcriptTruncated: false,
+    });
+    if (!source) return null;
+
+    return await withNoteStorageWrite(async () => {
+      if (
+        expectedNoteGeneration !== noteStorageGeneration ||
+        expectedSourceGeneration !== exportSourceStorageGeneration
+      ) {
+        return null;
+      }
+      const persisted = await handleUpsertNoteSource(source);
+      return persisted?.success ? persisted.source : null;
+    });
+  } catch (error) {
+    debugLog(
+      "[DigestDock] Note source persistence skipped:",
+      error?.code || error?.message || "unknown error",
+    );
+    return null;
   }
 }
 
@@ -4314,6 +4445,18 @@ async function handleGetExportTranslationJob(jobId) {
     );
   }
   return { success: true, code: "OK", job };
+}
+
+async function handleListExportTranslationJobs() {
+  requireExportSourceModules();
+  const jobs = await YTD_EXPORT_JOBS.readExportJobs(chrome.storage.local);
+  return {
+    success: true,
+    code: "OK",
+    jobs: Object.values(jobs || {}).sort(
+      (left, right) => Number(right?.updatedAt || 0) - Number(left?.updatedAt || 0),
+    ),
+  };
 }
 
 function assertOnlyExportJobFields(value, allowed, code) {
@@ -6389,6 +6532,7 @@ globalThis.__YTD_TRANSLATION_TESTING__ = {
   createNoteId,
   getNoteStorageGeneration,
   handleSaveNote,
+  persistSavedNoteSourceBestEffort,
   handleTranslateOverviewOriginal,
   handleTranslateNotes,
   hasUsableChineseOverview,
@@ -6417,6 +6561,7 @@ globalThis.__YTD_TRANSLATION_TESTING__ = {
   handleTranslateExportSourceBatch,
   handleCancelExportTranslationJob,
   handleGetExportTranslationJob,
+  handleListExportTranslationJobs,
   handleCreateOrResumeExportJob,
   handleCheckpointExportJob,
   handleUpsertNoteSource,

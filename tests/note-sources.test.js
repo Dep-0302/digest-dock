@@ -1005,6 +1005,9 @@ test("toExportSource maps notes through the injected language resolver", () => {
     mediaKey: "v",
     titleOriginal: "T",
     sourceLanguage: "en",
+    descriptionOriginal: "Partial description",
+    descriptionStatus: "present",
+    descriptionTruncated: true,
     transcriptOriginal: [{ start: 0, text: "a" }],
   });
   const out = sources.toExportSource(
@@ -1022,6 +1025,7 @@ test("toExportSource maps notes through the injected language resolver", () => {
   );
   assert.equal(out.titleOriginal, "T");
   assert.equal(out.sourceLanguage, "en");
+  assert.equal(out.descriptionTruncated, true);
   assert.deepEqual(out.notes[0], {
     timestampSeconds: 9,
     original: "RAW",

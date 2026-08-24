@@ -460,11 +460,18 @@ test("all-notes export exposes an accessible multi-video scope picker", () => {
   assert.match(html, /id="notesExportPicker"[\s\S]*?<fieldset>/);
   assert.match(html, /id="notesExportSelectAll"[^>]*type="checkbox"/);
   assert.match(html, /id="confirmNotesExportSelection"[\s\S]*?disabled/);
+  assert.match(html, /id="directNotesExportSelection"[\s\S]*?disabled/);
+  assert.match(html, /完整导出（0）/);
+  assert.match(html, /直接导出（0）/);
   assert.match(css, /\.notes-export-picker-list\s*\{[^}]*max-height:\s*240px;[^}]*overflow-y:\s*auto/);
   assert.match(js, /let selectedNoteExportMediaKeys = new Set\(\)/);
   assert.match(js, /confirm\.disabled = selected === 0/);
   assert.match(js, /selectAll\.indeterminate = selected > 0 && selected < total/);
   assert.match(js, /event\.key !== "Escape"/);
+  assert.doesNotMatch(
+    js,
+    /showNoteExportSupplementGuide|noteExportSupplementIsReady|补充导出|打开补充|重新检查并导出|放弃导出/,
+  );
 });
 
 test("notes TXT and completion jobs stay scoped away from full transcripts", () => {
@@ -481,21 +488,29 @@ test("notes TXT and completion jobs stay scoped away from full transcripts", () 
   assert.match(panel, /buildCurrentVideoText/);
   assert.match(panel, /buildAllNotesText/);
   assert.doesNotMatch(panel, /buildCurrentVideoMarkdown|buildAllNotesMarkdown|text\/markdown/);
-  assert.ok(
-    (panel.match(/includeTranscript: false/g) || []).length >= 12,
-    "all initial and final note-export prechecks/plans must exclude transcripts",
+  assert.match(
+    panel,
+    /function buildNotesExportPrecheck[\s\S]*?includeTranscript: false/,
+    "the shared note precheck must exclude full transcripts",
   );
   assert.match(
     panel,
-    /if \(!outcome\.complete\) \{[\s\S]*?await exportCurrentVideoNotes\(\)/,
+    /function buildNotesExportTranslationPlan[\s\S]*?includeTranscript: false/,
+    "the shared note completion plan must exclude full transcripts",
   );
   assert.match(
     panel,
-    /if \(!outcome\.complete\) \{[\s\S]*?await exportAllNotes\(frozenMediaKeys\)/,
+    /async function exportCurrentVideoNotes\(\) \{[\s\S]*?await exportAllNotes\(\[selectedMediaKey\]\);[\s\S]*?\n\}/,
+    "the current-video shortcut must delegate to the shared notes export flow",
   );
   assert.match(
     panel,
-    /if \(!outcome\.complete\) \{[\s\S]*?await exportSingleSourceGroup\(freshGroup\)/,
+    /if \(!outcome\.complete\) \{[\s\S]*?await exportAllNotes\(frozenMediaKeys,\s*\{/,
+  );
+  assert.match(
+    panel,
+    /async function exportSingleSourceGroup\(group\) \{[\s\S]*?await exportAllNotes\(\[selectedMediaKey\]\);[\s\S]*?\n\}/,
+    "the per-source shortcut must delegate to the shared notes export flow",
   );
   assert.match(
     panel,

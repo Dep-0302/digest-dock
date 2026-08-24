@@ -484,7 +484,10 @@ var YTD_NOTE_SOURCES = (() => {
     const sourceRevision = hashSourceText(
       JSON.stringify({
         mediaKey,
+        platform: normalizePlatform(input.platform),
+        canonicalUrl: cleanText(input.canonicalUrl, MAX_URL),
         titleOriginal,
+        channelName: cleanText(input.channelName, MAX_CHANNEL),
         sourceLanguage: cleanText(input.sourceLanguage, MAX_LANGUAGE_TAG),
         descriptionStatus: description.descriptionStatus,
         descriptionTruncated: description.descriptionTruncated,
@@ -762,6 +765,7 @@ var YTD_NOTE_SOURCES = (() => {
       descriptionOriginal: resolved.descriptionOriginal,
       descriptionZh: resolved.descriptionZh,
       descriptionStatus: resolved.descriptionStatus,
+      descriptionTruncated: resolved.descriptionTruncated === true,
       sourceLanguage: resolved.sourceLanguage,
       transcriptOriginal: resolved.transcriptOriginal,
       transcriptZh: resolved.transcriptZh,
