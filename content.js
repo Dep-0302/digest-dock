@@ -918,6 +918,58 @@ function showNoteSavedToast(note) {
 // VIDEO INFO EXTRACTION
 // ============================================================
 
+function decodeEmbeddedJsonString(match) {
+  if (!match?.[1]) return "";
+  try {
+    return JSON.parse(match[1]);
+  } catch {
+    return "";
+  }
+}
+
+function extractEmbeddedVideoDescription(videoId) {
+  const scripts = Array.from(document.scripts || []);
+  for (const script of scripts) {
+    const text = String(script?.textContent || "");
+    const detailsIndex = text.indexOf('"videoDetails":');
+    if (detailsIndex < 0) continue;
+    // `shortDescription` is an early flat field in videoDetails. Bound the
+    // scan so an unrelated large player script can never become an unbounded
+    // parse or allocation in the content script.
+    const details = text.slice(detailsIndex, detailsIndex + 250_000);
+    const embeddedVideoId = decodeEmbeddedJsonString(
+      details.match(/"videoId":("(?:\\.|[^"\\])*")/),
+    );
+    if (!embeddedVideoId || embeddedVideoId !== videoId) continue;
+    const descriptionMatch = details.match(
+      /"shortDescription":("(?:\\.|[^"\\])*")/,
+    );
+    if (!descriptionMatch) continue;
+    return {
+      found: true,
+      text: decodeEmbeddedJsonString(descriptionMatch).trim(),
+    };
+  }
+  return { found: false, text: "" };
+}
+
+function extractVisibleVideoDescription() {
+  const candidates = [
+    document.querySelector("#attributed-snippet-text"),
+    document.querySelector("meta[name='description']"),
+    document.querySelector("meta[property='og:description']"),
+    document.querySelector("meta[itemprop='description']"),
+    document.querySelector("#description-inner"),
+  ];
+  for (const candidate of candidates) {
+    const text = String(
+      candidate?.getAttribute?.("content") || candidate?.textContent || "",
+    ).trim();
+    if (text) return text;
+  }
+  return "";
+}
+
 /**
  * Reads the video title, channel name, and description directly from YouTube's page.
  * These are just sitting in the HTML — we grab them from the DOM elements.
@@ -937,25 +989,29 @@ function extractVideoInfo() {
   // Video duration from the video element
   const videoElement = document.querySelector("video.html5-main-video");
 
-  // Video description — YouTube has this in a few possible places
-  const descriptionElement = document.querySelector(
-    "#description-inner, " +
-      "ytd-watch-metadata #description yt-attributed-string, " +
-      "#description yt-formatted-string, " +
-      "ytd-expander#description yt-attributed-string",
-  );
+  const embeddedDescription = extractEmbeddedVideoDescription(videoId);
+  const visibleDescription = embeddedDescription.found
+    ? ""
+    : extractVisibleVideoDescription();
+  const description = embeddedDescription.found
+    ? embeddedDescription.text
+    : visibleDescription;
 
   return {
     videoId,
     title: titleElement?.textContent?.trim() || "",
     channelName: channelElement?.textContent?.trim() || "",
     duration: videoElement?.duration || 0,
-    description: descriptionElement?.textContent?.trim() || "",
-    descriptionStatus: descriptionElement
-      ? descriptionElement.textContent?.trim()
+    description,
+    // Only exact videoDetails data can prove completeness or a genuinely empty
+    // description. DOM/meta fallbacks are often truncated or temporarily empty
+    // during YouTube SPA hydration, so they remain incomplete evidence.
+    descriptionStatus: embeddedDescription.found
+      ? description
         ? "present"
         : "confirmed-empty"
       : "unknown",
+    descriptionTruncated: !embeddedDescription.found && !!description,
   };
 }
 
@@ -1075,6 +1131,8 @@ document.addEventListener("yt-navigate-finish", () => {
 // cannot redeclare top-level const/let bindings. These selected helpers stay
 // visible only for the repository's Node regression tests.
 Object.assign(globalThis, {
+  extractEmbeddedVideoDescription,
+  extractVideoInfo,
   findDigestButtonHost,
   injectDigestButton,
   isExtensionContextInvalidatedError,

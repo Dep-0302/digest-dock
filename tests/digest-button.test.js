@@ -154,6 +154,7 @@ function createHarness({ sendMessageImpl, consoleImpl = console } = {}) {
 
   const context = vm.createContext({
     console: consoleImpl,
+    URLSearchParams,
     document,
     window: {
       location: { pathname: "/watch" },
@@ -266,6 +267,78 @@ test("accidental duplicate content-script injection is idempotent", () => {
   assert.doesNotThrow(() => vm.runInContext(contentScript, harness.context));
   assert.equal(harness.context.__YTD_CONTENT_SCRIPT_ACTIVE__, true);
   assert.equal(typeof harness.context.injectDigestButton, "function");
+});
+
+test("video info reads the exact full description from embedded player data", () => {
+  const harness = createHarness();
+  const videoId = "0KHvXrq0gT8";
+  harness.context.window.location.search = `?v=${videoId}`;
+  harness.context.document.scripts = [
+    {
+      textContent:
+        `var ytInitialPlayerResponse = {"videoDetails":{"videoId":"${videoId}",` +
+        '"shortDescription":"First line\\nSecond line with \\\"quotes\\\".","lengthSeconds":"30"}};',
+    },
+  ];
+  harness.context.document.querySelector = (selector) => {
+    if (selector.includes("h1.ytd-watch-metadata")) {
+      return { textContent: "Why Everyone Is Living The Same Life" };
+    }
+    if (selector.includes("#channel-name")) {
+      return { textContent: "Mikey Posada" };
+    }
+    if (selector === "video.html5-main-video") return { duration: 30 };
+    return null;
+  };
+
+  const info = vm.runInContext("extractVideoInfo()", harness.context);
+  assert.equal(info.videoId, videoId);
+  assert.equal(info.description, 'First line\nSecond line with "quotes".');
+  assert.equal(info.descriptionStatus, "present");
+});
+
+test("video info distinguishes a confirmed empty description from an unready page", () => {
+  const harness = createHarness();
+  harness.context.window.location.search = "?v=empty123";
+  harness.context.document.scripts = [
+    {
+      textContent:
+        'var ytInitialPlayerResponse = {"videoDetails":{"videoId":"empty123","shortDescription":""}};',
+    },
+  ];
+  harness.context.document.querySelector = () => null;
+  const confirmedEmpty = vm.runInContext("extractVideoInfo()", harness.context);
+  assert.equal(confirmedEmpty.description, "");
+  assert.equal(confirmedEmpty.descriptionStatus, "confirmed-empty");
+
+  harness.context.document.scripts = [];
+  harness.context.document.querySelector = (selector) =>
+    selector.includes("#description-inline-expander")
+      ? { textContent: "" }
+      : null;
+  const unknown = vm.runInContext("extractVideoInfo()", harness.context);
+  assert.equal(unknown.descriptionStatus, "unknown");
+  assert.equal(unknown.descriptionTruncated, false);
+});
+
+test("a truncated DOM or meta description never counts as complete source material", () => {
+  const harness = createHarness();
+  harness.context.window.location.search = "?v=hydrating123";
+  harness.context.document.scripts = [];
+  harness.context.document.querySelector = (selector) => {
+    if (selector === "meta[name='description']") {
+      return {
+        getAttribute(name) {
+          return name === "content" ? "Truncated description..." : "";
+        },
+      };
+    }
+    return null;
+  };
+  const info = vm.runInContext("extractVideoInfo()", harness.context);
+  assert.equal(info.description, "Truncated description...");
+  assert.equal(info.descriptionStatus, "unknown");
+  assert.equal(info.descriptionTruncated, true);
 });
 
 test("watch-page mutations do not restart the note-button retry loop", () => {

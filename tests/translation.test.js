@@ -497,7 +497,7 @@ test("notes precheck exposes four explicit actions and local fallbacks start no 
   assert.deepEqual(actions, []);
 });
 
-test("blocking note export opens a metadata supplement guide without starting a provider", () => {
+test("blocking note export stays in the guide until metadata is actually complete", async () => {
   const documentImpl = createInteractiveDocument();
   const messages = [];
   const runtime = loadSidepanelRuntime({
@@ -543,9 +543,64 @@ test("blocking note export opens a metadata supplement guide without starting a 
   );
   assert.ok(recheck);
   assert.ok(documentImpl.findButton("notesExportPrecheck", "放弃导出"));
-  recheck.click();
-  assert.equal(rechecks, 1);
+  await recheck.click();
+  assert.equal(rechecks, 0);
+  assert.match(
+    documentImpl.element("notesExportStatus").textContent,
+    /资料仍未补充完成/,
+  );
   assert.deepEqual(messages, [], "rendering and rechecking the guide starts no provider");
+});
+
+test("metadata supplement guide rechecks only after the persisted source is complete", async () => {
+  const storageLocal = createMemoryStorageArea();
+  const noteSources = require("../note-sources.js");
+  await noteSources.writeNoteSource(storageLocal, {
+    mediaKey: "video-a",
+    platform: "youtube",
+    canonicalUrl: "https://www.youtube.com/watch?v=video-a",
+    titleOriginal: "Video A",
+    channelName: "Channel A",
+    descriptionOriginal: "Complete description",
+    descriptionStatus: "present",
+    sourceLanguage: "en",
+  });
+  const documentImpl = createInteractiveDocument();
+  const runtime = loadSidepanelRuntime({ documentImpl, storageLocal });
+  let rechecks = 0;
+  runtime.helpers.showNoteExportSupplementGuide(
+    {
+      hasTranslationGaps: false,
+      blockingVideos: [
+        {
+          mediaKey: "video-a",
+          title: "Video A",
+          blockingReasons: ["缺少视频简介状态"],
+        },
+      ],
+    },
+    [
+      {
+        mediaKey: "video-a",
+        representative: {
+          mediaKey: "video-a",
+          videoId: "video-a",
+          videoTitle: "Video A",
+          timestampedUrl: "https://www.youtube.com/watch?v=video-a&t=5s",
+        },
+        notes: [],
+      },
+    ],
+    () => {
+      rechecks += 1;
+    },
+  );
+  const recheck = documentImpl.findButton(
+    "notesExportPrecheck",
+    "重新检查并导出",
+  );
+  await recheck.click();
+  assert.equal(rechecks, 1);
 });
 
 test("notes export job identity includes the v4 TXT content contract", () => {
@@ -2382,6 +2437,8 @@ function installNoteNavigationFixture(runtime, options = {}) {
     authorizedTranscriptSuccess: options.authorizedTranscriptSuccess === true,
     cachedTranscript: options.cachedTranscript === true,
     authorizedError: String(options.authorizedError || ""),
+    omitMetadataVideoId: options.omitMetadataVideoId === true,
+    metadataTitle: String(options.metadataTitle || "Target video"),
   });
   return runtime.evaluate(`
     (() => {
@@ -2569,9 +2626,11 @@ function installNoteNavigationFixture(runtime, options = {}) {
           return {
             success: true,
             response: {
-              videoId: activeLocator?.videoId || "",
+              ...(fixtureOptions.omitMetadataVideoId
+                ? {}
+                : { videoId: activeLocator?.videoId || "" }),
               title: activeLocator?.routeKey === targetRouteKey
-                ? "Target video"
+                ? fixtureOptions.metadataTitle
                 : "Unrelated video",
               channelName: "Target channel",
               description: "Video description",
@@ -2603,7 +2662,15 @@ function installNoteNavigationFixture(runtime, options = {}) {
           return { success: true, notes: [targetNote] };
         }
         if (message.action === "upsertNoteSource") {
-          return { success: true, source: message.source };
+          await YTD_NOTE_SOURCES.writeNoteSource(
+            chrome.storage.local,
+            message.source,
+          );
+          const persisted = await YTD_NOTE_SOURCES.readNoteSource(
+            chrome.storage.local,
+            message.source.mediaKey,
+          );
+          return { success: true, source: persisted };
         }
         if (message.action === "fetchTranscript") {
           if (
@@ -2740,6 +2807,7 @@ function installNoteNavigationFixture(runtime, options = {}) {
           errorTitle: element("errorTitle").textContent,
           errorSecondaryText: element("errorSecondaryBtn").textContent,
           errorSecondaryHidden: element("errorSecondaryBtn").hidden,
+          noteExportStatus: element("notesExportStatus").textContent,
           fetchCount: fetchCount(),
           metadataRelayCount: messages.filter(
             (message) =>
@@ -3041,7 +3109,8 @@ test("opening another video's saved note stays in All Notes without requesting S
 });
 
 test("supplementing a YouTube note reads page metadata once and never fetches subtitles", async () => {
-  const runtime = loadSidepanelRuntime();
+  const storageLocal = createMemoryStorageArea();
+  const runtime = loadSidepanelRuntime({ storageLocal });
   const fixture = installNoteNavigationFixture(runtime, { hasAiKey: false });
 
   await fixture.playTargetForSupplement();
@@ -3061,6 +3130,71 @@ test("supplementing a YouTube note reads page metadata once and never fetches su
   const repeated = JSON.parse(fixture.snapshot());
   assert.equal(repeated.metadataRelayCount, 1, "completed capture is not repeated");
   assert.equal(repeated.fetchCount, 0);
+
+  const documentImpl = createInteractiveDocument();
+  const guideRuntime = loadSidepanelRuntime({ documentImpl, storageLocal });
+  let rechecks = 0;
+  guideRuntime.helpers.showNoteExportSupplementGuide(
+    {
+      hasTranslationGaps: false,
+      blockingVideos: [
+        {
+          mediaKey: fixture.targetMediaKey,
+          title: "Target video",
+          blockingReasons: ["缺少视频简介状态"],
+        },
+      ],
+    },
+    [
+      {
+        mediaKey: fixture.targetMediaKey,
+        representative: {
+          mediaKey: fixture.targetMediaKey,
+          videoId: fixture.targetVideoId,
+          videoTitle: "Target video",
+          timestampedUrl: fixture.targetUrl,
+        },
+        notes: [],
+      },
+    ],
+    () => {
+      rechecks += 1;
+    },
+  );
+  await documentImpl
+    .findButton("notesExportPrecheck", "重新检查并导出")
+    .click();
+  assert.equal(rechecks, 1, "persisted capture exits the guide exactly once");
+  assert.equal(JSON.parse(fixture.snapshot()).fetchCount, 0);
+});
+
+test("metadata supplement requires a refreshed content script even when a legacy title matches", async () => {
+  const matchingRuntime = loadSidepanelRuntime();
+  const matching = installNoteNavigationFixture(matchingRuntime, {
+    omitMetadataVideoId: true,
+  });
+  await matching.playTargetForSupplement();
+  await matching.inspectActive();
+  await nextTurn();
+  const matched = JSON.parse(matching.snapshot());
+  assert.equal(matched.upsertCount, 0);
+  assert.equal(matched.fetchCount, 0);
+  assert.equal(matched.sessionCaptureMetadata, true);
+  assert.match(matched.noteExportStatus, /刷新页面后再补充/);
+
+  const staleRuntime = loadSidepanelRuntime();
+  const stale = installNoteNavigationFixture(staleRuntime, {
+    omitMetadataVideoId: true,
+    metadataTitle: "Different stale video",
+  });
+  await stale.playTargetForSupplement();
+  await stale.inspectActive();
+  await nextTurn();
+  const rejected = JSON.parse(stale.snapshot());
+  assert.equal(rejected.upsertCount, 0);
+  assert.equal(rejected.fetchCount, 0);
+  assert.equal(rejected.sessionCaptureMetadata, true);
+  assert.match(rejected.noteExportStatus, /刷新当前视频页/);
 });
 
 test("supplementing the ordinary current video works without a transcript or note-only context", async () => {

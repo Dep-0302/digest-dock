@@ -510,6 +510,14 @@ test("YouTube metadata capture binds page info to the exact video identity", () 
     /function extractVideoInfo\(\)[\s\S]*?new URLSearchParams\(window\.location\.search\)\.get\("v"\)[\s\S]*?return \{[\s\S]*?videoId,/,
   );
   assert.match(content, /descriptionStatus:[\s\S]*?"confirmed-empty"/);
+  assert.match(
+    content,
+    /descriptionTruncated:\s*!embeddedDescription\.found && !!description/,
+  );
+  assert.match(
+    content,
+    /function extractEmbeddedVideoDescription\(videoId\)[\s\S]*?250_000[\s\S]*?"shortDescription"/,
+  );
 });
 
 test("runtime has no source-file credential dependency or retired model", () => {

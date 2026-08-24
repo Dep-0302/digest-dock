@@ -112,6 +112,54 @@ test("merge fills empty fields and upgrades transcript completeness without over
   assert.equal(merged.source.titleZh, "标题", "existing zh title preserved");
 });
 
+test("a shorter confirmed description replaces a longer truncated fallback", async () => {
+  const storage = makeStorage();
+  await sources.writeNoteSource(storage, {
+    mediaKey: "description-upgrade",
+    titleOriginal: "Video",
+    descriptionOriginal:
+      "Long DOM fallback with unrelated metadata and repeated visible page content.",
+    descriptionStatus: "present",
+    descriptionTruncated: true,
+  });
+  await sources.writeNoteSource(storage, {
+    mediaKey: "description-upgrade",
+    titleOriginal: "Video",
+    descriptionOriginal: "Exact description.",
+    descriptionStatus: "present",
+    descriptionTruncated: false,
+  });
+  const merged = await sources.readNoteSource(storage, "description-upgrade");
+  assert.equal(merged.descriptionOriginal, "Exact description.");
+  assert.equal(merged.descriptionStatus, "present");
+  assert.equal(merged.descriptionTruncated, false);
+});
+
+test("an exact confirmed-empty result clears a stale truncated fallback", async () => {
+  const storage = makeStorage();
+  await sources.writeNoteSource(storage, {
+    mediaKey: "description-empty-upgrade",
+    titleOriginal: "Video",
+    descriptionOriginal: "Truncated fallback text...",
+    descriptionStatus: "present",
+    descriptionTruncated: true,
+  });
+  await sources.writeNoteSource(storage, {
+    mediaKey: "description-empty-upgrade",
+    titleOriginal: "Video",
+    descriptionOriginal: "",
+    descriptionStatus: "confirmed-empty",
+    descriptionTruncated: false,
+  });
+  const merged = await sources.readNoteSource(
+    storage,
+    "description-empty-upgrade",
+  );
+  assert.equal(merged.descriptionOriginal, "");
+  assert.equal(merged.descriptionStatus, "confirmed-empty");
+  assert.equal(merged.descriptionTruncated, false);
+});
+
 test("title translations are source-hash bound, invalidated on change, and replanned", () => {
   const before = sources.normalizeNoteSource({
     mediaKey: "title-change",

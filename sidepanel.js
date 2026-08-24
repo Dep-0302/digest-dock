@@ -1412,8 +1412,34 @@ async function captureNotesOnlyMetadata(
           payload: { action: "getVideoInfo" },
         });
         const response = result?.success ? result.response : null;
-        if (!response || response.videoId !== locator.videoId) {
+        if (!response) {
           throw new Error("YouTube 页面资料尚未就绪。");
+        }
+        const responseVideoId = String(response.videoId || "").trim();
+        if (responseVideoId && responseVideoId !== locator.videoId) {
+          throw new Error("YouTube 页面已切换，未写入旧视频资料。");
+        }
+        if (!responseVideoId) {
+          const normalizeTitle = (value) =>
+            String(value || "")
+              .normalize("NFKC")
+              .replace(/\s+/g, " ")
+              .trim()
+              .toLocaleLowerCase();
+          const expectedTitle = normalizeTitle(context.videoTitle);
+          const responseTitle = normalizeTitle(response.title);
+          if (!expectedTitle || !responseTitle || expectedTitle !== responseTitle) {
+            const staleError = new Error(
+              "页面仍在使用旧版 DigestDock 内容脚本，请刷新当前视频页后再补充。",
+            );
+            staleError.code = "PAGE_REFRESH_REQUIRED";
+            throw staleError;
+          }
+          const refreshError = new Error(
+            "当前视频页尚未加载新版 DigestDock 内容脚本，请刷新页面后再补充。",
+          );
+          refreshError.code = "PAGE_REFRESH_REQUIRED";
+          throw refreshError;
         }
         metadata = response;
       }
@@ -1466,6 +1492,7 @@ async function captureNotesOnlyMetadata(
         channelName: currentChannelName,
         descriptionOriginal: currentVideoDescription,
         descriptionStatus: currentVideoDescriptionState,
+        descriptionTruncated: metadata.descriptionTruncated === true,
         descriptionZh: stored?.descriptionZh || "",
         sourceLanguage:
           stored?.sourceLanguage || currentVideoSourceLanguage || "",
@@ -1483,7 +1510,8 @@ async function captureNotesOnlyMetadata(
         !!currentVideoTitle &&
         !!currentChannelName &&
         !!currentMediaRef.canonicalUrl &&
-        currentVideoDescriptionState !== "unknown";
+        currentVideoDescriptionState !== "unknown" &&
+        metadata.descriptionTruncated !== true;
       if (requireActiveContext) {
         await persistNoteNavigationState({
           ...context,
@@ -1504,10 +1532,16 @@ async function captureNotesOnlyMetadata(
       );
       return persisted;
     } catch (error) {
-      console.warn("[DigestDock] Capture note metadata error:", error);
+      if (error?.code === "PAGE_REFRESH_REQUIRED") {
+        debugLog("[DigestDock] Metadata page refresh required");
+      } else {
+        console.warn("[DigestDock] Capture note metadata error:", error);
+      }
       if (ownsCapture()) {
         setNoteExportStatus(
-          "页面资料暂未读取完整。请等待页面加载后刷新，或稍后再次补充。",
+          error?.code === "PAGE_REFRESH_REQUIRED"
+            ? error.message
+            : "页面资料暂未读取完整。请等待页面加载后刷新，或稍后再次补充。",
           true,
         );
       }
@@ -3953,6 +3987,28 @@ function showNoteExportPrecheck(
   summary.focus?.();
 }
 
+async function noteExportSupplementIsReady(precheck) {
+  const sources = await YTD_NOTE_SOURCES.readAllSources(chrome.storage.local);
+  return (precheck.blockingVideos || []).every((video) => {
+    const source = YTD_NOTE_SOURCES.normalizeNoteSource(
+      sources?.[video.mediaKey],
+    );
+    if (!source) return false;
+    return (video.blockingReasons || []).every((reason) => {
+      if (reason.includes("标题")) return !!source.titleOriginal;
+      if (reason.includes("频道")) return !!source.channelName;
+      if (reason.includes("网址")) return !!source.canonicalUrl;
+      if (reason.includes("简介")) {
+        return (
+          source.descriptionStatus !== "unknown" &&
+          source.descriptionTruncated !== true
+        );
+      }
+      return false;
+    });
+  });
+}
+
 function showNoteExportSupplementGuide(precheck, groups, onRecheck) {
   const panel = document.getElementById("notesExportPrecheck");
   if (!panel) return;
@@ -4014,7 +4070,24 @@ function showNoteExportSupplementGuide(precheck, groups, onRecheck) {
   recheck.type = "button";
   recheck.className = "enhance-btn active";
   recheck.textContent = "重新检查并导出";
-  recheck.addEventListener("click", () => void onRecheck());
+  recheck.addEventListener("click", async () => {
+    recheck.disabled = true;
+    recheck.textContent = "正在检查…";
+    try {
+      if (!(await noteExportSupplementIsReady(precheck))) {
+        setNoteExportStatus(
+          "资料仍未补充完成。请先点击“打开补充”，等待成功提示后再检查；若提示页面版本过旧，请刷新视频页。",
+          true,
+        );
+        list.querySelector?.("button:not(:disabled)")?.focus?.();
+        return;
+      }
+      await onRecheck();
+    } finally {
+      recheck.disabled = false;
+      recheck.textContent = "重新检查并导出";
+    }
+  });
   const abandon = document.createElement("button");
   abandon.type = "button";
   abandon.className = "enhance-btn";
@@ -7088,6 +7161,7 @@ globalThis.__YTD_TRANSCRIPT_TESTING__ = {
   finalizeExportJobDownload,
   showNoteExportPrecheck,
   showNoteExportSupplementGuide,
+  noteExportSupplementIsReady,
   captureNotesOnlyMetadata,
   noteCanonicalUrl,
   normalizeExportMediaKeys,

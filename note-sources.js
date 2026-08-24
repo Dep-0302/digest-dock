@@ -568,18 +568,31 @@ var YTD_NOTE_SOURCES = (() => {
   function mergeDescription(prev, next, merged) {
     let chosenOriginal = prev.descriptionOriginal;
     let chosenStatus = prev.descriptionStatus;
-    if (
+    let chosenTruncated = prev.descriptionTruncated === true;
+    const incomingIsConfirmedComplete =
+      next.descriptionTruncated !== true &&
+      (next.descriptionStatus === "present" ||
+        next.descriptionStatus === "confirmed-empty");
+    if (prev.descriptionTruncated && incomingIsConfirmedComplete) {
+      // A verified page/player result outranks a longer DOM/meta fallback.
+      // This also lets an exact confirmed-empty result clear stale snippets.
+      chosenOriginal = next.descriptionOriginal;
+      chosenStatus = next.descriptionStatus;
+      chosenTruncated = false;
+    } else if (
       next.descriptionOriginal &&
       (!chosenOriginal || next.descriptionOriginal.length >= chosenOriginal.length)
     ) {
       chosenOriginal = next.descriptionOriginal;
       chosenStatus = "present";
+      chosenTruncated = next.descriptionTruncated === true;
     } else if (
       !chosenOriginal &&
       chosenStatus === "unknown" &&
       next.descriptionStatus === "confirmed-empty"
     ) {
       chosenStatus = "confirmed-empty";
+      chosenTruncated = false;
     }
 
     const currentHash = chosenOriginal ? hashSourceText(chosenOriginal) : "";
@@ -599,11 +612,7 @@ var YTD_NOTE_SOURCES = (() => {
           ...(prev.descriptionZhChunks || []),
           ...(next.descriptionZhChunks || []),
         ],
-        descriptionTruncated:
-          (chosenOriginal === prev.descriptionOriginal &&
-            prev.descriptionTruncated) ||
-          (chosenOriginal === next.descriptionOriginal &&
-            next.descriptionTruncated),
+        descriptionTruncated: chosenTruncated,
       }),
     );
   }
