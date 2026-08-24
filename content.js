@@ -102,9 +102,34 @@ function setNoteButtonContent(button, iconSvg, label) {
 }
 
 function isExtensionContextInvalidatedError(error) {
-  return String(error?.message || error || "").includes(
-    "Extension context invalidated",
+  const message = String(error?.message || error || "");
+  return (
+    error?.code === "EXTENSION_CONTEXT_INVALIDATED" ||
+    message.includes("Extension context invalidated") ||
+    /Cannot read properties of (?:undefined|null).*sendMessage/i.test(message)
   );
+}
+
+function activeExtensionRuntime() {
+  try {
+    return typeof chrome === "object" &&
+      chrome?.runtime &&
+      typeof chrome.runtime.sendMessage === "function"
+      ? chrome.runtime
+      : null;
+  } catch (_error) {
+    return null;
+  }
+}
+
+async function sendExtensionMessage(message) {
+  const runtime = activeExtensionRuntime();
+  if (!runtime) {
+    const error = new Error("Extension context invalidated.");
+    error.code = "EXTENSION_CONTEXT_INVALIDATED";
+    throw error;
+  }
+  return runtime.sendMessage(message);
 }
 
 function showExtensionRefreshNotice() {
@@ -115,7 +140,7 @@ function showExtensionRefreshNotice() {
   const notice = document.createElement("div");
   notice.id = DIGESTDOCK_YOUTUBE_DOM_IDS.refreshNotice;
   notice.textContent =
-    "DigestDock 已更新。请刷新当前 YouTube 页面后再生成摘要。";
+    "DigestDock 已更新。请刷新当前 YouTube 页面后再继续使用。";
   notice.style.cssText = `
     position: fixed;
     top: 18px;
@@ -399,7 +424,7 @@ function createDigestButton() {
 
     // Send message to background script to open side panel
     try {
-      const result = await chrome.runtime.sendMessage({
+      const result = await sendExtensionMessage({
         action: "openSidePanel",
       });
       debugLog("[DigestDock] openSidePanel response:", result);
@@ -772,7 +797,7 @@ async function saveCurrentNote() {
   }
 
   try {
-    const result = await chrome.runtime.sendMessage({
+    const result = await sendExtensionMessage({
       action: "saveNote",
       videoId: videoId,
       timestamp: currentTime,
@@ -798,6 +823,14 @@ async function saveCurrentNote() {
       console.error("[DigestDock] Save note error:", result.error);
     }
   } catch (err) {
+    if (isExtensionContextInvalidatedError(err)) {
+      if (noteButton) {
+        noteButton.disabled = true;
+        setNoteButtonState("请刷新页面");
+      }
+      showExtensionRefreshNotice();
+      return;
+    }
     setNoteButtonState("出错了");
     console.error("[DigestDock] Save note exception:", err);
   }

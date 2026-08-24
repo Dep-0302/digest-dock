@@ -103,7 +103,7 @@ class FakeElement {
   }
 }
 
-function createHarness({ sendMessageImpl } = {}) {
+function createHarness({ sendMessageImpl, consoleImpl = console } = {}) {
   const actionRows = [];
   const fallbackRows = [];
   const elements = [];
@@ -153,7 +153,7 @@ function createHarness({ sendMessageImpl } = {}) {
   };
 
   const context = vm.createContext({
-    console,
+    console: consoleImpl,
     document,
     window: {
       location: { pathname: "/watch" },
@@ -330,7 +330,13 @@ test("Digest button skips a hidden responsive toolbar", () => {
 });
 
 test("stale extension buttons ask for a page refresh without logging another failure", async () => {
+  const errors = [];
   const harness = createHarness({
+    consoleImpl: Object.assign(Object.create(console), {
+      error(...args) {
+        errors.push(args);
+      },
+    }),
     async sendMessageImpl() {
       throw new Error("Extension context invalidated.");
     },
@@ -354,12 +360,75 @@ test("stale extension buttons ask for a page refresh without logging another fai
   );
   assert.ok(notice);
   assert.match(notice.textContent, /请刷新当前 YouTube 页面/);
+  assert.equal(errors.length, 0);
   assert.equal(
     harness.context.isExtensionContextInvalidatedError(
       new Error("Extension context invalidated."),
     ),
     true,
   );
+  assert.equal(
+    harness.context.isExtensionContextInvalidatedError(
+      new TypeError("Cannot read properties of undefined (reading 'sendMessage')"),
+    ),
+    true,
+  );
+});
+
+test("a reloaded extension with no runtime disables the stale opener before sending", async () => {
+  let sendCalls = 0;
+  const errors = [];
+  const harness = createHarness({
+    consoleImpl: Object.assign(Object.create(console), {
+      error(...args) {
+        errors.push(args);
+      },
+    }),
+    async sendMessageImpl() {
+      sendCalls += 1;
+      return { success: true };
+    },
+  });
+  const { row, buttonGroup } = createActionRow({ width: 389, height: 36 });
+  harness.actionRows.push(row);
+  harness.context.injectDigestButton();
+  const button = buttonGroup.children[0];
+  harness.context.chrome.runtime = undefined;
+
+  await button.listeners.click({ preventDefault() {}, stopPropagation() {} });
+
+  assert.equal(sendCalls, 0);
+  assert.equal(button.disabled, true);
+  assert.equal(button.title, "请刷新页面");
+  assert.equal(button["aria-label"], "DigestDock 已更新，请刷新页面");
+  const notice = harness.context.document.getElementById(REFRESH_NOTICE_ID);
+  assert.ok(notice);
+  assert.match(notice.textContent, /请刷新当前 YouTube 页面/);
+  assert.equal(errors.length, 0);
+});
+
+test("ordinary side-panel messaging failures remain visible in the console", async () => {
+  const errors = [];
+  const harness = createHarness({
+    consoleImpl: Object.assign(Object.create(console), {
+      error(...args) {
+        errors.push(args);
+      },
+    }),
+    async sendMessageImpl() {
+      throw new Error("Could not establish connection. Receiving end does not exist.");
+    },
+  });
+  const { row, buttonGroup } = createActionRow({ width: 389, height: 36 });
+  harness.actionRows.push(row);
+  harness.context.injectDigestButton();
+  const button = buttonGroup.children[0];
+
+  await button.listeners.click({ preventDefault() {}, stopPropagation() {} });
+
+  assert.equal(button.disabled, undefined);
+  assert.equal(errors.length, 1);
+  assert.match(String(errors[0][0]), /Failed to open side panel/);
 });
 
 test("Digest button replaces stale instances and removes duplicates", () => {
