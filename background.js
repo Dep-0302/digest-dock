@@ -603,6 +603,76 @@ function isYouTubeVideoUrl(url) {
   }
 }
 
+function youtubeVideoIdFromUrl(url) {
+  try {
+    const parsed = new URL(String(url || ""));
+    if (!isYouTubeVideoUrl(parsed.href)) return "";
+    return String(parsed.searchParams.get("v") || "").trim();
+  } catch {
+    return "";
+  }
+}
+
+function effectiveTabUrl(tab) {
+  return String(tab?.pendingUrl || tab?.url || "");
+}
+
+function contentVideoInfoHasCompletenessContract(info) {
+  return (
+    typeof info?.descriptionTruncated === "boolean" &&
+    ["present", "confirmed-empty", "unknown"].includes(info?.descriptionStatus)
+  );
+}
+
+function mergeYouTubeVideoInfo(playerInfo, contentInfo, expectedVideoId) {
+  const expectedId = String(expectedVideoId || "").trim();
+  const playerId = String(playerInfo?.videoId || "").trim();
+  const contentId = String(contentInfo?.videoId || "").trim();
+  const playerMatches = !!playerInfo && !!expectedId && playerId === expectedId;
+  const contentMatches = !!contentInfo && !!expectedId && contentId === expectedId;
+  if (!playerMatches && !contentMatches) return null;
+
+  const player = playerMatches ? playerInfo : null;
+  const content = contentMatches ? contentInfo : {};
+  const playerDescriptionIsExact =
+    player && ["present", "confirmed-empty"].includes(player.descriptionStatus);
+  const contentHasCompletenessContract =
+    contentVideoInfoHasCompletenessContract(content);
+  const contentDescriptionStatus = contentHasCompletenessContract
+    ? content.descriptionStatus
+    : "unknown";
+
+  return {
+    ...content,
+    videoId: expectedId,
+    title: player?.title || content.title || "",
+    channelName: player?.channelName || content.channelName || "",
+    duration: player?.duration || content.duration || 0,
+    sourceLanguage: player?.sourceLanguage || content.sourceLanguage || "",
+    description: playerDescriptionIsExact
+      ? String(player.description || "")
+      : String(content.description || ""),
+    descriptionStatus: playerDescriptionIsExact
+      ? player.descriptionStatus
+      : contentDescriptionStatus,
+    descriptionTruncated: playerDescriptionIsExact
+      ? false
+      : contentHasCompletenessContract
+        ? content.descriptionTruncated === true
+        : true,
+  };
+}
+
+function youtubeVideoInfoIsComplete(info) {
+  return (
+    !!String(info?.videoId || "").trim() &&
+    !!String(info?.title || "").trim() &&
+    !!String(info?.channelName || "").trim() &&
+    ["present", "confirmed-empty"].includes(info?.descriptionStatus) &&
+    info?.descriptionTruncated !== true
+  );
+}
+
 function isBilibiliVideoUrl(url) {
   try {
     if (!globalThis.BILIBILI_ADAPTER) return false;
@@ -1117,7 +1187,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const hasExplicitTab = Number.isInteger(message.tabId);
         if (hasExplicitTab) {
           const requestedTab = await chrome.tabs.get(message.tabId).catch(() => null);
-          if (!requestedTab || !isSupportedVideoUrl(requestedTab.url)) {
+          const requestedUrl = effectiveTabUrl(requestedTab);
+          if (!requestedTab || !isSupportedVideoUrl(requestedUrl)) {
             sendResponse({
               success: false,
               error: "PAGE_CONTEXT_CHANGED",
@@ -1125,7 +1196,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             });
             return;
           }
-          tab = requestedTab;
+          tab = { ...requestedTab, url: requestedUrl };
         }
 
         let tabs = tab
@@ -1140,7 +1211,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           tabs[0]?.url,
         );
 
-        if (!tabs[0] || !isSupportedVideoUrl(tabs[0].url)) {
+        if (!tabs[0] || !isSupportedVideoUrl(effectiveTabUrl(tabs[0]))) {
           tabs = await chrome.tabs.query({
             url: SUPPORTED_VIDEO_TAB_PATTERNS,
             active: true,
@@ -1154,43 +1225,86 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }
 
         if (tabs[0]) {
+          const targetUrl = effectiveTabUrl(tabs[0]);
           debugLog(
             "[DigestDock BG] Sending to tab:",
             tabs[0].id,
             "URL:",
-            tabs[0].url,
+            targetUrl,
           );
-          let response = await sendMessageToContentWithRecovery(
-            tabs[0].id,
-            message.payload,
-            {},
-            tabs[0].url,
-          );
-
-          // For getVideoInfo, PREFER YouTube's own player data over the
-          // DOM scrape. The player's videoDetails is canonical: its `author`
-          // is always THIS video's channel and its `shortDescription` is the
-          // full text. The DOM scrape is unreliable — e.g. on a playlist page
-          // it grabbed the playlist owner's name ("Zara Zhang") instead of the
-          // real channel ("Replit and Stripe"), and its description is
-          // truncated while the box is collapsed. We fall back to the DOM
-          // only for fields the player didn't provide.
-          if (
+          const isYouTubeInfoRequest =
             message.payload?.action === "getVideoInfo" &&
-            isYouTubeVideoUrl(tabs[0].url)
-          ) {
-            const playerInfo = await getPlayerVideoDetails(tabs[0].id);
-            if (playerInfo) {
-              response = {
-                title: playerInfo.title || response?.title || "",
-                channelName:
-                  playerInfo.channelName || response?.channelName || "",
-                duration: playerInfo.duration || response?.duration || 0,
-                sourceLanguage:
-                  playerInfo.sourceLanguage || response?.sourceLanguage || "",
-                description:
-                  playerInfo.description || response?.description || "",
-              };
+            isYouTubeVideoUrl(targetUrl);
+          const expectedVideoId = isYouTubeInfoRequest
+            ? youtubeVideoIdFromUrl(targetUrl)
+            : "";
+          let playerInfo = null;
+          let response = null;
+
+          // The MAIN-world player response is canonical and does not depend on
+          // a content script having reached document_idle. This matters when a
+          // note opens a brand-new YouTube tab and metadata capture begins while
+          // the page is still committing. The exact videoId gate prevents stale
+          // SPA player data from being written to the newly opened video.
+          if (isYouTubeInfoRequest) {
+            playerInfo = await getPlayerVideoDetails(tabs[0].id);
+            const playerResponse = mergeYouTubeVideoInfo(
+              playerInfo,
+              null,
+              expectedVideoId,
+            );
+            if (youtubeVideoInfoIsComplete(playerResponse)) {
+              response = playerResponse;
+            }
+          }
+
+          if (!response) {
+            const contentResponse = await sendMessageToContentWithRecovery(
+              tabs[0].id,
+              message.payload,
+              {},
+              targetUrl,
+            );
+            if (isYouTubeInfoRequest) {
+              const contentVideoId = String(
+                contentResponse?.videoId || "",
+              ).trim();
+              if (contentVideoId && contentVideoId !== expectedVideoId) {
+                const pageChangedError = new Error(
+                  "YouTube 页面已切换，未读取其他视频的资料。",
+                );
+                pageChangedError.code = "PAGE_CONTEXT_CHANGED";
+                throw pageChangedError;
+              }
+              const mergedResponse = mergeYouTubeVideoInfo(
+                playerInfo,
+                contentResponse,
+                expectedVideoId,
+              );
+              if (!mergedResponse) {
+                const relayError = new Error(
+                  contentVideoId
+                    ? "YouTube 页面已切换，未读取其他视频的资料。"
+                    : "当前视频页尚未加载新版 DigestDock 内容脚本，请刷新页面后再补充。",
+                );
+                relayError.code = contentVideoId
+                  ? "PAGE_CONTEXT_CHANGED"
+                  : "PAGE_REFRESH_REQUIRED";
+                throw relayError;
+              }
+              if (
+                !youtubeVideoInfoIsComplete(mergedResponse) &&
+                !contentVideoInfoHasCompletenessContract(contentResponse)
+              ) {
+                const refreshError = new Error(
+                  "当前视频页尚未加载新版 DigestDock 内容脚本，请刷新页面后再补充。",
+                );
+                refreshError.code = "PAGE_REFRESH_REQUIRED";
+                throw refreshError;
+              }
+              response = mergedResponse;
+            } else {
+              response = contentResponse;
             }
           }
 
@@ -1208,12 +1322,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             error: "PAGE_REFRESH_REQUIRED",
             message: err.message,
           });
-        } else if (isTransientTabContextError(err)) {
+        } else if (
+          err?.code === "PAGE_CONTEXT_CHANGED" ||
+          isTransientTabContextError(err)
+        ) {
           debugLog("[DigestDock BG] Video tab context changed during relay");
           sendResponse({
             success: false,
             error: "PAGE_CONTEXT_CHANGED",
-            message: "视频页面正在刷新，请稍后重试。",
+            message:
+              err?.code === "PAGE_CONTEXT_CHANGED"
+                ? err.message
+                : "视频页面正在刷新，请稍后重试。",
           });
         } else {
           console.error("[DigestDock BG] Relay error:", err.message);
@@ -1244,9 +1364,19 @@ async function getPlayerVideoDetails(tabId) {
       func: () => {
         try {
           const player = document.getElementById("movie_player");
-          const playerResponse = player?.getPlayerResponse?.();
+          const playerResponse =
+            player?.getPlayerResponse?.() || window.ytInitialPlayerResponse;
           const details = playerResponse?.videoDetails;
           if (!details) return null;
+          const videoId = String(details.videoId || "").trim();
+          if (!videoId) return null;
+          const hasDescription = Object.prototype.hasOwnProperty.call(
+            details,
+            "shortDescription",
+          );
+          const description = hasDescription
+            ? String(details.shortDescription || "")
+            : "";
           const captionRenderer =
             playerResponse?.captions?.playerCaptionsTracklistRenderer;
           const captionTracks = Array.isArray(captionRenderer?.captionTracks)
@@ -1266,9 +1396,16 @@ async function getPlayerVideoDetails(tabId) {
             captionTracks[defaultCaptionIndex] ||
             null;
           return {
+            videoId,
             title: details.title || "",
             channelName: details.author || "",
-            description: details.shortDescription || "",
+            description,
+            descriptionStatus: hasDescription
+              ? description
+                ? "present"
+                : "confirmed-empty"
+              : "unknown",
+            descriptionTruncated: false,
             duration: Number(details.lengthSeconds) || 0,
             sourceLanguage:
               details.defaultAudioLanguage ||

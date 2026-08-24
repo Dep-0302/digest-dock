@@ -1128,6 +1128,21 @@ function isTransientTabLookupError(error) {
   );
 }
 
+function requireContentRelayResponse(
+  result,
+  fallbackMessage = "YouTube 页面资料尚未就绪。",
+) {
+  if (result?.success && result.response) return result.response;
+  const error = new Error(result?.message || fallbackMessage);
+  if (
+    result?.error === "PAGE_REFRESH_REQUIRED" ||
+    result?.error === "PAGE_CONTEXT_CHANGED"
+  ) {
+    error.code = result.error;
+  }
+  throw error;
+}
+
 async function runCheckCurrentTab(generation, options = {}) {
   const isLatestCheck = () => generation === tabCheckGeneration;
   try {
@@ -1245,23 +1260,18 @@ async function runCheckCurrentTab(generation, options = {}) {
         });
         if (!isLatestCheck()) return;
         debugLog("[DigestDock Panel] getVideoInfo result:", result);
-        if (
-          result?.error === "PAGE_REFRESH_REQUIRED" ||
-          result?.error === "PAGE_CONTEXT_CHANGED"
-        ) {
-          const refreshError = new Error(
-            result.message ||
-              "DigestDock 已更新，请刷新当前 YouTube 页面后重试。",
-          );
-          refreshError.code = "PAGE_REFRESH_REQUIRED";
-          throw refreshError;
-        }
-        if (result.success && result.response) {
-          videoInfo = result.response;
-        }
+        videoInfo = requireContentRelayResponse(
+          result,
+          "YouTube 页面资料尚未就绪。",
+        );
       } catch (e) {
         if (!isLatestCheck()) return;
-        if (e?.code === "PAGE_REFRESH_REQUIRED") throw e;
+        if (
+          e?.code === "PAGE_REFRESH_REQUIRED" ||
+          e?.code === "PAGE_CONTEXT_CHANGED"
+        ) {
+          throw e;
+        }
         console.error("[DigestDock Panel] getVideoInfo error:", e);
       }
       nextVideoTitle = videoInfo?.title || "";
@@ -1315,6 +1325,11 @@ async function runCheckCurrentTab(generation, options = {}) {
     if (error?.code === "PAGE_REFRESH_REQUIRED") {
       debugLog("[DigestDock Panel] Video page refresh required");
       showPageRefreshRequired(videoTabId, error.message);
+      return;
+    }
+    if (error?.code === "PAGE_CONTEXT_CHANGED") {
+      debugLog("[DigestDock Panel] Video page is still changing");
+      scheduleDigestRefresh();
       return;
     }
     console.error("Tab check error:", error);
@@ -1411,13 +1426,17 @@ async function captureNotesOnlyMetadata(
           tabId: context.tabId,
           payload: { action: "getVideoInfo" },
         });
-        const response = result?.success ? result.response : null;
-        if (!response) {
-          throw new Error("YouTube 页面资料尚未就绪。");
-        }
+        const response = requireContentRelayResponse(
+          result,
+          "YouTube 页面资料尚未就绪。",
+        );
         const responseVideoId = String(response.videoId || "").trim();
         if (responseVideoId && responseVideoId !== locator.videoId) {
-          throw new Error("YouTube 页面已切换，未写入旧视频资料。");
+          const pageChangedError = new Error(
+            "YouTube 页面已切换，未写入旧视频资料。",
+          );
+          pageChangedError.code = "PAGE_CONTEXT_CHANGED";
+          throw pageChangedError;
         }
         if (!responseVideoId) {
           const normalizeTitle = (value) =>
@@ -1532,17 +1551,21 @@ async function captureNotesOnlyMetadata(
       );
       return persisted;
     } catch (error) {
-      if (error?.code === "PAGE_REFRESH_REQUIRED") {
-        debugLog("[DigestDock] Metadata page refresh required");
+      if (
+        error?.code === "PAGE_REFRESH_REQUIRED" ||
+        error?.code === "PAGE_CONTEXT_CHANGED"
+      ) {
+        debugLog("[DigestDock] Metadata page state not ready:", error.code);
       } else {
         console.warn("[DigestDock] Capture note metadata error:", error);
       }
       if (ownsCapture()) {
         setNoteExportStatus(
-          error?.code === "PAGE_REFRESH_REQUIRED"
+          error?.code === "PAGE_REFRESH_REQUIRED" ||
+            error?.code === "PAGE_CONTEXT_CHANGED"
             ? error.message
             : "页面资料暂未读取完整。请等待页面加载后刷新，或稍后再次补充。",
-          true,
+          error?.code !== "PAGE_CONTEXT_CHANGED",
         );
       }
       return null;

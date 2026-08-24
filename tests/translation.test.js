@@ -148,6 +148,9 @@ function loadBackgroundHelpers({
   storageRemoveImpl = async () => {},
   storageClearImpl = async () => {},
   tabsImpl = {},
+  scriptingImpl = { executeScript: async () => [] },
+  pageDocumentImpl = {},
+  pageWindowImpl = {},
   bilibiliAdapterImpl = bilibiliAdapter,
   noteSourcesImpl = require("../note-sources.js"),
   exportJobsImpl = require("../export-jobs.js"),
@@ -161,6 +164,8 @@ function loadBackgroundHelpers({
     TextEncoder,
     fetch: fetchImpl,
     AbortController,
+    document: pageDocumentImpl,
+    window: pageWindowImpl,
     setTimeout: setTimeoutImpl,
     clearTimeout: clearTimeoutImpl,
     importScripts() {},
@@ -177,6 +182,7 @@ function loadBackgroundHelpers({
         },
       },
       action: { onClicked: listeners },
+      scripting: scriptingImpl,
       sidePanel: {
         setPanelBehavior() {},
         setOptions: () => Promise.resolve(),
@@ -2438,7 +2444,13 @@ function installNoteNavigationFixture(runtime, options = {}) {
     cachedTranscript: options.cachedTranscript === true,
     authorizedError: String(options.authorizedError || ""),
     omitMetadataVideoId: options.omitMetadataVideoId === true,
+    metadataVideoId:
+      options.metadataVideoId === undefined
+        ? null
+        : String(options.metadataVideoId),
     metadataTitle: String(options.metadataTitle || "Target video"),
+    metadataRelayFailure: options.metadataRelayFailure || null,
+    deferMetadataRelay: options.deferMetadataRelay === true,
   });
   return runtime.evaluate(`
     (() => {
@@ -2462,6 +2474,12 @@ function installNoteNavigationFixture(runtime, options = {}) {
       let activeTabId = 101;
       let nextCreatedTabId = 202;
       const createdTabById = new Map();
+      let releaseMetadataRelay = null;
+      let resolveMetadataRelayStarted = null;
+      let metadataRelayBlocked = fixtureOptions.deferMetadataRelay;
+      const metadataRelayStarted = new Promise((resolve) => {
+        resolveMetadataRelayStarted = resolve;
+      });
 
       const element = (id) => {
         if (!elements.has(id)) {
@@ -2622,13 +2640,21 @@ function installNoteNavigationFixture(runtime, options = {}) {
       chrome.runtime.sendMessage = async (message) => {
         messages.push(JSON.parse(JSON.stringify(message)));
         if (message.action === "relayToContent") {
+          if (fixtureOptions.metadataRelayFailure) {
+            return { ...fixtureOptions.metadataRelayFailure };
+          }
           const activeLocator = extractMediaLocator(activeUrlValue);
-          return {
+          const metadataResponse = {
             success: true,
             response: {
               ...(fixtureOptions.omitMetadataVideoId
                 ? {}
-                : { videoId: activeLocator?.videoId || "" }),
+                : {
+                    videoId:
+                      fixtureOptions.metadataVideoId ??
+                      activeLocator?.videoId ??
+                      "",
+                  }),
               title: activeLocator?.routeKey === targetRouteKey
                 ? fixtureOptions.metadataTitle
                 : "Unrelated video",
@@ -2639,6 +2665,14 @@ function installNoteNavigationFixture(runtime, options = {}) {
               sourceLanguage: "en",
             },
           };
+          if (metadataRelayBlocked) {
+            metadataRelayBlocked = false;
+            resolveMetadataRelayStarted?.();
+            await new Promise((resolve) => {
+              releaseMetadataRelay = resolve;
+            });
+          }
+          return metadataResponse;
         }
         if (message.action === "resolveBilibiliMedia") {
           return {
@@ -2754,6 +2788,12 @@ function installNoteNavigationFixture(runtime, options = {}) {
         playTargetForSupplement: () =>
           playNote(targetNote, { captureMetadata: true }),
         inspectActive: () => checkCurrentTab(),
+        waitForMetadataRelay: () => metadataRelayStarted,
+        releaseMetadataRelay: () => {
+          const release = releaseMetadataRelay;
+          releaseMetadataRelay = null;
+          release?.();
+        },
         openTranscript: () => switchTab("transcript"),
         clickConsentPrimary: () => errorAction?.(),
         clickConsentSecondary: () => errorSecondaryAction?.(),
@@ -3195,6 +3235,96 @@ test("metadata supplement requires a refreshed content script even when a legacy
   assert.equal(rejected.fetchCount, 0);
   assert.equal(rejected.sessionCaptureMetadata, true);
   assert.match(rejected.noteExportStatus, /刷新当前视频页/);
+});
+
+test("metadata supplement preserves the relay's actionable page-state error", async () => {
+  const runtime = loadSidepanelRuntime();
+  const fixture = installNoteNavigationFixture(runtime, {
+    metadataRelayFailure: {
+      success: false,
+      error: "PAGE_CONTEXT_CHANGED",
+      message: "视频页面正在加载，请稍后重试。",
+    },
+  });
+  await fixture.playTargetForSupplement();
+  await fixture.inspectActive();
+  await nextTurn();
+
+  const snapshot = JSON.parse(fixture.snapshot());
+  assert.equal(snapshot.upsertCount, 0);
+  assert.equal(snapshot.fetchCount, 0);
+  assert.equal(snapshot.sessionCaptureMetadata, true);
+  assert.equal(snapshot.noteExportStatus, "视频页面正在加载，请稍后重试。");
+});
+
+test("metadata supplement preserves an explicit refresh requirement", async () => {
+  const runtime = loadSidepanelRuntime();
+  const fixture = installNoteNavigationFixture(runtime, {
+    metadataRelayFailure: {
+      success: false,
+      error: "PAGE_REFRESH_REQUIRED",
+      message: "DigestDock 已更新，请刷新当前 YouTube 页面后重试。",
+    },
+  });
+  await fixture.playTargetForSupplement();
+  await fixture.inspectActive();
+  await nextTurn();
+
+  const snapshot = JSON.parse(fixture.snapshot());
+  assert.equal(snapshot.upsertCount, 0);
+  assert.equal(snapshot.fetchCount, 0);
+  assert.equal(snapshot.sessionCaptureMetadata, true);
+  assert.equal(
+    snapshot.noteExportStatus,
+    "DigestDock 已更新，请刷新当前 YouTube 页面后重试。",
+  );
+});
+
+test("metadata supplement rejects an explicit response for another video", async () => {
+  const runtime = loadSidepanelRuntime();
+  const fixture = installNoteNavigationFixture(runtime, {
+    metadataVideoId: "different-video",
+  });
+  await fixture.playTargetForSupplement();
+  await fixture.inspectActive();
+  await nextTurn();
+
+  const snapshot = JSON.parse(fixture.snapshot());
+  assert.equal(snapshot.upsertCount, 0);
+  assert.equal(snapshot.fetchCount, 0);
+  assert.equal(snapshot.sessionCaptureMetadata, true);
+  assert.match(snapshot.noteExportStatus, /页面已切换，未写入旧视频资料/);
+});
+
+test("metadata supplement never writes after the target tab navigates during relay", async () => {
+  const storageLocal = createMemoryStorageArea();
+  const runtime = loadSidepanelRuntime({ storageLocal });
+  const fixture = installNoteNavigationFixture(runtime, {
+    deferMetadataRelay: true,
+  });
+  await fixture.playTargetForSupplement();
+
+  const inspection = fixture.inspectActive();
+  await fixture.waitForMetadataRelay();
+  const openedTabId = JSON.parse(fixture.snapshot()).createdTabs[0].id;
+  fixture.setActiveTab(
+    "https://www.youtube.com/watch?v=navigated-away",
+    openedTabId,
+  );
+  fixture.releaseMetadataRelay();
+  await inspection;
+  await nextTurn();
+
+  const snapshot = JSON.parse(fixture.snapshot());
+  assert.equal(snapshot.upsertCount, 0);
+  assert.equal(snapshot.fetchCount, 0);
+  assert.equal(
+    await require("../note-sources.js").readNoteSource(
+      storageLocal,
+      fixture.targetMediaKey,
+    ),
+    null,
+  );
 });
 
 test("supplementing the ordinary current video works without a transcript or note-only context", async () => {
@@ -7531,6 +7661,574 @@ test("content messaging retries normal document startup without reinjection", as
   assert.equal(sendCount, 2);
   assert.deepEqual(waitCalls, [150]);
   assert.deepEqual(injectionCalls, []);
+});
+
+test("YouTube getVideoInfo prefers exact player metadata and preserves completeness fields", async () => {
+  const tab = {
+    id: 31,
+    url: "https://www.youtube.com/watch?v=player-video",
+  };
+  let contentMessageCount = 0;
+  const background = loadBackgroundHelpers({
+    tabsImpl: {
+      async get() {
+        return tab;
+      },
+      async query() {
+        return [tab];
+      },
+      async sendMessage() {
+        contentMessageCount += 1;
+        return {
+          videoId: "player-video",
+          title: "DOM fallback title",
+          channelName: "DOM fallback channel",
+          description: "Truncated fallback",
+          descriptionStatus: "unknown",
+          descriptionTruncated: true,
+        };
+      },
+    },
+    scriptingImpl: {
+      async executeScript() {
+        return [
+          {
+            result: {
+              videoId: "player-video",
+              title: "Canonical title",
+              channelName: "Canonical channel",
+              description: "Complete canonical description",
+              descriptionStatus: "present",
+              descriptionTruncated: false,
+              duration: 123,
+              sourceLanguage: "en",
+            },
+          },
+        ];
+      },
+    },
+  });
+
+  const response = await dispatchBackgroundMessage(background, {
+    action: "relayToContent",
+    tabId: tab.id,
+    payload: { action: "getVideoInfo" },
+  });
+
+  assert.equal(contentMessageCount, 0, "canonical player data needs no content receiver");
+  assert.deepEqual(JSON.parse(JSON.stringify(response)), {
+    success: true,
+    response: {
+      videoId: "player-video",
+      title: "Canonical title",
+      channelName: "Canonical channel",
+      description: "Complete canonical description",
+      descriptionStatus: "present",
+      descriptionTruncated: false,
+      duration: 123,
+      sourceLanguage: "en",
+    },
+  });
+});
+
+test("the real MAIN-world player callback emits complete present-description metadata", async () => {
+  const tab = {
+    id: 40,
+    url: "https://www.youtube.com/watch?v=real-player-callback",
+  };
+  let contentMessageCount = 0;
+  const playerResponse = {
+    videoDetails: {
+      videoId: "real-player-callback",
+      title: "Real callback title",
+      author: "Real callback channel",
+      shortDescription: "Real callback description",
+      lengthSeconds: "321",
+      defaultAudioLanguage: "en",
+    },
+  };
+  const background = loadBackgroundHelpers({
+    pageDocumentImpl: {
+      getElementById(id) {
+        return id === "movie_player"
+          ? { getPlayerResponse: () => playerResponse }
+          : null;
+      },
+    },
+    pageWindowImpl: {},
+    tabsImpl: {
+      async get() {
+        return tab;
+      },
+      async query() {
+        return [tab];
+      },
+      async sendMessage() {
+        contentMessageCount += 1;
+        return null;
+      },
+    },
+    scriptingImpl: {
+      async executeScript({ func }) {
+        return [{ result: func() }];
+      },
+    },
+  });
+
+  const response = await dispatchBackgroundMessage(background, {
+    action: "relayToContent",
+    tabId: tab.id,
+    payload: { action: "getVideoInfo" },
+  });
+
+  assert.equal(contentMessageCount, 0);
+  assert.deepEqual(JSON.parse(JSON.stringify(response.response)), {
+    videoId: "real-player-callback",
+    title: "Real callback title",
+    channelName: "Real callback channel",
+    duration: 321,
+    sourceLanguage: "en",
+    description: "Real callback description",
+    descriptionStatus: "present",
+    descriptionTruncated: false,
+  });
+});
+
+test("the real MAIN-world callback recognizes a confirmed-empty window fallback", async () => {
+  const tab = {
+    id: 41,
+    url: "https://www.youtube.com/watch?v=window-player-fallback",
+  };
+  let contentMessageCount = 0;
+  const background = loadBackgroundHelpers({
+    pageDocumentImpl: { getElementById: () => null },
+    pageWindowImpl: {
+      ytInitialPlayerResponse: {
+        videoDetails: {
+          videoId: "window-player-fallback",
+          title: "Window fallback title",
+          author: "Window fallback channel",
+          shortDescription: "",
+          lengthSeconds: "12",
+        },
+      },
+    },
+    tabsImpl: {
+      async get() {
+        return tab;
+      },
+      async query() {
+        return [tab];
+      },
+      async sendMessage() {
+        contentMessageCount += 1;
+        return null;
+      },
+    },
+    scriptingImpl: {
+      async executeScript({ func }) {
+        return [{ result: func() }];
+      },
+    },
+  });
+
+  const response = await dispatchBackgroundMessage(background, {
+    action: "relayToContent",
+    tabId: tab.id,
+    payload: { action: "getVideoInfo" },
+  });
+
+  assert.equal(contentMessageCount, 0);
+  assert.equal(response.response.videoId, "window-player-fallback");
+  assert.equal(response.response.description, "");
+  assert.equal(response.response.descriptionStatus, "confirmed-empty");
+  assert.equal(response.response.descriptionTruncated, false);
+});
+
+test("YouTube getVideoInfo ignores stale player data and accepts the exact content response", async () => {
+  const tab = {
+    id: 32,
+    url: "https://www.youtube.com/watch?v=current-video",
+  };
+  const background = loadBackgroundHelpers({
+    tabsImpl: {
+      async get() {
+        return tab;
+      },
+      async query() {
+        return [tab];
+      },
+      async sendMessage() {
+        return {
+          videoId: "current-video",
+          title: "Current title",
+          channelName: "Current channel",
+          description: "Current complete description",
+          descriptionStatus: "present",
+          descriptionTruncated: false,
+          duration: 456,
+          sourceLanguage: "en",
+        };
+      },
+    },
+    scriptingImpl: {
+      async executeScript() {
+        return [
+          {
+            result: {
+              videoId: "previous-video",
+              title: "Stale title",
+              channelName: "Stale channel",
+              description: "Stale description",
+              descriptionStatus: "present",
+              descriptionTruncated: false,
+              duration: 999,
+              sourceLanguage: "fr",
+            },
+          },
+        ];
+      },
+    },
+  });
+
+  const response = await dispatchBackgroundMessage(background, {
+    action: "relayToContent",
+    tabId: tab.id,
+    payload: { action: "getVideoInfo" },
+  });
+
+  assert.equal(response.success, true);
+  assert.equal(response.response.videoId, "current-video");
+  assert.equal(response.response.title, "Current title");
+  assert.equal(response.response.description, "Current complete description");
+  assert.equal(response.response.descriptionStatus, "present");
+  assert.equal(response.response.descriptionTruncated, false);
+});
+
+test("YouTube getVideoInfo falls back to exact content when player description is not ready", async () => {
+  const tab = {
+    id: 34,
+    url: "https://www.youtube.com/watch?v=description-fallback",
+  };
+  let contentMessageCount = 0;
+  const background = loadBackgroundHelpers({
+    tabsImpl: {
+      async get() {
+        return tab;
+      },
+      async query() {
+        return [tab];
+      },
+      async sendMessage() {
+        contentMessageCount += 1;
+        return {
+          videoId: "description-fallback",
+          title: "Content title",
+          channelName: "Content channel",
+          description: "Exact embedded description",
+          descriptionStatus: "present",
+          descriptionTruncated: false,
+        };
+      },
+    },
+    scriptingImpl: {
+      async executeScript() {
+        return [
+          {
+            result: {
+              videoId: "description-fallback",
+              title: "Player title",
+              channelName: "Player channel",
+              description: "",
+              descriptionStatus: "unknown",
+              descriptionTruncated: false,
+            },
+          },
+        ];
+      },
+    },
+  });
+
+  const response = await dispatchBackgroundMessage(background, {
+    action: "relayToContent",
+    tabId: tab.id,
+    payload: { action: "getVideoInfo" },
+  });
+
+  assert.equal(contentMessageCount, 1);
+  assert.equal(response.success, true);
+  assert.equal(response.response.videoId, "description-fallback");
+  assert.equal(response.response.title, "Player title");
+  assert.equal(response.response.description, "Exact embedded description");
+  assert.equal(response.response.descriptionStatus, "present");
+  assert.equal(response.response.descriptionTruncated, false);
+});
+
+test("YouTube getVideoInfo rejects mismatched player and content identities", async () => {
+  const tab = {
+    id: 35,
+    url: "https://www.youtube.com/watch?v=expected-video",
+  };
+  const background = loadBackgroundHelpers({
+    tabsImpl: {
+      async get() {
+        return tab;
+      },
+      async query() {
+        return [tab];
+      },
+      async sendMessage() {
+        return {
+          videoId: "other-content-video",
+          title: "Wrong content title",
+          descriptionStatus: "present",
+          description: "Wrong content description",
+        };
+      },
+    },
+    scriptingImpl: {
+      async executeScript() {
+        return [
+          {
+            result: {
+              videoId: "other-player-video",
+              title: "Wrong player title",
+              descriptionStatus: "present",
+              description: "Wrong player description",
+            },
+          },
+        ];
+      },
+    },
+  });
+
+  const response = await dispatchBackgroundMessage(background, {
+    action: "relayToContent",
+    tabId: tab.id,
+    payload: { action: "getVideoInfo" },
+  });
+
+  assert.equal(response.success, false);
+  assert.equal(response.error, "PAGE_CONTEXT_CHANGED");
+  assert.match(response.message, /页面已切换/);
+});
+
+test("YouTube getVideoInfo rejects mismatched content while exact player data is incomplete", async () => {
+  const tab = {
+    id: 39,
+    url: "https://www.youtube.com/watch?v=expected-incomplete",
+  };
+  const background = loadBackgroundHelpers({
+    tabsImpl: {
+      async get() {
+        return tab;
+      },
+      async query() {
+        return [tab];
+      },
+      async sendMessage() {
+        return {
+          videoId: "other-content-video",
+          title: "Wrong content title",
+          channelName: "Wrong content channel",
+          description: "Wrong content description",
+          descriptionStatus: "present",
+          descriptionTruncated: false,
+        };
+      },
+    },
+    scriptingImpl: {
+      async executeScript() {
+        return [
+          {
+            result: {
+              videoId: "expected-incomplete",
+              title: "Expected title",
+              channelName: "Expected channel",
+              description: "",
+              descriptionStatus: "unknown",
+              descriptionTruncated: false,
+            },
+          },
+        ];
+      },
+    },
+  });
+
+  const response = await dispatchBackgroundMessage(background, {
+    action: "relayToContent",
+    tabId: tab.id,
+    payload: { action: "getVideoInfo" },
+  });
+
+  assert.equal(response.success, false);
+  assert.equal(response.error, "PAGE_CONTEXT_CHANGED");
+  assert.match(response.message, /页面已切换/);
+  assert.equal(response.response, undefined);
+});
+
+test("YouTube getVideoInfo requires refresh for a legacy response without videoId", async () => {
+  const tab = {
+    id: 37,
+    url: "https://www.youtube.com/watch?v=legacy-response",
+  };
+  const background = loadBackgroundHelpers({
+    tabsImpl: {
+      async get() {
+        return tab;
+      },
+      async query() {
+        return [tab];
+      },
+      async sendMessage() {
+        return {
+          title: "Legacy title without identity",
+          channelName: "Legacy channel",
+          description: "Legacy description",
+        };
+      },
+    },
+  });
+
+  const response = await dispatchBackgroundMessage(background, {
+    action: "relayToContent",
+    tabId: tab.id,
+    payload: { action: "getVideoInfo" },
+  });
+
+  assert.equal(response.success, false);
+  assert.equal(response.error, "PAGE_REFRESH_REQUIRED");
+  assert.match(response.message, /刷新页面后再补充/);
+  assert.equal(response.response, undefined);
+});
+
+test("YouTube getVideoInfo requires refresh when legacy content omits truncation evidence", async () => {
+  const tab = {
+    id: 38,
+    url: "https://www.youtube.com/watch?v=legacy-truncation",
+  };
+  const background = loadBackgroundHelpers({
+    tabsImpl: {
+      async get() {
+        return tab;
+      },
+      async query() {
+        return [tab];
+      },
+      async sendMessage() {
+        return {
+          videoId: "legacy-truncation",
+          title: "Legacy title",
+          channelName: "Legacy channel",
+          description: "Collapsed legacy description...",
+          descriptionStatus: "present",
+        };
+      },
+    },
+  });
+
+  const response = await dispatchBackgroundMessage(background, {
+    action: "relayToContent",
+    tabId: tab.id,
+    payload: { action: "getVideoInfo" },
+  });
+
+  assert.equal(response.success, false);
+  assert.equal(response.error, "PAGE_REFRESH_REQUIRED");
+  assert.match(response.message, /刷新页面后再补充/);
+  assert.equal(response.response, undefined);
+});
+
+test("a confirmed-empty player description never adopts a truncated DOM fallback", async () => {
+  const tab = {
+    id: 36,
+    url: "https://www.youtube.com/watch?v=empty-description",
+  };
+  let contentMessageCount = 0;
+  const background = loadBackgroundHelpers({
+    tabsImpl: {
+      async get() {
+        return tab;
+      },
+      async query() {
+        return [tab];
+      },
+      async sendMessage() {
+        contentMessageCount += 1;
+        return {
+          videoId: "empty-description",
+          description: "Stale truncated text...",
+          descriptionStatus: "unknown",
+          descriptionTruncated: true,
+        };
+      },
+    },
+    scriptingImpl: {
+      async executeScript() {
+        return [
+          {
+            result: {
+              videoId: "empty-description",
+              title: "Empty description video",
+              channelName: "Channel",
+              description: "",
+              descriptionStatus: "confirmed-empty",
+              descriptionTruncated: false,
+            },
+          },
+        ];
+      },
+    },
+  });
+
+  const response = await dispatchBackgroundMessage(background, {
+    action: "relayToContent",
+    tabId: tab.id,
+    payload: { action: "getVideoInfo" },
+  });
+
+  assert.equal(contentMessageCount, 0);
+  assert.equal(response.success, true);
+  assert.equal(response.response.description, "");
+  assert.equal(response.response.descriptionStatus, "confirmed-empty");
+  assert.equal(response.response.descriptionTruncated, false);
+});
+
+test("relayToContent honors a supported pending URL while a new tab is committing", async () => {
+  const tab = {
+    id: 33,
+    url: "about:blank",
+    pendingUrl: "https://www.youtube.com/watch?v=pending-video",
+  };
+  const background = loadBackgroundHelpers({
+    tabsImpl: {
+      async get() {
+        return tab;
+      },
+      async query() {
+        return [];
+      },
+      async sendMessage() {
+        return {
+          videoId: "pending-video",
+          title: "Pending video",
+          channelName: "Channel",
+          description: "Description",
+          descriptionStatus: "present",
+          descriptionTruncated: false,
+        };
+      },
+    },
+  });
+
+  const response = await dispatchBackgroundMessage(background, {
+    action: "relayToContent",
+    tabId: tab.id,
+    payload: { action: "getVideoInfo" },
+  });
+
+  assert.equal(response.success, true);
+  assert.equal(response.response.videoId, "pending-video");
 });
 
 test("missing content receiver classification stays narrow", () => {
