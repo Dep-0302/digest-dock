@@ -315,12 +315,6 @@ var YTD_NOTE_EXPORT = (() => {
     lines.push(description || "（无简介）");
     lines.push("");
 
-    lines.push(`${sub} 字幕`);
-    lines.push("");
-    const transcriptLines = localizedTranscriptLines(source, resolvedMode);
-    lines.push(...(transcriptLines.length ? transcriptLines : ["（无字幕）"]));
-    lines.push("");
-
     lines.push(`${sub} 笔记`);
     lines.push("");
     const notes = sortNotesByTimecode(source?.notes || []);

@@ -451,6 +451,39 @@ test("notes filters preserve selected contrast and expose pressed state", () => 
   assert.match(js, /setAttribute\("aria-pressed", String\(showAll\)\)/);
 });
 
+test("notes markdown and completion jobs stay scoped away from full transcripts", () => {
+  const exporter = read("note-export.js");
+  const sources = read("note-sources.js");
+  const panel = read("sidepanel.js");
+  assert.doesNotMatch(
+    exporter,
+    /lines\.push\(`\$\{sub\} 字幕`\)/,
+    "notes Markdown must not append the full transcript section",
+  );
+  assert.match(sources, /function buildExportPrecheck\([\s\S]*?includeTranscript = true/);
+  assert.match(panel, /const EXPORT_CONTENT_CONTRACT_VERSION = 3/);
+  assert.ok(
+    (panel.match(/includeTranscript: false/g) || []).length >= 12,
+    "all initial and final note-export prechecks/plans must exclude transcripts",
+  );
+  assert.match(
+    panel,
+    /if \(!outcome\.complete\) \{[\s\S]*?await exportCurrentVideoNotes\(\)/,
+  );
+  assert.match(
+    panel,
+    /if \(!outcome\.complete\) \{[\s\S]*?await exportAllNotes\(\)/,
+  );
+  assert.match(
+    panel,
+    /if \(!outcome\.complete\) \{[\s\S]*?await exportSingleSourceGroup\(freshGroup\)/,
+  );
+  assert.match(
+    panel,
+    /if \(!outcome\.complete\) \{[\s\S]*?await exportTranscript\(\)/,
+  );
+});
+
 test("runtime has no source-file credential dependency or retired model", () => {
   const runtime = [
     "background.js",

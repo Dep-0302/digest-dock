@@ -101,12 +101,14 @@ DigestDock uses Chrome's local extension storage, not a DigestDock cloud service
   media identity.
 - Separately from JSON recovery backup, the side panel can export one video's
   notes, all notes, or one source group as Markdown, and can download the current
-  transcript as TXT. These files are assembled locally from already loaded or
-  saved title, channel, canonical URL, description, transcript, and note data.
+  transcript as TXT. Note Markdown contains saved notes plus title, channel,
+  canonical URL, and description; it does not append the full transcript. The
+  separate transcript TXT contains the complete transcript.
 - Original-language reading exports never call a network service. If Chinese or
-  bilingual content is incomplete, DigestDock shows the missing titles,
-  description chunks, transcript segments, and notes and does not substitute
-  original text as Chinese. Only an explicit "Generate Chinese and export" or
+  bilingual content is incomplete, note export shows missing titles, description
+  chunks, and saved notes, while transcript export separately shows missing
+  transcript segments. DigestDock does not substitute original text as Chinese.
+  Only an explicit "Generate Chinese and export" or
   "Continue" click may send those still-missing units to the currently selected
   AI provider. Each user-started round runs at most 20 task batches and a
   conservative maximum of 100 provider calls, saves every valid completed batch

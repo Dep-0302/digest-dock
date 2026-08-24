@@ -770,6 +770,7 @@ var YTD_NOTE_SOURCES = (() => {
     titleOf,
     isChineseText = defaultIsChineseText,
     resolveNote,
+    includeTranscript = true,
   } = {}) {
     const wantsTranslation = mode === "zh" || mode === "bilingual";
     const videos = (Array.isArray(groups) ? groups : []).map((group) => {
@@ -794,8 +795,11 @@ var YTD_NOTE_SOURCES = (() => {
       const hasUrl = !!canonicalUrl;
       const descriptionStatus = source?.descriptionStatus || "unknown";
       const blockingReasons = [];
-      if (!transcriptTotal) blockingReasons.push("缺少完整字幕");
-      else if (transcriptTruncated) blockingReasons.push("字幕资料已裁剪，不完整");
+      if (includeTranscript && !transcriptTotal) {
+        blockingReasons.push("缺少完整字幕");
+      } else if (includeTranscript && transcriptTruncated) {
+        blockingReasons.push("字幕资料已裁剪，不完整");
+      }
       if (!hasUrl) blockingReasons.push("缺少视频网址");
       if (descriptionStatus === "unknown") {
         blockingReasons.push("缺少视频简介状态");
@@ -836,7 +840,7 @@ var YTD_NOTE_SOURCES = (() => {
         !isChineseText(descriptionOriginal) &&
         descriptionMissingChunkCount > 0;
       const transcriptMissingCount =
-        wantsTranslation && !originalIsChinese
+        includeTranscript && wantsTranslation && !originalIsChinese
           ? countMissingTranscriptTranslations(transcriptOriginal, transcriptZh)
           : 0;
       const noteTranslationCount =

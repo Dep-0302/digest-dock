@@ -316,6 +316,149 @@ test("one confirmed export round starts at most 20 batches and never auto-downlo
   assert.equal(controller.translatedNoteIds.includes("round-note-21"), false);
   assert.equal(controller.job().state, "paused");
   assert.equal(downloadCount, 0, "an incomplete round never creates a file");
+
+  runtime.helpers.showNoteExportPrecheck(
+    {
+      videoCount: 1,
+      noteCount: 21,
+      hasBlocking: false,
+      blockingVideos: [],
+      hasTranslationGaps: true,
+      translationGaps: {
+        titles: 0,
+        descriptionChunks: 0,
+        transcriptSegments: 0,
+        notes: 1,
+      },
+    },
+    () => {},
+    () => {},
+    {
+      overLimit: false,
+      estimatedBatches: 1,
+      progress: {
+        totalUnits: 21,
+        completedUnits: 20,
+        remainingUnits: 1,
+        remainingBatches: 1,
+        roundMaxBatches: 20,
+      },
+    },
+  );
+  assert.equal(documentImpl.element("notesExportPrecheck").hidden, false);
+  assert.ok(
+    documentImpl.findButton(
+      "notesExportPrecheck",
+      "继续补齐（本轮最多 20 批）",
+    ),
+    "durable progress is re-presented as an actionable continuation",
+  );
+});
+
+test("a completed notes batch claims, downloads once, and finishes the durable job", async () => {
+  const controller = createSidepanelJobController();
+  const documentImpl = createInteractiveDocument();
+  const fixture = makeNoteRoundFixture(1);
+  const runtime = loadSidepanelRuntime({
+    sendMessage: controller.sendMessage,
+    documentImpl,
+    exportJobsImpl: createExportJobsBridge(),
+  });
+  const outcome = await runtime.helpers.runConfirmedExportTranslation({
+    plan: fixture.plan,
+    sourcesByKey: {},
+    groups: fixture.groups,
+    scope: "notes-current",
+    mode: "bilingual",
+    format: "markdown",
+    panelId: "notesExportPrecheck",
+    setStatus() {},
+  });
+  assert.equal(outcome.complete, true);
+  assert.equal(controller.job().state, "paused");
+  let downloads = 0;
+  await runtime.helpers.finalizeExportJobDownload(outcome, () => {
+    downloads += 1;
+  });
+  assert.equal(downloads, 1);
+  assert.equal(controller.job().state, "completed");
+  assert.equal(controller.job().exportClaim, null);
+});
+
+test("notes precheck original fallback exports locally without starting completion", () => {
+  const documentImpl = createInteractiveDocument();
+  const actions = [];
+  const runtime = loadSidepanelRuntime({
+    documentImpl,
+    sendMessage(message) {
+      actions.push(message.action);
+      return Promise.resolve({});
+    },
+  });
+  let generated = 0;
+  let exportedOriginal = 0;
+  runtime.helpers.showNoteExportPrecheck(
+    {
+      videoCount: 1,
+      noteCount: 1,
+      hasBlocking: false,
+      blockingVideos: [],
+      hasTranslationGaps: true,
+      translationGaps: {
+        titles: 0,
+        descriptionChunks: 0,
+        transcriptSegments: 0,
+        notes: 1,
+      },
+    },
+    () => {},
+    () => {
+      generated += 1;
+    },
+    {
+      overLimit: false,
+      estimatedBatches: 1,
+      progress: {
+        totalUnits: 1,
+        completedUnits: 0,
+        remainingUnits: 1,
+        remainingBatches: 1,
+        roundMaxBatches: 20,
+      },
+    },
+    () => {
+      exportedOriginal += 1;
+    },
+  );
+  const original = documentImpl.findButton(
+    "notesExportPrecheck",
+    "改为导出原文",
+  );
+  assert.ok(original);
+  original.click();
+  assert.equal(exportedOriginal, 1);
+  assert.equal(generated, 0);
+  assert.deepEqual(actions, []);
+});
+
+test("notes export job identity includes the v3 content contract", () => {
+  const helpers = loadSidepanelHelpers();
+  const intent = helpers.buildFrozenExportIntent({
+    scope: "notes-current",
+    mediaKeys: ["video-a"],
+    mode: "bilingual",
+    format: "markdown",
+    sourceRevisions: { "video-a": "source-r1" },
+    notesRevision: "notes-r1",
+    providerSnapshot: {
+      providerId: "deepseek",
+      modelId: "deepseek-v4-flash",
+      routeKey: "deepseek:deepseek-v4-flash",
+      targetLanguage: "zh",
+      translationVersion: "export-v2",
+    },
+  });
+  assert.match(intent.scope, /^notes-current-v3-/);
 });
 
 test("the real progress cancel button cancels the durable job and starts no later batch", async () => {

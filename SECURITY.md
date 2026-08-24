@@ -80,7 +80,9 @@ Examples include:
   Markdown note exports and TXT transcript downloads are one-way reading
   exports and are never accepted as restore input.
 - Original-language Markdown/TXT export is local-only. Chinese and bilingual
-  exports fail closed when translations are incomplete. Only an explicit
+  exports fail closed when their own scoped content is incomplete: note Markdown
+  checks only title, description, and saved notes; transcript TXT checks complete
+  transcript segments. Only an explicit
   "Generate Chinese and export" or "Continue" action may call the selected AI
   provider. A saved key is not standing consent: each action starts at most 20
   task batches and a conservative maximum of 100 provider calls, saves each

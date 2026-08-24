@@ -146,7 +146,7 @@ const sampleSource = {
   ],
 };
 
-test("current video markdown carries every required field in zh mode", () => {
+test("current video notes markdown carries metadata and saved notes without a full transcript", () => {
   const md = exporter.buildCurrentVideoMarkdown(sampleSource, "zh");
   assert.match(md, /^# 未来/m);
   assert.match(md, /- 频道：Some Channel/);
@@ -154,9 +154,8 @@ test("current video markdown carries every required field in zh mode", () => {
   assert.match(md, /- 平台：YouTube/);
   assert.match(md, /- 导出语言：中文/);
   assert.match(md, /## 视频简介\n\n一段中文简介。/);
-  assert.match(md, /## 字幕/);
-  assert.match(md, /- \[00:04\] 第一行/);
-  assert.match(md, /- \[00:47\] 第二行/);
+  assert.doesNotMatch(md, /## 字幕/);
+  assert.doesNotMatch(md, /第一行|第二行/);
   assert.match(md, /### 00:04\n\n较早的笔记/);
   // Notes are ordered by timecode: 00:04 must appear before 02:34.
   assert.ok(md.indexOf("### 00:04") < md.indexOf("### 02:34"));
@@ -165,7 +164,7 @@ test("current video markdown carries every required field in zh mode", () => {
 test("bilingual markdown pairs original and Chinese with clear labels", () => {
   const md = exporter.buildCurrentVideoMarkdown(sampleSource, "bilingual");
   assert.match(md, /^# The Future \/ 未来/m);
-  assert.match(md, /- \[00:04\] first line\n  - 第一行/);
+  assert.doesNotMatch(md, /first line|第一行/);
   assert.match(md, /\*\*原文\*\*：early note/);
   assert.match(md, /\*\*中文\*\*：较早的笔记/);
 });
@@ -174,6 +173,7 @@ test("original mode never emits Chinese text", () => {
   const md = exporter.buildCurrentVideoMarkdown(sampleSource, "original");
   assert.match(md, /^# The Future/m);
   assert.doesNotMatch(md, /未来|一段中文简介|第一行|较早的笔记/);
+  assert.doesNotMatch(md, /first line|second line|## 字幕/);
 });
 
 test("all-notes markdown produces one section per source in group order", () => {
@@ -192,6 +192,7 @@ test("all-notes markdown produces one section per source in group order", () => 
   assert.match(md, /^## 未来/m);
   assert.match(md, /^## 另一个/m);
   assert.ok(md.indexOf("## 未来") < md.indexOf("## 另一个"));
+  assert.doesNotMatch(md, /## 字幕|first line|second line/);
 });
 
 test("transcript TXT keeps the header and full ordered transcript", () => {
@@ -206,7 +207,7 @@ test("transcript TXT keeps the header and full ordered transcript", () => {
   assert.match(txt, /\[00:47\] second line/);
 });
 
-test("missing description and transcript degrade to explicit placeholders", () => {
+test("missing description degrades explicitly while notes export ignores transcript state", () => {
   const bare = {
     platform: "bilibili",
     titleOriginal: "空",
@@ -216,6 +217,28 @@ test("missing description and transcript degrade to explicit placeholders", () =
   const md = exporter.buildCurrentVideoMarkdown(bare, "zh");
   assert.match(md, /- 平台：B 站/);
   assert.match(md, /## 视频简介\n\n（无简介）/);
-  assert.match(md, /## 字幕\n\n（无字幕）/);
+  assert.doesNotMatch(md, /## 字幕|（无字幕）/);
   assert.match(md, /## 笔记\n\n（无笔记）/);
+});
+
+test("a notes export with 395 transcript rows still serializes only saved notes", () => {
+  const source = {
+    ...sampleSource,
+    transcriptOriginal: Array.from({ length: 395 }, (_, index) => ({
+      start: index,
+      text: `transcript-only-row-${index}`,
+    })),
+    transcriptZh: [],
+    notes: [
+      {
+        timestampSeconds: 378,
+        original: "the one saved note",
+        zh: "唯一保存的笔记",
+      },
+    ],
+  };
+  const md = exporter.buildCurrentVideoMarkdown(source, "original");
+  assert.match(md, /## 笔记/);
+  assert.match(md, /### 06:18\n\nthe one saved note/);
+  assert.doesNotMatch(md, /transcript-only-row|## 字幕/);
 });

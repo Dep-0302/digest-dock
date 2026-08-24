@@ -7,6 +7,7 @@
 
 const DEBUG = false;
 const REQUIRED_RUNTIME_PROTOCOL_VERSION = 10;
+const EXPORT_CONTENT_CONTRACT_VERSION = 3;
 const debugLog = (...args) => {
   if (DEBUG) console.log(...args);
 };
@@ -2227,9 +2228,7 @@ async function exportTranscript() {
         });
         if (!exportRunIsCurrent(outcome.owner)) throw exportCancelledError();
         if (!outcome.complete) {
-          setTranscriptExportStatus(
-            `本轮已保存，仍有 ${outcome.remainingCount} 个翻译单元。再次点击导出即可继续。`,
-          );
+          await exportTranscript();
           return;
         }
         const latestSource = await YTD_NOTE_SOURCES.readNoteSource(
@@ -2710,7 +2709,7 @@ function buildFrozenExportIntent({
     }),
   );
   return {
-    scope: `${scope}-${contractHash.replace(/[^A-Za-z0-9_-]/g, "-")}`,
+    scope: `${scope}-v${EXPORT_CONTENT_CONTRACT_VERSION}-${contractHash.replace(/[^A-Za-z0-9_-]/g, "-")}`,
     mediaKeys,
     mode,
     format,
@@ -3374,6 +3373,7 @@ async function exportCurrentVideoNotes() {
       titleOf: () => noteVideoTitleSortKey(notes[0], mode),
       isChineseText: looksLikeLegacyChineseNote,
       resolveNote: resolveNoteExportEntry,
+      includeTranscript: false,
       }),
     );
     const translationPlan = YTD_NOTE_SOURCES.buildExportTranslationPlan({
@@ -3382,6 +3382,7 @@ async function exportCurrentVideoNotes() {
       mode,
       isChineseText: looksLikeLegacyChineseNote,
       resolveNote: resolveNoteExportEntry,
+      includeTranscript: false,
     });
     const exportWithMode = (exportMode) => {
       const source = exportSourceForGroup(group, storedSource);
@@ -3413,9 +3414,7 @@ async function exportCurrentVideoNotes() {
           });
           if (!exportRunIsCurrent(outcome.owner)) throw exportCancelledError();
           if (!outcome.complete) {
-            setNoteExportStatus(
-              `本轮已保存，仍有 ${outcome.remainingCount} 个翻译单元。再次点击导出即可继续。`,
-            );
+            await exportCurrentVideoNotes();
             return;
           }
           const latestNotesResult = await chrome.runtime.sendMessage({
@@ -3453,6 +3452,7 @@ async function exportCurrentVideoNotes() {
               mode,
               isChineseText: looksLikeLegacyChineseNote,
               resolveNote: resolveNoteExportEntry,
+              includeTranscript: false,
             }),
           );
           const finalPlan = YTD_NOTE_SOURCES.buildExportTranslationPlan({
@@ -3461,6 +3461,7 @@ async function exportCurrentVideoNotes() {
             mode,
             isChineseText: looksLikeLegacyChineseNote,
             resolveNote: resolveNoteExportEntry,
+            includeTranscript: false,
           });
           if (finalPlan.unitCount || finalPrecheck.hasTranslationGaps) {
             throw new Error("补译尚未完整写入，请再次点击导出继续。");
@@ -3529,6 +3530,7 @@ async function exportAllNotes() {
           noteVideoTitleSortKey(group.representative || group.notes[0], mode),
         isChineseText: looksLikeLegacyChineseNote,
         resolveNote: resolveNoteExportEntry,
+        includeTranscript: false,
       }),
     );
     const translationPlan = YTD_NOTE_SOURCES.buildExportTranslationPlan({
@@ -3537,6 +3539,7 @@ async function exportAllNotes() {
       mode,
       isChineseText: looksLikeLegacyChineseNote,
       resolveNote: resolveNoteExportEntry,
+      includeTranscript: false,
     });
     const exportWithMode = (exportMode) => {
       const sources = groups.map((group) =>
@@ -3565,9 +3568,7 @@ async function exportAllNotes() {
           });
           if (!exportRunIsCurrent(outcome.owner)) throw exportCancelledError();
           if (!outcome.complete) {
-            setNoteExportStatus(
-              `本轮已保存，仍有 ${outcome.remainingCount} 个翻译单元。再次点击导出即可继续。`,
-            );
+            await exportAllNotes();
             return;
           }
           const latest = await collectAllNotesExport();
@@ -3588,6 +3589,7 @@ async function exportAllNotes() {
               mode,
               isChineseText: looksLikeLegacyChineseNote,
               resolveNote: resolveNoteExportEntry,
+              includeTranscript: false,
             }),
           );
           const finalPlan = YTD_NOTE_SOURCES.buildExportTranslationPlan({
@@ -3596,6 +3598,7 @@ async function exportAllNotes() {
             mode,
             isChineseText: looksLikeLegacyChineseNote,
             resolveNote: resolveNoteExportEntry,
+            includeTranscript: false,
           });
           if (finalPlan.unitCount || finalPrecheck.hasTranslationGaps) {
             throw new Error("补译尚未完整写入，请再次点击导出继续。");
@@ -3660,6 +3663,21 @@ function toggleNoteExportMenu() {
   btn.setAttribute("aria-expanded", willShow ? "true" : "false");
 }
 
+async function readFreshNoteGroup(mediaKey) {
+  const refreshed = await chrome.runtime.sendMessage({
+    action: "getNotes",
+    videoId: null,
+  });
+  const groups = sortNoteGroups(
+    groupNotesBySource(
+      refreshed?.success && Array.isArray(refreshed.notes)
+        ? refreshed.notes
+        : [],
+    ),
+  );
+  return groups.find((candidate) => candidate.mediaKey === mediaKey) || null;
+}
+
 /** Exports a single source container's notes (the per-video shortcut). */
 async function exportSingleSourceGroup(group) {
   setNoteExportStatus("");
@@ -3703,6 +3721,7 @@ async function exportSingleSourceGroup(group) {
         titleOf: () => noteVideoTitleSortKey(group.representative, mode),
         isChineseText: looksLikeLegacyChineseNote,
         resolveNote: resolveNoteExportEntry,
+        includeTranscript: false,
       }),
     );
     const sourceMap = storedSource ? { [key]: storedSource } : {};
@@ -3712,6 +3731,7 @@ async function exportSingleSourceGroup(group) {
       mode,
       isChineseText: looksLikeLegacyChineseNote,
       resolveNote: resolveNoteExportEntry,
+      includeTranscript: false,
     });
     const exportWithMode = (exportMode) => {
       const source = exportSourceForGroup(group, storedSource);
@@ -3742,30 +3762,17 @@ async function exportSingleSourceGroup(group) {
             setStatus: setNoteExportStatus,
           });
           if (!exportRunIsCurrent(outcome.owner)) throw exportCancelledError();
+          const freshGroup = await readFreshNoteGroup(key);
+          if (!freshGroup) throw new Error("补译后未找到该视频的笔记。");
           if (!outcome.complete) {
-            setNoteExportStatus(
-              `本轮已保存，仍有 ${outcome.remainingCount} 个翻译单元。再次点击导出即可继续。`,
-            );
+            await exportSingleSourceGroup(freshGroup);
             return;
           }
-          const refreshed = await chrome.runtime.sendMessage({
-            action: "getNotes",
-            videoId: null,
-          });
           assertFrozenExportOutcome(outcome, {
             mediaKeys: [key],
             mode,
             format: "markdown",
           });
-          const groups = sortNoteGroups(
-            groupNotesBySource(
-              refreshed?.success && Array.isArray(refreshed.notes)
-                ? refreshed.notes
-                : [],
-            ),
-          );
-          const freshGroup = groups.find((candidate) => candidate.mediaKey === key);
-          if (!freshGroup) throw new Error("补译后未找到该视频的笔记。");
           const latestSource = await YTD_NOTE_SOURCES.readNoteSource(
             chrome.storage.local,
             key,
@@ -3780,6 +3787,7 @@ async function exportSingleSourceGroup(group) {
               mode,
               isChineseText: looksLikeLegacyChineseNote,
               resolveNote: resolveNoteExportEntry,
+              includeTranscript: false,
             }),
           );
           const finalPlan = YTD_NOTE_SOURCES.buildExportTranslationPlan({
@@ -3788,6 +3796,7 @@ async function exportSingleSourceGroup(group) {
             mode,
             isChineseText: looksLikeLegacyChineseNote,
             resolveNote: resolveNoteExportEntry,
+            includeTranscript: false,
           });
           if (finalPlan.unitCount || finalPrecheck.hasTranslationGaps) {
             throw new Error("补译尚未完整写入，请再次点击导出继续。");
@@ -6044,6 +6053,9 @@ globalThis.__YTD_TRANSCRIPT_TESTING__ = {
   describeExportPrecheck,
   runConfirmedExportTranslation: runConfirmedExportTranslationRound,
   runConfirmedExportTranslationRound,
+  finalizeExportJobDownload,
+  showNoteExportPrecheck,
+  buildFrozenExportIntent,
   renderExportTranslationProgress,
   exportRunIsCurrent,
   sourceBatchMessage,

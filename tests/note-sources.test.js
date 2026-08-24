@@ -456,6 +456,68 @@ test("description completeness blocks unknown, allows confirmed-empty, and count
   assert.equal(originalCheck.translationGaps.descriptionChunks, 0);
 });
 
+test("notes export planning ignores full transcript gaps while transcript planning keeps them", () => {
+  const source = sources.normalizeNoteSource({
+    mediaKey: "notes-scope",
+    canonicalUrl: "https://www.youtube.com/watch?v=notes-scope",
+    titleOriginal: "Notes scope",
+    titleZh: "笔记范围",
+    channelName: "Channel",
+    descriptionOriginal: "English description",
+    descriptionZh: "中文简介",
+    descriptionStatus: "present",
+    sourceLanguage: "en",
+    transcriptOriginal: Array.from({ length: 395 }, (_, index) => ({
+      id: `segment-${index}`,
+      start: index,
+      text: `transcript-only-row-${index}`,
+    })),
+    transcriptZh: [],
+  });
+  const groups = [
+    {
+      mediaKey: "notes-scope",
+      representative: { videoTitle: "Notes scope" },
+      notes: [
+        {
+          id: "saved-note",
+          text: "Saved English note",
+          translatedText: "保存的中文笔记",
+        },
+      ],
+    },
+  ];
+  const sourcesByKey = { "notes-scope": source };
+  const notePrecheck = sources.buildExportPrecheck({
+    groups,
+    sourcesByKey,
+    mode: "bilingual",
+    includeTranscript: false,
+  });
+  const notePlan = sources.buildExportTranslationPlan({
+    groups,
+    sourcesByKey,
+    mode: "bilingual",
+    includeTranscript: false,
+  });
+  assert.equal(notePrecheck.translationGaps.transcriptSegments, 0);
+  assert.equal(notePrecheck.hasTranslationGaps, false);
+  assert.equal(notePlan.sourceBatches.length, 0);
+  assert.equal(notePlan.unitCount, 0);
+
+  const transcriptPlan = sources.buildExportTranslationPlan({
+    groups,
+    sourcesByKey,
+    mode: "bilingual",
+    includeTitles: false,
+    includeNotes: false,
+    includeDescriptions: false,
+    includeTranscript: true,
+  });
+  assert.equal(transcriptPlan.unitCount, 395);
+  assert.equal(transcriptPlan.sourceBatches.length, 99);
+});
+
 test("export translation plan is deterministic, bounded, and batches stable IDs", () => {
   const groups = [
     {
