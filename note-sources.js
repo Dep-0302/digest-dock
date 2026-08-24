@@ -753,6 +753,7 @@ var YTD_NOTE_SOURCES = (() => {
       descriptionOriginal: resolved.descriptionOriginal,
       descriptionZh: resolved.descriptionZh,
       descriptionStatus: resolved.descriptionStatus,
+      sourceLanguage: resolved.sourceLanguage,
       transcriptOriginal: resolved.transcriptOriginal,
       transcriptZh: resolved.transcriptZh,
       transcriptTruncated: resolved.transcriptTruncated,
@@ -800,6 +801,8 @@ var YTD_NOTE_SOURCES = (() => {
       } else if (includeTranscript && transcriptTruncated) {
         blockingReasons.push("字幕资料已裁剪，不完整");
       }
+      if (!titleOriginal) blockingReasons.push("缺少视频标题");
+      if (!channelName) blockingReasons.push("缺少频道名称");
       if (!hasUrl) blockingReasons.push("缺少视频网址");
       if (descriptionStatus === "unknown") {
         blockingReasons.push("缺少视频简介状态");

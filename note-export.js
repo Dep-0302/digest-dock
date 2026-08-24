@@ -1,6 +1,7 @@
 /**
  * Pure, dependency-free helpers shared by the side panel UI and the reading
- * exports (Markdown notes + TXT transcript). Centralizing grouping, timecode
+ * exports (TXT notes + TXT transcript).
+ * Centralizing grouping, timecode
  * formatting and the original/Chinese/bilingual language assembly here keeps the
  * on-screen rendering and the exported files from drifting into two different
  * sets of rules.
@@ -189,12 +190,12 @@ var YTD_NOTE_EXPORT = (() => {
 
   function currentVideoNotesFilename(title, mode, { date } = {}) {
     const suffix = MODE_FILE_SUFFIX[normalizeMode(mode)];
-    return `${safeTitleSlug(title)}-notes-${suffix}-${isoDate(date)}.md`;
+    return `${safeTitleSlug(title)}-notes-${suffix}-${isoDate(date)}.txt`;
   }
 
   function allNotesFilename(mode, { date } = {}) {
     const suffix = MODE_FILE_SUFFIX[normalizeMode(mode)];
-    return `digestdock-all-notes-${suffix}-${isoDate(date)}.md`;
+    return `digestdock-all-notes-${suffix}-${isoDate(date)}.txt`;
   }
 
   // ----------------------------------------------------------------
@@ -237,11 +238,153 @@ var YTD_NOTE_EXPORT = (() => {
       .trim();
   }
 
+  // ----------------------------------------------------------------
+  // Plain-text notes documents. These builders intentionally use stricter
+  // language semantics than localizedSegments(), whose fallback behavior is
+  // retained for the on-screen UI. A Chinese
+  // or bilingual export must never silently substitute original-language text
+  // for a missing Chinese value.
+  // ----------------------------------------------------------------
+
+  function missingText(label) {
+    return `（缺失：${label}）`;
+  }
+
+  function strictLocalizedValue(
+    original,
+    zh,
+    mode,
+    labels,
+    { originalIsChinese = false } = {},
+  ) {
+    const resolvedMode = normalizeMode(mode);
+    const originalText = inlineText(original);
+    const zhText = inlineText(zh) || (originalIsChinese ? originalText : "");
+    const originalLabel = labels?.original || "原文";
+    const zhLabel = labels?.zh || "中文";
+    if (resolvedMode === "original") {
+      return originalText || missingText(originalLabel);
+    }
+    if (resolvedMode === "zh") {
+      return zhText || missingText(zhLabel);
+    }
+    if (originalText && zhText && originalText === zhText) {
+      return `中文：${zhText}`;
+    }
+    return [
+      `原文：${originalText || missingText(originalLabel)}`,
+      `中文：${zhText || missingText(zhLabel)}`,
+    ].join("\n");
+  }
+
+  function strictDescriptionValue(source, mode, originalIsChinese) {
+    const status = String(source?.descriptionStatus || "unknown");
+    if (status === "confirmed-empty") return "（无简介）";
+    let value = strictLocalizedValue(
+      source?.descriptionOriginal,
+      source?.descriptionZh,
+      mode,
+      { original: "原文视频简介", zh: "中文视频简介" },
+      { originalIsChinese },
+    );
+    if (source?.descriptionTruncated) {
+      value = `${value}\n〔资料不完整：简介已裁剪〕`;
+    }
+    return value;
+  }
+
+  /**
+   * Builds one source as Markdown-free UTF-8 text. The caller may pass a
+   * filtered source list to buildAllNotesText(); only those sources are ever
+   * serialized.
+   */
+  function buildSourceText(source, mode) {
+    const resolvedMode = normalizeMode(mode);
+    const sourceLanguage = String(source?.sourceLanguage || "")
+      .trim()
+      .toLowerCase();
+    const originalIsChinese =
+      source?.platform === "bilibili" ||
+      /^(?:zh|cmn|yue)(?:-|$)/.test(sourceLanguage);
+    const lines = [];
+    const title = strictLocalizedValue(
+      source?.titleOriginal,
+      source?.titleZh,
+      resolvedMode,
+      { original: "原文标题", zh: "中文标题" },
+      { originalIsChinese },
+    );
+    if (resolvedMode === "bilingual") {
+      lines.push("标题：");
+      lines.push(title);
+    } else {
+      lines.push(`标题：${title}`);
+    }
+    lines.push(
+      `频道：${inlineText(source?.channelName) || missingText("频道")}`,
+      `网址：${inlineText(source?.canonicalUrl) || missingText("网址")}`,
+      `平台：${platformLabel(source?.platform)}`,
+      `语言：${MODE_LABEL[resolvedMode]}`,
+      "",
+      "视频简介：",
+    );
+    lines.push(
+      strictDescriptionValue(source, resolvedMode, originalIsChinese),
+      "",
+      "笔记：",
+    );
+
+    const notes = sortNotesByTimecode(source?.notes || []);
+    if (!notes.length) {
+      lines.push("（无笔记）");
+    } else {
+      notes.forEach((note, index) => {
+        if (index > 0) lines.push("");
+        lines.push(`[${formatTimecode(note?.timestampSeconds)}]`);
+        lines.push(
+          strictLocalizedValue(note?.original, note?.zh, resolvedMode, {
+            original: "原文笔记",
+            zh: "中文笔记",
+          }, { originalIsChinese }),
+        );
+      });
+    }
+    return `${lines.join("\n").trimEnd()}\n`;
+  }
+
+  function buildCurrentVideoText(source, mode, { date } = {}) {
+    const body = buildSourceText(source, mode).trimEnd();
+    const exportedAt = new Date(date || Date.now()).toISOString();
+    return `${body}\n导出时间：${exportedAt}\n`;
+  }
+
+  function buildAllNotesText(sources, mode, { date } = {}) {
+    const resolvedMode = normalizeMode(mode);
+    const selectedSources = Array.isArray(sources) ? sources : [];
+    const lines = [
+      "DigestDock 全部笔记",
+      `语言：${MODE_LABEL[resolvedMode]}`,
+      `导出时间：${new Date(date || Date.now()).toISOString()}`,
+      `视频数量：${selectedSources.length}`,
+    ];
+    const divider = "=".repeat(60);
+    selectedSources.forEach((source, index) => {
+      lines.push(
+        "",
+        divider,
+        `视频 ${index + 1} / ${selectedSources.length}`,
+        divider,
+        buildSourceText(source, resolvedMode).trimEnd(),
+      );
+    });
+    return `${lines.join("\n").trimEnd()}\n`;
+  }
+
   function localizedField(original, zh, mode) {
     const blocks = localizedSegments(original, zh, mode);
     if (mode === "bilingual" && blocks.length === 2) {
       return blocks
-        .map((block) => `**${LANG_HEADING[block.lang]}**：${block.text}`)
+        .map((block) => `${LANG_HEADING[block.lang]}：${block.text}`)
         .join("\n\n");
     }
     return blocks.map((block) => block.text).join("\n\n");
@@ -269,94 +412,6 @@ var YTD_NOTE_EXPORT = (() => {
       }
       return `- [${stamp}] ${blocks.map((block) => block.text).join(" / ")}`;
     });
-  }
-
-  /**
-   * Builds the Markdown body for one source (used both as a standalone
-   * "current video" export and as one section of the "all notes" export). When
-   * `headingLevel` is 2 the title becomes an `##` section for the combined file.
-   */
-  function buildSourceMarkdown(source, mode, { headingLevel = 1 } = {}) {
-    const resolvedMode = normalizeMode(mode);
-    const hashes = "#".repeat(headingLevel);
-    const sub = "#".repeat(headingLevel + 1);
-    const subSub = "#".repeat(headingLevel + 2);
-    // A heading is single-line, so bilingual titles join with " / " rather than
-    // the labelled block form used for multi-paragraph description/notes.
-    const title =
-      localizedPlainText(
-        source?.titleOriginal,
-        source?.titleZh,
-        resolvedMode,
-        " / ",
-      ) || "Untitled Video";
-    const lines = [];
-    lines.push(`${hashes} ${title.replace(/\n/g, " ")}`);
-    lines.push("");
-    const meta = [];
-    if (String(source?.channelName || "").trim()) {
-      meta.push(`- 频道：${inlineText(source.channelName)}`);
-    }
-    if (String(source?.canonicalUrl || "").trim()) {
-      meta.push(`- 网址：${inlineText(source.canonicalUrl)}`);
-    }
-    meta.push(`- 平台：${platformLabel(source?.platform)}`);
-    meta.push(`- 导出语言：${MODE_LABEL[resolvedMode]}`);
-    lines.push(...meta);
-    lines.push("");
-
-    lines.push(`${sub} 视频简介`);
-    lines.push("");
-    const description = localizedField(
-      source?.descriptionOriginal,
-      source?.descriptionZh,
-      resolvedMode,
-    );
-    lines.push(description || "（无简介）");
-    lines.push("");
-
-    lines.push(`${sub} 笔记`);
-    lines.push("");
-    const notes = sortNotesByTimecode(source?.notes || []);
-    if (!notes.length) {
-      lines.push("（无笔记）");
-      lines.push("");
-    } else {
-      notes.forEach((note) => {
-        lines.push(`${subSub} ${formatTimecode(note?.timestampSeconds)}`);
-        lines.push("");
-        const blocks = localizedSegments(note?.original, note?.zh, resolvedMode);
-        if (resolvedMode === "bilingual" && blocks.length === 2) {
-          lines.push(`**${LANG_HEADING.original}**：${blocks[0].text}`);
-          lines.push("");
-          lines.push(`**${LANG_HEADING.zh}**：${blocks[1].text}`);
-        } else {
-          lines.push(blocks.map((block) => block.text).join("\n\n") || "（空）");
-        }
-        lines.push("");
-      });
-    }
-    return `${lines.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd()}\n`;
-  }
-
-  function buildCurrentVideoMarkdown(source, mode) {
-    return buildSourceMarkdown(source, mode, { headingLevel: 1 });
-  }
-
-  function buildAllNotesMarkdown(sources, mode, { date } = {}) {
-    const resolvedMode = normalizeMode(mode);
-    const header = [
-      "# DigestDock 全部笔记",
-      "",
-      `- 导出语言：${MODE_LABEL[resolvedMode]}`,
-      `- 导出时间：${new Date(date || Date.now()).toISOString()}`,
-      `- 视频数量：${(sources || []).length}`,
-      "",
-    ].join("\n");
-    const sections = (sources || []).map((source) =>
-      buildSourceMarkdown(source, resolvedMode, { headingLevel: 2 }),
-    );
-    return `${`${header}\n${sections.join("\n")}`.trimEnd()}\n`;
   }
 
   /**
@@ -420,9 +475,9 @@ var YTD_NOTE_EXPORT = (() => {
     allNotesFilename,
     platformLabel,
     localizedTranscriptLines,
-    buildSourceMarkdown,
-    buildCurrentVideoMarkdown,
-    buildAllNotesMarkdown,
+    buildSourceText,
+    buildCurrentVideoText,
+    buildAllNotesText,
     buildTranscriptText,
   };
 })();

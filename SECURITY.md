@@ -77,13 +77,13 @@ Examples include:
 - Clearing extension data or removing the extension does not delete a downloaded
   backup. Delete all copies separately when they are no longer needed.
 - The JSON file remains the only recovery format accepted by the importer.
-  Markdown note exports and TXT transcript downloads are one-way reading
+  TXT note exports and TXT transcript downloads are one-way reading
   exports and are never accepted as restore input.
-- Original-language Markdown/TXT export is local-only. Chinese and bilingual
-  exports fail closed when their own scoped content is incomplete: note Markdown
+- Original-language TXT export is local-only. Chinese and bilingual
+  completion fails closed when its scoped content is incomplete: note TXT
   checks only title, description, and saved notes; transcript TXT checks complete
   transcript segments. Only an explicit
-  "Generate Chinese and export" or "Continue" action may call the selected AI
+  "Complete and export" or "Continue" action may call the selected AI
   provider. A saved key is not standing consent: each action starts at most 20
   task batches and a conservative maximum of 100 provider calls, saves each
   valid batch before continuing, and never starts the next round automatically.

@@ -335,7 +335,7 @@ test("one confirmed export round starts at most 20 batches and never auto-downlo
     groups: fixture.groups,
     scope: "notes-current",
     mode: "bilingual",
-    format: "markdown",
+    format: "txt",
     panelId: "notesExportPrecheck",
     setStatus() {},
   });
@@ -385,7 +385,7 @@ test("one confirmed export round starts at most 20 batches and never auto-downlo
   assert.ok(
     documentImpl.findButton(
       "notesExportPrecheck",
-      "继续补齐（本轮最多 20 批）",
+      "补充导出",
     ),
     "durable progress is re-presented as an actionable continuation",
   );
@@ -406,7 +406,7 @@ test("a completed notes batch claims, downloads once, and finishes the durable j
     groups: fixture.groups,
     scope: "notes-current",
     mode: "bilingual",
-    format: "markdown",
+    format: "txt",
     panelId: "notesExportPrecheck",
     setStatus() {},
   });
@@ -421,7 +421,7 @@ test("a completed notes batch claims, downloads once, and finishes the durable j
   assert.equal(controller.job().exportClaim, null);
 });
 
-test("notes precheck original fallback exports locally without starting completion", () => {
+test("notes precheck exposes four explicit actions and local fallbacks start no completion", () => {
   const documentImpl = createInteractiveDocument();
   const actions = [];
   const runtime = loadSidepanelRuntime({
@@ -432,6 +432,7 @@ test("notes precheck original fallback exports locally without starting completi
     },
   });
   let generated = 0;
+  let exportedDirect = 0;
   let exportedOriginal = 0;
   runtime.helpers.showNoteExportPrecheck(
     {
@@ -447,7 +448,9 @@ test("notes precheck original fallback exports locally without starting completi
         notes: 1,
       },
     },
-    () => {},
+    () => {
+      exportedDirect += 1;
+    },
     () => {
       generated += 1;
     },
@@ -468,22 +471,90 @@ test("notes precheck original fallback exports locally without starting completi
   );
   const original = documentImpl.findButton(
     "notesExportPrecheck",
-    "改为导出原文",
+    "导出原文",
   );
+  const supplement = documentImpl.findButton(
+    "notesExportPrecheck",
+    "补充导出",
+  );
+  const direct = documentImpl.findButton(
+    "notesExportPrecheck",
+    "直接导出",
+  );
+  const abandon = documentImpl.findButton(
+    "notesExportPrecheck",
+    "放弃导出",
+  );
+  assert.ok(supplement);
+  assert.ok(direct);
   assert.ok(original);
+  assert.ok(abandon);
+  direct.click();
+  assert.equal(exportedDirect, 1);
   original.click();
   assert.equal(exportedOriginal, 1);
   assert.equal(generated, 0);
   assert.deepEqual(actions, []);
 });
 
-test("notes export job identity includes the v3 content contract", () => {
+test("blocking note export opens a metadata supplement guide without starting a provider", () => {
+  const documentImpl = createInteractiveDocument();
+  const messages = [];
+  const runtime = loadSidepanelRuntime({
+    documentImpl,
+    sendMessage(message) {
+      messages.push(message);
+      return Promise.resolve({ success: true });
+    },
+  });
+  let rechecks = 0;
+  runtime.helpers.showNoteExportSupplementGuide(
+    {
+      hasTranslationGaps: false,
+      blockingVideos: [
+        {
+          mediaKey: "video-a",
+          title: "Video A",
+          blockingReasons: ["缺少视频简介状态"],
+        },
+      ],
+    },
+    [
+      {
+        mediaKey: "video-a",
+        representative: {
+          mediaKey: "video-a",
+          videoId: "video-a",
+          videoTitle: "Video A",
+          timestampedUrl: "https://www.youtube.com/watch?v=video-a&t=5s",
+        },
+        notes: [],
+      },
+    ],
+    () => {
+      rechecks += 1;
+    },
+  );
+
+  assert.ok(documentImpl.findButton("notesExportPrecheck", "打开补充"));
+  const recheck = documentImpl.findButton(
+    "notesExportPrecheck",
+    "重新检查并导出",
+  );
+  assert.ok(recheck);
+  assert.ok(documentImpl.findButton("notesExportPrecheck", "放弃导出"));
+  recheck.click();
+  assert.equal(rechecks, 1);
+  assert.deepEqual(messages, [], "rendering and rechecking the guide starts no provider");
+});
+
+test("notes export job identity includes the v4 TXT content contract", () => {
   const helpers = loadSidepanelHelpers();
   const intent = helpers.buildFrozenExportIntent({
     scope: "notes-current",
     mediaKeys: ["video-a"],
     mode: "bilingual",
-    format: "markdown",
+    format: "txt",
     sourceRevisions: { "video-a": "source-r1" },
     notesRevision: "notes-r1",
     providerSnapshot: {
@@ -494,7 +565,35 @@ test("notes export job identity includes the v3 content contract", () => {
       translationVersion: "export-v2",
     },
   });
-  assert.match(intent.scope, /^notes-current-v3-/);
+  assert.match(intent.scope, /^notes-current-v4-/);
+  assert.equal(intent.format, "txt");
+});
+
+test("selected note export freezes only requested media keys and fails closed when one disappears", () => {
+  const helpers = loadSidepanelHelpers();
+  const groups = [
+    { mediaKey: "video-b", notes: [{ id: "b" }] },
+    { mediaKey: "video-a", notes: [{ id: "a" }] },
+    { mediaKey: "video-c", notes: [{ id: "c" }] },
+  ];
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(
+      helpers.normalizeExportMediaKeys(["video-c", "video-a", "video-a"]),
+    )),
+    ["video-a", "video-c"],
+  );
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(
+      helpers
+        .filterNoteGroupsByMediaKeys(groups, ["video-c", "video-a"])
+        .map((group) => group.mediaKey),
+    )),
+    ["video-a", "video-c"],
+  );
+  assert.throws(
+    () => helpers.filterNoteGroupsByMediaKeys(groups, ["video-a", "deleted"]),
+    (error) => error.code === "EXPORT_SELECTION_STALE",
+  );
 });
 
 test("the real progress cancel button cancels the durable job and starts no later batch", async () => {
@@ -514,7 +613,7 @@ test("the real progress cancel button cancels the durable job and starts no late
     groups: fixture.groups,
     scope: "notes-current",
     mode: "bilingual",
-    format: "markdown",
+    format: "txt",
     panelId: "notesExportPrecheck",
     setStatus() {},
   });
@@ -2280,6 +2379,9 @@ function installNoteNavigationFixture(runtime, options = {}) {
     targetMediaKey,
     targetUrl,
     hasAiKey: options.hasAiKey !== false,
+    authorizedTranscriptSuccess: options.authorizedTranscriptSuccess === true,
+    cachedTranscript: options.cachedTranscript === true,
+    authorizedError: String(options.authorizedError || ""),
   });
   return runtime.evaluate(`
     (() => {
@@ -2372,7 +2474,28 @@ function installNoteNavigationFixture(runtime, options = {}) {
       highlightMomentsOnPage = () => {};
       setupExplainFeature = () => {};
       translateTranscript = () => {};
-      loadFromCache = async () => null;
+      loadFromCache = async (videoId) => {
+        if (!fixtureOptions.cachedTranscript || videoId !== targetMediaKey) {
+          return null;
+        }
+        return {
+          analysis: null,
+          analysisVideoId: targetMediaKey,
+          transcript: [{ start: 0, text: "Cached target transcript" }],
+          transcriptText: "Cached target transcript",
+          transcriptTimestamped: "[0:00] Cached target transcript",
+          transcriptLanguage: "en",
+          transcriptSource: "supadata",
+          transcriptSourceAttempt: "SUPADATA",
+          routeKey: targetRouteKey,
+          mediaRef: {
+            ...targetLocator,
+            platform: targetPlatform,
+            mediaKey: targetMediaKey,
+          },
+          timestamp: Date.now(),
+        };
+      };
       saveToCache = async () => {};
 
       const targetNote = {
@@ -2446,6 +2569,7 @@ function installNoteNavigationFixture(runtime, options = {}) {
           return {
             success: true,
             response: {
+              videoId: activeLocator?.videoId || "",
               title: activeLocator?.routeKey === targetRouteKey
                 ? "Target video"
                 : "Unrelated video",
@@ -2478,7 +2602,39 @@ function installNoteNavigationFixture(runtime, options = {}) {
         if (message.action === "getNotes") {
           return { success: true, notes: [targetNote] };
         }
+        if (message.action === "upsertNoteSource") {
+          return { success: true, source: message.source };
+        }
         if (message.action === "fetchTranscript") {
+          if (
+            message.supadataConsent === true &&
+            fixtureOptions.authorizedTranscriptSuccess
+          ) {
+            return {
+              success: true,
+              source: "supadata",
+              sourceAttempt: "SUPADATA",
+              selectedTrack: null,
+              transcript: [
+                {
+                  text: "Authorized target transcript",
+                  start: 0,
+                  duration: 2,
+                  language: "en",
+                },
+              ],
+              transcriptText: "Authorized target transcript",
+              transcriptTextTimestamped: "[0:00] Authorized target transcript",
+              language: "en",
+            };
+          }
+          if (message.supadataConsent === true && fixtureOptions.authorizedError) {
+            return {
+              success: false,
+              error: fixtureOptions.authorizedError,
+              message: "Authorized provider failed.",
+            };
+          }
           return {
             success: false,
             error: "SUPADATA_CONSENT_REQUIRED",
@@ -2528,8 +2684,12 @@ function installNoteNavigationFixture(runtime, options = {}) {
         targetRouteKey,
         targetUrl,
         playTarget: () => playNote(targetNote),
+        playTargetForSupplement: () =>
+          playNote(targetNote, { captureMetadata: true }),
         inspectActive: () => checkCurrentTab(),
         openTranscript: () => switchTab("transcript"),
+        clickConsentPrimary: () => errorAction?.(),
+        clickConsentSecondary: () => errorSecondaryAction?.(),
         navigateFront: (url) => handleFrontTabUrl(url),
         setActiveVideo: (videoId) => {
           activeUrlValue =
@@ -2575,9 +2735,27 @@ function installNoteNavigationFixture(runtime, options = {}) {
               ? "undefined"
               : currentNotesFilterVideoId,
           resultsVisible: element("resultsState").style.display !== "none",
+          errorVisible: element("errorState").style.display !== "none",
           panelClosed,
           errorTitle: element("errorTitle").textContent,
+          errorSecondaryText: element("errorSecondaryBtn").textContent,
+          errorSecondaryHidden: element("errorSecondaryBtn").hidden,
           fetchCount: fetchCount(),
+          metadataRelayCount: messages.filter(
+            (message) =>
+              message.action === "relayToContent" &&
+              message.payload?.action === "getVideoInfo",
+          ).length,
+          bilibiliResolveCount: messages.filter(
+            (message) => message.action === "resolveBilibiliMedia",
+          ).length,
+          upsertCount: messages.filter(
+            (message) => message.action === "upsertNoteSource",
+          ).length,
+          supadataConsents: messages
+            .filter((message) => message.action === "fetchTranscript")
+            .map((message) => message.supadataConsent),
+          currentTranscriptText,
           noteLoadCount: noteLoadMessages().length,
           noteLoadVideoIds: noteLoadMessages().map((message) =>
             message.videoId === undefined ? "undefined" : message.videoId),
@@ -2587,6 +2765,11 @@ function installNoteNavigationFixture(runtime, options = {}) {
           sessionKeys: Object.keys(
             chrome.storage.session.snapshot?.() || {},
           ).sort(),
+          sessionPhase:
+            Object.values(chrome.storage.session.snapshot?.() || {})[0]?.phase || "",
+          sessionCaptureMetadata:
+            Object.values(chrome.storage.session.snapshot?.() || {})[0]
+              ?.captureMetadata === true,
           backgroundActions: messages.map((message) => message.action),
           renderedNotes,
           tabSeekCount: messages.filter(
@@ -2857,6 +3040,68 @@ test("opening another video's saved note stays in All Notes without requesting S
   assert.equal(snapshot.sessionKeys.length, 1);
 });
 
+test("supplementing a YouTube note reads page metadata once and never fetches subtitles", async () => {
+  const runtime = loadSidepanelRuntime();
+  const fixture = installNoteNavigationFixture(runtime, { hasAiKey: false });
+
+  await fixture.playTargetForSupplement();
+  await fixture.inspectActive();
+  await nextTurn();
+
+  const snapshot = JSON.parse(fixture.snapshot());
+  assert.equal(snapshot.metadataRelayCount, 1);
+  assert.equal(snapshot.bilibiliResolveCount, 0);
+  assert.equal(snapshot.upsertCount, 1);
+  assert.equal(snapshot.fetchCount, 0);
+  assert.equal(snapshot.sessionCaptureMetadata, false);
+  assert.equal(snapshot.activeTab, "notes");
+
+  await fixture.inspectActive();
+  await nextTurn();
+  const repeated = JSON.parse(fixture.snapshot());
+  assert.equal(repeated.metadataRelayCount, 1, "completed capture is not repeated");
+  assert.equal(repeated.fetchCount, 0);
+});
+
+test("supplementing the ordinary current video works without a transcript or note-only context", async () => {
+  const runtime = loadSidepanelRuntime();
+  const fixture = installNoteNavigationFixture(runtime, { hasAiKey: false });
+  fixture.setActiveTab(fixture.targetUrl, 909);
+  fixture.setCurrentVideo(fixture.targetVideoId);
+
+  await fixture.playTargetForSupplement();
+  await nextTurn();
+
+  const snapshot = JSON.parse(fixture.snapshot());
+  assert.equal(snapshot.metadataRelayCount, 1);
+  assert.equal(snapshot.upsertCount, 1);
+  assert.equal(snapshot.fetchCount, 0);
+  assert.deepEqual(snapshot.openedUrls, []);
+});
+
+test("supplementing a Bilibili P2 note keeps the exact CID and never uses Supadata", async () => {
+  const runtime = loadSidepanelRuntime();
+  const fixture = installNoteNavigationFixture(runtime, {
+    targetPlatform: "bilibili",
+    targetVideoId: "BV1e3411j7ZM",
+    targetMediaKey: "bilibili:BV1e3411j7ZM:200",
+    targetUrl: "https://www.bilibili.com/video/BV1e3411j7ZM/?p=2&t=56",
+    hasAiKey: false,
+  });
+
+  await fixture.playTargetForSupplement();
+  await fixture.inspectActive();
+  await nextTurn();
+
+  const snapshot = JSON.parse(fixture.snapshot());
+  assert.equal(snapshot.bilibiliResolveCount, 1);
+  assert.equal(snapshot.metadataRelayCount, 0);
+  assert.equal(snapshot.upsertCount, 1);
+  assert.equal(snapshot.fetchCount, 0);
+  assert.equal(snapshot.currentVideoId, fixture.targetMediaKey);
+  assert.equal(snapshot.sessionCaptureMetadata, false);
+});
+
 test("duplicate navigation events stay note-only until transcript is requested explicitly", async () => {
   const runtime = loadSidepanelRuntime();
   const fixture = installNoteNavigationFixture(runtime);
@@ -2880,6 +3125,156 @@ test("duplicate navigation events stay note-only until transcript is requested e
     afterExplicitTranscript.errorTitle,
     "是否使用 Supadata 获取字幕？",
   );
+  assert.equal(afterExplicitTranscript.errorSecondaryText, "返回笔记");
+  assert.deepEqual(afterExplicitTranscript.supadataConsents, [false]);
+});
+
+test("declining consent after a saved-note jump returns to All Notes without a third-party request", async () => {
+  const runtime = loadSidepanelRuntime();
+  const fixture = installNoteNavigationFixture(runtime);
+
+  await fixture.playTarget();
+  await fixture.inspectActive();
+  await fixture.openTranscript();
+  await nextTurn();
+  await nextTurn();
+
+  const consent = JSON.parse(fixture.snapshot());
+  assert.equal(consent.errorTitle, "是否使用 Supadata 获取字幕？");
+  assert.equal(consent.errorSecondaryText, "返回笔记");
+  assert.equal(consent.errorSecondaryHidden, false);
+  assert.deepEqual(consent.supadataConsents, [false]);
+  assert.equal(consent.sessionPhase, "active");
+
+  await fixture.clickConsentSecondary();
+  await nextTurn();
+
+  const returned = JSON.parse(fixture.snapshot());
+  assert.equal(returned.activeTab, "notes");
+  assert.equal(returned.resultsVisible, true);
+  assert.equal(returned.errorVisible, false);
+  assert.equal(returned.notesFilterShowAll, true);
+  assert.equal(returned.currentNotesFilterVideoId, null);
+  assert.equal(returned.sessionPhase, "active");
+  assert.deepEqual(returned.supadataConsents, [false]);
+  assert.deepEqual(returned.noteLoadVideoIds, [null, null]);
+
+  // An ordinary automatic inspection must continue to honor the restored
+  // notes-only context instead of treating the decline as a digest request.
+  await fixture.inspectActive();
+  await nextTurn();
+  const afterAutomaticCheck = JSON.parse(fixture.snapshot());
+  assert.equal(afterAutomaticCheck.activeTab, "notes");
+  assert.deepEqual(afterAutomaticCheck.supadataConsents, [false]);
+
+  // A later explicit Transcript click starts a fresh unconsented probe. It
+  // still cannot authorize Supadata without another primary-button click.
+  await fixture.openTranscript();
+  await nextTurn();
+  await nextTurn();
+  const secondConsent = JSON.parse(fixture.snapshot());
+  assert.equal(secondConsent.errorTitle, "是否使用 Supadata 获取字幕？");
+  assert.deepEqual(secondConsent.supadataConsents, [false, false]);
+});
+
+test("confirming consent after a saved-note jump is exactly false then true and clears the context on success", async () => {
+  const runtime = loadSidepanelRuntime();
+  const fixture = installNoteNavigationFixture(runtime, {
+    authorizedTranscriptSuccess: true,
+  });
+
+  await fixture.playTarget();
+  await fixture.inspectActive();
+  await fixture.openTranscript();
+  await nextTurn();
+  await nextTurn();
+  assert.deepEqual(JSON.parse(fixture.snapshot()).supadataConsents, [false]);
+
+  await fixture.clickConsentPrimary();
+  await nextTurn();
+
+  const completed = JSON.parse(fixture.snapshot());
+  assert.deepEqual(completed.supadataConsents, [false, true]);
+  assert.equal(completed.currentTranscriptText, "Authorized target transcript");
+  assert.equal(completed.activeTab, "transcript");
+  assert.equal(completed.resultsVisible, true);
+  assert.deepEqual(completed.sessionKeys, []);
+});
+
+test("a cached transcript opened from saved notes needs no consent and clears the notes-only context", async () => {
+  const runtime = loadSidepanelRuntime();
+  const fixture = installNoteNavigationFixture(runtime, {
+    cachedTranscript: true,
+  });
+
+  await fixture.playTarget();
+  await fixture.inspectActive();
+  await fixture.openTranscript();
+  await nextTurn();
+  await nextTurn();
+
+  const completed = JSON.parse(fixture.snapshot());
+  assert.deepEqual(completed.supadataConsents, []);
+  assert.equal(completed.currentTranscriptText, "Cached target transcript");
+  assert.equal(completed.activeTab, "transcript");
+  assert.equal(completed.resultsVisible, true);
+  assert.deepEqual(completed.sessionKeys, []);
+});
+
+test("a provider failure after saved-note consent keeps a safe return to All Notes", async () => {
+  const runtime = loadSidepanelRuntime();
+  const fixture = installNoteNavigationFixture(runtime, {
+    authorizedError: "RATE_LIMITED",
+  });
+
+  await fixture.playTarget();
+  await fixture.inspectActive();
+  await fixture.openTranscript();
+  await nextTurn();
+  await nextTurn();
+  await fixture.clickConsentPrimary();
+  await nextTurn();
+
+  const failed = JSON.parse(fixture.snapshot());
+  assert.deepEqual(failed.supadataConsents, [false, true]);
+  assert.equal(failed.errorTitle, "Supadata 暂时限流");
+  assert.equal(failed.errorSecondaryText, "返回笔记");
+  assert.equal(failed.errorSecondaryHidden, false);
+  assert.equal(failed.sessionPhase, "active");
+
+  await fixture.clickConsentSecondary();
+  await nextTurn();
+  const returned = JSON.parse(fixture.snapshot());
+  assert.equal(returned.activeTab, "notes");
+  assert.equal(returned.resultsVisible, true);
+  assert.deepEqual(returned.supadataConsents, [false, true]);
+});
+
+test("a stale consent return cannot resurrect notes-only state on another route", async () => {
+  const runtime = loadSidepanelRuntime();
+  const fixture = installNoteNavigationFixture(runtime);
+
+  await fixture.playTarget();
+  await fixture.inspectActive();
+  await fixture.openTranscript();
+  await nextTurn();
+  await nextTurn();
+  const consent = JSON.parse(fixture.snapshot());
+  const targetTabId = consent.createdTabs[0].id;
+
+  fixture.setActiveTab(
+    "https://www.youtube.com/watch?v=another-video",
+    targetTabId,
+  );
+  const returned = await fixture.clickConsentSecondary();
+  await nextTurn();
+
+  assert.equal(returned, false);
+  const stale = JSON.parse(fixture.snapshot());
+  assert.equal(stale.resultsVisible, false);
+  assert.equal(stale.errorVisible, true);
+  assert.deepEqual(stale.sessionKeys, []);
+  assert.deepEqual(stale.supadataConsents, [false]);
 });
 
 test("saved-note navigation suppression is bound to one target route and is not reused", async () => {

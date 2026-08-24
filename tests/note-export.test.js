@@ -111,13 +111,20 @@ test("filenames carry a language suffix and drop illegal path characters", () =>
   );
   assert.equal(
     exporter.currentVideoNotesFilename("标题", "zh", { date: "2026-08-21T00:00:00Z" }),
-    "标题-notes-zh-2026-08-21.md",
+    "标题-notes-zh-2026-08-21.txt",
   );
   assert.equal(
     exporter.allNotesFilename("original", { date: "2026-08-21T00:00:00Z" }),
-    "digestdock-all-notes-original-2026-08-21.md",
+    "digestdock-all-notes-original-2026-08-21.txt",
   );
   assert.equal(exporter.safeTitleSlug("   "), "digestdock", "blank title has a fallback");
+  assert.equal(
+    exporter.currentVideoNotesFilename("A\u0000/B:*?", "original", {
+      date: "2026-08-21T00:00:00Z",
+    }),
+    "A B-notes-original-2026-08-21.txt",
+    "control and path characters stay out of TXT filenames",
+  );
 });
 
 // ----------------------------------------------------------------
@@ -146,53 +153,157 @@ const sampleSource = {
   ],
 };
 
-test("current video notes markdown carries metadata and saved notes without a full transcript", () => {
-  const md = exporter.buildCurrentVideoMarkdown(sampleSource, "zh");
-  assert.match(md, /^# 未来/m);
-  assert.match(md, /- 频道：Some Channel/);
-  assert.match(md, /- 网址：https:\/\/www\.youtube\.com\/watch\?v=abc123/);
-  assert.match(md, /- 平台：YouTube/);
-  assert.match(md, /- 导出语言：中文/);
-  assert.match(md, /## 视频简介\n\n一段中文简介。/);
-  assert.doesNotMatch(md, /## 字幕/);
-  assert.doesNotMatch(md, /第一行|第二行/);
-  assert.match(md, /### 00:04\n\n较早的笔记/);
-  // Notes are ordered by timecode: 00:04 must appear before 02:34.
-  assert.ok(md.indexOf("### 00:04") < md.indexOf("### 02:34"));
-});
-
-test("bilingual markdown pairs original and Chinese with clear labels", () => {
-  const md = exporter.buildCurrentVideoMarkdown(sampleSource, "bilingual");
-  assert.match(md, /^# The Future \/ 未来/m);
-  assert.doesNotMatch(md, /first line|第一行/);
-  assert.match(md, /\*\*原文\*\*：early note/);
-  assert.match(md, /\*\*中文\*\*：较早的笔记/);
-});
-
-test("original mode never emits Chinese text", () => {
-  const md = exporter.buildCurrentVideoMarkdown(sampleSource, "original");
-  assert.match(md, /^# The Future/m);
-  assert.doesNotMatch(md, /未来|一段中文简介|第一行|较早的笔记/);
-  assert.doesNotMatch(md, /first line|second line|## 字幕/);
-});
-
-test("all-notes markdown produces one section per source in group order", () => {
-  const second = {
-    ...sampleSource,
-    titleOriginal: "Another",
-    titleZh: "另一个",
-    canonicalUrl: "https://www.youtube.com/watch?v=def456",
-    notes: [{ timestampSeconds: 1, original: "n", zh: "笔记" }],
-  };
-  const md = exporter.buildAllNotesMarkdown([sampleSource, second], "zh", {
+test("current-video TXT is Markdown-free and contains metadata plus time-sorted notes", () => {
+  const txt = exporter.buildCurrentVideoText(sampleSource, "zh", {
     date: "2026-08-21T00:00:00Z",
   });
-  assert.match(md, /^# DigestDock 全部笔记/m);
-  assert.match(md, /- 视频数量：2/);
-  assert.match(md, /^## 未来/m);
-  assert.match(md, /^## 另一个/m);
-  assert.ok(md.indexOf("## 未来") < md.indexOf("## 另一个"));
-  assert.doesNotMatch(md, /## 字幕|first line|second line/);
+  assert.match(txt, /^标题：未来/m);
+  assert.match(txt, /^频道：Some Channel/m);
+  assert.match(txt, /^网址：https:\/\/www\.youtube\.com\/watch\?v=abc123/m);
+  assert.match(txt, /^平台：YouTube/m);
+  assert.match(txt, /^语言：中文/m);
+  assert.match(txt, /视频简介：\n一段中文简介。/);
+  assert.match(txt, /笔记：\n\[00:04\]\n较早的笔记/);
+  assert.ok(txt.indexOf("[00:04]") < txt.indexOf("[02:34]"));
+  assert.doesNotMatch(txt, /(?:^|\n)#+\s|\*\*/);
+  assert.doesNotMatch(txt, /first line|second line|字幕：/);
+});
+
+test("bilingual TXT labels original and Chinese adjacently", () => {
+  const txt = exporter.buildSourceText(sampleSource, "bilingual");
+  assert.match(txt, /标题：\n原文：The Future\n\s*中文：未来/);
+  assert.match(
+    txt,
+    /视频简介：\n原文：An english description\.\n中文：一段中文简介。/,
+  );
+  assert.match(txt, /\[00:04\]\n原文：early note\n中文：较早的笔记/);
+  assert.doesNotMatch(txt, /(?:^|\n)#+\s|\*\*/);
+});
+
+test("Chinese and bilingual TXT mark missing requested-language fields without original fallback", () => {
+  const incomplete = {
+    platform: "youtube",
+    titleOriginal: "Original title that must not stand in for Chinese",
+    descriptionOriginal: "Original description",
+    notes: [{ timestampSeconds: 1, original: "Original note" }],
+  };
+  const zh = exporter.buildSourceText(incomplete, "zh");
+  assert.match(zh, /^标题：（缺失：中文标题）/m);
+  assert.match(zh, /^频道：（缺失：频道）/m);
+  assert.match(zh, /^网址：（缺失：网址）/m);
+  assert.match(zh, /视频简介：\n（缺失：中文视频简介）/);
+  assert.match(zh, /\[00:01\]\n（缺失：中文笔记）/);
+  assert.doesNotMatch(zh, /Original title|Original description|Original note/);
+
+  const bilingual = exporter.buildSourceText(incomplete, "bilingual");
+  assert.match(
+    bilingual,
+    /原文：Original title that must not stand in for Chinese\n\s*中文：（缺失：中文标题）/,
+  );
+  assert.match(
+    bilingual,
+    /原文：Original description\n中文：（缺失：中文视频简介）/,
+  );
+  assert.match(
+    bilingual,
+    /原文：Original note\n中文：（缺失：中文笔记）/,
+  );
+});
+
+test("a confirmed Chinese source reuses original text instead of reporting missing Chinese", () => {
+  const txt = exporter.buildCurrentVideoText(
+    {
+      platform: "bilibili",
+      sourceLanguage: "zh-CN",
+      titleOriginal: "中文标题",
+      channelName: "频道",
+      canonicalUrl: "https://www.bilibili.com/video/BV1example/",
+      descriptionOriginal: "中文简介",
+      descriptionStatus: "present",
+      notes: [{ timestampSeconds: 2, original: "中文笔记", zh: "" }],
+    },
+    "zh",
+  );
+  assert.match(txt, /标题：中文标题/);
+  assert.match(txt, /视频简介：\n中文简介/);
+  assert.match(txt, /\[00:02\]\n中文笔记/);
+  assert.doesNotMatch(txt, /缺失：中文/);
+
+  const bilingual = exporter.buildCurrentVideoText(
+    {
+      platform: "bilibili",
+      sourceLanguage: "zh-CN",
+      titleOriginal: "中文标题",
+      channelName: "频道",
+      canonicalUrl: "https://www.bilibili.com/video/BV1example/",
+      descriptionOriginal: "中文简介",
+      descriptionStatus: "present",
+      notes: [{ timestampSeconds: 2, original: "中文笔记", zh: "" }],
+    },
+    "bilingual",
+  );
+  assert.equal((bilingual.match(/中文标题/g) || []).length, 1);
+  assert.equal((bilingual.match(/中文简介/g) || []).length, 1);
+  assert.equal((bilingual.match(/中文笔记/g) || []).length, 1);
+});
+
+test("TXT distinguishes an unknown description from a confirmed empty one", () => {
+  const unknown = exporter.buildCurrentVideoText(
+    { ...sampleSource, descriptionOriginal: "", descriptionZh: "", descriptionStatus: "unknown" },
+    "original",
+  );
+  const empty = exporter.buildCurrentVideoText(
+    { ...sampleSource, descriptionOriginal: "", descriptionZh: "", descriptionStatus: "confirmed-empty" },
+    "original",
+  );
+  assert.match(unknown, /（缺失：原文视频简介）/);
+  assert.match(empty, /视频简介：\n（无简介）/);
+  assert.doesNotMatch(empty, /缺失：原文视频简介/);
+});
+
+test("TXT marks a truncated description as incomplete", () => {
+  const txt = exporter.buildCurrentVideoText(
+    { ...sampleSource, descriptionStatus: "present", descriptionTruncated: true },
+    "original",
+  );
+  assert.match(txt, /An english description\.\n〔资料不完整：简介已裁剪〕/);
+});
+
+test("TXT preserves long timecodes beyond three hours", () => {
+  const txt = exporter.buildSourceText(
+    {
+      ...sampleSource,
+      notes: [
+        { timestampSeconds: 3 * 3600 + 7, original: "long video note", zh: "长视频笔记" },
+      ],
+    },
+    "original",
+  );
+  assert.match(txt, /\[3:00:07\]\nlong video note/);
+});
+
+test("all-notes TXT clearly separates sources and serializes only selected sources", () => {
+  const selected = {
+    ...sampleSource,
+    titleOriginal: "Selected source",
+    titleZh: "选中的来源",
+    notes: [{ timestampSeconds: 5, original: "selected-only-marker", zh: "仅选中" }],
+  };
+  const excluded = {
+    ...sampleSource,
+    titleOriginal: "Excluded source",
+    titleZh: "未选中的来源",
+    notes: [{ timestampSeconds: 6, original: "excluded-marker", zh: "排除" }],
+  };
+  const txt = exporter.buildAllNotesText([selected], "original", {
+    date: "2026-08-21T00:00:00Z",
+  });
+  assert.match(txt, /^DigestDock 全部笔记/m);
+  assert.match(txt, /^视频数量：1/m);
+  assert.match(txt, /={20,}\n视频 1 \/ 1\n={20,}/);
+  assert.match(txt, /Selected source|selected-only-marker/);
+  assert.doesNotMatch(txt, /Excluded source|excluded-marker/);
+  assert.doesNotMatch(txt, /(?:^|\n)#+\s|\*\*/);
 });
 
 test("transcript TXT keeps the header and full ordered transcript", () => {
@@ -205,20 +316,6 @@ test("transcript TXT keeps the header and full ordered transcript", () => {
   assert.match(txt, /\[00:04\] first line\n {4}第一行/);
   // Full transcript is present regardless of scroll position; 00:47 line exists.
   assert.match(txt, /\[00:47\] second line/);
-});
-
-test("missing description degrades explicitly while notes export ignores transcript state", () => {
-  const bare = {
-    platform: "bilibili",
-    titleOriginal: "空",
-    notes: [],
-    transcriptOriginal: [],
-  };
-  const md = exporter.buildCurrentVideoMarkdown(bare, "zh");
-  assert.match(md, /- 平台：B 站/);
-  assert.match(md, /## 视频简介\n\n（无简介）/);
-  assert.doesNotMatch(md, /## 字幕|（无字幕）/);
-  assert.match(md, /## 笔记\n\n（无笔记）/);
 });
 
 test("a notes export with 395 transcript rows still serializes only saved notes", () => {
@@ -237,8 +334,8 @@ test("a notes export with 395 transcript rows still serializes only saved notes"
       },
     ],
   };
-  const md = exporter.buildCurrentVideoMarkdown(source, "original");
-  assert.match(md, /## 笔记/);
-  assert.match(md, /### 06:18\n\nthe one saved note/);
-  assert.doesNotMatch(md, /transcript-only-row|## 字幕/);
+  const txt = exporter.buildCurrentVideoText(source, "original");
+  assert.match(txt, /笔记：/);
+  assert.match(txt, /\[06:18\]\nthe one saved note/);
+  assert.doesNotMatch(txt, /transcript-only-row|字幕：/);
 });

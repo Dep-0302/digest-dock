@@ -1409,6 +1409,115 @@ body {
   display: none;
 }
 
+.notes-export-picker {
+  margin: 10px 0;
+  padding: 12px;
+  color: var(--text-secondary);
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+}
+
+.notes-export-picker[hidden] {
+  display: none;
+}
+
+.notes-export-picker fieldset {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.notes-export-picker legend {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  inline-size: 100%;
+  padding: 0;
+  margin-bottom: 8px;
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--text);
+}
+
+.notes-export-selection-count {
+  flex-shrink: 0;
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+.notes-export-select-all,
+.notes-export-picker-option {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 34px;
+  cursor: pointer;
+}
+
+.notes-export-select-all {
+  padding: 0 8px;
+  font-size: 12px;
+  font-weight: 600;
+  border-bottom: 1px solid var(--border);
+}
+
+.notes-export-picker-list {
+  max-height: 240px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.notes-export-picker-option {
+  padding: 7px 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.notes-export-picker-option:last-child {
+  border-bottom: 0;
+}
+
+.notes-export-select-all input,
+.notes-export-picker-option input {
+  flex: 0 0 auto;
+  inline-size: 16px;
+  block-size: 16px;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.notes-export-picker-option-copy {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.notes-export-picker-option-title {
+  overflow: hidden;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.notes-export-picker-option-meta {
+  overflow: hidden;
+  font-size: 11px;
+  color: var(--text-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.notes-export-picker-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 10px;
+}
+
 .notes-export-item {
   padding: 8px 10px;
   font-size: 12px;
@@ -1449,7 +1558,49 @@ body {
 
 .notes-export-precheck-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
+}
+
+.notes-export-supplement-list {
+  display: grid;
+  gap: 7px;
+  margin: 9px 0;
+}
+
+.notes-export-supplement-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+}
+
+.notes-export-supplement-copy {
+  display: grid;
+  flex: 1 1 auto;
+  gap: 2px;
+  min-width: 0;
+}
+
+.notes-export-supplement-copy strong,
+.notes-export-supplement-copy span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.notes-export-supplement-copy strong {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.notes-export-supplement-copy span {
+  color: var(--text-muted);
+  font-size: 11px;
 }
 
 .notes-export-status {

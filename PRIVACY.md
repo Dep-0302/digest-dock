@@ -100,16 +100,16 @@ DigestDock uses Chrome's local extension storage, not a DigestDock cloud service
   fields. A URL supplied by the backup file is not trusted as the source of
   media identity.
 - Separately from JSON recovery backup, the side panel can export one video's
-  notes, all notes, or one source group as Markdown, and can download the current
-  transcript as TXT. Note Markdown contains saved notes plus title, channel,
+  notes, a selected set of source videos, all notes, or one source group as TXT,
+  and can download the current transcript as TXT. Note TXT contains saved notes plus title, channel,
   canonical URL, and description; it does not append the full transcript. The
   separate transcript TXT contains the complete transcript.
 - Original-language reading exports never call a network service. If Chinese or
-  bilingual content is incomplete, note export shows missing titles, description
+  bilingual content is incomplete, note export shows missing metadata, titles, description
   chunks, and saved notes, while transcript export separately shows missing
   transcript segments. DigestDock does not substitute original text as Chinese.
-  Only an explicit "Generate Chinese and export" or
-  "Continue" click may send those still-missing units to the currently selected
+  "Export now" stays local and writes explicit missing markers. Only an explicit
+  "Complete and export" or "Continue" click may send still-missing translation units to the currently selected
   AI provider. Each user-started round runs at most 20 task batches and a
   conservative maximum of 100 provider calls, saves every valid completed batch
   locally before continuing, and stops for another click instead of automatically
@@ -117,8 +117,9 @@ DigestDock uses Chrome's local extension storage, not a DigestDock cloud service
   A response already in flight may still be cached if it matches the frozen video
   and source revision, but it cannot start another batch, update a different
   video, or trigger an automatic download. This path never calls Supadata and
-  never silently switches provider.
-- Reading exports are plain, unencrypted Markdown or TXT outside extension
+  never silently switches provider. Metadata completion reads only a video page
+  the user explicitly opens; it does not open pages in the background or call Supadata.
+- Reading exports are plain, unencrypted TXT outside extension
   storage. Clearing or removing DigestDock does not delete files already
   downloaded by Chrome.
 

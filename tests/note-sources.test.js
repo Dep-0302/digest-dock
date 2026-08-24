@@ -311,6 +311,61 @@ test("export precheck lists missing material and never suggests fetching", () =>
   assert.equal(zh.hasTranslationGaps, true);
 });
 
+test("export precheck uses representative metadata when the source record is missing", () => {
+  const precheck = sources.buildExportPrecheck({
+    groups: [
+      {
+        mediaKey: "representative-only",
+        representative: {
+          videoTitle: "Representative title",
+          channelName: "Representative channel",
+          canonicalUrl: "https://youtu.be/representative-only",
+          platform: "youtube",
+        },
+        notes: [{ id: "note", text: "Saved note" }],
+      },
+    ],
+    sourcesByKey: {},
+    mode: "original",
+    includeTranscript: false,
+  });
+
+  const video = precheck.videos[0];
+  assert.equal(video.hasSource, false);
+  assert.equal(video.hasTitle, true);
+  assert.equal(video.hasChannel, true);
+  assert.equal(video.hasUrl, true);
+  assert.equal(video.blocking, true, "unknown description still blocks");
+  assert.deepEqual(video.blockingReasons, ["缺少视频简介状态"]);
+});
+
+test("export precheck blocks genuinely missing title and channel", () => {
+  const source = sources.normalizeNoteSource({
+    mediaKey: "missing-metadata",
+    canonicalUrl: "https://youtu.be/missing-metadata",
+    descriptionStatus: "confirmed-empty",
+  });
+  const precheck = sources.buildExportPrecheck({
+    groups: [
+      {
+        mediaKey: "missing-metadata",
+        representative: { platform: "youtube" },
+        notes: [],
+      },
+    ],
+    sourcesByKey: { "missing-metadata": source },
+    mode: "original",
+    includeTranscript: false,
+  });
+
+  const video = precheck.videos[0];
+  assert.equal(video.hasTitle, false);
+  assert.equal(video.hasChannel, false);
+  assert.ok(video.blockingReasons.includes("缺少视频标题"));
+  assert.ok(video.blockingReasons.includes("缺少频道名称"));
+  assert.ok(!video.blockingReasons.includes("缺少完整字幕"));
+});
+
 test("export precheck counts missing note-body translations", () => {
   const groups = [
     {
@@ -356,6 +411,7 @@ test("precheck treats a Chinese-source video as needing no translation", () => {
       platform: "bilibili",
       canonicalUrl: "https://www.bilibili.com/video/BV1xx411c7mD/?p=2",
       titleOriginal: "中文视频",
+      channelName: "中文频道",
       descriptionStatus: "confirmed-empty",
       transcriptOriginal: [{ start: 0, text: "你好" }],
     }),
@@ -381,6 +437,7 @@ test("original mode never reports translation gaps", () => {
       mediaKey: "v",
       canonicalUrl: "https://youtu.be/v",
       titleOriginal: "English",
+      channelName: "Channel",
       descriptionStatus: "confirmed-empty",
       sourceLanguage: "en",
       transcriptOriginal: [{ start: 0, text: "a" }],
@@ -408,6 +465,7 @@ test("description completeness blocks unknown, allows confirmed-empty, and count
     canonicalUrl: "https://youtu.be/description-state",
     titleOriginal: "Video",
     titleZh: "视频",
+    channelName: "Channel",
     sourceLanguage: "en",
     transcriptOriginal: [{ id: "row", start: 0, text: "hello" }],
     transcriptZh: [{ segmentId: "row", start: 0, text: "你好" }],
@@ -433,6 +491,22 @@ test("description completeness blocks unknown, allows confirmed-empty, and count
   });
   assert.equal(emptyCheck.videos[0].blocking, false);
   assert.equal(emptyCheck.translationGaps.descriptionChunks, 0);
+
+  const truncated = sources.normalizeNoteSource({
+    ...base,
+    descriptionOriginal: "x".repeat(20_001),
+  });
+  const truncatedCheck = sources.buildExportPrecheck({
+    groups,
+    sourcesByKey: { "description-state": truncated },
+    mode: "original",
+  });
+  assert.equal(truncatedCheck.videos[0].blocking, true);
+  assert.ok(
+    truncatedCheck.videos[0].blockingReasons.includes(
+      "视频简介已裁剪，不完整",
+    ),
+  );
 
   const present = sources.normalizeNoteSource({
     ...base,
@@ -516,6 +590,38 @@ test("notes export planning ignores full transcript gaps while transcript planni
   });
   assert.equal(transcriptPlan.unitCount, 395);
   assert.equal(transcriptPlan.sourceBatches.length, 99);
+});
+
+test("notes export precheck does not require a whole-video transcript", () => {
+  const source = sources.normalizeNoteSource({
+    mediaKey: "note-without-transcript",
+    canonicalUrl: "https://youtu.be/note-without-transcript",
+    titleOriginal: "Saved note source",
+    channelName: "Channel",
+    descriptionStatus: "confirmed-empty",
+    sourceLanguage: "en",
+    transcriptOriginal: [],
+    transcriptTruncated: true,
+  });
+  const precheck = sources.buildExportPrecheck({
+    groups: [
+      {
+        mediaKey: "note-without-transcript",
+        representative: { videoTitle: "Saved note source" },
+        notes: [{ id: "saved-note", text: "The saved note itself" }],
+      },
+    ],
+    sourcesByKey: { "note-without-transcript": source },
+    mode: "original",
+    includeTranscript: false,
+  });
+
+  assert.equal(precheck.videos[0].blocking, false);
+  assert.equal(precheck.videos[0].hasOriginalTranscript, false);
+  assert.ok(!precheck.videos[0].blockingReasons.includes("缺少完整字幕"));
+  assert.ok(
+    !precheck.videos[0].blockingReasons.includes("字幕资料已裁剪，不完整"),
+  );
 });
 
 test("export translation plan is deterministic, bounded, and batches stable IDs", () => {
@@ -850,6 +956,7 @@ test("toExportSource maps notes through the injected language resolver", () => {
   const source = sources.normalizeNoteSource({
     mediaKey: "v",
     titleOriginal: "T",
+    sourceLanguage: "en",
     transcriptOriginal: [{ start: 0, text: "a" }],
   });
   const out = sources.toExportSource(
@@ -866,6 +973,7 @@ test("toExportSource maps notes through the injected language resolver", () => {
     },
   );
   assert.equal(out.titleOriginal, "T");
+  assert.equal(out.sourceLanguage, "en");
   assert.deepEqual(out.notes[0], {
     timestampSeconds: 9,
     original: "RAW",

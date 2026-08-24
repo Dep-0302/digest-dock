@@ -313,7 +313,7 @@
                     type="button"
                     aria-haspopup="menu"
                     aria-expanded="false"
-                    aria-controls="notesExportMenu"
+                    aria-controls="notesExportMenu notesExportPicker"
                   >
                     导出笔记
                   </button>
@@ -334,16 +334,68 @@
                     </button>
                     <button
                       class="notes-export-item"
+                      id="selectNotesForExport"
+                      type="button"
+                      role="menuitem"
+                      hidden
+                    >
+                      选择视频导出…
+                    </button>
+                    <button
+                      class="notes-export-item"
                       id="exportAllNotes"
                       type="button"
                       role="menuitem"
+                      hidden
                     >
-                      导出全部笔记
+                      导出全部视频
                     </button>
                   </div>
                 </div>
               </div>
             </div>
+            <form
+              class="notes-export-picker"
+              id="notesExportPicker"
+              aria-labelledby="notesExportPickerLegend"
+              hidden
+            >
+              <fieldset>
+                <legend id="notesExportPickerLegend">
+                  <span>选择要导出的视频</span>
+                  <span
+                    class="notes-export-selection-count"
+                    id="notesExportSelectionCount"
+                    aria-live="polite"
+                  >已选 0/0</span>
+                </legend>
+                <label class="notes-export-select-all">
+                  <input id="notesExportSelectAll" type="checkbox" />
+                  <span>全选</span>
+                </label>
+                <div
+                  class="notes-export-picker-list"
+                  id="notesExportPickerList"
+                ></div>
+                <div class="notes-export-picker-actions">
+                  <button
+                    class="enhance-btn"
+                    id="cancelNotesExportSelection"
+                    type="button"
+                  >
+                    取消
+                  </button>
+                  <button
+                    class="enhance-btn active"
+                    id="confirmNotesExportSelection"
+                    type="submit"
+                    disabled
+                  >
+                    导出所选（0）
+                  </button>
+                </div>
+              </fieldset>
+            </form>
             <div
               class="notes-export-precheck"
               id="notesExportPrecheck"

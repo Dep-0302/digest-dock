@@ -923,6 +923,7 @@ function showNoteSavedToast(note) {
  * These are just sitting in the HTML — we grab them from the DOM elements.
  */
 function extractVideoInfo() {
+  const videoId = new URLSearchParams(window.location.search).get("v") || "";
   // The video title is in an h1 element inside the #title container
   const titleElement = document.querySelector(
     "h1.ytd-watch-metadata yt-formatted-string, #title h1 yt-formatted-string",
@@ -945,6 +946,7 @@ function extractVideoInfo() {
   );
 
   return {
+    videoId,
     title: titleElement?.textContent?.trim() || "",
     channelName: channelElement?.textContent?.trim() || "",
     duration: videoElement?.duration || 0,
@@ -952,7 +954,7 @@ function extractVideoInfo() {
     descriptionStatus: descriptionElement
       ? descriptionElement.textContent?.trim()
         ? "present"
-        : "unknown"
+        : "confirmed-empty"
       : "unknown",
   };
 }

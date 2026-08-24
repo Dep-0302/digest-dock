@@ -306,8 +306,8 @@ test("release copy documents current scope without em dashes", () => {
   assert.doesNotMatch(optionsPage, /%USERPROFILE%\\Documents\\(?:youtube-digest|digest-dock)/);
 
   assert.doesNotMatch(chineseReadme, /^## 用编程 Agent 改造成自己的版本$/m);
-  assert.match(readme, /exports the current video, all notes, or one source group as UTF-8 Markdown/i);
-  assert.match(chineseReadme, /当前视频、全部笔记和单个视频来源的 UTF-8 Markdown 导出/);
+  assert.match(readme, /exports the current video, selected source videos, all notes, or one source group as UTF-8 TXT/i);
+  assert.match(chineseReadme, /当前视频、所选视频、全部笔记和单个视频来源的 UTF-8 TXT 导出/);
   assert.match(readme, /Tencent Hunyuan Translation[\s\S]*unavailable/i);
   assert.match(chineseReadme, /腾讯混元翻译[\s\S]*暂不可用/);
 
@@ -321,6 +321,7 @@ test("release copy documents current scope without em dashes", () => {
   assert.doesNotMatch(publishedDocs, /optional custom-origin/i);
   assert.doesNotMatch(publishedDocs, /chosen AI provider/i);
   assert.doesNotMatch(publishedDocs, /configure a different OpenAI-compatible/i);
+  assert.doesNotMatch(publishedDocs, /Markdown note exports|note Markdown|笔记 Markdown|可导出 Markdown/i);
   // The retired remix mechanism and the DeepSeek-only claim are gone; the
   // published build now ships a preset provider picker with DeepSeek as default.
   assert.doesNotMatch(publishedDocs, /only AI provider/i);
@@ -451,17 +452,35 @@ test("notes filters preserve selected contrast and expose pressed state", () => 
   assert.match(js, /setAttribute\("aria-pressed", String\(showAll\)\)/);
 });
 
-test("notes markdown and completion jobs stay scoped away from full transcripts", () => {
+test("all-notes export exposes an accessible multi-video scope picker", () => {
+  const html = read("sidepanel.html");
+  const css = read("sidepanel.css");
+  const js = read("sidepanel.js");
+  assert.match(html, /id="selectNotesForExport"[\s\S]*?选择视频导出/);
+  assert.match(html, /id="notesExportPicker"[\s\S]*?<fieldset>/);
+  assert.match(html, /id="notesExportSelectAll"[^>]*type="checkbox"/);
+  assert.match(html, /id="confirmNotesExportSelection"[\s\S]*?disabled/);
+  assert.match(css, /\.notes-export-picker-list\s*\{[^}]*max-height:\s*240px;[^}]*overflow-y:\s*auto/);
+  assert.match(js, /let selectedNoteExportMediaKeys = new Set\(\)/);
+  assert.match(js, /confirm\.disabled = selected === 0/);
+  assert.match(js, /selectAll\.indeterminate = selected > 0 && selected < total/);
+  assert.match(js, /event\.key !== "Escape"/);
+});
+
+test("notes TXT and completion jobs stay scoped away from full transcripts", () => {
   const exporter = read("note-export.js");
   const sources = read("note-sources.js");
   const panel = read("sidepanel.js");
   assert.doesNotMatch(
     exporter,
     /lines\.push\(`\$\{sub\} 字幕`\)/,
-    "notes Markdown must not append the full transcript section",
+    "notes reading exports must not append the full transcript section",
   );
   assert.match(sources, /function buildExportPrecheck\([\s\S]*?includeTranscript = true/);
-  assert.match(panel, /const EXPORT_CONTENT_CONTRACT_VERSION = 3/);
+  assert.match(panel, /const EXPORT_CONTENT_CONTRACT_VERSION = 4/);
+  assert.match(panel, /buildCurrentVideoText/);
+  assert.match(panel, /buildAllNotesText/);
+  assert.doesNotMatch(panel, /buildCurrentVideoMarkdown|buildAllNotesMarkdown|text\/markdown/);
   assert.ok(
     (panel.match(/includeTranscript: false/g) || []).length >= 12,
     "all initial and final note-export prechecks/plans must exclude transcripts",
@@ -472,7 +491,7 @@ test("notes markdown and completion jobs stay scoped away from full transcripts"
   );
   assert.match(
     panel,
-    /if \(!outcome\.complete\) \{[\s\S]*?await exportAllNotes\(\)/,
+    /if \(!outcome\.complete\) \{[\s\S]*?await exportAllNotes\(frozenMediaKeys\)/,
   );
   assert.match(
     panel,
@@ -482,6 +501,15 @@ test("notes markdown and completion jobs stay scoped away from full transcripts"
     panel,
     /if \(!outcome\.complete\) \{[\s\S]*?await exportTranscript\(\)/,
   );
+});
+
+test("YouTube metadata capture binds page info to the exact video identity", () => {
+  const content = read("content.js");
+  assert.match(
+    content,
+    /function extractVideoInfo\(\)[\s\S]*?new URLSearchParams\(window\.location\.search\)\.get\("v"\)[\s\S]*?return \{[\s\S]*?videoId,/,
+  );
+  assert.match(content, /descriptionStatus:[\s\S]*?"confirmed-empty"/);
 });
 
 test("runtime has no source-file credential dependency or retired model", () => {
