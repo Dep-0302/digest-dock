@@ -54,7 +54,7 @@ test("manifest uses minimized install-time permissions", () => {
     "https://www.bilibili.com/video/BV*",
   ]);
   assert.equal(Object.hasOwn(manifest, "optional_host_permissions"), false);
-  assert.equal(manifest.version, "1.4.2");
+  assert.equal(manifest.version, "1.4.3");
 });
 
 test("cross-platform runtime dependencies match the API-primary release surface", () => {
@@ -132,7 +132,7 @@ test("cross-platform runtime dependencies match the API-primary release surface"
     3,
     "only the icon-adjacent DigestDock brand word must emphasize D, D, and K",
   );
-  assert.match(optionsPage, /<p class="settings-version">DigestDock 1\.4\.2<\/p>/);
+  assert.match(optionsPage, /<p class="settings-version">DigestDock 1\.4\.3<\/p>/);
   assert.match(optionsPage, /<p class="eyebrow">DIGESTDOCK<\/p>/);
   assert.match(optionsStyles, /\.brand-letter\s*\{[^}]*font-weight:\s*750/);
   assert.doesNotMatch(optionsPage, /#1F2933|#F26A4F/);
