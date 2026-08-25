@@ -1378,6 +1378,311 @@ body {
   color: white;
 }
 
+/* Notes header: filter on the left, export on the right. */
+.notes-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.notes-export {
+  position: relative;
+}
+
+.notes-export-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  min-width: 160px;
+  padding: 4px;
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  box-shadow: var(--shadow-md, 0 6px 20px rgba(0, 0, 0, 0.16));
+}
+
+.notes-export-menu[hidden] {
+  display: none;
+}
+
+.notes-export-picker {
+  margin: 10px 0;
+  padding: 12px;
+  color: var(--text-secondary);
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+}
+
+.notes-export-picker[hidden] {
+  display: none;
+}
+
+.notes-export-picker fieldset {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.notes-export-picker legend {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  inline-size: 100%;
+  padding: 0;
+  margin-bottom: 8px;
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--text);
+}
+
+.notes-export-selection-count {
+  flex-shrink: 0;
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+.notes-export-select-all,
+.notes-export-picker-option {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 34px;
+  cursor: pointer;
+}
+
+.notes-export-select-all {
+  padding: 0 8px;
+  font-size: 12px;
+  font-weight: 600;
+  border-bottom: 1px solid var(--border);
+}
+
+.notes-export-picker-list {
+  max-height: 240px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.notes-export-picker-option {
+  padding: 7px 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.notes-export-picker-option:last-child {
+  border-bottom: 0;
+}
+
+.notes-export-select-all input,
+.notes-export-picker-option input {
+  flex: 0 0 auto;
+  inline-size: 16px;
+  block-size: 16px;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.notes-export-picker-option-copy {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+  flex: 1 1 auto;
+}
+
+.notes-export-picker-option-status {
+  flex: 0 0 auto;
+  padding: 2px 7px;
+  font-size: 10.5px;
+  font-weight: 650;
+  line-height: 1.4;
+  color: var(--text-muted);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.notes-export-picker-option-status.is-ready {
+  color: var(--success);
+  border-color: color-mix(in srgb, var(--success) 28%, var(--border));
+  background: color-mix(in srgb, var(--success) 7%, var(--surface));
+}
+
+.notes-export-picker-option-status.is-metadata {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 24%, var(--border));
+  background: color-mix(in srgb, var(--danger) 6%, var(--surface));
+}
+
+.notes-export-picker-option-status.is-translation {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 24%, var(--border));
+  background: color-mix(in srgb, var(--accent) 6%, var(--surface));
+}
+
+.notes-export-picker-option-title {
+  overflow: hidden;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.notes-export-picker-option-meta {
+  overflow: hidden;
+  font-size: 11px;
+  color: var(--text-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.notes-export-picker-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.notes-export-picker-disclosure {
+  margin: 10px 0 0;
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-secondary);
+  background: color-mix(in srgb, var(--surface-raised) 78%, transparent);
+}
+
+.notes-export-cancel {
+  margin-right: auto;
+}
+
+.notes-export-item {
+  padding: 8px 10px;
+  font-size: 12px;
+  text-align: left;
+  color: var(--text-secondary);
+  background: none;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.notes-export-item:hover,
+.notes-export-item:focus-visible {
+  background: var(--surface-hover, rgba(0, 0, 0, 0.05));
+  color: var(--text-primary);
+  outline: none;
+}
+
+.notes-export-precheck {
+  margin: 10px 0;
+  padding: 10px 12px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+}
+
+.notes-export-precheck[hidden] {
+  display: none;
+}
+
+.notes-export-precheck-text {
+  margin: 0 0 8px;
+  white-space: pre-line;
+}
+
+.notes-export-precheck-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.notes-export-supplement-list {
+  display: grid;
+  gap: 7px;
+  margin: 9px 0;
+}
+
+.notes-export-supplement-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+}
+
+.notes-export-supplement-copy {
+  display: grid;
+  flex: 1 1 auto;
+  gap: 2px;
+  min-width: 0;
+}
+
+.notes-export-supplement-copy strong,
+.notes-export-supplement-copy span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.notes-export-supplement-copy strong {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.notes-export-supplement-copy span {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.notes-export-status {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.notes-export-status.is-error {
+  color: var(--danger, #c0392b);
+}
+
+.notes-export-status[hidden] {
+  display: none;
+}
+
+.note-source-export {
+  margin-left: 6px;
+  padding: 3px 9px;
+  font-size: 11px;
+  color: var(--text-muted);
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.note-source-export:hover,
+.note-source-export:focus-visible {
+  color: var(--text-secondary);
+  border-color: var(--accent);
+  outline: none;
+}
+
 .notes-intro {
   font-family: var(--font-reading);
   font-size: 13px;
@@ -1387,10 +1692,97 @@ body {
   line-height: 1.7;
 }
 
-/* Continuous list: hairline separators rather than one floating card each */
+/* One bordered source container per video; notes grouped inside by timecode. */
 #notesList {
   display: flex;
   flex-direction: column;
+}
+
+.note-source-group {
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  margin-bottom: 12px;
+  overflow: hidden;
+}
+
+.note-source-group:last-child {
+  margin-bottom: 0;
+}
+
+.note-source-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-raised);
+}
+
+.note-source-title {
+  flex: 1 1 100%;
+  min-width: 0;
+  font-family: var(--font-reading);
+  font-size: 13.5px;
+  font-weight: 650;
+  line-height: 1.4;
+  color: var(--text);
+}
+
+/* Long titles truncate to one line each; the full text stays reachable via the
+   header `title` attribute and each line's `lang`-tagged accessible name. */
+.note-source-title-line {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.note-source-title-line--zh {
+  margin-top: 1px;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.note-source-meta {
+  flex: 1 1 auto;
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+.note-source-actions {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 6px;
+}
+
+.note-source-open {
+  font: 600 11.5px/1 var(--font-body);
+  padding: 5px 10px;
+  border: 1px solid var(--border-heavy);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition:
+    color 0.16s ease,
+    border-color 0.16s ease;
+}
+
+.note-source-open:hover {
+  color: var(--text);
+  border-color: var(--text-muted);
+}
+
+.note-source-open:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.note-source-list {
+  padding: 2px 14px;
 }
 
 .note-item {

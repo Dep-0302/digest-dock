@@ -103,7 +103,7 @@ class FakeElement {
   }
 }
 
-function createHarness({ sendMessageImpl } = {}) {
+function createHarness({ sendMessageImpl, consoleImpl = console } = {}) {
   const actionRows = [];
   const fallbackRows = [];
   const elements = [];
@@ -153,7 +153,8 @@ function createHarness({ sendMessageImpl } = {}) {
   };
 
   const context = vm.createContext({
-    console,
+    console: consoleImpl,
+    URLSearchParams,
     document,
     window: {
       location: { pathname: "/watch" },
@@ -268,6 +269,78 @@ test("accidental duplicate content-script injection is idempotent", () => {
   assert.equal(typeof harness.context.injectDigestButton, "function");
 });
 
+test("video info reads the exact full description from embedded player data", () => {
+  const harness = createHarness();
+  const videoId = "0KHvXrq0gT8";
+  harness.context.window.location.search = `?v=${videoId}`;
+  harness.context.document.scripts = [
+    {
+      textContent:
+        `var ytInitialPlayerResponse = {"videoDetails":{"videoId":"${videoId}",` +
+        '"shortDescription":"First line\\nSecond line with \\\"quotes\\\".","lengthSeconds":"30"}};',
+    },
+  ];
+  harness.context.document.querySelector = (selector) => {
+    if (selector.includes("h1.ytd-watch-metadata")) {
+      return { textContent: "Why Everyone Is Living The Same Life" };
+    }
+    if (selector.includes("#channel-name")) {
+      return { textContent: "Mikey Posada" };
+    }
+    if (selector === "video.html5-main-video") return { duration: 30 };
+    return null;
+  };
+
+  const info = vm.runInContext("extractVideoInfo()", harness.context);
+  assert.equal(info.videoId, videoId);
+  assert.equal(info.description, 'First line\nSecond line with "quotes".');
+  assert.equal(info.descriptionStatus, "present");
+});
+
+test("video info distinguishes a confirmed empty description from an unready page", () => {
+  const harness = createHarness();
+  harness.context.window.location.search = "?v=empty123";
+  harness.context.document.scripts = [
+    {
+      textContent:
+        'var ytInitialPlayerResponse = {"videoDetails":{"videoId":"empty123","shortDescription":""}};',
+    },
+  ];
+  harness.context.document.querySelector = () => null;
+  const confirmedEmpty = vm.runInContext("extractVideoInfo()", harness.context);
+  assert.equal(confirmedEmpty.description, "");
+  assert.equal(confirmedEmpty.descriptionStatus, "confirmed-empty");
+
+  harness.context.document.scripts = [];
+  harness.context.document.querySelector = (selector) =>
+    selector.includes("#description-inline-expander")
+      ? { textContent: "" }
+      : null;
+  const unknown = vm.runInContext("extractVideoInfo()", harness.context);
+  assert.equal(unknown.descriptionStatus, "unknown");
+  assert.equal(unknown.descriptionTruncated, false);
+});
+
+test("a truncated DOM or meta description never counts as complete source material", () => {
+  const harness = createHarness();
+  harness.context.window.location.search = "?v=hydrating123";
+  harness.context.document.scripts = [];
+  harness.context.document.querySelector = (selector) => {
+    if (selector === "meta[name='description']") {
+      return {
+        getAttribute(name) {
+          return name === "content" ? "Truncated description..." : "";
+        },
+      };
+    }
+    return null;
+  };
+  const info = vm.runInContext("extractVideoInfo()", harness.context);
+  assert.equal(info.description, "Truncated description...");
+  assert.equal(info.descriptionStatus, "unknown");
+  assert.equal(info.descriptionTruncated, true);
+});
+
 test("watch-page mutations do not restart the note-button retry loop", () => {
   const harness = createHarness();
   harness.documentListeners.DOMContentLoaded();
@@ -330,7 +403,13 @@ test("Digest button skips a hidden responsive toolbar", () => {
 });
 
 test("stale extension buttons ask for a page refresh without logging another failure", async () => {
+  const errors = [];
   const harness = createHarness({
+    consoleImpl: Object.assign(Object.create(console), {
+      error(...args) {
+        errors.push(args);
+      },
+    }),
     async sendMessageImpl() {
       throw new Error("Extension context invalidated.");
     },
@@ -354,12 +433,75 @@ test("stale extension buttons ask for a page refresh without logging another fai
   );
   assert.ok(notice);
   assert.match(notice.textContent, /请刷新当前 YouTube 页面/);
+  assert.equal(errors.length, 0);
   assert.equal(
     harness.context.isExtensionContextInvalidatedError(
       new Error("Extension context invalidated."),
     ),
     true,
   );
+  assert.equal(
+    harness.context.isExtensionContextInvalidatedError(
+      new TypeError("Cannot read properties of undefined (reading 'sendMessage')"),
+    ),
+    true,
+  );
+});
+
+test("a reloaded extension with no runtime disables the stale opener before sending", async () => {
+  let sendCalls = 0;
+  const errors = [];
+  const harness = createHarness({
+    consoleImpl: Object.assign(Object.create(console), {
+      error(...args) {
+        errors.push(args);
+      },
+    }),
+    async sendMessageImpl() {
+      sendCalls += 1;
+      return { success: true };
+    },
+  });
+  const { row, buttonGroup } = createActionRow({ width: 389, height: 36 });
+  harness.actionRows.push(row);
+  harness.context.injectDigestButton();
+  const button = buttonGroup.children[0];
+  harness.context.chrome.runtime = undefined;
+
+  await button.listeners.click({ preventDefault() {}, stopPropagation() {} });
+
+  assert.equal(sendCalls, 0);
+  assert.equal(button.disabled, true);
+  assert.equal(button.title, "请刷新页面");
+  assert.equal(button["aria-label"], "DigestDock 已更新，请刷新页面");
+  const notice = harness.context.document.getElementById(REFRESH_NOTICE_ID);
+  assert.ok(notice);
+  assert.match(notice.textContent, /请刷新当前 YouTube 页面/);
+  assert.equal(errors.length, 0);
+});
+
+test("ordinary side-panel messaging failures remain visible in the console", async () => {
+  const errors = [];
+  const harness = createHarness({
+    consoleImpl: Object.assign(Object.create(console), {
+      error(...args) {
+        errors.push(args);
+      },
+    }),
+    async sendMessageImpl() {
+      throw new Error("Could not establish connection. Receiving end does not exist.");
+    },
+  });
+  const { row, buttonGroup } = createActionRow({ width: 389, height: 36 });
+  harness.actionRows.push(row);
+  harness.context.injectDigestButton();
+  const button = buttonGroup.children[0];
+
+  await button.listeners.click({ preventDefault() {}, stopPropagation() {} });
+
+  assert.equal(button.disabled, undefined);
+  assert.equal(errors.length, 1);
+  assert.match(String(errors[0][0]), /Failed to open side panel/);
 });
 
 test("Digest button replaces stale instances and removes duplicates", () => {

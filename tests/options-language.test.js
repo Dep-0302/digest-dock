@@ -158,158 +158,101 @@ test("notes backup controls are accessible and explain the notes-only JSON scope
   }
 });
 
-test("customization guidance is concise and has a visible placeholder reminder", () => {
+test("the AI service card exposes an accessible provider combobox, not a native select", () => {
   const html = read("options.html");
-  const steps = html.match(
-    /<ol class="customization-steps">([\s\S]*?)<\/ol>/,
-  );
+  const script = read("options.js");
 
-  assert.ok(steps, "Expected a numbered customization guide");
-  assert.equal((steps[1].match(/<li\b/g) || []).length, 3);
-  assert.match(html, /class="prompt-reminder"/);
-  assert.match(html, /role="note"/);
-  assert.equal(
-    options.translate("zh-CN", "customizationReminder"),
-    "复制前，请先把 [PROVIDER] 和 [MODEL] 替换成你想使用的服务和模型。",
+  // The provider picker is an ARIA combobox/listbox (a native <select> cannot
+  // reliably render the per-option official brand icons), with a labelled
+  // trigger and a hidden, labelled listbox.
+  assert.doesNotMatch(html, /<select\b/i);
+  assert.match(
+    html,
+    /id="providerSelectButton"[\s\S]*?role="combobox"[\s\S]*?aria-haspopup="listbox"[\s\S]*?aria-expanded="false"[\s\S]*?aria-controls="providerSelectList"/,
   );
-  assert.equal(
-    options.translate("en", "customizationStepFolder"),
-    "Open the extracted DigestDock project folder in your coding agent.",
+  assert.match(
+    html,
+    /id="providerSelectButton"[\s\S]*?aria-labelledby="providerSelectLabel providerSelectButton"/,
   );
-  assert.equal(
-    options.translate("zh-CN", "customizationStepFolder"),
-    "在编程 Agent 中打开 DigestDock 解压后的项目文件夹。",
+  assert.match(
+    html,
+    /id="providerSelectList"[\s\S]*?role="listbox"[\s\S]*?aria-labelledby="providerSelectLabel"[\s\S]*?tabindex="-1"[\s\S]*?hidden/,
   );
-  assert.doesNotMatch(html, /~\/Documents\/(?:youtube-digest|digest-dock)/);
-  assert.doesNotMatch(html, /%USERPROFILE%\\Documents\\(?:youtube-digest|digest-dock)/);
+  // The presentation list carries all six official icons. Unverified entries
+  // remain visible but disabled and can never become the active provider.
+  assert.match(script, /listProviderDescriptions\(\)/);
+  assert.match(script, /aria-disabled/);
+  assert.match(script, /providerUnavailable/);
+  assert.match(script, /if \(!selectable\) return;/);
+  assert.match(script, /providerSelectList\.classList\.toggle\([\s\S]*?"opens-up"/);
+
+  // The service avatar and the trigger both keep an <img>/monogram pair so a
+  // missing official asset falls back to a neutral glyph, never a wrong icon.
+  assert.match(
+    html,
+    /id="providerAvatarImg"[^>]*src="icons\/providers\/deepseek\.png"[^>]*alt="DeepSeek"/,
+  );
+  assert.match(html, /id="providerAvatarMonogram"[^>]*hidden/);
+  assert.match(
+    html,
+    /class="provider-select-avatar-img"[^>]*src="icons\/providers\/deepseek\.png"[^>]*alt="DeepSeek"/,
+  );
+  assert.match(html, /class="provider-monogram"[^>]*hidden/);
+
+  // Capabilities are shown as text next to the model label, not colour alone.
+  assert.match(html, /data-i18n="capabilitiesLabel"/);
+  assert.match(html, /id="providerCapabilities"/);
+  assert.match(html, /id="providerModelLabel"/);
 });
 
-test("customization prompt switches languages and preserves technical values", () => {
+test("the key field is provider-neutral with a runtime create-key link", () => {
   const html = read("options.html");
-  const englishPrompt = options.translate("en", "customizationPrompt");
-  const chinesePrompt = options.translate("zh-CN", "customizationPrompt");
 
-  assert.match(html, /placeholder="粘贴 Supadata 密钥"/);
-  assert.match(html, /placeholder="粘贴 DeepSeek 密钥"/);
-  assert.match(html, /https:\/\/dash\.supadata\.ai\/auth\/sign-up/);
-  assert.match(html, /https:\/\/platform\.deepseek\.com\/api_keys/);
-  const supadataInput = html.match(/<input[\s\S]*?id="supadataApiKey"[\s\S]*?>/)?.[0];
+  // No provider name is baked into the key input; the placeholder, help text,
+  // and create-key link are all driven by the selected provider at runtime.
+  const keyInput = html.match(/<input[\s\S]*?id="aiApiKey"[\s\S]*?>/)?.[0];
+  assert.ok(keyInput, "Expected the AI key input");
+  assert.match(keyInput, /data-i18n-placeholder="aiKeyPlaceholder"/);
+  assert.doesNotMatch(keyInput, /DeepSeek/);
+  assert.match(html, /id="providerHelpLink"[\s\S]*?data-i18n="createKeyLink"/);
+  assert.match(html, /id="providerHelpText"[\s\S]*?data-i18n="aiKeyHelp"/);
+  // No free-form endpoint, model, or legacy provider text inputs are exposed.
+  assert.doesNotMatch(html, /id="(?:provider|aiBaseUrl|aiModel)"/);
+
+  for (const language of ["en", "zh-CN"]) {
+    assert.doesNotMatch(options.translate(language, "aiKeyPlaceholder"), /DeepSeek/);
+  }
+});
+
+test("the provider monogram stays a readable, wrong-provider-proof glyph", () => {
+  assert.equal(options.providerMonogram("DeepSeek"), "D");
+  assert.equal(options.providerMonogram("智谱 GLM"), "G");
+  assert.equal(options.providerMonogram("阿里云百炼 Qwen"), "Q");
+  assert.equal(options.providerMonogram("Fireworks"), "F");
+  assert.equal(options.providerMonogram(""), "?");
+});
+
+test("Supadata stays optional and saving writes the whole provider key map", () => {
+  const html = read("options.html");
+  const optionsScript = read("options.js");
+
+  const supadataInput = html.match(
+    /<input[\s\S]*?id="supadataApiKey"[\s\S]*?>/,
+  )?.[0];
   assert.ok(supadataInput, "Expected the optional Supadata input");
   assert.doesNotMatch(supadataInput, /\srequired(?:\s|=|>)/i);
   assert.match(options.translate("en", "supadataApiKeyLabel"), /optional/i);
   assert.match(options.translate("zh-CN", "supadataApiKeyLabel"), /可选/);
   assert.match(options.translate("en", "supadataHelp"), /confirm[\s\S]*third-party/i);
   assert.match(options.translate("zh-CN", "supadataHelp"), /确认[\s\S]*第三方/);
-  assert.doesNotMatch(options.translate("en", "supadataHelp"), /YouTube Digest/);
-  assert.doesNotMatch(options.translate("zh-CN", "supadataHelp"), /YouTube Digest/);
-  const saveSettings = read("options.js").match(
+
+  const saveSettings = optionsScript.match(
     /async function saveSettings\(event\)[\s\S]*?\n    }/,
   )?.[0];
   assert.ok(saveSettings, "Expected the Settings save handler");
-  assert.match(saveSettings, /if \(!settings\.aiApiKey\)/);
-  assert.doesNotMatch(saveSettings, /!settings\.supadataApiKey/);
-  assert.ok(html.includes(`>${chinesePrompt}</textarea>`));
-  assert.match(chinesePrompt, /^请把当前本地 DigestDock 工作区改为使用/);
-  assert.notEqual(chinesePrompt, englishPrompt);
-  assert.match(
-    englishPrompt,
-    /Keep DeepSeek-only request fields and retry behavior isolated to DeepSeek\. Handle provider-specific rules separately so one provider does not affect another\./,
-  );
-  assert.match(
-    chinesePrompt,
-    /DeepSeek 专用的请求参数和重试逻辑继续只用于 DeepSeek。新服务的专属规则请单独处理，避免相互影响。/,
-  );
-
-  for (const prompt of [englishPrompt, chinesePrompt]) {
-    assert.match(prompt, /\[PROVIDER\]/);
-    assert.match(prompt, /\[MODEL\]/);
-    assert.match(prompt, /manifest\.json/);
-    assert.match(prompt, /README\.md/);
-    assert.match(prompt, /README\.zh-CN\.md/);
-    assert.match(prompt, /PRIVACY\.md/);
-    assert.match(prompt, /SECURITY\.md/);
-    assert.match(prompt, /npm test/);
-    assert.match(prompt, /npm run check/);
-    assert.match(prompt, /npm run package/);
-    assert.doesNotMatch(prompt, /—/);
-  }
-  const textareaTag = html.match(/<textarea id="customizationPrompt"[^>]*>/);
-  assert.ok(textareaTag, "Expected the customization prompt textarea");
-  assert.doesNotMatch(textareaTag[0], /\sreadonly(?:\s|=|>)/);
-  assert.match(
-    textareaTag[0],
-    /aria-describedby="customizationPromptReminder"/,
-  );
-  assert.doesNotMatch(html, /<textarea id="customizationPrompt"[^>]*data-i18n/);
-});
-
-test("language switching preserves edited prompt drafts for the page session", () => {
-  const drafts = options.createPromptDrafts();
-  const chineseDefault = drafts["zh-CN"];
-
-  const chinese = options.switchPromptDraft(
-    drafts,
-    "en",
-    "zh-CN",
-    "Edited English [PROVIDER] [MODEL]",
-  );
-  assert.equal(chinese.prompt, chineseDefault);
-
-  const english = options.switchPromptDraft(
-    drafts,
-    "zh-CN",
-    "en",
-    "已编辑中文 [PROVIDER] [MODEL]",
-  );
-  assert.equal(english.prompt, "Edited English [PROVIDER] [MODEL]");
-
-  const restoredChinese = options.switchPromptDraft(
-    drafts,
-    "en",
-    "zh-CN",
-    english.prompt,
-  );
-  assert.equal(restoredChinese.prompt, "已编辑中文 [PROVIDER] [MODEL]");
-});
-
-test("copy helper writes the current edited textarea value", async () => {
-  const writes = [];
-  const clipboard = {
-    async writeText(value) {
-      writes.push(value);
-    },
-  };
-
-  await options.copyPromptValue(
-    clipboard,
-    "My edited prompt for [PROVIDER] and [MODEL]",
-  );
-
-  assert.deepEqual(writes, ["My edited prompt for [PROVIDER] and [MODEL]"]);
-});
-
-test("localized prompt updates preserve the textarea selection and scroll", () => {
-  const textarea = {
-    value: options.translate("en", "customizationPrompt"),
-    selectionStart: 12,
-    selectionEnd: 48,
-    selectionDirection: "forward",
-    scrollTop: 90,
-    scrollLeft: 7,
-    setSelectionRange(start, end, direction) {
-      this.selectionStart = start;
-      this.selectionEnd = end;
-      this.selectionDirection = direction;
-    },
-  };
-  const chinesePrompt = options.translate("zh-CN", "customizationPrompt");
-
-  options.updateLocalizedPrompt(textarea, chinesePrompt);
-
-  assert.equal(textarea.value, chinesePrompt);
-  assert.equal(textarea.selectionStart, 12);
-  assert.equal(textarea.selectionEnd, 48);
-  assert.equal(textarea.selectionDirection, "forward");
-  assert.equal(textarea.scrollTop, 90);
-  assert.equal(textarea.scrollLeft, 7);
+  // One write persists every provider's key; the active-key gate uses the
+  // registry contract, never a single legacy aiApiKey field.
+  assert.match(saveSettings, /aiApiKeys\[id\] = providerKeyDrafts\[id\]/);
+  assert.match(saveSettings, /hasActiveApiKey\(settings\)/);
+  assert.doesNotMatch(saveSettings, /settings\.aiApiKey\b/);
 });

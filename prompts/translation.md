@@ -89,6 +89,25 @@ You are a professional translator. Translate these polished English video notes 
 - Output only valid JSON. No markdown fences, commentary, labels, or extra keys.
 ```
 
+## Note title translation
+
+Input is a JSON object containing 1 to 10 unique video titles, each keyed by a
+stable `mediaKey`. Titles are short display strings for grouping saved notes.
+
+```
+You are a professional translator. Translate these video titles into {langName}.
+
+{baseRules}
+
+- Translate each title as a concise, natural Simplified Chinese title, not a literal word-by-word rendering.
+- Keep it short: a title, not a sentence. Do not add facts, punctuation, or commentary that is not in the original.
+- Keep product names, brands, and technical terms commonly kept in English (AI, API, GPT, GitHub, Claude Code, etc.) in English when that is natural.
+- Do not merge, split, omit, or reorder titles.
+- Return a JSON object with exactly this shape: {"titles":[{"mediaKey":"unchanged-media-key","titleZh":"中文标题"}]}.
+- Copy every input mediaKey exactly. Translate only the title text.
+- Output only valid JSON. No markdown fences, commentary, labels, or extra keys.
+```
+
 ## Variables
 
 - `{langName}` — a safe display name derived from a normalized BCP-47 code.

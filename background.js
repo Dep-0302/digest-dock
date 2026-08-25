@@ -14,13 +14,18 @@
 
 // Import safe defaults and validation helpers. Secret keys live in
 // chrome.storage.local and are never part of the extension source.
+// ai-providers.js loads first so settings and request logic can derive each
+// provider's endpoint, model, and adapter from the registry.
+importScripts("ai-providers.js");
 importScripts("settings.js");
 importScripts("bilibili.js");
 importScripts("notes-backup.js");
+importScripts("note-sources.js");
+importScripts("export-jobs.js");
 
 const DEBUG = false;
 const ANALYSIS_SCHEMA_VERSION = 3;
-const RUNTIME_PROTOCOL_VERSION = 9;
+const RUNTIME_PROTOCOL_VERSION = 11;
 const ANALYSIS_BASE_LANGUAGE = "zh-Hans";
 const TRANSCRIPT_SOURCE_POLICY_VERSION = 4;
 const AI_PROVIDER_IDLE_TIMEOUT_MS = 50_000;
@@ -28,6 +33,9 @@ const AI_PROVIDER_HARD_TIMEOUT_MS = 120_000;
 const AI_PROVIDER_MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MAX_SAVED_NOTES = 100;
 const NOTE_TRANSLATION_JOB_TIMEOUT_MS = 110_000;
+const EXPORT_SOURCE_BATCH_MAX_UNITS = 4;
+const EXPORT_SOURCE_BATCH_MAX_CHARACTERS = 12_000;
+const EXPORT_SOURCE_BATCH_LEASE_MS = 135_000;
 // After a Supadata 429 the extension refuses to start another provider request
 // for a bounded window. This is a Supadata-specific rate limit, never YouTube.
 const SUPADATA_RATE_LIMIT_COOLDOWN_MS = 60_000;
@@ -47,6 +55,12 @@ const debugLog = (...args) => {
 // side panels pointed at the same tab) share one in-flight provider call
 // instead of each spending a separate Supadata credit.
 const youtubeSupadataInFlight = new Map();
+// A side panel can be closed and reopened while the MV3 service worker keeps an
+// authorized export batch alive. Duplicate submissions for the same durable
+// job/batch share this promise, so they never spend a second provider request.
+const exportSourceBatchInFlight = new Map();
+let exportSourceBatchQueueTail = Promise.resolve();
+let exportSourceStorageGeneration = 0;
 let youtubeSupadataCooldownUntil = 0;
 
 function runYoutubeSupadataSingleFlight(key, task) {
@@ -260,6 +274,20 @@ async function getSettings() {
   return YTD_SETTINGS.normalize(stored[YTD_SETTINGS.STORAGE_KEY]);
 }
 
+// Resolves the active provider record for a settings object. Always returns a
+// verified, selectable provider (falling back to the default id, never adopting
+// another provider's key), so request construction can rely on a valid adapter.
+function resolveActiveProvider(settings) {
+  const id = YTD_AI_PROVIDERS.resolveProviderId(settings?.provider);
+  return YTD_AI_PROVIDERS.getProvider(id);
+}
+
+// User-facing provider name for error copy, so messages never hardcode
+// "DeepSeek" once another provider is selected.
+function providerDisplayLabel(settings) {
+  return resolveActiveProvider(settings)?.displayName || "AI 服务";
+}
+
 function isMissingContentReceiverError(error) {
   const message = String(error?.message || error || "");
   return (
@@ -365,24 +393,26 @@ async function requestAiCompletion({
   settingsOverride,
 }) {
   const settings = settingsOverride || (await getSettings());
-  if (!settings.aiApiKey) {
+  const provider = resolveActiveProvider(settings);
+  const providerLabel = provider?.displayName || "AI 服务";
+  const apiKey = YTD_SETTINGS.apiKeyFor(settings, provider?.id);
+  if (!apiKey) {
     const error = new Error(
-      "尚未配置 DeepSeek API 密钥，请打开 DigestDock 设置。",
+      `尚未配置${providerLabel} API 密钥，请打开 DigestDock 设置。`,
     );
     error.code = "NO_AI_KEY";
     throw error;
   }
-  const body = {
-    model: settings.aiModel,
-    max_tokens: maxTokens,
+  // The provider adapter owns endpoint, auth header, model field, and which
+  // optional fields (JSON mode, thinking-disable) are allowed, so a field like
+  // DeepSeek's `thinking` never leaks onto a provider that would reject it.
+  const { url, headers, body } = provider.buildRequest({
+    apiKey,
     messages,
-  };
-  if (typeof temperature === "number") body.temperature = temperature;
-  if (responseFormat) {
-    body.response_format = responseFormat;
-  }
-  // Product features need bounded, predictable latency rather than reasoning traces.
-  body.thinking = { type: "disabled" };
+    maxTokens,
+    temperature,
+    responseFormat,
+  });
 
   const controller = new AbortController();
   const effectiveHardTimeoutMs =
@@ -411,20 +441,14 @@ async function requestAiCompletion({
   );
   resetIdleTimeout();
   try {
-    const response = await fetch(
-      YTD_SETTINGS.chatCompletionsUrl(),
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${settings.aiApiKey}`,
-        },
-        body: JSON.stringify(body),
-        signal: controller.signal,
-      },
-    );
-    // Receiving headers proves DeepSeek is still making progress. DeepSeek
-    // may then send blank-line body chunks while a non-streaming request queues.
+    const response = await fetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    // Receiving headers proves the provider is still making progress. It may
+    // then send blank-line body chunks while a non-streaming request queues.
     resetIdleTimeout();
 
     const data = await readBoundedAiResponse(response, resetIdleTimeout);
@@ -433,14 +457,20 @@ async function requestAiCompletion({
       const error = new Error(
         errorData.error?.message ||
           errorData.message ||
-          `DeepSeek error: ${response.status}`,
+          `${providerLabel} error: ${response.status}`,
       );
       error.status = response.status;
+      // Provider adapter maps the raw status onto a product error code.
+      const normalized = provider.normalizeError({
+        status: response.status,
+        body: errorData,
+      });
+      if (normalized) error.code = normalized;
       throw error;
     }
 
-    const choice = data.choices?.[0];
-    const finishReason = choice?.finish_reason;
+    const parsed = provider.parseResponse(data);
+    const finishReason = parsed.finishReason;
     if (finishReason && finishReason !== "stop") {
       const codeByFinishReason = {
         length: "OUTPUT_TRUNCATED",
@@ -448,16 +478,16 @@ async function requestAiCompletion({
         insufficient_system_resource: "PROVIDER_UNAVAILABLE",
       };
       const finishError = new Error(
-        `DeepSeek stopped before completing the response (${finishReason}).`,
+        `${providerLabel} stopped before completing the response (${finishReason}).`,
       );
       finishError.code =
         codeByFinishReason[finishReason] || "UNEXPECTED_FINISH_REASON";
       throw finishError;
     }
 
-    const text = choice?.message?.content;
+    const text = parsed.text;
     if (typeof text !== "string" || !text.trim()) {
-      const error = new Error("DeepSeek returned an empty response.");
+      const error = new Error(`${providerLabel} returned an empty response.`);
       error.code = "EMPTY_AI_RESPONSE";
       throw error;
     }
@@ -466,14 +496,14 @@ async function requestAiCompletion({
   } catch (error) {
     if (timeoutKind === "idle") {
       const timeoutError = new Error(
-        "DeepSeek 请求已连续 50 秒没有响应，请重试。",
+        `${providerLabel} 请求已连续 50 秒没有响应，请重试。`,
       );
       timeoutError.code = "AI_IDLE_TIMEOUT";
       throw timeoutError;
     }
     if (timeoutKind === "hard") {
       const timeoutError = new Error(
-        `DeepSeek 请求超过 ${Math.ceil(effectiveHardTimeoutMs / 1000)} 秒，请重试。`,
+        `${providerLabel} 请求超过 ${Math.ceil(effectiveHardTimeoutMs / 1000)} 秒，请重试。`,
       );
       timeoutError.code = "AI_HARD_TIMEOUT";
       throw timeoutError;
@@ -494,13 +524,13 @@ async function readBoundedAiResponse(response, onActivity) {
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
-      // Every received chunk is activity, including DeepSeek's blank lines.
+      // Every received chunk is activity, including a provider's blank lines.
       onActivity();
       const byteLength = value?.byteLength ?? 0;
       responseBytes += byteLength;
       if (responseBytes > AI_PROVIDER_MAX_RESPONSE_BYTES) {
         await reader.cancel?.().catch(() => {});
-        const error = new Error("DeepSeek response exceeded the 2 MiB limit.");
+        const error = new Error("AI provider response exceeded the 2 MiB limit.");
         error.code = "AI_RESPONSE_TOO_LARGE";
         throw error;
       }
@@ -517,7 +547,7 @@ async function readBoundedAiResponse(response, onActivity) {
     onActivity();
     const byteLength = new TextEncoder().encode(responseText).byteLength;
     if (byteLength > AI_PROVIDER_MAX_RESPONSE_BYTES) {
-      const error = new Error("DeepSeek response exceeded the 2 MiB limit.");
+      const error = new Error("AI provider response exceeded the 2 MiB limit.");
       error.code = "AI_RESPONSE_TOO_LARGE";
       throw error;
     }
@@ -573,6 +603,76 @@ function isYouTubeVideoUrl(url) {
   }
 }
 
+function youtubeVideoIdFromUrl(url) {
+  try {
+    const parsed = new URL(String(url || ""));
+    if (!isYouTubeVideoUrl(parsed.href)) return "";
+    return String(parsed.searchParams.get("v") || "").trim();
+  } catch {
+    return "";
+  }
+}
+
+function effectiveTabUrl(tab) {
+  return String(tab?.pendingUrl || tab?.url || "");
+}
+
+function contentVideoInfoHasCompletenessContract(info) {
+  return (
+    typeof info?.descriptionTruncated === "boolean" &&
+    ["present", "confirmed-empty", "unknown"].includes(info?.descriptionStatus)
+  );
+}
+
+function mergeYouTubeVideoInfo(playerInfo, contentInfo, expectedVideoId) {
+  const expectedId = String(expectedVideoId || "").trim();
+  const playerId = String(playerInfo?.videoId || "").trim();
+  const contentId = String(contentInfo?.videoId || "").trim();
+  const playerMatches = !!playerInfo && !!expectedId && playerId === expectedId;
+  const contentMatches = !!contentInfo && !!expectedId && contentId === expectedId;
+  if (!playerMatches && !contentMatches) return null;
+
+  const player = playerMatches ? playerInfo : null;
+  const content = contentMatches ? contentInfo : {};
+  const playerDescriptionIsExact =
+    player && ["present", "confirmed-empty"].includes(player.descriptionStatus);
+  const contentHasCompletenessContract =
+    contentVideoInfoHasCompletenessContract(content);
+  const contentDescriptionStatus = contentHasCompletenessContract
+    ? content.descriptionStatus
+    : "unknown";
+
+  return {
+    ...content,
+    videoId: expectedId,
+    title: player?.title || content.title || "",
+    channelName: player?.channelName || content.channelName || "",
+    duration: player?.duration || content.duration || 0,
+    sourceLanguage: player?.sourceLanguage || content.sourceLanguage || "",
+    description: playerDescriptionIsExact
+      ? String(player.description || "")
+      : String(content.description || ""),
+    descriptionStatus: playerDescriptionIsExact
+      ? player.descriptionStatus
+      : contentDescriptionStatus,
+    descriptionTruncated: playerDescriptionIsExact
+      ? false
+      : contentHasCompletenessContract
+        ? content.descriptionTruncated === true
+        : true,
+  };
+}
+
+function youtubeVideoInfoIsComplete(info) {
+  return (
+    !!String(info?.videoId || "").trim() &&
+    !!String(info?.title || "").trim() &&
+    !!String(info?.channelName || "").trim() &&
+    ["present", "confirmed-empty"].includes(info?.descriptionStatus) &&
+    info?.descriptionTruncated !== true
+  );
+}
+
 function isBilibiliVideoUrl(url) {
   try {
     if (!globalThis.BILIBILI_ADAPTER) return false;
@@ -624,6 +724,11 @@ function normalizeBilibiliMediaRef(mediaRef) {
   const rawDuration = Number(
     mediaRef.duration || mediaRef.metadata?.duration,
   );
+  const rawDescription = safeString(
+    mediaRef.description || mediaRef.metadata?.description,
+    Number.MAX_SAFE_INTEGER,
+  );
+  const description = rawDescription.slice(0, 10_000);
   const metadata = {
     title,
     channelName,
@@ -631,10 +736,16 @@ function normalizeBilibiliMediaRef(mediaRef) {
       mediaRef.creator || mediaRef.metadata?.creator || channelName,
       300,
     ),
-    description: safeString(
-      mediaRef.description || mediaRef.metadata?.description,
-      10_000,
-    ),
+    description,
+    descriptionStatus: ["unknown", "confirmed-empty", "present"].includes(
+      mediaRef.descriptionStatus || mediaRef.metadata?.descriptionStatus,
+    )
+      ? mediaRef.descriptionStatus || mediaRef.metadata?.descriptionStatus
+      : "unknown",
+    descriptionTruncated:
+      mediaRef.descriptionTruncated === true ||
+      mediaRef.metadata?.descriptionTruncated === true ||
+      rawDescription.length > description.length,
     duration:
       Number.isFinite(rawDuration) && rawDuration > 0 ? rawDuration : 0,
     partTitle: safeString(
@@ -827,7 +938,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.action === "translateNotes") {
-    handleTranslateNotes(message.notes)
+    handleTranslateNotes({ notes: message.notes, titles: message.titles })
       .then(sendResponse)
       .catch((err) => sendResponse({ success: false, error: err.message }));
     return true;
@@ -933,15 +1044,91 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  // A user-confirmed export batch is translated and committed entirely in the
+  // service worker. It does not depend on the side panel remaining open, and
+  // it never accepts or returns provider credentials.
+  if (message.action === "translateExportSourceBatch") {
+    handleTranslateExportSourceBatch(message)
+      .then(sendResponse)
+      .catch((error) => sendResponse(exportSourceBatchFailure(error)));
+    return true;
+  }
+
+  if (message.action === "translateExportNotesBatch") {
+    handleTranslateExportNotesBatch(message)
+      .then(sendResponse)
+      .catch((error) => sendResponse(exportSourceBatchFailure(error)));
+    return true;
+  }
+
+  if (message.action === "cancelExportTranslationJob") {
+    handleCancelExportTranslationJob(message.jobId)
+      .then(sendResponse)
+      .catch((error) => sendResponse(exportSourceBatchFailure(error)));
+    return true;
+  }
+
+  if (message.action === "getExportJob") {
+    handleGetExportTranslationJob(message.jobId)
+      .then(sendResponse)
+      .catch((error) => sendResponse(exportSourceBatchFailure(error)));
+    return true;
+  }
+
+  if (message.action === "listExportJobs") {
+    handleListExportTranslationJobs()
+      .then(sendResponse)
+      .catch((error) => sendResponse(exportSourceBatchFailure(error)));
+    return true;
+  }
+
+  if (message.action === "createOrResumeExportJob") {
+    handleCreateOrResumeExportJob(message.job)
+      .then(sendResponse)
+      .catch((error) => sendResponse(exportSourceBatchFailure(error)));
+    return true;
+  }
+
+  if (message.action === "checkpointExportJob") {
+    handleCheckpointExportJob(message.jobId, message.patch)
+      .then(sendResponse)
+      .catch((error) => sendResponse(exportSourceBatchFailure(error)));
+    return true;
+  }
+
+  if (
+    message.action === "upsertNoteSource" ||
+    message.action === "persistNoteSource"
+  ) {
+    handleUpsertNoteSource(message.source)
+      .then(sendResponse)
+      .catch((error) => sendResponse(exportSourceBatchFailure(error)));
+    return true;
+  }
+
   if (message.action === "checkConfig") {
     getSettings()
-      .then((settings) =>
+      .then((settings) => {
+        const provider = resolveActiveProvider(settings);
+        const providerDescription = YTD_AI_PROVIDERS.describeProvider(
+          provider?.id,
+        );
         sendResponse({
           hasSupadataKey: !!settings.supadataApiKey,
-          hasAiKey: !!settings.aiApiKey,
+          hasAiKey: YTD_SETTINGS.hasActiveApiKey(settings),
+          // Provider identity and capabilities (never the key itself) so the
+          // side panel can label the active service and gate unsupported
+          // features without a second round trip.
+          provider: providerDescription
+            ? {
+                ...providerDescription,
+                modelId: provider?.model || "",
+                routeKey: `${provider?.id || ""}:${provider?.model || ""}`,
+              }
+            : null,
           runtimeProtocolVersion: RUNTIME_PROTOCOL_VERSION,
-        }),
-      )
+        });
+      })
       .catch((error) => sendResponse({ error: error.message }));
     return true;
   }
@@ -1013,7 +1200,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const hasExplicitTab = Number.isInteger(message.tabId);
         if (hasExplicitTab) {
           const requestedTab = await chrome.tabs.get(message.tabId).catch(() => null);
-          if (!requestedTab || !isSupportedVideoUrl(requestedTab.url)) {
+          const requestedUrl = effectiveTabUrl(requestedTab);
+          if (!requestedTab || !isSupportedVideoUrl(requestedUrl)) {
             sendResponse({
               success: false,
               error: "PAGE_CONTEXT_CHANGED",
@@ -1021,7 +1209,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             });
             return;
           }
-          tab = requestedTab;
+          tab = { ...requestedTab, url: requestedUrl };
         }
 
         let tabs = tab
@@ -1036,7 +1224,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           tabs[0]?.url,
         );
 
-        if (!tabs[0] || !isSupportedVideoUrl(tabs[0].url)) {
+        if (!tabs[0] || !isSupportedVideoUrl(effectiveTabUrl(tabs[0]))) {
           tabs = await chrome.tabs.query({
             url: SUPPORTED_VIDEO_TAB_PATTERNS,
             active: true,
@@ -1050,43 +1238,86 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }
 
         if (tabs[0]) {
+          const targetUrl = effectiveTabUrl(tabs[0]);
           debugLog(
             "[DigestDock BG] Sending to tab:",
             tabs[0].id,
             "URL:",
-            tabs[0].url,
+            targetUrl,
           );
-          let response = await sendMessageToContentWithRecovery(
-            tabs[0].id,
-            message.payload,
-            {},
-            tabs[0].url,
-          );
-
-          // For getVideoInfo, PREFER YouTube's own player data over the
-          // DOM scrape. The player's videoDetails is canonical: its `author`
-          // is always THIS video's channel and its `shortDescription` is the
-          // full text. The DOM scrape is unreliable — e.g. on a playlist page
-          // it grabbed the playlist owner's name ("Zara Zhang") instead of the
-          // real channel ("Replit and Stripe"), and its description is
-          // truncated while the box is collapsed. We fall back to the DOM
-          // only for fields the player didn't provide.
-          if (
+          const isYouTubeInfoRequest =
             message.payload?.action === "getVideoInfo" &&
-            isYouTubeVideoUrl(tabs[0].url)
-          ) {
-            const playerInfo = await getPlayerVideoDetails(tabs[0].id);
-            if (playerInfo) {
-              response = {
-                title: playerInfo.title || response?.title || "",
-                channelName:
-                  playerInfo.channelName || response?.channelName || "",
-                duration: playerInfo.duration || response?.duration || 0,
-                sourceLanguage:
-                  playerInfo.sourceLanguage || response?.sourceLanguage || "",
-                description:
-                  playerInfo.description || response?.description || "",
-              };
+            isYouTubeVideoUrl(targetUrl);
+          const expectedVideoId = isYouTubeInfoRequest
+            ? youtubeVideoIdFromUrl(targetUrl)
+            : "";
+          let playerInfo = null;
+          let response = null;
+
+          // The MAIN-world player response is canonical and does not depend on
+          // a content script having reached document_idle. This matters when a
+          // note opens a brand-new YouTube tab and metadata capture begins while
+          // the page is still committing. The exact videoId gate prevents stale
+          // SPA player data from being written to the newly opened video.
+          if (isYouTubeInfoRequest) {
+            playerInfo = await getPlayerVideoDetails(tabs[0].id);
+            const playerResponse = mergeYouTubeVideoInfo(
+              playerInfo,
+              null,
+              expectedVideoId,
+            );
+            if (youtubeVideoInfoIsComplete(playerResponse)) {
+              response = playerResponse;
+            }
+          }
+
+          if (!response) {
+            const contentResponse = await sendMessageToContentWithRecovery(
+              tabs[0].id,
+              message.payload,
+              {},
+              targetUrl,
+            );
+            if (isYouTubeInfoRequest) {
+              const contentVideoId = String(
+                contentResponse?.videoId || "",
+              ).trim();
+              if (contentVideoId && contentVideoId !== expectedVideoId) {
+                const pageChangedError = new Error(
+                  "YouTube 页面已切换，未读取其他视频的资料。",
+                );
+                pageChangedError.code = "PAGE_CONTEXT_CHANGED";
+                throw pageChangedError;
+              }
+              const mergedResponse = mergeYouTubeVideoInfo(
+                playerInfo,
+                contentResponse,
+                expectedVideoId,
+              );
+              if (!mergedResponse) {
+                const relayError = new Error(
+                  contentVideoId
+                    ? "YouTube 页面已切换，未读取其他视频的资料。"
+                    : "当前视频页尚未加载新版 DigestDock 内容脚本，请刷新页面后再补充。",
+                );
+                relayError.code = contentVideoId
+                  ? "PAGE_CONTEXT_CHANGED"
+                  : "PAGE_REFRESH_REQUIRED";
+                throw relayError;
+              }
+              if (
+                !youtubeVideoInfoIsComplete(mergedResponse) &&
+                !contentVideoInfoHasCompletenessContract(contentResponse)
+              ) {
+                const refreshError = new Error(
+                  "当前视频页尚未加载新版 DigestDock 内容脚本，请刷新页面后再补充。",
+                );
+                refreshError.code = "PAGE_REFRESH_REQUIRED";
+                throw refreshError;
+              }
+              response = mergedResponse;
+            } else {
+              response = contentResponse;
             }
           }
 
@@ -1104,12 +1335,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             error: "PAGE_REFRESH_REQUIRED",
             message: err.message,
           });
-        } else if (isTransientTabContextError(err)) {
+        } else if (
+          err?.code === "PAGE_CONTEXT_CHANGED" ||
+          isTransientTabContextError(err)
+        ) {
           debugLog("[DigestDock BG] Video tab context changed during relay");
           sendResponse({
             success: false,
             error: "PAGE_CONTEXT_CHANGED",
-            message: "视频页面正在刷新，请稍后重试。",
+            message:
+              err?.code === "PAGE_CONTEXT_CHANGED"
+                ? err.message
+                : "视频页面正在刷新，请稍后重试。",
           });
         } else {
           console.error("[DigestDock BG] Relay error:", err.message);
@@ -1140,9 +1377,19 @@ async function getPlayerVideoDetails(tabId) {
       func: () => {
         try {
           const player = document.getElementById("movie_player");
-          const playerResponse = player?.getPlayerResponse?.();
+          const playerResponse =
+            player?.getPlayerResponse?.() || window.ytInitialPlayerResponse;
           const details = playerResponse?.videoDetails;
           if (!details) return null;
+          const videoId = String(details.videoId || "").trim();
+          if (!videoId) return null;
+          const hasDescription = Object.prototype.hasOwnProperty.call(
+            details,
+            "shortDescription",
+          );
+          const description = hasDescription
+            ? String(details.shortDescription || "")
+            : "";
           const captionRenderer =
             playerResponse?.captions?.playerCaptionsTracklistRenderer;
           const captionTracks = Array.isArray(captionRenderer?.captionTracks)
@@ -1162,9 +1409,16 @@ async function getPlayerVideoDetails(tabId) {
             captionTracks[defaultCaptionIndex] ||
             null;
           return {
+            videoId,
             title: details.title || "",
             channelName: details.author || "",
-            description: details.shortDescription || "",
+            description,
+            descriptionStatus: hasDescription
+              ? description
+                ? "present"
+                : "confirmed-empty"
+              : "unknown",
+            descriptionTruncated: false,
             duration: Number(details.lengthSeconds) || 0,
             sourceLanguage:
               details.defaultAudioLanguage ||
@@ -1997,13 +2251,15 @@ async function handleAnalyzeTranscript(
   sourceLanguage = "",
   platform = "youtube",
 ) {
+  // Hoisted so the catch block can name the active provider in error copy.
+  let settings;
   try {
-    const settings = await getSettings();
-    if (!settings.aiApiKey) {
+    settings = await getSettings();
+    if (!YTD_SETTINGS.hasActiveApiKey(settings)) {
       return {
         success: false,
         error: "NO_AI_KEY",
-        message: "尚未配置 DeepSeek API 密钥，请打开 DigestDock 设置。",
+        message: `尚未配置${providerDisplayLabel(settings)} API 密钥，请打开 DigestDock 设置。`,
       };
     }
 
@@ -2067,7 +2323,7 @@ async function handleAnalyzeTranscript(
     debugLog(
       "[DigestDock] Requesting video analysis",
       normalizedPlatform,
-      settings.aiModel,
+      resolveActiveProvider(settings)?.model,
     );
     const { text: responseText } = await requestAiCompletion({
       maxTokens: 8192,
@@ -2089,7 +2345,9 @@ async function handleAnalyzeTranscript(
       normalizedSourceLanguage,
     );
     if (!hasUsableChineseOverview(analysis)) {
-      throw new Error("DeepSeek 没有返回可用的中文概览，请重试。");
+      throw new Error(
+        `${providerDisplayLabel(settings)} 没有返回可用的中文概览，请重试。`,
+      );
     }
 
     return {
@@ -2102,14 +2360,14 @@ async function handleAnalyzeTranscript(
       return {
         success: false,
         error: "INVALID_AI_KEY",
-        message: "DeepSeek 拒绝了该 API 密钥。",
+        message: `${providerDisplayLabel(settings)} 拒绝了该 API 密钥。`,
       };
     }
     if (error.status === 429) {
       return {
         success: false,
         error: "RATE_LIMITED",
-        message: "DeepSeek 限制了本次请求，请稍后重试。",
+        message: `${providerDisplayLabel(settings)} 限制了本次请求，请稍后重试。`,
       };
     }
     return {
@@ -2273,6 +2531,7 @@ async function handleSaveNote(
   preferredLanguage = "",
 ) {
   const saveGeneration = noteStorageGeneration;
+  const sourceStorageGeneration = exportSourceStorageGeneration;
   try {
     const mediaRef = await resolveMediaRef(mediaInput, sourceUrl);
     const mediaKey = mediaRef.mediaKey || mediaRef.videoId;
@@ -2507,6 +2766,23 @@ async function handleSaveNote(
       };
     }
 
+    // A note and the material needed to export it belong to the same user
+    // action. Persist the source immediately while the exact video tab is
+    // still available, instead of relying on a later side-panel lifecycle.
+    // This is deliberately best-effort: the note is already durable, and a
+    // transient page/storage failure must never turn a successful save into a
+    // failed note. No transcript/provider call is made here; `transcript` is
+    // the local material already used to create the note.
+    await persistSavedNoteSourceBestEffort({
+      mediaRef,
+      note,
+      transcript,
+      tabId,
+      sourceLanguage: storedSourceLanguage,
+      expectedNoteGeneration: saveGeneration,
+      expectedSourceGeneration: sourceStorageGeneration,
+    });
+
     // Chinese generation is triggered by the Notes panel after this save
     // notification. Keeping one owner prevents a failed save-time translation
     // from being retried immediately by noteSaved -> loadNotes.
@@ -2518,6 +2794,106 @@ async function handleSaveNote(
   } catch (error) {
     console.error("[DigestDock] Save note error:", error);
     return { success: false, error: error.message };
+  }
+}
+
+/**
+ * Best-effort source persistence for one successfully saved note.
+ *
+ * YouTube metadata is accepted only from the exact tab/player video identity;
+ * stale SPA state therefore cannot be attached to another note. Bilibili's
+ * resolved media reference already carries the API-backed metadata and is
+ * reused without another request.
+ *
+ * The final write is serialized with note clear/reset. Holding the shared note
+ * queue while calling the existing note-source upsert means a later clear runs
+ * after this write and removes it, while an earlier clear changes the captured
+ * generations and prevents this write from resurrecting cleared data.
+ */
+async function persistSavedNoteSourceBestEffort({
+  mediaRef,
+  note,
+  transcript,
+  tabId,
+  sourceLanguage = "",
+  expectedNoteGeneration,
+  expectedSourceGeneration,
+}) {
+  try {
+    let metadata = null;
+    if (mediaRef?.platform === "youtube") {
+      if (!Number.isInteger(tabId)) return null;
+      const playerDetails = await getPlayerVideoDetails(tabId);
+      const expectedVideoId = String(mediaRef.videoId || "").trim();
+      const actualVideoId = String(playerDetails?.videoId || "").trim();
+      if (!expectedVideoId || actualVideoId !== expectedVideoId) {
+        debugLog(
+          "[DigestDock] Skipping note source: YouTube player identity changed",
+        );
+        return null;
+      }
+      metadata = playerDetails;
+    } else if (mediaRef?.platform === "bilibili") {
+      metadata = mediaRef;
+    } else {
+      return null;
+    }
+
+    const description = String(
+      metadata.description || metadata.metadata?.description || "",
+    ).trim();
+    const explicitDescriptionStatus =
+      metadata.descriptionStatus || metadata.metadata?.descriptionStatus;
+    const descriptionStatus = [
+      "present",
+      "confirmed-empty",
+      "unknown",
+    ].includes(explicitDescriptionStatus)
+      ? explicitDescriptionStatus
+      : description
+        ? "present"
+        : "unknown";
+    const source = YTD_NOTE_SOURCES.normalizeNoteSource({
+      mediaKey: note.mediaKey,
+      platform: note.platform,
+      canonicalUrl: note.canonicalUrl,
+      titleOriginal: String(metadata.title || note.videoTitle || "").trim(),
+      channelName: String(
+        metadata.channelName ||
+          metadata.metadata?.channelName ||
+          note.channelName ||
+          "",
+      ).trim(),
+      descriptionOriginal: description,
+      descriptionStatus,
+      descriptionTruncated:
+        metadata.descriptionTruncated === true ||
+        metadata.metadata?.descriptionTruncated === true,
+      sourceLanguage: String(
+        sourceLanguage || note.sourceLanguage || metadata.sourceLanguage || "",
+      ).trim(),
+      transcriptOriginal: Array.isArray(transcript) ? transcript : [],
+      transcriptZh: [],
+      transcriptTruncated: false,
+    });
+    if (!source) return null;
+
+    return await withNoteStorageWrite(async () => {
+      if (
+        expectedNoteGeneration !== noteStorageGeneration ||
+        expectedSourceGeneration !== exportSourceStorageGeneration
+      ) {
+        return null;
+      }
+      const persisted = await handleUpsertNoteSource(source);
+      return persisted?.success ? persisted.source : null;
+    });
+  } catch (error) {
+    debugLog(
+      "[DigestDock] Note source persistence skipped:",
+      error?.code || error?.message || "unknown error",
+    );
+    return null;
   }
 }
 
@@ -2536,7 +2912,7 @@ async function cleanupNoteText(
   sourceLanguage = "",
 ) {
   const settings = await getSettings();
-  if (!settings.aiApiKey) {
+  if (!YTD_SETTINGS.hasActiveApiKey(settings)) {
     return [beforeText, targetText, afterText].filter(Boolean).join(" ");
   }
 
@@ -2715,7 +3091,21 @@ function handleImportNotesBackup(backupText) {
 function handleClearAllNotes() {
   return withNoteStorageWrite(async () => {
     try {
+      await preflightExportTranslationStorage();
       noteStorageGeneration += 1;
+      exportSourceStorageGeneration += 1;
+      if (
+        typeof YTD_EXPORT_JOBS !== "undefined" &&
+        typeof YTD_EXPORT_JOBS.clearExportJobs === "function"
+      ) {
+        await YTD_EXPORT_JOBS.clearExportJobs(chrome.storage.local);
+      }
+      if (
+        typeof YTD_NOTE_SOURCES !== "undefined" &&
+        typeof YTD_NOTE_SOURCES.clearNoteSources === "function"
+      ) {
+        await YTD_NOTE_SOURCES.clearNoteSources(chrome.storage.local);
+      }
       await chrome.storage.local.remove("ytd_notes");
       notifyNotesChanged();
       return { success: true };
@@ -2728,7 +3118,21 @@ function handleClearAllNotes() {
 function handleResetAllExtensionData(preferredLanguage) {
   return withNoteStorageWrite(async () => {
     try {
+      await preflightExportTranslationStorage();
       noteStorageGeneration += 1;
+      exportSourceStorageGeneration += 1;
+      if (
+        typeof YTD_EXPORT_JOBS !== "undefined" &&
+        typeof YTD_EXPORT_JOBS.clearExportJobs === "function"
+      ) {
+        await YTD_EXPORT_JOBS.clearExportJobs(chrome.storage.local);
+      }
+      if (
+        typeof YTD_NOTE_SOURCES !== "undefined" &&
+        typeof YTD_NOTE_SOURCES.clearNoteSources === "function"
+      ) {
+        await YTD_NOTE_SOURCES.clearNoteSources(chrome.storage.local);
+      }
       const safeLanguage = preferredLanguage === "en" ? "en" : "zh-CN";
       await chrome.storage.local.clear();
       await chrome.storage.local.set({ ytd_options_language: safeLanguage });
@@ -2783,11 +3187,11 @@ async function handleExplainSelection(
 ) {
   try {
     const settings = await getSettings();
-    if (!settings.aiApiKey) {
+    if (!YTD_SETTINGS.hasActiveApiKey(settings)) {
       return {
         success: false,
         error: "NO_AI_KEY",
-        message: "尚未配置 DeepSeek API 密钥。",
+        message: `尚未配置${providerDisplayLabel(settings)} API 密钥。`,
       };
     }
 
@@ -2827,6 +3231,1432 @@ async function handleExplainSelection(
       error: error.message || "解释所选内容失败",
     };
   }
+}
+
+// ============================================================
+// RESUMABLE EXPORT SOURCE TRANSLATION
+// ============================================================
+
+function exportSourceBatchError(code, message, details = {}) {
+  const error = new Error(message);
+  error.code = code;
+  Object.assign(error, details);
+  return error;
+}
+
+const EXPORT_SOURCE_SAFE_ERROR_CODES = new Set([
+  "INVALID_EXPORT_SOURCE_BATCH",
+  "INVALID_EXPORT_JOB",
+  "INVALID_EXPORT_JOB_PATCH",
+  "INVALID_EXPORT_JOB_PROGRESS",
+  "INVALID_EXPORT_JOB_TRANSITION",
+  "EXPORT_JOB_ALREADY_CLAIMED",
+  "EXPORT_JOB_NOT_FOUND",
+  "EXPORT_JOB_NOT_RUNNING",
+  "EXPORT_JOB_NOT_RESUMABLE",
+  "EXPORT_JOB_MEDIA_MISMATCH",
+  "EXPORT_JOB_SOURCE_REVISION_MISMATCH",
+  "EXPORT_JOB_UNIT_MISMATCH",
+  "EXPORT_JOB_BATCH_BUSY",
+  "EXPORT_JOB_PROVIDER_MISMATCH",
+  "EXPORT_SOURCE_NOT_FOUND",
+  "EXPORT_SOURCE_STALE",
+  "EXPORT_SOURCE_UNIT_MISMATCH",
+  "EXPORT_BATCH_PROGRESS_STALE",
+  "EXPORT_SOURCE_BATCH_PARTIAL",
+  "EXPORT_SOURCE_BATCH_COMMIT_FAILED",
+  "EXPORT_SOURCE_PROVIDER_FAILED",
+  "EXPORT_SOURCE_MODULE_UNAVAILABLE",
+  "EXPORT_JOB_MODULE_UNAVAILABLE",
+  "EXPORT_SOURCE_BATCH_FAILED",
+]);
+
+function normalizeExportSourceBatchCode(value) {
+  const code = String(value || "");
+  return EXPORT_SOURCE_SAFE_ERROR_CODES.has(code)
+    ? code
+    : "EXPORT_SOURCE_BATCH_FAILED";
+}
+
+function exportSourceBatchSafeMessage(code) {
+  const messages = {
+    INVALID_EXPORT_SOURCE_BATCH: "补译批次无效，请刷新后重试。",
+    EXPORT_JOB_NOT_FOUND: "补译任务不存在或已被清理，请重新开始导出。",
+    EXPORT_JOB_NOT_RUNNING: "补译任务当前未运行，不会启动新的翻译请求。",
+    EXPORT_JOB_NOT_RESUMABLE: "补译任务已结束，不能继续运行。",
+    EXPORT_JOB_ALREADY_CLAIMED: "该导出任务已由另一个侧栏实例接管。",
+    EXPORT_JOB_MEDIA_MISMATCH: "补译任务与当前视频不匹配，请重新预检。",
+    EXPORT_JOB_SOURCE_REVISION_MISMATCH:
+      "视频原始资料已变化，本批次未写入，请重新预检。",
+    EXPORT_JOB_UNIT_MISMATCH: "补译单元不属于当前任务，请重新预检。",
+    EXPORT_JOB_BATCH_BUSY: "该补译任务已有另一批正在处理，请稍候。",
+    EXPORT_JOB_PROVIDER_MISMATCH:
+      "当前翻译服务或模型已变化，本批次未调用，请重新确认。",
+    EXPORT_SOURCE_NOT_FOUND: "本地没有这段视频资料，请重新打开视频后再试。",
+    EXPORT_SOURCE_STALE: "视频原始资料已变化，本批次未写入，请重新预检。",
+    EXPORT_SOURCE_UNIT_MISMATCH:
+      "补译单元与本地原文不一致，未调用翻译服务。",
+    EXPORT_BATCH_PROGRESS_STALE:
+      "本地补译进度已变化，请刷新后继续，已完成内容不会重译。",
+    EXPORT_SOURCE_BATCH_PARTIAL:
+      "翻译服务未返回完整批次，本批次未写入，请重试。",
+    EXPORT_SOURCE_BATCH_COMMIT_FAILED:
+      "补译结果未能安全保存，本批次未计入进度，请重试。",
+    EXPORT_SOURCE_PROVIDER_FAILED: "翻译服务未完成本批次，请稍后重试。",
+    EXPORT_SOURCE_MODULE_UNAVAILABLE:
+      "补译资料模块不可用，请重新加载扩展后再试。",
+    EXPORT_JOB_MODULE_UNAVAILABLE:
+      "补译任务模块不可用，请重新加载扩展后再试。",
+  };
+  return messages[code] || "补译批次失败，请重试。";
+}
+
+function exportSourceBatchFailure(error, overrides = {}) {
+  const code = normalizeExportSourceBatchCode(error?.code);
+  const message = exportSourceBatchSafeMessage(code);
+  return {
+    success: false,
+    code,
+    error: message,
+    jobState: overrides.jobState || error?.jobState || "",
+    completedUnitKeys: Array.isArray(overrides.completedUnitKeys)
+      ? overrides.completedUnitKeys
+      : [],
+    remainingCount: Number.isSafeInteger(overrides.remainingCount)
+      ? overrides.remainingCount
+      : null,
+    actualProviderCalls: Number.isSafeInteger(overrides.actualProviderCalls)
+      ? overrides.actualProviderCalls
+      : Number.isSafeInteger(error?.actualProviderCalls)
+        ? error.actualProviderCalls
+        : 0,
+  };
+}
+
+function requireExportSourceModules() {
+  if (
+    typeof YTD_NOTE_SOURCES !== "object" ||
+    typeof YTD_NOTE_SOURCES.readNoteSource !== "function" ||
+    typeof YTD_NOTE_SOURCES.validateExportSourceTranslationUnits !==
+      "function" ||
+    typeof YTD_NOTE_SOURCES.commitExportSourceTranslationBatch !== "function" ||
+    typeof YTD_NOTE_SOURCES.normalizeNoteSource !== "function" ||
+    typeof YTD_NOTE_SOURCES.writeNoteSource !== "function"
+  ) {
+    throw exportSourceBatchError(
+      "EXPORT_SOURCE_MODULE_UNAVAILABLE",
+      "The note-source translation module is unavailable.",
+    );
+  }
+  if (
+    typeof YTD_EXPORT_JOBS !== "object" ||
+    typeof YTD_EXPORT_JOBS.readExportJob !== "function" ||
+    typeof YTD_EXPORT_JOBS.checkpointExportJob !== "function" ||
+    typeof YTD_EXPORT_JOBS.normalizeExportJob !== "function" ||
+    typeof YTD_EXPORT_JOBS.createExportJob !== "function" ||
+    typeof YTD_EXPORT_JOBS.upsertExportJob !== "function"
+  ) {
+    throw exportSourceBatchError(
+      "EXPORT_JOB_MODULE_UNAVAILABLE",
+      "The export-job module is unavailable.",
+    );
+  }
+}
+
+async function preflightExportTranslationStorage() {
+  requireExportSourceModules();
+  if (
+    typeof YTD_NOTE_SOURCES.preflightNoteSourceStorage !== "function" ||
+    typeof YTD_EXPORT_JOBS.preflightExportJobs !== "function"
+  ) {
+    throw exportSourceBatchError(
+      "EXPORT_SOURCE_MODULE_UNAVAILABLE",
+      "Export translation storage cannot be validated safely.",
+    );
+  }
+  await YTD_EXPORT_JOBS.preflightExportJobs(chrome.storage.local);
+  await YTD_NOTE_SOURCES.preflightNoteSourceStorage(chrome.storage.local);
+}
+
+function assertExportSourceStorageGeneration(expectedGeneration) {
+  if (expectedGeneration !== exportSourceStorageGeneration) {
+    throw exportSourceBatchError(
+      "EXPORT_JOB_NOT_FOUND",
+      "Export translation state was cleared before this request could commit.",
+    );
+  }
+}
+
+function normalizeExportBatchToken(value, maxLength) {
+  if (typeof value !== "string") return "";
+  const token = value.normalize("NFC").trim();
+  return token &&
+    token.length <= maxLength &&
+    !/[\s\u0000-\u001f\u007f]/.test(token)
+    ? token
+    : "";
+}
+
+function normalizeExportSourceRevision(value) {
+  if (Number.isSafeInteger(value) && value >= 0) return value;
+  return normalizeExportBatchToken(value, 128);
+}
+
+/**
+ * Applies the public 1–4 unit / 12k character boundary before any storage or
+ * provider work. Only allowlisted fields survive normalization.
+ */
+function validateExportSourceBatchRequest(message) {
+  if (!message || typeof message !== "object" || Array.isArray(message)) {
+    throw exportSourceBatchError(
+      "INVALID_EXPORT_SOURCE_BATCH",
+      "Export source batch must be an object.",
+    );
+  }
+  for (const secretField of [
+    "apiKey",
+    "aiApiKey",
+    "providerApiKey",
+    "authorization",
+    "credentials",
+    "settings",
+    "key",
+  ]) {
+    if (Object.prototype.hasOwnProperty.call(message, secretField)) {
+      throw exportSourceBatchError(
+        "INVALID_EXPORT_SOURCE_BATCH",
+        "Provider credentials are not accepted by this action.",
+      );
+    }
+  }
+  const jobId = normalizeExportBatchToken(message.jobId, 80);
+  const mediaKey = normalizeExportBatchToken(message.mediaKey, 64);
+  const sourceRevision = normalizeExportSourceRevision(message.sourceRevision);
+  const requestedUnits = message.units;
+  if (
+    !jobId ||
+    !mediaKey ||
+    sourceRevision === "" ||
+    !Array.isArray(requestedUnits) ||
+    requestedUnits.length < 1 ||
+    requestedUnits.length > EXPORT_SOURCE_BATCH_MAX_UNITS
+  ) {
+    throw exportSourceBatchError(
+      "INVALID_EXPORT_SOURCE_BATCH",
+      "Export source batch identity or unit count is invalid.",
+    );
+  }
+
+  const seenUnitKeys = new Set();
+  let totalCharacters = 0;
+  const units = requestedUnits.map((unit) => {
+    const unitKey = normalizeExportBatchToken(unit?.unitKey || unit?.id, 256);
+    const sourceHash =
+      typeof unit?.sourceHash === "string" ? unit.sourceHash.trim() : "";
+    const text = typeof unit?.text === "string" ? unit.text.trim() : "";
+    const kind = unit?.kind;
+    if (
+      !unitKey ||
+      seenUnitKeys.has(unitKey) ||
+      !/^fnv1a-[0-9a-f]{16}$/.test(sourceHash) ||
+      !text ||
+      text.length > 4000 ||
+      !["description", "transcript"].includes(kind)
+    ) {
+      throw exportSourceBatchError(
+        "INVALID_EXPORT_SOURCE_BATCH",
+        "Export source unit identity, hash, kind, or text is invalid.",
+      );
+    }
+    seenUnitKeys.add(unitKey);
+    totalCharacters += text.length;
+    const normalized = {
+      id: unitKey,
+      unitKey,
+      mediaKey,
+      sourceRevision,
+      sourceHash,
+      text,
+      kind,
+    };
+    if (kind === "description") {
+      if (
+        !Number.isSafeInteger(unit.chunkIndex) ||
+        unit.chunkIndex < 0 ||
+        unit.chunkIndex > 9999
+      ) {
+        throw exportSourceBatchError(
+          "INVALID_EXPORT_SOURCE_BATCH",
+          "Description chunk identity is invalid.",
+        );
+      }
+      normalized.chunkIndex = unit.chunkIndex;
+    } else {
+      const segmentId = normalizeExportBatchToken(unit.segmentId, 300);
+      const start = Number(unit.start);
+      if (!segmentId || !Number.isFinite(start) || start < 0 || start > 86400) {
+        throw exportSourceBatchError(
+          "INVALID_EXPORT_SOURCE_BATCH",
+          "Transcript segment identity is invalid.",
+        );
+      }
+      normalized.segmentId = segmentId;
+      normalized.start = Math.round(start * 1000) / 1000;
+      normalized.startMs = Math.round(start * 1000);
+    }
+    return normalized;
+  });
+  if (totalCharacters > EXPORT_SOURCE_BATCH_MAX_CHARACTERS) {
+    throw exportSourceBatchError(
+      "INVALID_EXPORT_SOURCE_BATCH",
+      "Export source batch exceeds 12000 characters.",
+    );
+  }
+  return {
+    jobId,
+    mediaKey,
+    sourceRevision,
+    units,
+    unitKeys: units.map((unit) => unit.unitKey),
+  };
+}
+
+function exportSourceBatchFlightKey(request) {
+  return `${request.jobId}\u0000${[...request.unitKeys].sort().join("\u0001")}`;
+}
+
+function shortExportBatchHash(value) {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash.toString(16).padStart(8, "0");
+}
+
+const exportJobActiveBatch = new Map();
+
+function enqueueExportSourceBatch(task) {
+  const pending = exportSourceBatchQueueTail.catch(() => undefined).then(task);
+  exportSourceBatchQueueTail = pending.catch(() => undefined);
+  return pending;
+}
+
+function runExportSourceBatchSingleFlight(request) {
+  const flightKey = exportSourceBatchFlightKey(request);
+  const existing = exportSourceBatchInFlight.get(flightKey);
+  if (existing) return existing;
+  const activeKey = exportJobActiveBatch.get(request.jobId);
+  if (activeKey && activeKey !== flightKey) {
+    return Promise.resolve(
+      exportSourceBatchFailure(
+        exportSourceBatchError(
+          "EXPORT_JOB_BATCH_BUSY",
+          "Another source batch is already running for this export job.",
+        ),
+      ),
+    );
+  }
+  const promise = enqueueExportSourceBatch(() => executeExportSourceBatch(request))
+    .catch(async (error) => {
+      let checkpointedJob = null;
+      if (error?.checkpoint === true || request.batchClaimed === true) {
+        checkpointedJob = await checkpointExportBatchError(
+          request.jobId,
+          error,
+        );
+      }
+      return exportSourceBatchFailure(error, {
+        jobState: checkpointedJob?.state || error?.jobState || "",
+        completedUnitKeys: checkpointedJob?.completedUnitKeys || [],
+        remainingCount: checkpointedJob
+          ? exportJobRemainingCount(checkpointedJob)
+          : null,
+        actualProviderCalls: Number.isSafeInteger(error?.actualProviderCalls)
+          ? error.actualProviderCalls
+          : 0,
+      });
+    })
+    .finally(() => {
+      if (exportSourceBatchInFlight.get(flightKey) === promise) {
+        exportSourceBatchInFlight.delete(flightKey);
+      }
+      if (exportJobActiveBatch.get(request.jobId) === flightKey) {
+        exportJobActiveBatch.delete(request.jobId);
+      }
+    });
+  exportSourceBatchInFlight.set(flightKey, promise);
+  exportJobActiveBatch.set(request.jobId, flightKey);
+  return promise;
+}
+
+function revisionsMatch(left, right) {
+  return left === right;
+}
+
+function exportJobRemainingCount(job) {
+  const completed = new Set(job?.completedUnitKeys || []);
+  return (job?.orderedUnitKeys || []).reduce(
+    (count, unitKey) => count + (completed.has(unitKey) ? 0 : 1),
+    0,
+  );
+}
+
+function exportJobCursor(job, completedUnitKeys = job?.completedUnitKeys || []) {
+  const completed = new Set(completedUnitKeys);
+  const ordered = job?.orderedUnitKeys || [];
+  let cursor = 0;
+  while (cursor < ordered.length && completed.has(ordered[cursor])) cursor += 1;
+  return cursor;
+}
+
+function assertExportJobMatchesRequest(job, request, { mustRun = true } = {}) {
+  if (!job) {
+    throw exportSourceBatchError(
+      "EXPORT_JOB_NOT_FOUND",
+      "Export translation job was not found.",
+    );
+  }
+  if (mustRun && job.state !== "running") {
+    throw exportSourceBatchError(
+      "EXPORT_JOB_NOT_RUNNING",
+      "Export translation job is not running.",
+      { jobState: job.state },
+    );
+  }
+  if (!job.intent?.mediaKeys?.includes(request.mediaKey)) {
+    throw exportSourceBatchError(
+      "EXPORT_JOB_MEDIA_MISMATCH",
+      "Export job does not include this media source.",
+      { jobState: job.state },
+    );
+  }
+  if (
+    !Object.prototype.hasOwnProperty.call(
+      job.sourceRevisions || {},
+      request.mediaKey,
+    ) ||
+    !revisionsMatch(job.sourceRevisions[request.mediaKey], request.sourceRevision)
+  ) {
+    throw exportSourceBatchError(
+      "EXPORT_JOB_SOURCE_REVISION_MISMATCH",
+      "Export job source revision no longer matches.",
+      { jobState: job.state },
+    );
+  }
+  const ordered = new Set(job.orderedUnitKeys || []);
+  if (request.unitKeys.some((unitKey) => !ordered.has(unitKey))) {
+    throw exportSourceBatchError(
+      "EXPORT_JOB_UNIT_MISMATCH",
+      "Export source units do not belong to this job.",
+      { jobState: job.state },
+    );
+  }
+  return job;
+}
+
+function sameUnitKeyList(left, right) {
+  return (
+    Array.isArray(left) &&
+    left.length === right.length &&
+    left.every((value, index) => value === right[index])
+  );
+}
+
+function exportStoredNoteOriginalText(note) {
+  if (
+    isConfirmedSimplifiedChineseSource(note?.textLanguage) &&
+    typeof note?.text === "string" &&
+    note.text.trim()
+  ) {
+    return note.text.trim();
+  }
+  if (noteHasChineseSource(note)) {
+    return String(note?.rawText || note?.text || "").trim();
+  }
+  return String(note?.text || note?.rawText || "").trim();
+}
+
+function exportStoredNoteTitle(note) {
+  return String(note?.videoTitle || "").trim() || "Untitled Video";
+}
+
+function exportStoredNotesRevision(notes, mediaKeys) {
+  const allowed = new Set(mediaKeys || []);
+  const originals = (Array.isArray(notes) ? notes : [])
+    .filter((note) =>
+      allowed.has(String(note?.mediaKey || note?.videoId || "").trim()),
+    )
+    .map((note) => [
+      String(note?.id || ""),
+      String(note?.mediaKey || note?.videoId || ""),
+      exportStoredNoteOriginalText(note),
+      exportStoredNoteTitle(note),
+    ])
+    .sort((left, right) => left[0].localeCompare(right[0]));
+  return YTD_NOTE_SOURCES.hashSourceText(JSON.stringify(originals));
+}
+
+function exportStoredNoteUnitKey(note) {
+  return `note:${YTD_NOTE_SOURCES.hashSourceText(String(note?.id || ""))}:${YTD_NOTE_SOURCES.hashSourceText(exportStoredNoteOriginalText(note))}`;
+}
+
+function exportStoredTitleUnitKey(mediaKey, title) {
+  return `title:${YTD_NOTE_SOURCES.hashSourceText(mediaKey)}:${YTD_NOTE_SOURCES.hashSourceText(title)}`;
+}
+
+async function assertExportNotesJobCurrent(jobId, storageGeneration) {
+  assertExportSourceStorageGeneration(storageGeneration);
+  const job = await YTD_EXPORT_JOBS.readExportJob(chrome.storage.local, jobId);
+  if (!job || job.state !== "running") {
+    throw exportSourceBatchError(
+      job ? "EXPORT_JOB_NOT_RUNNING" : "EXPORT_JOB_NOT_FOUND",
+      "Export note job is no longer running.",
+      { jobState: job?.state || "" },
+    );
+  }
+  const stored = await chrome.storage.local.get("ytd_notes");
+  const notes = Array.isArray(stored?.ytd_notes) ? stored.ytd_notes : [];
+  if (exportStoredNotesRevision(notes, job.intent.mediaKeys) !== job.notesRevision) {
+    throw exportSourceBatchError(
+      "EXPORT_JOB_SOURCE_REVISION_MISMATCH",
+      "Stored notes changed after the export job was authorized.",
+      { jobState: job.state },
+    );
+  }
+  for (const [mediaKey, revision] of Object.entries(job.sourceRevisions || {})) {
+    const source = await YTD_NOTE_SOURCES.readNoteSource(
+      chrome.storage.local,
+      mediaKey,
+    );
+    if (!source || !revisionsMatch(source.sourceRevision, revision)) {
+      throw exportSourceBatchError(
+        "EXPORT_JOB_SOURCE_REVISION_MISMATCH",
+        "Stored video material changed after the export job was authorized.",
+        { jobState: job.state },
+      );
+    }
+  }
+  const settings = await getSettings();
+  assertExportSourceStorageGeneration(storageGeneration);
+  assertExportProviderSnapshot(job, settings);
+  return { job, notes, settings };
+}
+
+async function handleTranslateExportNotesBatch(message) {
+  requireExportSourceModules();
+  const storageGeneration = exportSourceStorageGeneration;
+  if (!message || typeof message !== "object" || Array.isArray(message)) {
+    throw exportSourceBatchError(
+      "INVALID_EXPORT_SOURCE_BATCH",
+      "Export note batch must be an object.",
+    );
+  }
+  for (const secretField of [
+    "apiKey",
+    "aiApiKey",
+    "providerApiKey",
+    "authorization",
+    "credentials",
+    "settings",
+    "key",
+  ]) {
+    if (Object.prototype.hasOwnProperty.call(message, secretField)) {
+      throw exportSourceBatchError(
+        "INVALID_EXPORT_SOURCE_BATCH",
+        "Provider credentials are not accepted by this action.",
+      );
+    }
+  }
+  const jobId = normalizeExportBatchToken(message.jobId, 80);
+  const requestedKeys = Array.isArray(message.unitKeys)
+    ? message.unitKeys.map((key) => normalizeExportBatchToken(key, 1024))
+    : [];
+  const notesRequest = Array.isArray(message.notes) ? message.notes : [];
+  const titlesRequest = Array.isArray(message.titles) ? message.titles : [];
+  if (
+    !jobId ||
+    requestedKeys.length < 1 ||
+    requestedKeys.length > 10 ||
+    requestedKeys.some((key) => !key) ||
+    new Set(requestedKeys).size !== requestedKeys.length ||
+    (notesRequest.length > 0) === (titlesRequest.length > 0) ||
+    requestedKeys.length !== (notesRequest.length || titlesRequest.length)
+  ) {
+    throw exportSourceBatchError(
+      "INVALID_EXPORT_SOURCE_BATCH",
+      "Export note batch identity is invalid.",
+    );
+  }
+
+  let frozen = await assertExportNotesJobCurrent(jobId, storageGeneration);
+  const ordered = new Set(frozen.job.orderedUnitKeys || []);
+  const completed = new Set(frozen.job.completedUnitKeys || []);
+  if (requestedKeys.some((key) => !ordered.has(key) || completed.has(key))) {
+    throw exportSourceBatchError(
+      "EXPORT_JOB_UNIT_MISMATCH",
+      "Export note units do not belong to the current job gap.",
+      { jobState: frozen.job.state },
+    );
+  }
+
+  let canonicalNotes = [];
+  let canonicalTitles = [];
+  if (notesRequest.length) {
+    const byId = new Map(
+      frozen.notes.map((note) => [String(note?.id || ""), note]),
+    );
+    canonicalNotes = notesRequest.map((requested, index) => {
+      const stored = byId.get(String(requested?.id || ""));
+      if (!stored || exportStoredNoteUnitKey(stored) !== requestedKeys[index]) {
+        throw exportSourceBatchError(
+          "EXPORT_JOB_UNIT_MISMATCH",
+          "Export note text no longer matches its frozen unit.",
+          { jobState: frozen.job.state },
+        );
+      }
+      return {
+        id: String(stored.id),
+        text: exportStoredNoteOriginalText(stored),
+        videoTitle: exportStoredNoteTitle(stored),
+        rawText: String(stored.rawText || ""),
+        sourceLanguage: String(stored.sourceLanguage || ""),
+        platform: stored.platform === "bilibili" ? "bilibili" : "youtube",
+        textLanguage: String(stored.textLanguage || ""),
+      };
+    });
+  } else {
+    const sources = await YTD_NOTE_SOURCES.readAllSources(chrome.storage.local);
+    const firstNoteByMedia = new Map();
+    frozen.notes.forEach((note) => {
+      const mediaKey = String(note?.mediaKey || note?.videoId || "");
+      if (mediaKey && !firstNoteByMedia.has(mediaKey)) {
+        firstNoteByMedia.set(mediaKey, note);
+      }
+    });
+    canonicalTitles = titlesRequest.map((requested, index) => {
+      const mediaKey = normalizeExportBatchToken(requested?.mediaKey, 128);
+      const title = String(
+        sources[mediaKey]?.titleOriginal ||
+          firstNoteByMedia.get(mediaKey)?.videoTitle ||
+          "",
+      ).trim();
+      if (
+        !mediaKey ||
+        !frozen.job.intent.mediaKeys.includes(mediaKey) ||
+        !title ||
+        exportStoredTitleUnitKey(mediaKey, title) !== requestedKeys[index]
+      ) {
+        throw exportSourceBatchError(
+          "EXPORT_JOB_UNIT_MISMATCH",
+          "Export title no longer matches its frozen unit.",
+          { jobState: frozen.job.state },
+        );
+      }
+      return { mediaKey, title };
+    });
+  }
+
+  const beforeProviderCall = async () => {
+    frozen = await assertExportNotesJobCurrent(jobId, storageGeneration);
+    if (requestedKeys.some((key) => frozen.job.completedUnitKeys.includes(key))) {
+      throw exportSourceBatchError(
+        "EXPORT_BATCH_PROGRESS_STALE",
+        "Export note progress changed before the provider request.",
+        { jobState: frozen.job.state },
+      );
+    }
+    return frozen.settings;
+  };
+  const result = await handleTranslateNotes(
+    { notes: canonicalNotes, titles: canonicalTitles },
+    { settings: frozen.settings, beforeProviderCall },
+  );
+  const translatedCount =
+    (Array.isArray(result?.translations) ? result.translations.length : 0) +
+    (Array.isArray(result?.titles) ? result.titles.length : 0);
+  if (!result?.success || translatedCount !== requestedKeys.length) {
+    const failureCode =
+      result?.code || result?.titleFailures?.[0]?.code || "";
+    return {
+      ...result,
+      success: translatedCount > 0,
+      code: normalizeExportSourceBatchCode(failureCode),
+      error: exportSourceBatchSafeMessage(failureCode),
+    };
+  }
+  return { ...result, success: true, code: "OK", error: "" };
+}
+
+function sourceUnitHasTranslation(source, unit) {
+  if (unit.kind === "description") {
+    return (source.descriptionZhChunks || []).some(
+      (chunk) =>
+        chunk.index === unit.chunkIndex && chunk.sourceHash === unit.sourceHash,
+    );
+  }
+  return (source.transcriptZh || []).some(
+    (entry) =>
+      entry.segmentId === unit.segmentId &&
+      entry.startMs === unit.startMs &&
+      entry.sourceHash === unit.sourceHash,
+  );
+}
+
+function assertExportProviderSnapshot(job, settings) {
+  const snapshot = job?.providerSnapshot;
+  const provider = resolveActiveProvider(settings);
+  const providerId = String(provider?.id || "");
+  const modelId = String(provider?.model || "");
+  const expectedProviderId = String(
+    snapshot?.providerId || snapshot?.provider || "",
+  );
+  const expectedModelId = String(snapshot?.modelId || snapshot?.model || "");
+  const routeKey = `${providerId}:${modelId}`;
+  if (
+    !snapshot ||
+    !expectedProviderId ||
+    !expectedModelId ||
+    expectedProviderId !== providerId ||
+    expectedModelId !== modelId ||
+    snapshot.routeKey !== routeKey ||
+    snapshot.targetLanguage !== "zh" ||
+    snapshot.translationVersion !== "export-v2" ||
+    !YTD_SETTINGS.hasActiveApiKey(settings)
+  ) {
+    throw exportSourceBatchError(
+      "EXPORT_JOB_PROVIDER_MISMATCH",
+      "The active provider route no longer matches the authorized export job.",
+      { jobState: job?.state || "", checkpoint: true },
+    );
+  }
+  return settings;
+}
+
+async function authorizeExportSourceProviderCall(
+  request,
+  batchId,
+  storageGeneration,
+) {
+  if (storageGeneration !== exportSourceStorageGeneration) {
+    throw exportSourceBatchError(
+      "EXPORT_JOB_NOT_FOUND",
+      "Export source storage was cleared before the provider request.",
+      { checkpoint: true },
+    );
+  }
+  const source = await YTD_NOTE_SOURCES.readNoteSource(
+    chrome.storage.local,
+    request.mediaKey,
+  );
+  const validation = YTD_NOTE_SOURCES.validateExportSourceTranslationUnits(
+    source,
+    request,
+  );
+  if (!validation?.valid) {
+    throw exportSourceBatchError(
+      validation?.code === "REVISION_MISMATCH"
+        ? "EXPORT_SOURCE_STALE"
+        : "EXPORT_SOURCE_UNIT_MISMATCH",
+      `Export source changed before the provider call: ${String(validation?.code || "UNKNOWN")}.`,
+      { checkpoint: true },
+    );
+  }
+  const settings = await getSettings();
+  const job = assertExportJobMatchesRequest(
+    await YTD_EXPORT_JOBS.readExportJob(chrome.storage.local, request.jobId),
+    request,
+  );
+  if (
+    job.currentBatch?.batchId !== batchId ||
+    !sameUnitKeyList(job.currentBatch?.unitKeys, request.unitKeys)
+  ) {
+    throw exportSourceBatchError(
+      "EXPORT_JOB_NOT_RUNNING",
+      "The claimed export batch is no longer active.",
+      { jobState: job.state, checkpoint: true },
+    );
+  }
+  if (storageGeneration !== exportSourceStorageGeneration) {
+    throw exportSourceBatchError(
+      "EXPORT_JOB_NOT_FOUND",
+      "Export source storage was cleared before the provider request.",
+      { jobState: job.state, checkpoint: true },
+    );
+  }
+  return assertExportProviderSnapshot(job, settings);
+}
+
+async function checkpointExportBatchError(jobId, error) {
+  try {
+    const job = await YTD_EXPORT_JOBS.readExportJob(
+      chrome.storage.local,
+      jobId,
+    );
+    if (!job) return null;
+    let nextState = null;
+    if (job.state === "running") {
+      if (error?.code === "EXPORT_JOB_PROVIDER_MISMATCH") {
+        nextState = "paused";
+      } else if (
+        [
+          "EXPORT_SOURCE_STALE",
+          "EXPORT_JOB_SOURCE_REVISION_MISMATCH",
+        ].includes(error?.code)
+      ) {
+        nextState = "stale";
+      } else {
+        nextState = "failed";
+      }
+    }
+    const result = await YTD_EXPORT_JOBS.checkpointExportJob(
+      chrome.storage.local,
+      jobId,
+      {
+        ...(nextState ? { state: nextState } : {}),
+        currentBatch: null,
+        lastError: {
+          code: normalizeExportSourceBatchCode(error?.code),
+          message: exportSourceBatchSafeMessage(
+            normalizeExportSourceBatchCode(error?.code),
+          ),
+          retryable: true,
+          at: Date.now(),
+        },
+      },
+    );
+    return result.job;
+  } catch (_checkpointError) {
+    return null;
+  }
+}
+
+async function executeExportSourceBatch(request) {
+  requireExportSourceModules();
+  const storageGeneration = exportSourceStorageGeneration;
+  let job = assertExportJobMatchesRequest(
+    await YTD_EXPORT_JOBS.readExportJob(chrome.storage.local, request.jobId),
+    request,
+  );
+  const completed = new Set(job.completedUnitKeys || []);
+  const completedRequestKeys = request.unitKeys.filter((unitKey) =>
+    completed.has(unitKey),
+  );
+
+  let source = await YTD_NOTE_SOURCES.readNoteSource(
+    chrome.storage.local,
+    request.mediaKey,
+  );
+  if (!source) {
+    throw exportSourceBatchError(
+      "EXPORT_SOURCE_NOT_FOUND",
+      "Export source was not found in local storage.",
+      { jobState: job.state },
+    );
+  }
+  if (!revisionsMatch(source.sourceRevision, request.sourceRevision)) {
+    throw exportSourceBatchError(
+      "EXPORT_SOURCE_STALE",
+      "Export source revision changed before translation.",
+      { jobState: job.state, checkpoint: true },
+    );
+  }
+  let validation = YTD_NOTE_SOURCES.validateExportSourceTranslationUnits(
+    source,
+    request,
+  );
+  if (!validation?.valid) {
+    throw exportSourceBatchError(
+      validation?.code === "REVISION_MISMATCH"
+        ? "EXPORT_SOURCE_STALE"
+        : validation?.code === "UNIT_ALREADY_TRANSLATED"
+          ? "EXPORT_BATCH_PROGRESS_STALE"
+          : "EXPORT_SOURCE_UNIT_MISMATCH",
+      `Export source unit validation failed: ${String(validation?.code || "UNKNOWN")}.`,
+      {
+        jobState: job.state,
+        checkpoint: validation?.code === "REVISION_MISMATCH",
+      },
+    );
+  }
+  let canonicalUnits = validation.units;
+  const alreadyTranslated = canonicalUnits.filter((unit) =>
+    sourceUnitHasTranslation(source, unit),
+  );
+  const translatedKeys = new Set(alreadyTranslated.map((unit) => unit.id));
+  const durablyCompletedKeys = completedRequestKeys.filter((unitKey) =>
+    translatedKeys.has(unitKey),
+  );
+  if (durablyCompletedKeys.length === request.unitKeys.length) {
+    return {
+      success: true,
+      code: "EXPORT_BATCH_ALREADY_COMPLETED",
+      jobState: job.state,
+      completedUnitKeys: job.completedUnitKeys,
+      remainingCount: exportJobRemainingCount(job),
+      actualProviderCalls: 0,
+    };
+  }
+  if (durablyCompletedKeys.length) {
+    throw exportSourceBatchError(
+      "EXPORT_BATCH_PROGRESS_STALE",
+      "This batch mixes durably completed units with units still pending.",
+      { jobState: job.state },
+    );
+  }
+  if (alreadyTranslated.length) {
+    if (alreadyTranslated.length !== canonicalUnits.length) {
+      throw exportSourceBatchError(
+        "EXPORT_BATCH_PROGRESS_STALE",
+        "The source batch contains a mix of completed and pending units.",
+        { jobState: job.state },
+      );
+    }
+    const checkpoint = await YTD_EXPORT_JOBS.checkpointExportJob(
+      chrome.storage.local,
+      request.jobId,
+      {
+        completedUnitKeys: request.unitKeys,
+        cursor: exportJobCursor(job, [
+          ...(job.completedUnitKeys || []),
+          ...request.unitKeys,
+        ]),
+        currentBatch: null,
+        lastError: null,
+      },
+    );
+    return {
+      success: true,
+      code: "EXPORT_BATCH_ALREADY_COMPLETED",
+      jobState: checkpoint.job.state,
+      completedUnitKeys: checkpoint.job.completedUnitKeys,
+      remainingCount: exportJobRemainingCount(checkpoint.job),
+      actualProviderCalls: 0,
+    };
+  }
+
+  const now = Date.now();
+  if (
+    job.currentBatch?.unitKeys?.length &&
+    !sameUnitKeyList(job.currentBatch.unitKeys, request.unitKeys) &&
+    job.currentBatch.leaseUntil > now
+  ) {
+    throw exportSourceBatchError(
+      "EXPORT_JOB_BATCH_BUSY",
+      "A different export batch still holds the durable lease.",
+      { jobState: job.state },
+    );
+  }
+  const batchId = `source-batch-${shortExportBatchHash(
+    request.unitKeys.join("\u0000"),
+  )}`;
+  const claim = await YTD_EXPORT_JOBS.checkpointExportJob(
+    chrome.storage.local,
+    request.jobId,
+    {
+      currentBatch: {
+        batchId,
+        unitKeys: request.unitKeys,
+        leaseUntil: now + EXPORT_SOURCE_BATCH_LEASE_MS,
+      },
+      lastError: null,
+    },
+  );
+  request.batchClaimed = true;
+  job = assertExportJobMatchesRequest(claim.job, request);
+
+  // Re-hydrate after claiming the durable batch. The atomic commit performs
+  // this validation once more after the provider returns.
+  source = await YTD_NOTE_SOURCES.readNoteSource(
+    chrome.storage.local,
+    request.mediaKey,
+  );
+  validation = YTD_NOTE_SOURCES.validateExportSourceTranslationUnits(
+    source,
+    request,
+  );
+  if (!validation?.valid) {
+    throw exportSourceBatchError(
+      validation?.code === "REVISION_MISMATCH"
+        ? "EXPORT_SOURCE_STALE"
+        : validation?.code === "UNIT_ALREADY_TRANSLATED"
+          ? "EXPORT_BATCH_PROGRESS_STALE"
+          : "EXPORT_SOURCE_UNIT_MISMATCH",
+      `Export source changed before provider request: ${String(validation?.code || "UNKNOWN")}.`,
+      { jobState: job.state, checkpoint: true },
+    );
+  }
+  canonicalUnits = validation.units;
+  const providerSegments = canonicalUnits.map((unit, index) => ({
+    id: `export_${index}`,
+    text: unit.text,
+  }));
+  const translated = await handleTranslateContent(
+    { segments: providerSegments },
+    "transcriptBatch",
+    "zh",
+    canonicalUnits[0]?.videoTitle || "",
+    () =>
+      authorizeExportSourceProviderCall(
+        request,
+        batchId,
+        storageGeneration,
+      ),
+  );
+  const actualProviderCalls = Number.isSafeInteger(translated.actualProviderCalls)
+    ? translated.actualProviderCalls
+    : translated.success
+      ? 1
+      : 0;
+  if (!translated.success) {
+    const providerFailureCode = EXPORT_SOURCE_SAFE_ERROR_CODES.has(
+      translated.code,
+    )
+      ? translated.code
+      : "EXPORT_SOURCE_PROVIDER_FAILED";
+    const error = exportSourceBatchError(
+      providerFailureCode,
+      translated.error || "The translation provider rejected this batch.",
+      { actualProviderCalls, jobState: job.state },
+    );
+    const failedJob = await checkpointExportBatchError(
+      request.jobId,
+      error,
+    );
+    return exportSourceBatchFailure(error, {
+      jobState: failedJob?.state || job.state,
+      completedUnitKeys: failedJob?.completedUnitKeys || job.completedUnitKeys,
+      remainingCount: exportJobRemainingCount(failedJob || job),
+      actualProviderCalls,
+    });
+  }
+
+  const translationsById = new Map();
+  const translatedSegments = Array.isArray(translated.translatedContent?.segments)
+    ? translated.translatedContent.segments
+    : [];
+  providerSegments.forEach((providerSegment, index) => {
+    const candidate = translatedSegments.find(
+      (segment) => segment?.id === providerSegment.id,
+    );
+    const text = typeof candidate?.text === "string" ? candidate.text.trim() : "";
+    if (text) translationsById.set(canonicalUnits[index].id, text);
+  });
+  if (translationsById.size !== canonicalUnits.length) {
+    const error = exportSourceBatchError(
+      "EXPORT_SOURCE_BATCH_PARTIAL",
+      "The translation provider returned an incomplete source batch.",
+      { actualProviderCalls, jobState: job.state },
+    );
+    const failedJob = await checkpointExportBatchError(
+      request.jobId,
+      error,
+    );
+    return exportSourceBatchFailure(error, {
+      jobState: failedJob?.state || job.state,
+      completedUnitKeys: failedJob?.completedUnitKeys || job.completedUnitKeys,
+      remainingCount: exportJobRemainingCount(failedJob || job),
+      actualProviderCalls,
+    });
+  }
+
+  let latestJob;
+  try {
+    latestJob = assertExportJobMatchesRequest(
+      await YTD_EXPORT_JOBS.readExportJob(chrome.storage.local, request.jobId),
+      request,
+      { mustRun: false },
+    );
+  } catch (error) {
+    error.actualProviderCalls = actualProviderCalls;
+    error.checkpoint = true;
+    throw error;
+  }
+  if (!["running", "cancelled"].includes(latestJob.state)) {
+    throw exportSourceBatchError(
+      "EXPORT_JOB_NOT_RUNNING",
+      "The export job stopped before this response could be committed.",
+      {
+        actualProviderCalls,
+        jobState: latestJob.state,
+        checkpoint: true,
+      },
+    );
+  }
+  if (storageGeneration !== exportSourceStorageGeneration) {
+    throw exportSourceBatchError(
+      "EXPORT_JOB_NOT_FOUND",
+      "Export source storage was cleared while the request was in flight.",
+      {
+        actualProviderCalls,
+        jobState: latestJob.state,
+        checkpoint: true,
+      },
+    );
+  }
+
+  const commit = await YTD_NOTE_SOURCES.commitExportSourceTranslationBatch(
+    chrome.storage.local,
+    {
+      mediaKey: request.mediaKey,
+      expectedRevision: request.sourceRevision,
+      units: canonicalUnits,
+      translationsById,
+    },
+    { protectedKeys: new Set(latestJob.intent.mediaKeys) },
+  );
+  if (commit?.stale) {
+    throw exportSourceBatchError(
+      "EXPORT_SOURCE_STALE",
+      "The export source changed while the provider request was in flight.",
+      {
+        actualProviderCalls,
+        jobState: latestJob.state,
+        checkpoint: true,
+      },
+    );
+  }
+  if (
+    commit?.code !== "OK" ||
+    commit.appliedUnitIds?.length !== canonicalUnits.length
+  ) {
+    throw exportSourceBatchError(
+      "EXPORT_SOURCE_BATCH_COMMIT_FAILED",
+      `The source batch was not committed: ${String(commit?.code || "UNKNOWN")}.`,
+      {
+        actualProviderCalls,
+        jobState: latestJob.state,
+        checkpoint: true,
+      },
+    );
+  }
+
+  // Deliberately omit a state patch. If cancellation won the race, the export
+  // job module unions this progress while preserving `cancelled`; no next batch
+  // or auto-export can be started by this background action.
+  const completedUnitKeys = [
+    ...(latestJob.completedUnitKeys || []),
+    ...request.unitKeys,
+  ];
+  const checkpoint = await YTD_EXPORT_JOBS.checkpointExportJob(
+    chrome.storage.local,
+    request.jobId,
+    {
+      completedUnitKeys: request.unitKeys,
+      cursor: exportJobCursor(latestJob, completedUnitKeys),
+      currentBatch: null,
+      lastError: null,
+    },
+  );
+  return {
+    success: true,
+    code:
+      checkpoint.job.state === "cancelled"
+        ? "EXPORT_CANCELLED_BATCH_COMMITTED"
+        : "OK",
+    jobState: checkpoint.job.state,
+    completedUnitKeys: checkpoint.job.completedUnitKeys,
+    remainingCount: exportJobRemainingCount(checkpoint.job),
+    actualProviderCalls,
+  };
+}
+
+async function handleTranslateExportSourceBatch(message) {
+  let request;
+  try {
+    request = validateExportSourceBatchRequest(message);
+  } catch (error) {
+    return exportSourceBatchFailure(error);
+  }
+  return runExportSourceBatchSingleFlight(request);
+}
+
+async function handleCancelExportTranslationJob(jobId) {
+  requireExportSourceModules();
+  const normalizedJobId = normalizeExportBatchToken(jobId, 80);
+  if (!normalizedJobId) {
+    return exportSourceBatchFailure(
+      exportSourceBatchError("INVALID_EXPORT_SOURCE_BATCH", "Invalid job id."),
+    );
+  }
+  const job = await YTD_EXPORT_JOBS.readExportJob(
+    chrome.storage.local,
+    normalizedJobId,
+  );
+  if (!job) {
+    return exportSourceBatchFailure(
+      exportSourceBatchError("EXPORT_JOB_NOT_FOUND", "Export job not found."),
+    );
+  }
+  if (job.state === "cancelled") {
+    return {
+      success: true,
+      code: "EXPORT_JOB_CANCELLED",
+      jobState: job.state,
+      completedUnitKeys: job.completedUnitKeys,
+      remainingCount: exportJobRemainingCount(job),
+      actualProviderCalls: 0,
+    };
+  }
+  if (!["planned", "running", "paused", "failed"].includes(job.state)) {
+    return exportSourceBatchFailure(
+      exportSourceBatchError(
+        "EXPORT_JOB_NOT_RUNNING",
+        `Export job cannot be cancelled from ${job.state}.`,
+        { jobState: job.state },
+      ),
+      {
+        jobState: job.state,
+        completedUnitKeys: job.completedUnitKeys,
+        remainingCount: exportJobRemainingCount(job),
+      },
+    );
+  }
+  const checkpoint = await YTD_EXPORT_JOBS.checkpointExportJob(
+    chrome.storage.local,
+    normalizedJobId,
+    { state: "cancelled", currentBatch: null, exportClaim: null },
+  );
+  return {
+    success: true,
+    code: "EXPORT_JOB_CANCELLED",
+    jobState: checkpoint.job.state,
+    completedUnitKeys: checkpoint.job.completedUnitKeys,
+    remainingCount: exportJobRemainingCount(checkpoint.job),
+    actualProviderCalls: 0,
+  };
+}
+
+async function handleGetExportTranslationJob(jobId) {
+  requireExportSourceModules();
+  const normalizedJobId = normalizeExportBatchToken(jobId, 80);
+  if (!normalizedJobId) {
+    return exportSourceBatchFailure(
+      exportSourceBatchError("INVALID_EXPORT_SOURCE_BATCH", "Invalid job id."),
+    );
+  }
+  const job = await YTD_EXPORT_JOBS.readExportJob(
+    chrome.storage.local,
+    normalizedJobId,
+  );
+  if (!job) {
+    return exportSourceBatchFailure(
+      exportSourceBatchError("EXPORT_JOB_NOT_FOUND", "Export job not found."),
+    );
+  }
+  return { success: true, code: "OK", job };
+}
+
+async function handleListExportTranslationJobs() {
+  requireExportSourceModules();
+  const jobs = await YTD_EXPORT_JOBS.readExportJobs(chrome.storage.local);
+  return {
+    success: true,
+    code: "OK",
+    jobs: Object.values(jobs || {}).sort(
+      (left, right) => Number(right?.updatedAt || 0) - Number(left?.updatedAt || 0),
+    ),
+  };
+}
+
+function assertOnlyExportJobFields(value, allowed, code) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw exportSourceBatchError(code, "Export job metadata must be an object.");
+  }
+  if (Object.keys(value).some((field) => !allowed.includes(field))) {
+    throw exportSourceBatchError(
+      code,
+      "Export job metadata contains an unsupported field.",
+    );
+  }
+  return value;
+}
+
+const EXPORT_JOB_INPUT_FIELDS = [
+  "schemaVersion",
+  "jobId",
+  "state",
+  "intent",
+  "sourceRevisions",
+  "notesRevision",
+  "orderedUnitKeys",
+  "completedUnitKeys",
+  "currentBatch",
+  "cursor",
+  "roundBudget",
+  "providerSnapshot",
+  "exportClaim",
+  "lastError",
+  "updatedAt",
+];
+const EXPORT_JOB_PATCH_FIELDS = [
+  "state",
+  "completedUnitKeys",
+  "currentBatch",
+  "cursor",
+  "exportClaim",
+  "lastError",
+];
+
+async function handleCreateOrResumeExportJob(jobInput) {
+  requireExportSourceModules();
+  const storageGeneration = exportSourceStorageGeneration;
+  assertOnlyExportJobFields(
+    jobInput,
+    EXPORT_JOB_INPUT_FIELDS,
+    "INVALID_EXPORT_JOB",
+  );
+  let candidate = YTD_EXPORT_JOBS.normalizeExportJob(jobInput);
+  if (!candidate) candidate = YTD_EXPORT_JOBS.createExportJob(jobInput);
+  const existing = await YTD_EXPORT_JOBS.readExportJob(
+    chrome.storage.local,
+    candidate.jobId,
+  );
+  assertExportSourceStorageGeneration(storageGeneration);
+  let result = await YTD_EXPORT_JOBS.upsertExportJob(
+    chrome.storage.local,
+    candidate,
+  );
+  assertExportSourceStorageGeneration(storageGeneration);
+  const stored = result.job;
+  if (stored && existing) {
+    // Never clear a running job's durable lease/claim from a duplicate resume.
+    // Resuming a stopped job is an explicit state transition after the frozen
+    // fields have been revalidated by upsertExportJob above.
+    if (stored.state === "running") {
+      return {
+        success: true,
+        code: "OK",
+        changed: result.changed === true,
+        job: stored,
+      };
+    }
+    if (["ready_to_export", "completed", "stale"].includes(stored.state)) {
+      if (candidate.state !== stored.state) {
+        throw exportSourceBatchError(
+          "EXPORT_JOB_NOT_RESUMABLE",
+          `Export job cannot resume from ${stored.state}.`,
+          { jobState: stored.state },
+        );
+      }
+    } else if (
+      ["planned", "paused", "failed", "cancelled"].includes(stored.state) &&
+      ["planned", "running", "paused"].includes(candidate.state)
+    ) {
+      assertExportSourceStorageGeneration(storageGeneration);
+      result = await YTD_EXPORT_JOBS.checkpointExportJob(
+        chrome.storage.local,
+        candidate.jobId,
+        {
+          state: candidate.state,
+          completedUnitKeys: candidate.completedUnitKeys,
+          currentBatch: null,
+          cursor: candidate.cursor,
+          exportClaim: null,
+          lastError: null,
+        },
+        { allowCancelledResume: stored.state === "cancelled" },
+      );
+    }
+  }
+  return {
+    success: true,
+    code: "OK",
+    changed: result.changed === true,
+    job: result.job,
+  };
+}
+
+async function handleCheckpointExportJob(jobId, patchInput) {
+  requireExportSourceModules();
+  const normalizedJobId = normalizeExportBatchToken(jobId, 80);
+  if (!normalizedJobId) {
+    throw exportSourceBatchError("INVALID_EXPORT_JOB", "Invalid export job id.");
+  }
+  assertOnlyExportJobFields(
+    patchInput,
+    EXPORT_JOB_PATCH_FIELDS,
+    "INVALID_EXPORT_JOB_PATCH",
+  );
+  const patch = {};
+  EXPORT_JOB_PATCH_FIELDS.forEach((field) => {
+    if (Object.prototype.hasOwnProperty.call(patchInput, field)) {
+      patch[field] = patchInput[field];
+    }
+  });
+  if (patch.lastError) {
+    const code = normalizeExportSourceBatchCode(patch.lastError.code);
+    patch.lastError = {
+      code,
+      message: exportSourceBatchSafeMessage(code),
+      retryable: patch.lastError.retryable !== false,
+      at:
+        Number.isSafeInteger(patch.lastError.at) && patch.lastError.at >= 0
+          ? patch.lastError.at
+          : Date.now(),
+    };
+  }
+  const result = await YTD_EXPORT_JOBS.checkpointExportJob(
+    chrome.storage.local,
+    normalizedJobId,
+    patch,
+    {
+      requireEmptyExportClaim:
+        patch.state === "ready_to_export" && !!patch.exportClaim,
+    },
+  );
+  return {
+    success: true,
+    code: "OK",
+    changed: result.changed === true,
+    job: result.job,
+  };
+}
+
+async function handleUpsertNoteSource(sourceInput) {
+  requireExportSourceModules();
+  const storageGeneration = exportSourceStorageGeneration;
+  const source = YTD_NOTE_SOURCES.normalizeNoteSource(sourceInput);
+  if (!source) {
+    return exportSourceBatchFailure(
+      exportSourceBatchError(
+        "INVALID_EXPORT_SOURCE_BATCH",
+        "Note source is invalid.",
+      ),
+    );
+  }
+  const stored = await chrome.storage.local.get("ytd_notes");
+  assertExportSourceStorageGeneration(storageGeneration);
+  const protectedKeys = new Set(
+    (Array.isArray(stored?.ytd_notes) ? stored.ytd_notes : [])
+      .map((note) => String(note?.mediaKey || note?.videoId || "").trim())
+      .filter(Boolean),
+  );
+  protectedKeys.add(source.mediaKey);
+  const result = await YTD_NOTE_SOURCES.writeNoteSource(
+    chrome.storage.local,
+    source,
+    { protectedKeys },
+  );
+  assertExportSourceStorageGeneration(storageGeneration);
+  const persisted = await YTD_NOTE_SOURCES.readNoteSource(
+    chrome.storage.local,
+    source.mediaKey,
+  );
+  if (!persisted) {
+    throw exportSourceBatchError(
+      "EXPORT_SOURCE_BATCH_COMMIT_FAILED",
+      "Note source was not persisted.",
+    );
+  }
+  return {
+    success: true,
+    code: "OK",
+    changed: result?.changed === true,
+    mediaKey: persisted.mediaKey,
+    sourceRevision: persisted.sourceRevision,
+    source: persisted,
+  };
 }
 
 // ============================================================
@@ -2928,6 +4758,33 @@ function normalizeTranslatedSegmentBatch(parsed, sourceSegments) {
         : "Missing or invalid Chinese translation",
     })),
   };
+}
+
+function transcriptTranslationMaxTokens(sourceSegments) {
+  const totalCharacters = sourceSegments.reduce(
+    (sum, segment) => sum + segment.text.length,
+    0,
+  );
+  // Short on-screen batches keep the established 1536-token budget. Export
+  // completion can legitimately send up to 12k source characters, so scale the
+  // output allowance rather than truncating a valid JSON object mid-string.
+  return Math.min(
+    8192,
+    Math.max(1536, Math.ceil(totalCharacters * 0.8) + 512),
+  );
+}
+
+function parseTranscriptTranslation(text, sourceSegments) {
+  try {
+    const parsed = parseLooseJson(text);
+    const aligned = normalizeTranslatedSegmentBatch(parsed, sourceSegments);
+    return {
+      success: aligned.segments.some((segment) => segment.text),
+      translatedContent: aligned,
+    };
+  } catch (_error) {
+    return { success: false, translatedContent: null };
+  }
 }
 
 function validateOverviewOriginalTranslationRequest(analysis, targetLanguage) {
@@ -3032,8 +4889,11 @@ async function handleTranslateOverviewOriginal(
 ) {
   try {
     const settings = await getSettings();
-    if (!settings.aiApiKey) {
-      return { success: false, error: "尚未配置 DeepSeek API 密钥" };
+    if (!YTD_SETTINGS.hasActiveApiKey(settings)) {
+      return {
+        success: false,
+        error: `尚未配置${providerDisplayLabel(settings)} API 密钥`,
+      };
     }
 
     const source = validateOverviewOriginalTranslationRequest(
@@ -3619,8 +5479,12 @@ const NOTE_TRANSLATION_MAX_PROVIDER_CALLS = 5;
 const NOTE_TRANSLATION_RATE_LIMIT_BACKOFF_MS = 1_000;
 const NOTE_TRANSLATION_RATE_LIMIT_COOLDOWN_MS = 5_000;
 const NOTE_TRANSLATION_VALIDATION_VERSION = 1;
+const NOTE_TITLE_TRANSLATION_VALIDATION_VERSION = 1;
+const NOTE_TITLE_MEDIA_KEY_PATTERN = /^[A-Za-z0-9:_-]{1,64}$/;
+const NOTE_TITLE_TRANSLATION_MAX_TITLES = 10;
 
 function noteFailureCode(result, fallback = "PROVIDER_ERROR") {
+  if (EXPORT_SOURCE_SAFE_ERROR_CODES.has(result?.code)) return result.code;
   if (result?.code === "RATE_LIMITED") return "RATE_LIMITED";
   if (result?.code === "NOTE_JOB_TIMEOUT") return "NOTE_JOB_TIMEOUT";
   if (result?.code === "PROVIDER_TIMEOUT") return "PROVIDER_TIMEOUT";
@@ -3654,7 +5518,11 @@ function createNoteTranslationJob(dependencies = {}) {
     rateLimitRetries: 0,
     emptyFallbacks: 0,
     stopCode: "",
-    settings: null,
+    settings: dependencies.settings || null,
+    beforeProviderCall:
+      typeof dependencies.beforeProviderCall === "function"
+        ? dependencies.beforeProviderCall
+        : null,
     deadlineAt:
       Number.isFinite(dependencies.deadlineAt)
         ? dependencies.deadlineAt
@@ -3733,6 +5601,22 @@ async function callNoteTranslationProvider(
       code: job.stopCode,
       error: "笔记翻译重试次数已达上限",
     };
+  }
+
+  if (job.beforeProviderCall) {
+    try {
+      const settings = await waitForNoteJobDeadline(job, () =>
+        job.beforeProviderCall(),
+      );
+      if (settings) job.settings = settings;
+    } catch (error) {
+      job.stopCode = normalizeExportSourceBatchCode(error?.code);
+      return {
+        success: false,
+        code: job.stopCode,
+        error: exportSourceBatchSafeMessage(job.stopCode),
+      };
+    }
   }
 
   job.providerCalls += 1;
@@ -3834,7 +5718,12 @@ async function callStructuredNoteTranslation(
   return result;
 }
 
-function noteTranslationResult(requestedNotes, validTranslations, failureById) {
+function noteTranslationResult(
+  requestedNotes,
+  validTranslations,
+  failureById,
+  providerLabel = "AI 服务",
+) {
   const successfulIds = new Set(validTranslations.map((note) => note.id));
   const failures = requestedNotes
     .filter((note) => !successfulIds.has(note.id))
@@ -3844,15 +5733,20 @@ function noteTranslationResult(requestedNotes, validTranslations, failureById) {
     }));
   const primaryFailureCode = failures[0]?.code || "";
   const errorByCode = {
-    RATE_LIMITED: "DeepSeek 请求受限，请稍后重试。",
-    PROVIDER_TIMEOUT: "DeepSeek 请求超时，请稍后重试。",
+    RATE_LIMITED: `${providerLabel} 请求受限，请稍后重试。`,
+    PROVIDER_TIMEOUT: `${providerLabel} 请求超时，请稍后重试。`,
     NOTE_JOB_TIMEOUT: "笔记翻译任务超时，请重试。",
-    OUTPUT_TRUNCATED: "DeepSeek 输出被截断，请重试。",
-    CONTENT_FILTERED: "DeepSeek 未返回这条内容，请修改原文或稍后重试。",
-    PROVIDER_UNAVAILABLE: "DeepSeek 暂时不可用，请稍后重试。",
-    UNEXPECTED_FINISH_REASON: "DeepSeek 未正常完成响应，请重试。",
-    EMPTY_RESPONSE: "DeepSeek 未返回有效内容，请重试。",
+    OUTPUT_TRUNCATED: `${providerLabel} 输出被截断，请重试。`,
+    CONTENT_FILTERED: `${providerLabel} 未返回这条内容，请修改原文或稍后重试。`,
+    PROVIDER_UNAVAILABLE: `${providerLabel} 暂时不可用，请稍后重试。`,
+    UNEXPECTED_FINISH_REASON: `${providerLabel} 未正常完成响应，请重试。`,
+    EMPTY_RESPONSE: `${providerLabel} 未返回有效内容，请重试。`,
     RETRY_BUDGET_EXHAUSTED: "本轮笔记重试次数已达上限，请再次重试。",
+    EXPORT_JOB_PROVIDER_MISMATCH:
+      "当前翻译服务或模型已变化，本批次未调用，请重新确认。",
+    EXPORT_JOB_NOT_RUNNING: "补译任务已停止，不会启动新的翻译请求。",
+    EXPORT_JOB_SOURCE_REVISION_MISMATCH:
+      "笔记或视频资料已变化，请重新预检。",
   };
   return {
     success: validTranslations.length > 0,
@@ -3866,7 +5760,235 @@ function noteTranslationResult(requestedNotes, validTranslations, failureById) {
   };
 }
 
-function handleTranslateNotes(notes, dependencies = {}) {
+// ============================================================
+// NOTE VIDEO TITLE TRANSLATION
+// Titles are translated once per stable media identity and validated
+// independently of the note bodies, so a failed title never blocks a note's
+// body (and vice versa). Every note sharing the mediaKey is backfilled with the
+// same validated Chinese title.
+// ============================================================
+
+function noteTitleMediaKey(note) {
+  return String(note?.mediaKey || note?.videoId || "").trim();
+}
+
+/**
+ * Normalizes and de-duplicates the optional `titles` request array. Invalid or
+ * duplicate entries are skipped rather than throwing, so a malformed auxiliary
+ * title can never reject the note-body translation it travels with.
+ */
+function validateNoteTitleTranslationRequest(titles) {
+  if (!Array.isArray(titles) || !titles.length) return [];
+  const seen = new Set();
+  const normalized = [];
+  for (const entry of titles) {
+    const mediaKey =
+      typeof entry?.mediaKey === "string" ? entry.mediaKey.trim() : "";
+    const title =
+      typeof entry?.title === "string" ? entry.title.trim().slice(0, 500) : "";
+    if (!NOTE_TITLE_MEDIA_KEY_PATTERN.test(mediaKey) || !title) continue;
+    if (seen.has(mediaKey)) continue;
+    seen.add(mediaKey);
+    normalized.push({ mediaKey, title });
+    if (normalized.length >= NOTE_TITLE_TRANSLATION_MAX_TITLES) break;
+  }
+  return normalized;
+}
+
+function noteTitleTranslationUserContent(titles) {
+  return JSON.stringify({
+    titles: titles.map(({ mediaKey, title }) => ({ mediaKey, title })),
+  });
+}
+
+function validateNoteTitleCandidate(candidate) {
+  const titleZh =
+    typeof candidate?.titleZh === "string" ? candidate.titleZh.trim() : "";
+  if (!titleZh) return { titleZh: "", failureCode: "EMPTY_RESPONSE" };
+  if (titleZh.length > 500 || hasExplicitBilingualLabels(titleZh)) {
+    return { titleZh: "", failureCode: "INVALID_TRANSLATION" };
+  }
+  if (looksLikeUsableChineseNote(titleZh)) {
+    return { titleZh, failureCode: "" };
+  }
+  return { titleZh: "", failureCode: "INVALID_TRANSLATION" };
+}
+
+function normalizeNoteTitleTranslation(parsed, sourceTitles) {
+  const raw = Array.isArray(parsed?.titles) ? parsed.titles : [];
+  const byKey = new Map();
+  const duplicateKeys = new Set();
+  raw.forEach((candidate) => {
+    const key =
+      typeof candidate?.mediaKey === "string" ? candidate.mediaKey.trim() : "";
+    if (!key) return;
+    if (byKey.has(key)) {
+      duplicateKeys.add(key);
+      return;
+    }
+    byKey.set(key, candidate);
+  });
+  return sourceTitles.map((source) => {
+    if (duplicateKeys.has(source.mediaKey)) {
+      return {
+        mediaKey: source.mediaKey,
+        titleZh: "",
+        failureCode: "MULTIPLE_CANDIDATES",
+      };
+    }
+    const candidate = byKey.get(source.mediaKey);
+    if (!candidate) {
+      return {
+        mediaKey: source.mediaKey,
+        titleZh: "",
+        failureCode: "MISSING_ITEM",
+      };
+    }
+    const validated = validateNoteTitleCandidate(candidate);
+    return {
+      mediaKey: source.mediaKey,
+      titleZh: validated.titleZh,
+      failureCode: validated.failureCode,
+    };
+  });
+}
+
+function persistNoteTitleTranslations(titleByMediaKey, job) {
+  return withNoteStorageWrite(async () => {
+    const stored = job
+      ? await waitForNoteJobDeadline(job, () =>
+          chrome.storage.local.get("ytd_notes"),
+        )
+      : await chrome.storage.local.get("ytd_notes");
+    const storedNotes = Array.isArray(stored.ytd_notes) ? stored.ytd_notes : [];
+    const updatedNotes = storedNotes.map((note) => {
+      const key = noteTitleMediaKey(note);
+      if (!key || !titleByMediaKey.has(key)) return note;
+      const translated = titleByMediaKey.get(key);
+      return {
+        ...note,
+        videoTitleZh: translated.titleZh,
+        videoTitleZhSourceHash: translated.sourceHash,
+        videoTitleZhValidated: true,
+        videoTitleZhValidationVersion: NOTE_TITLE_TRANSLATION_VALIDATION_VERSION,
+      };
+    });
+    if (job && noteJobRemainingMs(job) <= 0) {
+      const error = new Error("笔记翻译任务超时，请重试。");
+      error.code = "NOTE_JOB_TIMEOUT";
+      job.stopCode = error.code;
+      throw error;
+    }
+    await chrome.storage.local.set({ ytd_notes: updatedNotes });
+  });
+}
+
+/**
+ * Translates a de-duplicated batch of titles inside an existing note-translation
+ * job, sharing that job's provider-call budget, rate-limit cooldown and
+ * deadline. Returns valid titles plus a per-mediaKey failure map. Never throws.
+ */
+async function translateNoteTitlesInJob(job, sourceTitles) {
+  const failureByKey = new Map();
+  if (!sourceTitles.length) return { titles: [], failureByKey };
+  const failAll = (code) => {
+    sourceTitles.forEach((title) => failureByKey.set(title.mediaKey, code));
+    return { titles: [], failureByKey };
+  };
+  if (job.stopCode) return failAll(job.stopCode);
+  if (noteJobRemainingMs(job) <= 0) return failAll("NOTE_JOB_TIMEOUT");
+  if (job.now() < noteTranslationCooldownUntil) return failAll("RATE_LIMITED");
+
+  const options = {
+    temperature: 0.2,
+    maxTokens: 1024,
+    responseFormat: { type: "json_object" },
+  };
+  let systemPrompt;
+  try {
+    const baseRules = await waitForNoteJobDeadline(job, () =>
+      getTranslationBaseRules("zh"),
+    );
+    systemPrompt = await waitForNoteJobDeadline(job, () =>
+      loadPromptSection("translation.md", "Note title translation", {
+        langName: "Simplified Chinese",
+        baseRules,
+      }),
+    );
+  } catch (error) {
+    return failAll(error?.code === "NOTE_JOB_TIMEOUT" ? error.code : "PROVIDER_ERROR");
+  }
+
+  const result = await callStructuredNoteTranslation(
+    job,
+    systemPrompt,
+    noteTitleTranslationUserContent(sourceTitles),
+    options,
+  );
+  if (!result.success) return failAll(noteFailureCode(result));
+
+  let normalized;
+  try {
+    normalized = normalizeNoteTitleTranslation(
+      parseLooseJson(result.text),
+      sourceTitles,
+    );
+  } catch (_error) {
+    normalized = sourceTitles.map((title) => ({
+      mediaKey: title.mediaKey,
+      titleZh: "",
+      failureCode: "INVALID_JSON",
+    }));
+  }
+
+  for (let index = 0; index < normalized.length; index += 1) {
+    if (normalized[index].titleZh) continue;
+    if (job.stopCode) {
+      normalized[index].failureCode = job.stopCode;
+      continue;
+    }
+    const retry = await callStructuredNoteTranslation(
+      job,
+      systemPrompt,
+      noteTitleTranslationUserContent([sourceTitles[index]]),
+      options,
+    );
+    if (!retry.success) {
+      normalized[index].failureCode = noteFailureCode(retry);
+      continue;
+    }
+    let retryNormalized;
+    try {
+      retryNormalized = normalizeNoteTitleTranslation(parseLooseJson(retry.text), [
+        sourceTitles[index],
+      ]);
+    } catch (_error) {
+      retryNormalized = [
+        { mediaKey: sourceTitles[index].mediaKey, titleZh: "", failureCode: "INVALID_JSON" },
+      ];
+    }
+    normalized[index] = retryNormalized[0];
+  }
+
+  const titles = normalized
+    .filter((title) => title.titleZh)
+    .map(({ mediaKey, titleZh }) => ({ mediaKey, titleZh }));
+  normalized.forEach((title) => {
+    if (!title.titleZh) {
+      failureByKey.set(
+        title.mediaKey,
+        title.failureCode || job.stopCode || "INVALID_TRANSLATION",
+      );
+    }
+  });
+  return { titles, failureByKey };
+}
+
+function handleTranslateNotes(request, dependencies = {}) {
+  // Backward compatible: an array is a notes-only request; an object may carry
+  // an optional de-duplicated `titles` batch translated in the same job.
+  const notes = Array.isArray(request) ? request : request?.notes || [];
+  const titles = Array.isArray(request) ? [] : request?.titles || [];
   const now = dependencies.now || Date.now;
   const requestDependencies = {
     ...dependencies,
@@ -3876,15 +5998,79 @@ function handleTranslateNotes(notes, dependencies = {}) {
       : now() + NOTE_TRANSLATION_JOB_TIMEOUT_MS,
   };
   const run = noteTranslationQueue.then(() =>
-    runTranslateNotes(notes, requestDependencies),
+    runTranslateNotes(notes, titles, requestDependencies),
   );
   noteTranslationQueue = run.catch(() => {});
   return run;
 }
 
-async function runTranslateNotes(notes, dependencies = {}) {
-  let requestedNotes = [];
+async function runTranslateNotes(notes, titles, dependencies = {}) {
   const job = createNoteTranslationJob(dependencies);
+  const normalizedTitles = validateNoteTitleTranslationRequest(titles);
+  const bodyResult = (notes || []).length
+    ? await runTranslateNoteBodies(notes, job)
+    : { success: true, translations: [], missingIds: [], failures: [] };
+  if (!normalizedTitles.length) return bodyResult;
+
+  let titleOutcome = { titles: [], failureByKey: new Map() };
+  try {
+    if (!job.settings) {
+      const settings = await waitForNoteJobDeadline(job, () => getSettings());
+      if (YTD_SETTINGS.hasActiveApiKey(settings)) job.settings = settings;
+    }
+    if (job.settings && YTD_SETTINGS.hasActiveApiKey(job.settings)) {
+      titleOutcome = await translateNoteTitlesInJob(job, normalizedTitles);
+      if (titleOutcome.titles.length) {
+        const sourceByMediaKey = new Map(
+          normalizedTitles.map((title) => [title.mediaKey, title.title]),
+        );
+        await persistNoteTitleTranslations(
+          new Map(
+            titleOutcome.titles.map((translated) => [
+              translated.mediaKey,
+              {
+                titleZh: translated.titleZh,
+                sourceHash: YTD_NOTE_SOURCES.hashSourceText(
+                  sourceByMediaKey.get(translated.mediaKey) || "",
+                ),
+              },
+            ]),
+          ),
+          job,
+        );
+      }
+    } else {
+      normalizedTitles.forEach((t) =>
+        titleOutcome.failureByKey.set(t.mediaKey, "NO_AI_KEY"),
+      );
+    }
+  } catch (error) {
+    // A title failure must never corrupt the body result.
+    normalizedTitles.forEach((t) => {
+      if (!titleOutcome.failureByKey.has(t.mediaKey)) {
+        titleOutcome.failureByKey.set(t.mediaKey, error?.code || "PROVIDER_ERROR");
+      }
+    });
+  }
+
+  const successfulTitleKeys = new Set(
+    titleOutcome.titles.map((t) => t.mediaKey),
+  );
+  return {
+    ...bodyResult,
+    success: bodyResult.success || titleOutcome.titles.length > 0,
+    titles: titleOutcome.titles,
+    titleFailures: normalizedTitles
+      .filter((t) => !successfulTitleKeys.has(t.mediaKey))
+      .map((t) => ({
+        mediaKey: t.mediaKey,
+        code: titleOutcome.failureByKey.get(t.mediaKey) || "INVALID_TRANSLATION",
+      })),
+  };
+}
+
+async function runTranslateNoteBodies(notes, job) {
+  let requestedNotes = [];
   try {
     requestedNotes = validateNoteTranslationRequest(notes);
     const storedBefore = await waitForNoteJobDeadline(
@@ -3976,12 +6162,18 @@ async function runTranslateNotes(notes, dependencies = {}) {
         requestedNotes,
         existingTranslations,
         failureById,
+        providerDisplayLabel(job.settings),
       );
     }
 
-    const settings = await waitForNoteJobDeadline(job, () => getSettings());
-    if (!settings.aiApiKey) {
-      return { success: false, error: "尚未配置 DeepSeek API 密钥" };
+    const settings =
+      job.settings ||
+      (await waitForNoteJobDeadline(job, () => getSettings()));
+    if (!YTD_SETTINGS.hasActiveApiKey(settings)) {
+      return {
+        success: false,
+        error: `尚未配置${providerDisplayLabel(settings)} API 密钥`,
+      };
     }
     job.settings = settings;
     if (job.now() < noteTranslationCooldownUntil) {
@@ -3990,6 +6182,7 @@ async function runTranslateNotes(notes, dependencies = {}) {
         requestedNotes,
         existingTranslations,
         failureById,
+        providerDisplayLabel(job.settings),
       );
     }
 
@@ -4024,6 +6217,7 @@ async function runTranslateNotes(notes, dependencies = {}) {
         requestedNotes,
         existingTranslations,
         failureById,
+        providerDisplayLabel(job.settings),
       );
     }
 
@@ -4120,13 +6314,19 @@ async function runTranslateNotes(notes, dependencies = {}) {
       requestedNotes,
       validTranslations,
       failureById,
+      providerDisplayLabel(job.settings),
     );
   } catch (error) {
     if (error?.code === "NOTE_JOB_TIMEOUT" && requestedNotes.length) {
       const failureById = new Map(
         requestedNotes.map((note) => [note.id, "NOTE_JOB_TIMEOUT"]),
       );
-      return noteTranslationResult(requestedNotes, [], failureById);
+      return noteTranslationResult(
+        requestedNotes,
+        [],
+        failureById,
+        providerDisplayLabel(job.settings),
+      );
     }
     return { success: false, error: error.message || "中文笔记生成失败" };
   }
@@ -4145,24 +6345,32 @@ async function handleTranslateContent(
   contentType,
   targetLanguage,
   videoTitle,
+  beforeProviderCall,
 ) {
+  let actualProviderCalls = 0;
   try {
     if (targetLanguage !== "zh") {
       return {
         success: false,
         error: `Unsupported translation target: ${String(targetLanguage)}`,
+        actualProviderCalls,
       };
     }
     if (contentType !== "transcriptBatch") {
       return {
         success: false,
         error: `Unsupported translation content type: ${String(contentType)}`,
+        actualProviderCalls,
       };
     }
 
     const settings = await getSettings();
-    if (!settings.aiApiKey) {
-      return { success: false, error: "尚未配置 DeepSeek API 密钥" };
+    if (!YTD_SETTINGS.hasActiveApiKey(settings)) {
+      return {
+        success: false,
+        error: `尚未配置${providerDisplayLabel(settings)} API 密钥`,
+        actualProviderCalls,
+      };
     }
 
     const sourceSegments = validateTranscriptBatchRequest(content);
@@ -4180,37 +6388,86 @@ async function handleTranslateContent(
     const userContent = JSON.stringify({ segments: sourceSegments });
     const translationOptions = {
       temperature: 0.2,
-      maxTokens: 1536,
+      maxTokens: transcriptTranslationMaxTokens(sourceSegments),
       responseFormat: { type: "json_object" },
     };
-    let result = await callAiTranslation(
+    const callAuthorizedTranslation = async (prompt, options) => {
+      const authorizedSettings =
+        typeof beforeProviderCall === "function"
+          ? await beforeProviderCall()
+          : settings;
+      if (!YTD_SETTINGS.hasActiveApiKey(authorizedSettings)) {
+        throw exportSourceBatchError(
+          "NO_AI_KEY",
+          `尚未配置${providerDisplayLabel(authorizedSettings)} API 密钥`,
+        );
+      }
+      actualProviderCalls += 1;
+      return callAiTranslation(prompt, userContent, {
+        ...options,
+        settings: authorizedSettings,
+      });
+    };
+    let result = await callAuthorizedTranslation(
       systemPrompt,
-      userContent,
       translationOptions,
     );
+    let retried = false;
 
-    // DeepSeek JSON mode can rarely return an empty content string. The prompt
-    // already requires JSON, so retry once without response_format.
-    if (!result.success && result.code === "EMPTY_AI_RESPONSE") {
-      result = await callAiTranslation(systemPrompt, userContent, {
+    // A provider may return an empty response or signal an output-length stop.
+    // Retry once with a larger budget and without response_format. The prompt
+    // still requires exact JSON, while the one-retry bound prevents cost fanout.
+    if (
+      !result.success &&
+      ["EMPTY_AI_RESPONSE", "OUTPUT_TRUNCATED"].includes(result.code)
+    ) {
+      result = await callAuthorizedTranslation(systemPrompt, {
         temperature: translationOptions.temperature,
-        maxTokens: translationOptions.maxTokens,
+        maxTokens: Math.min(8192, translationOptions.maxTokens * 2),
       });
+      retried = true;
     }
-    if (!result.success) return result;
+    if (!result.success) return { ...result, actualProviderCalls };
 
-    const parsed = parseLooseJson(result.text);
-    const aligned = normalizeTranslatedSegmentBatch(parsed, sourceSegments);
-    if (!aligned.segments.some((segment) => segment.text)) {
+    let parsed = parseTranscriptTranslation(result.text, sourceSegments);
+    // Some OpenAI-compatible providers report finish_reason=stop even when the
+    // JSON text ends inside a quoted string. Treat that as untrusted provider
+    // output, not an extension runtime exception, and recover exactly once.
+    if (!parsed.success && !retried) {
+      result = await callAuthorizedTranslation(
+        `${systemPrompt}\nReturn one complete JSON object. Do not stop inside a string or omit the final brackets.`,
+        {
+          temperature: translationOptions.temperature,
+          maxTokens: Math.min(8192, translationOptions.maxTokens * 2),
+        },
+      );
+      retried = true;
+      if (!result.success) return { ...result, actualProviderCalls };
+      parsed = parseTranscriptTranslation(result.text, sourceSegments);
+    }
+    if (!parsed.success) {
       return {
         success: false,
-        error: "翻译结果中没有有效的中文片段",
+        code: "INVALID_JSON",
+        error: "AI 返回的翻译 JSON 不完整，请重试该段。",
+        actualProviderCalls,
       };
     }
-    return { success: true, translatedContent: aligned };
+    return {
+      success: true,
+      translatedContent: parsed.translatedContent,
+      actualProviderCalls,
+    };
   } catch (error) {
-    console.error("[DigestDock] Translation error:", error);
-    return { success: false, error: error.message || "翻译失败" };
+    if (!String(error?.code || "").startsWith("EXPORT_")) {
+      console.error("[DigestDock] Translation error:", error);
+    }
+    return {
+      success: false,
+      code: error?.code,
+      error: error.message || "翻译失败",
+      actualProviderCalls,
+    };
   }
 }
 
@@ -4275,6 +6532,7 @@ globalThis.__YTD_TRANSLATION_TESTING__ = {
   createNoteId,
   getNoteStorageGeneration,
   handleSaveNote,
+  persistSavedNoteSourceBestEffort,
   handleTranslateOverviewOriginal,
   handleTranslateNotes,
   hasUsableChineseOverview,
@@ -4294,6 +6552,19 @@ globalThis.__YTD_TRANSLATION_TESTING__ = {
   normalizeNoteTranslation,
   normalizeSingletonNoteTranslationResponse,
   validateNoteTranslationCandidate,
+  validateNoteTitleTranslationRequest,
+  validateNoteTitleCandidate,
+  normalizeNoteTitleTranslation,
+  noteTitleTranslationUserContent,
+  noteTitleMediaKey,
+  validateExportSourceBatchRequest,
+  handleTranslateExportSourceBatch,
+  handleCancelExportTranslationJob,
+  handleGetExportTranslationJob,
+  handleListExportTranslationJobs,
+  handleCreateOrResumeExportJob,
+  handleCheckpointExportJob,
+  handleUpsertNoteSource,
   resolveSourceLanguage,
   saveNoteToStorage,
   sendMessageToContentWithRecovery,

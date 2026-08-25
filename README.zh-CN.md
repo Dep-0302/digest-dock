@@ -28,9 +28,9 @@ DigestDock 是在 [Zara Zhang 原作 YouTube Digest](https://github.com/zarazhan
 你的 Agent 应该帮你：
 
 1. 先询问你想把项目长期保存在哪里，再下载或克隆到那里，并告诉你准确的完整路径。如果你需要建议，可以推荐 macOS 或 Linux 上的 `~/Documents/digest-dock`，或 Windows 上的 `%USERPROFILE%\Documents\digest-dock`。
-2. 打开下方 DeepSeek 官方页面；如果你需要新的 YouTube 字幕，再打开 Supadata 页面，并指导你创建相应账号。
+2. 打开你选择的 AI 服务商官方页面；如果你需要新的 YouTube 字幕，再打开 Supadata 页面，并指导你创建相应账号。
 3. 指导你在 Chrome 中通过“加载已解压的扩展程序”选择你刚才确定的那个准确项目文件夹。
-4. 告诉你应该在扩展的“设置”页面哪个位置填写必需的 DeepSeek Key，以及用于新 YouTube 字幕的 Supadata Key。
+4. 告诉你应该在扩展的“设置”页面哪个位置选择 AI 服务商并填写对应 Key，以及用于新 YouTube 字幕的 Supadata Key。
 5. 打开一个带字幕的 YouTube 视频，确认字幕和翻译功能可以使用。
 
 安装后请让这个文件夹留在原位。如果移动或删除它，Chrome 中加载的本地扩展会失效，需要从新的长期存放位置重新加载。
@@ -57,7 +57,7 @@ DigestDock 会按扩展 ID 隔离注入到页面中的控件，因此旧版 YouT
 
 ## 设置 API Key
 
-服务访问使用你自己的账号和 Key。**DeepSeek API Key** 用于两个平台的概览、讲解、翻译和自动润色笔记。Supadata Key 对整个扩展仍是可选项，因为 B 站不会使用它；但当你选择获取新的 YouTube 字幕时需要配置。
+服务访问使用你自己的账号和 Key。你在 **设置** 中从预设列表选择一个 AI 服务商并填写它的 API Key，用于两个平台的概览、讲解、翻译和自动润色笔记；DeepSeek 是默认服务商。Supadata Key 对整个扩展仍是可选项，因为 B 站不会使用它；但当你选择获取新的 YouTube 字幕时需要配置。
 
 对于新视频或已经过期的 YouTube 缓存，主线只通过 Supadata 获取字幕正文。保存 Key 不等于持续授权：侧边栏会说明将发送标准 YouTube 链接，并由你逐视频确认本次请求。明确的登录、年龄、会员、地区或不可用状态会在调用 Supadata 前停止。DigestDock 强制使用 `mode=native`，只请求已有 YouTube 字幕轨，不请求音频生成式转录。B 站仍直接读取已有字幕轨，不使用 Supadata。
 
@@ -73,27 +73,33 @@ DigestDock 会按扩展 ID 隔离注入到页面中的控件，因此旧版 YouT
 
 如果页面流程发生变化，请查看 [Supadata 官方文档](https://docs.supadata.ai/)。
 
-### 获取 DeepSeek API Key
+### 获取 AI 服务商 API Key
+
+DeepSeek 是默认服务商。创建 DeepSeek Key：
 
 1. 打开 DeepSeek 官方 [API Keys 页面](https://platform.deepseek.com/api_keys)。
 2. 按照提示登录，或创建 DeepSeek 开放平台账号。
 3. 点击 **Create new API key**，填写容易识别的名称，例如 `DigestDock`，然后创建 Key。
 4. 立即复制 Key。完整 Key 可能只会显示一次。
-5. 把 Key 粘贴到 DigestDock 设置中的 **DeepSeek API key**。
+5. 在选中 DeepSeek 时，把 Key 粘贴到 DigestDock 设置中的 **API key** 输入框。
 6. 如果 DeepSeek 提示余额不足，请在 DeepSeek 开放平台账号中充值后再试。
 
 当前账号和接口说明请查看 [DeepSeek 官方 API 文档](https://api-docs.deepseek.com/)。
 
 在侧边栏中打开 **Settings**。你也可以在 `chrome://extensions` 的 DigestDock 卡片中打开扩展选项。Key 只能粘贴到这些设置输入框中。不要把 Key 发送到 AI 对话、项目文件、截图或公开消息中。
 
-发布版本只支持 DeepSeek V4 Flash：
+你在设置中选择 AI 服务商，只需从预设选择器中挑选，不需要填写 Base URL 或模型名。每个服务商的接口地址、模型、请求格式和能力限制由扩展预设：
 
-```text
-Base URL: https://api.deepseek.com
-Model: deepseek-v4-flash
-```
+| 服务商 | 模型 | 创建 Key |
+| --- | --- | --- |
+| DeepSeek（默认） | DeepSeek V4 Flash | [platform.deepseek.com/api_keys](https://platform.deepseek.com/api_keys) |
+| 智谱 GLM | GLM-4.7-Flash | [open.bigmodel.cn](https://open.bigmodel.cn/usercenter/apikeys) |
+| 阿里云百炼 Qwen | Qwen Flash（Qwen3） | [bailian.console.aliyun.com](https://bailian.console.aliyun.com/?apiKey=1) |
+| SiliconFlow | Qwen3-8B | [cloud.siliconflow.cn](https://cloud.siliconflow.cn/account/ak) |
+| Fireworks | DeepSeek V4 Flash | [app.fireworks.ai](https://app.fireworks.ai/settings/users/api-keys) |
+| 腾讯混元翻译 | hunyuan-translation-lite | 当前仅展示官网图标与“暂不可用”；未核实单 Key 兼容调用前不能选择 |
 
-DigestDock 会让所有 DeepSeek 请求使用非思考模式，以获得更快、更稳定的交互。设置中的接口地址和模型固定，只需要填写 DeepSeek API Key。如果想使用其他服务或模型，请在设置中复制安全的自定义 prompt，让编程 Agent 修改你自己的本地副本。不要把任何 API Key 放进 prompt 或对话。
+每个服务商的 Key 分别保存，切换服务商再切回来仍会保留你已填写的 Key。选择或保存服务商本身不发起网络请求；DigestDock 也不会在某个服务商失败时静默切换到另一家：如果服务商失败或缺少某项能力，会明确说明，而不是悄悄换用其他服务。DeepSeek 请求使用非思考模式，以获得更快、更稳定的交互。
 
 API Key 和设置保存在你设备上的 Chrome 扩展本地存储中。发布包不会包含或使用 `config.js`。
 
@@ -136,7 +142,9 @@ JSON 文件只包含备份格式信息和已保存的笔记记录，包括其中
 
 改名前导出的备份，包括名为 `youtube-digest-notes-YYYY-MM-DD.json` 的文件，仍然可以导入。DigestDock 会验证 JSON 内容，不会把文件名当作可信依据。
 
-当前 JSON 功能是用于恢复 DigestDock 笔记的备份格式。面向学习工具的 Markdown、CSV、Anki 等导出属于另一类未来功能，当前 JSON 备份并不提供这些格式。
+JSON 是用于恢复 DigestDock 笔记的数据备份格式，与阅读导出相互独立。笔记页提供当前视频、所选视频、全部笔记和单个视频来源的 UTF-8 TXT 导出；每个视频包含标题、频道、网址、简介和按时间码排序的已保存笔记，不再附带整部字幕。完整字幕由字幕页按当前原文、中文或双语模式单独下载 UTF-8 TXT。
+
+原文阅读导出只使用本地资料，不调用 AI 或 Supadata。笔记 TXT 只检查所选视频的元数据、标题、简介和已保存笔记，不要求补齐整部字幕；字幕 TXT 才单独检查完整字幕段。资料不完整时固定提供“补充导出 / 直接导出 / 导出原文 / 放弃导出”：直接导出会明确标注缺失，不会用原文冒充中文；补充导出只读取你明确打开的视频页资料，并在你确认后补译所选范围，不会后台打开视频，也不会调用 Supadata。长任务继续保持分轮、可取消和可恢复。
 
 ## 当前支持范围
 
@@ -152,7 +160,10 @@ JSON 文件只包含备份格式信息和已保存的笔记记录，包括其中
 - 如果笔记对应的原字幕已经是中文，则直接复用原字幕作为中文笔记，不再发送中文翻译请求。
 - 对 B 站中文字幕，概览和润色笔记各只进行一次中文 AI 请求，不经过“中文→英文→中文”。
 - 本地笔记、带版本信息的 JSON 笔记备份与恢复，以及最近字幕、概览和翻译的本地缓存。
-- 发布版本的所有 AI 功能都使用 DeepSeek V4 Flash。其他服务需要修改本地代码，不属于发布版本的支持范围。
+- 全部笔记按视频来源分组，来源内只按时间码排序；可选择一个或多个视频导出 TXT，也可导出当前视频、全部视频或单个来源；字幕按当前语言模式单独导出 TXT。
+- 长视频支持可恢复的中文／双语阅读导出。标题、简介块、字幕段和笔记的已验证译文按视频保存在本地；每轮由用户明确点击，最多执行 20 批，并在继续前逐批持久化。
+- 所有 AI 功能由你在设置中选择的预设服务商提供：DeepSeek V4 Flash（默认）、智谱 GLM-4.7-Flash、阿里云百炼 Qwen Flash、SiliconFlow Qwen3-8B 或 Fireworks DeepSeek V4 Flash。每个服务商的接口地址和模型固定，Key 分别保存，没有自定义接口地址字段。
+- 设置下拉同时显示腾讯混元翻译官方图标，但该项目前为“暂不可用”：官方没有确认 `hunyuan-translation-lite` 可通过本扩展当前的单 Key OpenAI-compatible 路径调用，因此不会猜测 Endpoint、模型路由或鉴权。
 
 YouTube 覆盖范围取决于 Supadata 能否返回已有原生字幕。Shorts、直播、B 站番剧页、私密或受访问限制的视频、画面硬字幕，以及没有原生字幕轨的视频可能无法使用。目前没有测试 Firefox、Safari、移动浏览器或其他 Chromium 浏览器。
 
@@ -186,25 +197,7 @@ DeepSeek 说明这些价格可能很快上调，因此使用此估算前必须�
 
 如果所有输入都按缓存未命中计费，输入约 $0.0046，输出约 $0.0010 到 $0.0013，总计约 $0.0056 到 $0.0059。当大量重复的 system prompt 命中 DeepSeek 自动尽力而为缓存时，更现实的低值约为 $0.002 到 $0.003。完整翻译这段演讲的实用估算是 **$0.002 到 $0.006 USD，约 ¥0.02 到 ¥0.04**。
 
-翻译是延迟按需和渐进式的。已缓存的分段会复用，只有滚动到并请求的字幕行才会发起调用。重试、服务商行为和价格变化都可能增加最终成本。
-
-## 用编程 Agent 改造成自己的版本
-
-本仓库按个人 Remix 项目维护，不接受上游 Issue 或 Pull Request。如果需要不同的行为，请从自己的 Fork 或本地副本继续修改，并让改动范围只作用于对应版本。
-
-DigestDock 使用原生 HTML、CSS 和 JavaScript，应用本身没有构建步骤，因此本地修改和 Agent 辅助开发都比较直接。适合继续扩展的方向包括：
-
-- 增加更多翻译语言，并让每个人选择自己的学习语言。
-- 为课程、访谈、教程、测评或研究视频增加自定义总结模板。
-- 增加生词本，保存单词、原句、解释和视频时间戳。
-- 增加面向学习的 Markdown、CSV 或 Anki 导出。当前 JSON 功能是恢复备份，不是学习工具导出。
-- 增加个人主题筛选，只突出与你目标相关的章节。
-- 增加本地模型选项，获得不同的隐私和成本方案。
-- 改善键盘操作、字体大小和高对比度等无障碍体验。
-
-继续开发时应保留用户自带 API Key 的模式，不要把秘密写入源代码，并运行下方检查。分享自己的版本前，也要在真实视频上测试受影响的平台路径。
-
-如果想使用其他 AI 服务或模型，请先在编程 Agent 中打开 Chrome 通过“加载已解压的扩展程序”使用的那个准确的 DigestDock 项目文件夹。然后打开 DigestDock 设置并点击 **Copy customization prompt**。发送前替换 `[PROVIDER]` 和 `[MODEL]`，但不要加入任何 API Key。Agent 完成本地代码修改后，请你自己在它指出的设置位置填写 Key。
+日常浏览中的翻译是延迟按需和渐进式的。已缓存的分段会复用，只有滚动到并请求的字幕行才会发起调用。只有明确点击“补充导出”或“继续补齐”时，才可能补齐显示范围外的缺失内容。长视频会被拆成每轮最多 20 个任务批次；每个有效批次立即保存，后续轮次只规划原文版本仍匹配的缺失单元，且不会自动续跑。重试、服务商行为和价格变化都可能增加最终成本。
 
 ## 隐私和数据流向
 
@@ -213,10 +206,12 @@ DigestDock 会直接从扩展发起网络请求：
 1. 对 YouTube，只读取当前标签页的视频身份、元数据、源语言和访问状态，不直接向 YouTube 请求字幕正文。
 2. 对新视频或过期缓存，侧边栏先请求一次授权。只有你点击 Supadata 操作后，DigestDock 才会把标准化的视频地址和你的 Key 发送给 Supadata，并请求 `mode=native` 原生字幕；明确的登录、年龄、会员、地区或不可用状态会在此前停止。
 3. 对 B 站，直接向 B 站请求当前视频元数据和已有字幕轨，复用浏览器当前会话但不读取或保存 Cookie 值。
-4. 当你使用 AI 功能时，把字幕和相关视频信息发送给 DeepSeek。翻译或讲解等功能只发送当前需要的内容，例如选中的文本和上下文，或少量字幕分段。
-5. API Key、设置、笔记和最近缓存保存在 Chrome 本地。临时签名的 B 站字幕 URL 只用于当次请求，不会保存或写入日志。
+4. 当你使用 AI 功能时，把字幕和相关视频信息发送给你在设置中选择的 AI 服务商。翻译或讲解等功能只发送当前需要的内容，例如选中的文本和上下文，或少量字幕分段。
+5. API Key、设置、笔记、最近缓存、可复用的视频级导出译文和轻量导出进度保存在 Chrome 本地。导出任务不会保存 API Key、字幕／笔记正文或译文；这些文本只保留在原有笔记或视频来源记录中。临时签名的 B 站字幕 URL 只用于当次请求，不会保存或写入日志。
 
-DigestDock 没有账号系统、广告、分析统计或行为追踪。YouTube、B 站、可选的 Supadata 和 DeepSeek 仍会按照各自的条款和隐私政策处理请求。详情请查看 [PRIVACY.md](PRIVACY.md)。
+删除全部笔记或重置扩展数据时，也会清理视频级阅读导出资料和未完成任务；Chrome 已经下载的 TXT 或 JSON 文件不会因此被删除。
+
+DigestDock 没有账号系统、广告、分析统计或行为追踪。YouTube、B 站、可选的 Supadata 和你选择的 AI 服务商仍会按照各自的条款和隐私政策处理请求。详情请查看 [PRIVACY.md](PRIVACY.md)。
 
 ## 常见问题
 
@@ -237,9 +232,9 @@ DigestDock 没有账号系统、广告、分析统计或行为追踪。YouTube�
 
 ### DigestDock 提示需要设置
 
-- 保存 DeepSeek Key 以使用 AI 功能；如果需要新的 YouTube 字幕，再配置 Supadata Key。B 站不需要 Supadata。
-- 发布版本固定使用 DeepSeek V4 Flash，没有需要填写的 Base URL 或 Model 字段。
-- 如果设置提示旧的自定义服务已移除，请重新填写 DeepSeek Key。旧 AI Key 已安全清除，避免被错误用于 DeepSeek。
+- 在设置中选择一个 AI 服务商并保存它的 API Key 以使用 AI 功能；如果需要新的 YouTube 字幕，再配置 Supadata Key。B 站不需要 Supadata。
+- 每个服务商的接口地址和模型都是预设的，没有需要填写的 Base URL 或 Model 字段。切换服务商会保留各自的 Key。
+- 如果设置提示旧的自定义服务已移除，请选择一个服务商并填写它的 Key。旧的自定义接口 Key 已安全清除，避免被错误用于其他服务。
 
 ### 找不到字幕
 
@@ -251,10 +246,10 @@ DigestDock 不会自动改用 AI 生成字幕，也不会执行音频 ASR。
 
 ### AI 请求失败
 
-- `401` 或 `403` 通常表示 DeepSeek Key 或账号权限有问题。
-- `429` 通常表示达到了 DeepSeek 服务限速或消费上限。
-- 确认 Key 来自上方链接的 DeepSeek 开放平台账号，并且账号有可用额度。
-- 如果你把本地副本改成了其他模型，请再次使用设置中的自定义 prompt，让编程 Agent 检查本地实现。
+- `401` 或 `403` 通常表示所选服务商的 Key 或账号权限有问题。
+- `429` 通常表示达到了所选服务商的限速或消费上限。
+- 确认 Key 来自该服务商的账号，并且账号有可用额度。
+- 如果某个服务商持续失败，请在设置中改选另一个服务商并保存它的 Key。DigestDock 不会自行切换服务商。
 
 不要在对话、截图或日志中分享 API Key、私密字幕或个人笔记。
 

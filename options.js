@@ -12,10 +12,8 @@ const YTD_OPTIONS = (() => {
       navGroupSettings: "Settings",
       navGroupOther: "Other",
       navServices: "Service connections",
-      navTranscript: "Transcript provider",
       navNotes: "Notes & backup",
       navPrivacy: "Privacy",
-      deepseekTagline: "Overviews, explanations, translation, and note polishing",
       supadataTagline: "Optional provider for new YouTube transcripts",
       statusConfigured: "Configured",
       statusNotConfigured: "Not configured",
@@ -28,8 +26,7 @@ const YTD_OPTIONS = (() => {
       unsavedChanges: "You have unsaved changes.",
       heading: "Bring your own API keys",
       lede:
-        "Keys stay in this Chrome profile. DeepSeek powers AI features, and Supadata is the optional provider that fetches native captions for new YouTube videos. This open-source extension has no developer server or analytics.",
-      transcriptProvider: "YouTube transcript provider",
+        "Keys stay in this Chrome profile. You pick one AI provider and paste its API key to power AI features, and Supadata is the optional provider that fetches native captions for new YouTube videos. This open-source extension has no developer server or analytics.",
       supadataApiKeyLabel: "Supadata API key (optional)",
       supadataPlaceholder: "Paste your Supadata key",
       supadataHelp:
@@ -37,37 +34,24 @@ const YTD_OPTIONS = (() => {
       supadataLink: "Create a Supadata account and key",
       supadataHelpSuffix:
         ". Supadata generates the key during onboarding.",
-      aiProvider: "AI provider",
-      providerSummaryLabel: "Supported AI provider",
-      providerBadge: "Supported in this version",
-      deepseekApiKeyLabel: "DeepSeek API key",
-      deepseekPlaceholder: "Paste your DeepSeek key",
-      deepseekHelp:
-        "DigestDock uses DeepSeek V4 Flash for overviews, explanations, translation, and note polishing. ",
-      deepseekLink: "Create a DeepSeek API key",
-      deepseekHelpSuffix: ".",
-      privacyNote:
-        "When you use AI features, DeepSeek receives the video transcript and relevant video context. Review DeepSeek's terms and pricing before saving.",
+      aiServiceName: "AI provider",
+      providerLabel: "AI provider",
+      providerListAriaLabel: "Choose an AI provider",
+      providerUnavailable: "Unavailable",
+      capabilitiesLabel: "Capabilities: ",
+      capOverview: "Overview",
+      capExplain: "Explanation",
+      capTranslate: "Translation",
+      capNotes: "Notes",
+      aiKeyLabel: "API key",
+      aiKeyPlaceholder: "Paste the selected provider's API key",
+      aiKeyHelp:
+        "The selected AI provider generates overviews, explanations, transcript translation, and note polishing. ",
+      createKeyLink: "Create an API key",
+      createKeyLinkSuffix: ".",
+      providerPrivacyNote:
+        "When you use AI features, the selected provider receives the video transcript and relevant video context. Review that provider's terms and pricing before saving.",
       saveSettings: "Save settings",
-      localRemix: "Local remix",
-      customizationTitle: "Want to use another AI model?",
-      customizationPurpose: "Edit and copy a safe prompt for your coding agent",
-      agentBadge: "Coding agent ready",
-      customizationIntro:
-        "You can edit the prompt directly. Complete these three steps before copying:",
-      customizationStepFolder:
-        "Open the extracted DigestDock project folder in your coding agent.",
-      customizationStepReplace:
-        "Replace [PROVIDER] and [MODEL] with the service and model you want to use.",
-      customizationStepKeys:
-        "Never include API keys in the prompt or chat. Enter them yourself after the code is ready.",
-      customizationPromptLabel: "Editable customization prompt",
-      customizationReminderLabel: "Prompt reminder",
-      customizationReminder:
-        "Before copying, replace [PROVIDER] and [MODEL] with the provider and model you want to use.",
-      customizationPrompt:
-        "Customize this local DigestDock workspace to use [PROVIDER] with [MODEL]. Work only in the current workspace. Before editing, verify that it contains manifest.json and that the manifest name is DigestDock. If verification fails, stop and ask me to open the extracted DigestDock project folder in my coding agent. Do not search other folders, edit a guessed copy, assume an installation path, or claim Chrome can reveal the absolute OS source path. Update the provider's API endpoint, request format, and minimum Chrome host permissions. Preserve bring-your-own-key and local Chrome storage. Never put API keys in source code, commits, logs, screenshots, this prompt, or chat; after the code is ready, tell me where to enter the key myself. Keep DeepSeek-only request fields and retry behavior isolated to DeepSeek. Handle provider-specific rules separately so one provider does not affect another. Update README.md, README.zh-CN.md, PRIVACY.md, SECURITY.md, and tests. Run npm test, npm run check, and npm run package. Then explain how to reload the unpacked extension and test it on a real YouTube video.",
-      copyCustomizationPrompt: "Copy edited prompt",
       notesBackup: "Notes backup",
       notesBackupHelp:
         "The JSON backup contains saved notes, stored language versions, and validated YouTube or Bilibili media identity and timestamps. It never includes API keys, settings, full transcripts, or digest caches. Import rebuilds safe timestamp links, merges with local notes, and skips duplicates.",
@@ -82,17 +66,13 @@ const YTD_OPTIONS = (() => {
       footer:
         'Read <a href="PRIVACY.md" target="_blank">PRIVACY.md</a> in the repository for the complete data-flow description.',
       migrationWarning:
-        "Custom provider settings were removed safely. Your optional Supadata key was kept, but the AI key was cleared. Enter a DeepSeek API key to continue.",
+        "Your settings were upgraded to the multi-provider format. Saved keys were kept and mapped to their provider; endpoints and models now come from the built-in presets.",
       saving: "Saving…",
       addSupadataKey:
         "Add a Supadata API key to fetch native captions for new YouTube videos after per-attempt consent.",
-      addDeepseekKey: "Add a DeepSeek API key.",
+      addAiKey: "Add an API key for the selected AI provider.",
       saved: "Saved. Reopen DigestDock to use these settings.",
       saveFailed: "Could not save settings. Please try again.",
-      copying: "Copying…",
-      promptCopied: "Edited prompt copied.",
-      copyFailed:
-        "Could not copy the prompt. Select the prompt text and copy it manually.",
       exportingNotes: "Preparing notes backup…",
       notesExported: ({ count }) =>
         `Exported ${count} saved note${count === 1 ? "" : "s"}.`,
@@ -137,10 +117,8 @@ const YTD_OPTIONS = (() => {
       navGroupSettings: "设置",
       navGroupOther: "其他",
       navServices: "服务连接",
-      navTranscript: "字幕服务",
       navNotes: "笔记与备份",
       navPrivacy: "隐私说明",
-      deepseekTagline: "概览、解释、翻译和笔记润色",
       supadataTagline: "新 YouTube 视频的可选字幕服务",
       statusConfigured: "已配置",
       statusNotConfigured: "未配置",
@@ -153,44 +131,31 @@ const YTD_OPTIONS = (() => {
       unsavedChanges: "有未保存的更改。",
       heading: "使用你自己的 API 密钥",
       lede:
-        "密钥仅保存在当前 Chrome 个人资料中。DeepSeek 用于 AI 功能，Supadata 是可选服务，用于为新的 YouTube 视频获取原生字幕。本开源扩展没有开发者服务器，也不使用分析服务。",
-      transcriptProvider: "YouTube 字幕服务",
+        "密钥仅保存在当前 Chrome 个人资料中。你选择一个 AI 服务商并填写它的 API 密钥用于 AI 功能，Supadata 是可选服务，用于为新的 YouTube 视频获取原生字幕。本开源扩展没有开发者服务器，也不使用分析服务。",
       supadataApiKeyLabel: "Supadata API 密钥（可选）",
       supadataPlaceholder: "粘贴 Supadata 密钥",
       supadataHelp:
         "新的 YouTube 字幕由 Supadata 获取。它对整个扩展仍是可选配置，但只有你在侧边栏确认本次使用第三方 Supadata 时才会调用，且逐视频授权；B 站不会使用。",
       supadataLink: "创建 Supadata 账号并获取密钥",
       supadataHelpSuffix: "。Supadata 会在引导流程中生成密钥。",
-      aiProvider: "AI 服务",
-      providerSummaryLabel: "支持的 AI 服务",
-      providerBadge: "当前版本支持",
-      deepseekApiKeyLabel: "DeepSeek API 密钥",
-      deepseekPlaceholder: "粘贴 DeepSeek 密钥",
-      deepseekHelp:
-        "DigestDock 使用 DeepSeek V4 Flash 生成概览、解释内容、翻译字幕和润色笔记。",
-      deepseekLink: "创建 DeepSeek API 密钥",
-      deepseekHelpSuffix: "。",
-      privacyNote:
-        "使用 AI 功能时，DeepSeek 会收到视频字幕及相关视频上下文。保存前请查看 DeepSeek 的服务条款和价格。",
+      aiServiceName: "AI 服务商",
+      providerLabel: "AI 服务商",
+      providerListAriaLabel: "选择 AI 服务商",
+      providerUnavailable: "暂不可用",
+      capabilitiesLabel: "支持能力：",
+      capOverview: "概览",
+      capExplain: "讲解",
+      capTranslate: "翻译",
+      capNotes: "笔记",
+      aiKeyLabel: "API 密钥",
+      aiKeyPlaceholder: "粘贴当前服务的 API 密钥",
+      aiKeyHelp:
+        "所选 AI 服务用于生成概览、解释内容、翻译字幕和润色笔记。",
+      createKeyLink: "前往创建 API 密钥",
+      createKeyLinkSuffix: "。",
+      providerPrivacyNote:
+        "使用 AI 功能时，所选服务会收到视频字幕及相关视频上下文。保存前请查看该服务的服务条款和价格。",
       saveSettings: "保存设置",
-      localRemix: "本地改造",
-      customizationTitle: "想使用其他 AI 模型？",
-      customizationPurpose: "编辑并复制一段可安全交给编程 Agent 的提示词",
-      agentBadge: "可交给编程 Agent",
-      customizationIntro: "你可以直接编辑提示词。复制前完成以下三步：",
-      customizationStepFolder:
-        "在编程 Agent 中打开 DigestDock 解压后的项目文件夹。",
-      customizationStepReplace:
-        "把 [PROVIDER] 和 [MODEL] 替换成你想使用的服务和模型。",
-      customizationStepKeys:
-        "不要在提示词或聊天中加入 API 密钥。代码准备好后，请自行填写。",
-      customizationPromptLabel: "可编辑的自定义提示词",
-      customizationReminderLabel: "提示词提醒",
-      customizationReminder:
-        "复制前，请先把 [PROVIDER] 和 [MODEL] 替换成你想使用的服务和模型。",
-      customizationPrompt:
-        "请把当前本地 DigestDock 工作区改为使用 [PROVIDER] 提供的 [MODEL]。只在当前工作区中操作。编辑前，先确认其中包含 manifest.json，且 manifest 中的 name 是 DigestDock。如果验证失败，请停止，并让我在编程 Agent 中打开 DigestDock 解压后的项目文件夹。不要搜索其他文件夹，不要编辑猜测的副本，不要假设安装路径，也不要声称 Chrome 可以显示操作系统中的绝对源码路径。更新该服务的 API endpoint、请求格式和最少的 Chrome host permissions。保留用户自带密钥模式和 Chrome 本地存储。不要把 API 密钥写入源代码、提交记录、日志、截图、这段提示词或聊天；代码准备好后，请告诉我应该在哪里自行填写密钥。DeepSeek 专用的请求参数和重试逻辑继续只用于 DeepSeek。新服务的专属规则请单独处理，避免相互影响。更新 README.md、README.zh-CN.md、PRIVACY.md、SECURITY.md 和测试。运行 npm test、npm run check 和 npm run package。最后，说明如何重新加载已解压的扩展，并在真实 YouTube 视频上测试。",
-      copyCustomizationPrompt: "复制编辑后的提示词",
       notesBackup: "笔记备份",
       notesBackupHelp:
         "JSON 备份只包含已保存笔记、语言版本和经过校验的 YouTube 或 B 站媒体身份与时间戳，不包含 API 密钥、设置、完整字幕或摘要缓存。导入会重建安全时间戳链接，与本机笔记合并，并自动跳过重复项。",
@@ -205,16 +170,13 @@ const YTD_OPTIONS = (() => {
       footer:
         '完整数据流说明请参阅仓库中的 <a href="PRIVACY.md" target="_blank">PRIVACY.md</a>。',
       migrationWarning:
-        "已安全移除自定义服务设置。可选的 Supadata 密钥已保留，AI 密钥已清除。请输入 DeepSeek API 密钥以继续使用。",
+        "设置已升级为多服务商格式。已保存的密钥被保留并归入各自服务商；Endpoint 和模型现在由内置预设提供。",
       saving: "正在保存…",
       addSupadataKey:
         "为新的 YouTube 视频获取原生字幕，请添加可选的 Supadata API 密钥（每次逐一授权）。",
-      addDeepseekKey: "请添加 DeepSeek API 密钥。",
+      addAiKey: "请为所选 AI 服务商添加 API 密钥。",
       saved: "已保存。请重新打开 DigestDock 以使用这些设置。",
       saveFailed: "无法保存设置，请重试。",
-      copying: "正在复制…",
-      promptCopied: "已复制编辑后的提示词。",
-      copyFailed: "无法复制提示词。请选中提示词文本并手动复制。",
       exportingNotes: "正在准备笔记备份…",
       notesExported: ({ count }) => `已导出 ${count} 条笔记。`,
       noNotesToExport: "当前没有可导出的笔记。",
@@ -382,60 +344,40 @@ const YTD_OPTIONS = (() => {
     }
   }
 
-  function updateLocalizedPrompt(textarea, prompt) {
-    const selectionStart = textarea.selectionStart;
-    const selectionEnd = textarea.selectionEnd;
-    const selectionDirection = textarea.selectionDirection;
-    const scrollTop = textarea.scrollTop;
-    const scrollLeft = textarea.scrollLeft;
+  // A short brand monogram used as the neutral icon placeholder until an
+  // official brand icon is bundled (see icons/providers/PROVENANCE.md). Prefers
+  // the first Latin letter of the display name so mixed CJK names still get a
+  // readable, wrong-provider-proof glyph.
+  function providerMonogram(displayName) {
+    const name = String(displayName || "").trim();
+    const latin = name.match(/[A-Za-z]/);
+    return (latin ? latin[0] : name.charAt(0) || "?").toUpperCase();
+  }
 
-    textarea.value = prompt;
-
-    if (
-      Number.isInteger(selectionStart) &&
-      Number.isInteger(selectionEnd) &&
-      typeof textarea.setSelectionRange === "function"
-    ) {
-      textarea.setSelectionRange(
-        Math.min(selectionStart, prompt.length),
-        Math.min(selectionEnd, prompt.length),
-        selectionDirection || "none",
-      );
+  // Sets a local brand icon on an <img>/monogram pair. The icon is only ever a
+  // bundled local path; on load it replaces the monogram, on error (e.g. the
+  // official asset is not yet bundled) it stays hidden so the neutral monogram
+  // remains — never a remote or wrong-provider image.
+  function applyProviderIcon(img, monogramEl, provider) {
+    const monogram = providerMonogram(provider.displayName);
+    if (monogramEl) monogramEl.textContent = monogram;
+    if (!img) return;
+    if (!provider.iconPath || /^[a-z]+:|^\/\//i.test(provider.iconPath)) {
+      img.hidden = true;
+      return;
     }
-    textarea.scrollTop = scrollTop;
-    textarea.scrollLeft = scrollLeft;
-  }
-
-  function createPromptDrafts() {
-    return {
-      en: translate("en", "customizationPrompt"),
-      "zh-CN": translate("zh-CN", "customizationPrompt"),
+    img.alt = provider.iconAlt || provider.displayName;
+    img.onload = () => {
+      img.hidden = false;
+      if (monogramEl) monogramEl.hidden = true;
     };
-  }
-
-  function switchPromptDraft(
-    drafts,
-    currentLanguage,
-    nextLanguage,
-    currentValue,
-  ) {
-    const normalizedCurrentLanguage = normalizeLanguage(currentLanguage);
-    const normalizedNextLanguage = normalizeLanguage(nextLanguage);
-    drafts[normalizedCurrentLanguage] = String(currentValue ?? "");
-    if (typeof drafts[normalizedNextLanguage] !== "string") {
-      drafts[normalizedNextLanguage] = translate(
-        normalizedNextLanguage,
-        "customizationPrompt",
-      );
-    }
-    return {
-      language: normalizedNextLanguage,
-      prompt: drafts[normalizedNextLanguage],
+    img.onerror = () => {
+      img.hidden = true;
+      if (monogramEl) monogramEl.hidden = false;
     };
-  }
-
-  async function copyPromptValue(clipboard, value) {
-    await clipboard.writeText(value);
+    img.hidden = true;
+    if (monogramEl) monogramEl.hidden = false;
+    img.src = provider.iconPath;
   }
 
   function triggerNotesBackupDownload(root, backup, date = new Date()) {
@@ -580,14 +522,10 @@ const YTD_OPTIONS = (() => {
       root.chrome,
       getSafeLocalStorage(root),
     );
+    const providersApi = root.YTD_AI_PROVIDERS;
     const form = doc.getElementById("settingsForm");
     const aiApiKeyInput = doc.getElementById("aiApiKey");
     const supadataApiKeyInput = doc.getElementById("supadataApiKey");
-    const customizationPrompt = doc.getElementById("customizationPrompt");
-    const copyCustomizationPromptBtn = doc.getElementById(
-      "copyCustomizationPromptBtn",
-    );
-    const copyStatus = doc.getElementById("copyStatus");
     const saveStatus = doc.getElementById("saveStatus");
     const dataStatus = doc.getElementById("dataStatus");
     const backupStatus = doc.getElementById("backupStatus");
@@ -595,7 +533,7 @@ const YTD_OPTIONS = (() => {
     const importNotesBtn = doc.getElementById("importNotesBtn");
     const importNotesFile = doc.getElementById("importNotesFile");
     const languageButtons = [...doc.querySelectorAll("[data-language]")];
-    const deepseekStatus = doc.getElementById("deepseekStatus");
+    const aiStatus = doc.getElementById("aiStatus");
     const supadataStatus = doc.getElementById("supadataStatus");
     const revealToggles = [...doc.querySelectorAll("[data-reveal]")];
     const settingsScroll = doc.querySelector(".settings-scroll");
@@ -609,9 +547,45 @@ const YTD_OPTIONS = (() => {
     const settingsNavTargetIds = new Set(
       settingsNavTargets.map((entry) => entry.id),
     );
+
+    // Provider picker DOM (a custom ARIA select-only combobox; the plan forbids
+    // a native <select> because option rows carry brand icons).
+    const providerSelectButton = doc.getElementById("providerSelectButton");
+    const providerSelectList = doc.getElementById("providerSelectList");
+    const providerSelectValue = doc.getElementById("providerSelectValue");
+    const providerSelectAvatarImg = providerSelectButton
+      ? providerSelectButton.querySelector(".provider-select-avatar-img")
+      : null;
+    const providerSelectMonogram = providerSelectButton
+      ? providerSelectButton.querySelector(".provider-monogram")
+      : null;
+    const providerAvatarImg = doc.getElementById("providerAvatarImg");
+    const providerAvatarMonogram = doc.getElementById("providerAvatarMonogram");
+    const providerModelLabel = doc.getElementById("providerModelLabel");
+    const providerCapabilities = doc.getElementById("providerCapabilities");
+    const providerHelpLink = doc.getElementById("providerHelpLink");
+
+    const providerList = providersApi
+      ? providersApi.listProviderDescriptions()
+      : [];
+    const selectableProviderList = providerList.filter(
+      (provider) => provider.selectable && provider.configVerified,
+    );
+    const CAP_LABEL_KEYS = {
+      overview: "capOverview",
+      explain: "capExplain",
+      translate: "capTranslate",
+      notes: "capNotes",
+    };
+
     const statusStates = new Map();
-    const promptDrafts = createPromptDrafts();
     let currentLanguage = DEFAULT_LANGUAGE;
+    // Per-provider key drafts so switching providers never loses an unsaved key
+    // typed for another provider. Seeded from storage, updated on every input.
+    const providerKeyDrafts = {};
+    let currentProviderId =
+      selectableProviderList[0]?.id || settingsApi.DEFAULT_PROVIDER || "deepseek";
+    let providerListOpen = false;
 
     function renderStatus(element) {
       const state = statusStates.get(element);
@@ -636,8 +610,16 @@ const YTD_OPTIONS = (() => {
       badge.dataset.status = hasKey ? "configured" : "empty";
     }
 
+    function currentProvider() {
+      return (
+        providerList.find((provider) => provider.id === currentProviderId) ||
+        selectableProviderList[0] ||
+        null
+      );
+    }
+
     function updateServiceStatus() {
-      setServiceBadge(deepseekStatus, Boolean(aiApiKeyInput.value.trim()));
+      setServiceBadge(aiStatus, Boolean(aiApiKeyInput.value.trim()));
       setServiceBadge(supadataStatus, Boolean(supadataApiKeyInput.value.trim()));
     }
 
@@ -656,28 +638,255 @@ const YTD_OPTIONS = (() => {
       button.setAttribute("aria-pressed", String(reveal));
     }
 
-    function applyLanguage(language) {
-      const nextDraft = switchPromptDraft(
-        promptDrafts,
-        currentLanguage,
-        language,
-        customizationPrompt.value,
+    // Renders the capability pills for the active provider. Text labels (not
+    // color) carry the meaning, so the limits read in high-contrast modes.
+    function renderProviderCapabilities(provider) {
+      if (!providerCapabilities) return;
+      providerCapabilities.textContent = "";
+      for (const capability of provider?.capabilities || []) {
+        const key = CAP_LABEL_KEYS[capability];
+        if (!key) continue;
+        const pill = doc.createElement("span");
+        pill.className = "capability-tag";
+        pill.textContent = translate(currentLanguage, key);
+        providerCapabilities.appendChild(pill);
+      }
+    }
+
+    // Reflects the active provider across the service card and the combobox
+    // button. Never issues a network request.
+    function renderActiveProvider() {
+      const provider = currentProvider();
+      if (!provider) return;
+      if (providerSelectValue) providerSelectValue.textContent = provider.displayName;
+      if (providerModelLabel) {
+        providerModelLabel.textContent = provider.modelLabel || provider.model || "";
+      }
+      applyProviderIcon(providerSelectAvatarImg, providerSelectMonogram, provider);
+      applyProviderIcon(providerAvatarImg, providerAvatarMonogram, provider);
+      renderProviderCapabilities(provider);
+      if (providerHelpLink && provider.apiKeyHelpUrl) {
+        providerHelpLink.href = provider.apiKeyHelpUrl;
+      }
+      // Mark the matching listbox option selected.
+      if (providerSelectList) {
+        for (const option of providerSelectList.querySelectorAll('[role="option"]')) {
+          option.setAttribute(
+            "aria-selected",
+            String(option.dataset.provider === provider.id),
+          );
+        }
+      }
+    }
+
+    function buildProviderList() {
+      if (!providerSelectList) return;
+      providerSelectList.textContent = "";
+      for (const provider of providerList) {
+        const option = doc.createElement("li");
+        option.id = `provider-option-${provider.id}`;
+        option.className = "provider-option";
+        option.setAttribute("role", "option");
+        option.dataset.provider = provider.id;
+        option.setAttribute(
+          "aria-selected",
+          String(provider.id === currentProviderId),
+        );
+        const selectable = provider.selectable && provider.configVerified;
+        if (!selectable) {
+          option.classList.add("is-disabled");
+          option.setAttribute("aria-disabled", "true");
+          option.title = provider.blockedReason || translate(
+            currentLanguage,
+            "providerUnavailable",
+          );
+        }
+
+        const avatar = doc.createElement("span");
+        avatar.className = "provider-option-avatar";
+        avatar.setAttribute("aria-hidden", "true");
+        const img = doc.createElement("img");
+        img.className = "provider-option-avatar-img";
+        img.hidden = true;
+        const monogram = doc.createElement("span");
+        monogram.className = "provider-monogram";
+        avatar.appendChild(img);
+        avatar.appendChild(monogram);
+        applyProviderIcon(img, monogram, provider);
+
+        const name = doc.createElement("span");
+        name.className = "provider-option-name";
+        name.textContent = provider.displayName;
+
+        if (!selectable) {
+          const state = doc.createElement("span");
+          state.className = "provider-option-state";
+          state.textContent = translate(currentLanguage, "providerUnavailable");
+          name.appendChild(state);
+        }
+
+        option.appendChild(avatar);
+        option.appendChild(name);
+        option.addEventListener("click", () => {
+          if (!selectable) return;
+          selectProvider(provider.id);
+          closeProviderList({ focusButton: true });
+        });
+        providerSelectList.appendChild(option);
+      }
+    }
+
+    function selectProvider(id, { markDirty = true } = {}) {
+      if (!selectableProviderList.some((provider) => provider.id === id)) return;
+      if (id !== currentProviderId) {
+        // Preserve whatever the user typed for the outgoing provider.
+        providerKeyDrafts[currentProviderId] = aiApiKeyInput.value;
+        currentProviderId = id;
+        aiApiKeyInput.value = providerKeyDrafts[id] || "";
+        if (markDirty) markUnsaved();
+      }
+      renderActiveProvider();
+      updateServiceStatus();
+    }
+
+    function providerOptionEls() {
+      return providerSelectList
+        ? [...providerSelectList.querySelectorAll('[role="option"]')]
+        : [];
+    }
+
+    function setActiveOption(id) {
+      const options = providerOptionEls();
+      for (const option of options) {
+        option.classList.toggle("is-active", option.dataset.provider === id);
+      }
+      if (providerSelectButton) {
+        providerSelectButton.setAttribute(
+          "aria-activedescendant",
+          id ? `provider-option-${id}` : "",
+        );
+      }
+    }
+
+    function openProviderList() {
+      if (!providerSelectList || providerListOpen || !selectableProviderList.length) return;
+      const triggerRect = providerSelectButton.getBoundingClientRect?.();
+      const saveBarTop = doc
+        .querySelector(".settings-savebar")
+        ?.getBoundingClientRect?.().top;
+      const topBarBottom = doc
+        .querySelector(".settings-topbar")
+        ?.getBoundingClientRect?.().bottom;
+      const lowerBoundary = Number.isFinite(saveBarTop)
+        ? saveBarTop
+        : root.innerHeight || 0;
+      const below = triggerRect
+        ? Math.max(0, lowerBoundary - triggerRect.bottom - 8)
+        : 0;
+      const upperBoundary = Number.isFinite(topBarBottom) ? topBarBottom : 0;
+      const above = triggerRect
+        ? Math.max(0, triggerRect.top - upperBoundary - 8)
+        : 0;
+      const preferredHeight = Math.min(320, providerList.length * 44 + 12);
+      const openUp = below < 160 && above > below;
+      providerSelectList.classList.toggle("opens-up", openUp);
+      const available = openUp ? above : below;
+      providerSelectList.style.maxHeight = `${Math.max(
+        120,
+        Math.min(preferredHeight, available || preferredHeight),
+      )}px`;
+      providerListOpen = true;
+      providerSelectList.hidden = false;
+      providerSelectButton.setAttribute("aria-expanded", "true");
+      setActiveOption(currentProviderId);
+    }
+
+    function closeProviderList({ focusButton = false } = {}) {
+      if (!providerSelectList) return;
+      providerListOpen = false;
+      providerSelectList.hidden = true;
+      providerSelectButton.setAttribute("aria-expanded", "false");
+      providerSelectButton.setAttribute("aria-activedescendant", "");
+      if (focusButton && typeof providerSelectButton.focus === "function") {
+        providerSelectButton.focus();
+      }
+    }
+
+    function activeOptionId() {
+      const current = providerOptionEls().find((option) =>
+        option.classList.contains("is-active"),
       );
-      currentLanguage = nextDraft.language;
+      return current ? current.dataset.provider : currentProviderId;
+    }
+
+    function moveActiveOption(delta) {
+      const ids = selectableProviderList.map((provider) => provider.id);
+      if (!ids.length) return;
+      const currentIndex = Math.max(0, ids.indexOf(activeOptionId()));
+      const nextIndex = Math.min(
+        ids.length - 1,
+        Math.max(0, currentIndex + delta),
+      );
+      setActiveOption(ids[nextIndex]);
+    }
+
+    function handleProviderButtonKeydown(event) {
+      switch (event.key) {
+        case "ArrowDown":
+        case "ArrowUp":
+          event.preventDefault();
+          if (!providerListOpen) {
+            openProviderList();
+          } else {
+            moveActiveOption(event.key === "ArrowDown" ? 1 : -1);
+          }
+          break;
+        case "Home":
+          if (providerListOpen) {
+            event.preventDefault();
+            setActiveOption(selectableProviderList[0]?.id);
+          }
+          break;
+        case "End":
+          if (providerListOpen) {
+            event.preventDefault();
+            setActiveOption(
+              selectableProviderList[selectableProviderList.length - 1]?.id,
+            );
+          }
+          break;
+        case "Enter":
+        case " ":
+        case "Spacebar":
+          event.preventDefault();
+          if (!providerListOpen) {
+            openProviderList();
+          } else {
+            selectProvider(activeOptionId());
+            closeProviderList({ focusButton: true });
+          }
+          break;
+        case "Escape":
+          if (providerListOpen) {
+            event.preventDefault();
+            closeProviderList({ focusButton: true });
+          }
+          break;
+        default:
+          break;
+      }
+    }
+
+    function applyLanguage(language) {
+      currentLanguage = normalizeLanguage(language);
       doc.documentElement.lang = currentLanguage;
       doc.title = translate(currentLanguage, "pageTitle");
 
       for (const element of doc.querySelectorAll("[data-i18n]")) {
-        element.textContent = translate(
-          currentLanguage,
-          element.dataset.i18n,
-        );
+        element.textContent = translate(currentLanguage, element.dataset.i18n);
       }
       for (const element of doc.querySelectorAll("[data-i18n-html]")) {
-        element.innerHTML = translate(
-          currentLanguage,
-          element.dataset.i18nHtml,
-        );
+        element.innerHTML = translate(currentLanguage, element.dataset.i18nHtml);
       }
       for (const element of doc.querySelectorAll("[data-i18n-aria-label]")) {
         element.setAttribute(
@@ -691,28 +900,41 @@ const YTD_OPTIONS = (() => {
           translate(currentLanguage, element.dataset.i18nPlaceholder),
         );
       }
+      if (providerSelectList) {
+        providerSelectList.setAttribute(
+          "aria-label",
+          translate(currentLanguage, "providerListAriaLabel"),
+        );
+      }
 
-      updateLocalizedPrompt(
-        customizationPrompt,
-        nextDraft.prompt,
-      );
       updateLanguageButtonState(languageButtons, currentLanguage);
       for (const element of statusStates.keys()) renderStatus(element);
-      // Re-apply the dynamic configured/not-configured badges after the static
-      // data-i18n pass has reset them to the default label.
+      // Re-render dynamic provider text and badges after the static data-i18n
+      // pass reset any shared nodes to their default labels.
+      if (providerSelectList) buildProviderList();
+      renderActiveProvider();
       updateServiceStatus();
     }
 
     async function loadSettings() {
       try {
         const stored = await storage.get(settingsApi.STORAGE_KEY);
-        const migration = settingsApi.migrateLegacyCustom(
+        const migration = settingsApi.migrateLegacy(
           stored[settingsApi.STORAGE_KEY],
         );
         const settings = migration.settings;
 
-        aiApiKeyInput.value = settings.aiApiKey;
+        for (const id of settingsApi.AI_PROVIDER_IDS) {
+          providerKeyDrafts[id] = settingsApi.apiKeyFor(settings, id);
+        }
+        currentProviderId = selectableProviderList.some(
+          (provider) => provider.id === settings.provider,
+        )
+          ? settings.provider
+          : selectableProviderList[0]?.id || currentProviderId;
+        aiApiKeyInput.value = providerKeyDrafts[currentProviderId] || "";
         supadataApiKeyInput.value = settings.supadataApiKey;
+        renderActiveProvider();
         updateServiceStatus();
         if (migration.migrated) {
           await storage.set({ [settingsApi.STORAGE_KEY]: settings });
@@ -739,13 +961,21 @@ const YTD_OPTIONS = (() => {
       event.preventDefault();
       setStatus(saveStatus, "saving");
 
+      // Persist the whole key map in one write: the visible input holds the
+      // active provider's key, the drafts hold the others entered this session.
+      providerKeyDrafts[currentProviderId] = aiApiKeyInput.value;
+      const aiApiKeys = {};
+      for (const id of settingsApi.AI_PROVIDER_IDS) {
+        aiApiKeys[id] = providerKeyDrafts[id] || "";
+      }
       const settings = settingsApi.normalize({
-        aiApiKey: aiApiKeyInput.value,
+        provider: currentProviderId,
+        aiApiKeys,
         supadataApiKey: supadataApiKeyInput.value,
       });
 
-      if (!settings.aiApiKey) {
-        setStatus(saveStatus, "addDeepseekKey");
+      if (!settingsApi.hasActiveApiKey(settings)) {
+        setStatus(saveStatus, "addAiKey");
         return;
       }
 
@@ -754,19 +984,6 @@ const YTD_OPTIONS = (() => {
         setStatus(saveStatus, "saved");
       } catch (_error) {
         setStatus(saveStatus, "saveFailed");
-      }
-    }
-
-    async function copyCustomizationPrompt() {
-      setStatus(copyStatus, "copying");
-      try {
-        await copyPromptValue(
-          root.navigator.clipboard,
-          customizationPrompt.value,
-        );
-        setStatus(copyStatus, "promptCopied");
-      } catch (_error) {
-        setStatus(copyStatus, "copyFailed");
       }
     }
 
@@ -921,6 +1138,22 @@ const YTD_OPTIONS = (() => {
       applySettingsNavState(settingsNavItems, id);
     }
 
+    function scrollSettingsSectionIntoView(id, behavior = "smooth") {
+      const target = settingsNavTargets.find((entry) => entry.id === id)?.element;
+      if (!settingsScroll || !target) return;
+      const scrollerTop = settingsScroll.getBoundingClientRect().top;
+      const targetTop = target.getBoundingClientRect().top;
+      const top = Math.max(
+        0,
+        settingsScroll.scrollTop + targetTop - scrollerTop - 12,
+      );
+      if (typeof settingsScroll.scrollTo === "function") {
+        settingsScroll.scrollTo({ top, behavior });
+      } else {
+        settingsScroll.scrollTop = top;
+      }
+    }
+
     // Scroll-spy scoped to the internal scroller. Reads live positions relative
     // to the scroller viewport so it stays correct regardless of window height.
     function syncActiveNavFromScroll() {
@@ -980,10 +1213,11 @@ const YTD_OPTIONS = (() => {
     // Resolve the active item from the URL hash (initial load and browser
     // back/forward hash changes). Returns false when the hash targets no
     // section so the caller can fall back to scroll position.
-    function syncActiveNavFromHash() {
+    function syncActiveNavFromHash({ scroll = false, behavior = "smooth" } = {}) {
       const id = settingsNavTargetFromHref(root.location?.hash || "");
       if (!settingsNavTargetIds.has(id)) return false;
       beginPendingNav(id);
+      if (scroll) scrollSettingsSectionIntoView(id, behavior);
       return true;
     }
 
@@ -1006,37 +1240,74 @@ const YTD_OPTIONS = (() => {
         { passive: true },
       );
       for (const item of settingsNavItems) {
-        // Reflect the click immediately and remember it as navigation intent;
-        // the anchor still performs its native hash navigation and smooth
-        // scroll. The intent keeps the clicked item active through the scroll,
-        // including near-bottom sections that cannot align to the top.
-        item.addEventListener("click", () => {
+        // Drive the internal scroller explicitly. Native fragment navigation
+        // does not reliably restore an element inside a nested overflow area on
+        // reload, which can otherwise leave the hash/highlight out of sync with
+        // the visible section.
+        item.addEventListener("click", (event) => {
           const id = settingsNavTargetFromHref(item.getAttribute("href"));
           if (settingsNavTargetIds.has(id)) {
+            event.preventDefault();
             beginPendingNav(id);
+            if (root.location?.hash !== `#${id}`) {
+              root.history?.pushState?.(null, "", `#${id}`);
+            }
+            scrollSettingsSectionIntoView(id);
           }
         });
       }
       root.addEventListener?.("hashchange", () => {
-        if (!syncActiveNavFromHash()) syncActiveNavFromScroll();
+        if (!syncActiveNavFromHash({ scroll: true })) syncActiveNavFromScroll();
       });
-      if (!syncActiveNavFromHash()) syncActiveNavFromScroll();
+      if (syncActiveNavFromHash()) {
+        scheduleFrame(() => {
+          const id = settingsNavTargetFromHref(root.location?.hash || "");
+          if (settingsNavTargetIds.has(id)) {
+            scrollSettingsSectionIntoView(id, "auto");
+          }
+        });
+      } else {
+        syncActiveNavFromScroll();
+      }
     }
 
     form.addEventListener("submit", saveSettings);
-    for (const input of [aiApiKeyInput, supadataApiKeyInput]) {
-      input.addEventListener("input", () => {
-        updateServiceStatus();
-        markUnsaved();
-      });
-    }
+    aiApiKeyInput.addEventListener("input", () => {
+      // Keep the active provider's draft in step so a later switch-and-return
+      // shows what the user typed.
+      providerKeyDrafts[currentProviderId] = aiApiKeyInput.value;
+      updateServiceStatus();
+      markUnsaved();
+    });
+    supadataApiKeyInput.addEventListener("input", () => {
+      updateServiceStatus();
+      markUnsaved();
+    });
     for (const button of revealToggles) {
       button.addEventListener("click", () => toggleKeyReveal(button));
     }
-    copyCustomizationPromptBtn.addEventListener(
-      "click",
-      copyCustomizationPrompt,
-    );
+
+    // Provider combobox wiring. Building the list, opening/closing, keyboard
+    // navigation, and outside-click dismissal all stay local: no network call.
+    if (providerSelectButton && providerSelectList) {
+      buildProviderList();
+      providerSelectButton.addEventListener("click", () => {
+        if (providerListOpen) closeProviderList({ focusButton: true });
+        else openProviderList();
+      });
+      providerSelectButton.addEventListener(
+        "keydown",
+        handleProviderButtonKeydown,
+      );
+      doc.addEventListener("click", (event) => {
+        if (!providerListOpen) return;
+        const container = doc.getElementById("providerSelect");
+        if (container && !container.contains(event.target)) {
+          closeProviderList();
+        }
+      });
+    }
+
     exportNotesBtn.addEventListener("click", exportNotes);
     importNotesBtn.addEventListener("click", openNotesImportPicker);
     importNotesFile.addEventListener("change", importNotes);
@@ -1064,8 +1335,6 @@ const YTD_OPTIONS = (() => {
     COPY,
     DEFAULT_LANGUAGE,
     LANGUAGE_STORAGE_KEY,
-    copyPromptValue,
-    createPromptDrafts,
     createStorageAdapter,
     normalizeLanguage,
     persistPreferredLanguage,
@@ -1074,8 +1343,7 @@ const YTD_OPTIONS = (() => {
     triggerNotesBackupDownload,
     translate,
     updateLanguageButtonState,
-    updateLocalizedPrompt,
-    switchPromptDraft,
+    providerMonogram,
     settingsNavTargetFromHref,
     resolveActiveSettingsSection,
     applySettingsNavState,

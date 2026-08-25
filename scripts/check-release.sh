@@ -27,8 +27,12 @@ fail() {
 public_allowlist=(
   "manifest.json"
   "background.js"
+  "ai-providers.js"
   "settings.js"
   "notes-backup.js"
+  "note-export.js"
+  "note-sources.js"
+  "export-jobs.js"
   "content.js"
   "bilibili.js"
   "content-bilibili.js"
@@ -41,6 +45,13 @@ public_allowlist=(
   "icons/icon16.png"
   "icons/icon48.png"
   "icons/icon128.png"
+  "icons/providers/PROVENANCE.md"
+  "icons/providers/deepseek.png"
+  "icons/providers/zhipu.png"
+  "icons/providers/dashscope-qwen.png"
+  "icons/providers/siliconflow.png"
+  "icons/providers/fireworks.svg"
+  "icons/providers/tencent-hunyuan.svg"
   "fonts/BarlowCondensed-Regular.woff2"
   "fonts/BarlowCondensed-Medium.woff2"
   "fonts/OFL.txt"
@@ -58,8 +69,13 @@ public_allowlist=(
 required_public_files=(
   "manifest.json"
   "background.js"
+  "ai-providers.js"
   "settings.js"
   "notes-backup.js"
+  "note-export.js"
+  "note-sources.js"
+  "export-jobs.js"
+  "icons/providers/PROVENANCE.md"
   "content.js"
   "bilibili.js"
   "content-bilibili.js"
@@ -281,6 +297,106 @@ for (const file of process.argv.slice(2)) {
 }
 
 if (found) process.exit(1);
+NODE
+
+# Provider registry, provider picker, and retired-entry checks.
+node - <<'NODE'
+const fs = require("fs");
+
+function read(file) {
+  return fs.readFileSync(file, "utf8");
+}
+
+const fail = (message) => {
+  console.error(`Release check failed: ${message}`);
+  process.exit(1);
+};
+
+const providers = read("ai-providers.js");
+// Every provider icon path must be a bundled local asset, never a remote or
+// data URL that would hot-link a brand icon at runtime.
+for (const match of providers.matchAll(/iconPath:\s*"([^"]*)"/g)) {
+  const iconPath = match[1];
+  if (/^[a-z]+:|^\/\//i.test(iconPath)) {
+    fail(`provider iconPath must be a local asset, not a URL: ${iconPath}`);
+  }
+  if (!/^icons\/providers\/[a-z0-9-]+\.(?:svg|png)$/.test(iconPath)) {
+    fail(`provider iconPath is not a bundled icons/providers image: ${iconPath}`);
+  }
+  if (!fs.existsSync(iconPath)) {
+    fail(`provider iconPath does not exist: ${iconPath}`);
+  }
+}
+if (!fs.existsSync("icons/providers/PROVENANCE.md")) {
+  fail("icons/providers/PROVENANCE.md is required for provider brand provenance");
+}
+
+const optionsPage = read("options.html");
+// The provider picker must be an accessible custom listbox, never a native
+// <select> (which cannot render brand icons in options reliably).
+if (/<select\b/i.test(optionsPage)) {
+  fail("options.html must not use a native <select> for the provider picker");
+}
+if (/role="listbox"/.test(optionsPage) === false) {
+  fail("options.html must expose the provider picker as an ARIA listbox");
+}
+// The retired transcript-provider nav and Local remix must be gone.
+if (/href="#section-transcript"/.test(optionsPage)) {
+  fail("options.html still links the retired 字幕服务 nav item");
+}
+if (/id="section-remix"|customization-card/.test(optionsPage)) {
+  fail("options.html still contains the retired 本地改造 section");
+}
+// No custom endpoint / base URL / model text inputs may return.
+if (/id="(?:provider|aiBaseUrl|aiModel)"/.test(optionsPage)) {
+  fail("options.html must not expose base URL / model / provider text inputs");
+}
+// ai-providers.js must load before settings.js on the options page.
+const aiIndex = optionsPage.indexOf('<script src="ai-providers.js"></script>');
+const settingsIndex = optionsPage.indexOf('<script src="settings.js"></script>');
+if (aiIndex === -1 || settingsIndex === -1 || aiIndex > settingsIndex) {
+  fail("options.html must load ai-providers.js before settings.js");
+}
+
+const background = read("background.js");
+if (!/importScripts\("ai-providers\.js"\)/.test(background)) {
+  fail("background.js must importScripts ai-providers.js");
+}
+const noteSourcesImport = background.indexOf(
+  'importScripts("note-sources.js")',
+);
+const exportJobsImport = background.indexOf(
+  'importScripts("export-jobs.js")',
+);
+if (
+  noteSourcesImport === -1 ||
+  exportJobsImport === -1 ||
+  noteSourcesImport > exportJobsImport
+) {
+  fail("background.js must load note-sources.js before export-jobs.js");
+}
+
+const sidepanelPage = read("sidepanel.html");
+const noteSourcesScript = sidepanelPage.indexOf(
+  '<script src="note-sources.js"></script>',
+);
+const exportJobsScript = sidepanelPage.indexOf(
+  '<script src="export-jobs.js"></script>',
+);
+const sidepanelScript = sidepanelPage.indexOf(
+  '<script src="sidepanel.js"></script>',
+);
+if (
+  noteSourcesScript === -1 ||
+  exportJobsScript === -1 ||
+  sidepanelScript === -1 ||
+  noteSourcesScript > exportJobsScript ||
+  exportJobsScript > sidepanelScript
+) {
+  fail(
+    "sidepanel.html must load note-sources.js, then export-jobs.js, then sidepanel.js",
+  );
+}
 NODE
 
 log "Release checks passed (${#release_files[@]} allowlisted files)."

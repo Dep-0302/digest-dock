@@ -18,18 +18,30 @@ test("manifest uses minimized install-time permissions", () => {
   assert.ok(!manifest.permissions.includes("activeTab"));
   assert.ok(!manifest.permissions.includes("cookies"));
   assert.ok(!manifest.permissions.includes("downloads"));
+  // Install-time host access is the fixed platform surface plus exactly one
+  // origin per selectable AI provider, derived from the registry so the two can
+  // never silently drift. The fail-closed Tencent provider ships no
+  // hostPermission and must never widen install-time access.
+  const providers = require("../ai-providers.js");
+  const baseHosts = [
+    "https://*.bilivideo.com/*",
+    "https://*.hdslb.com/*",
+    "https://api.bilibili.com/*",
+    "https://api.supadata.ai/*",
+    "https://subtitle.bilibili.com/*",
+    "https://www.bilibili.com/*",
+    "https://www.youtube.com/*",
+  ];
+  const providerHosts = providers
+    .listSelectableProviders()
+    .map((provider) => provider.hostPermission);
   assert.deepEqual(
     [...manifest.host_permissions].sort(),
-    [
-      "https://*.bilivideo.com/*",
-      "https://*.hdslb.com/*",
-      "https://api.bilibili.com/*",
-      "https://api.deepseek.com/*",
-      "https://api.supadata.ai/*",
-      "https://subtitle.bilibili.com/*",
-      "https://www.bilibili.com/*",
-      "https://www.youtube.com/*",
-    ].sort(),
+    [...baseHosts, ...providerHosts].sort(),
+  );
+  assert.ok(
+    !manifest.host_permissions.some((host) => /tencentcloudapi\.com/.test(host)),
+    "the fail-closed Tencent provider must not appear in host_permissions",
   );
   const bilibiliContentScript = manifest.content_scripts.find((entry) =>
     entry.matches?.includes("https://www.bilibili.com/video/BV*"),
@@ -42,18 +54,48 @@ test("manifest uses minimized install-time permissions", () => {
     "https://www.bilibili.com/video/BV*",
   ]);
   assert.equal(Object.hasOwn(manifest, "optional_host_permissions"), false);
-  assert.equal(manifest.version, "1.4.2");
+  assert.equal(manifest.version, "1.4.3");
 });
 
 test("cross-platform runtime dependencies match the API-primary release surface", () => {
   const background = read("background.js");
+  const sidepanelPage = read("sidepanel.html");
   const optionsPage = read("options.html");
   const optionsStyles = read("options.css");
   const releaseCheck = read("scripts/check-release.sh");
   const brandIcon = read("icons/digestdock-icon-solid.svg");
+  const backgroundNoteSourcesIndex = background.indexOf(
+    'importScripts("note-sources.js")',
+  );
+  const backgroundExportJobsIndex = background.indexOf(
+    'importScripts("export-jobs.js")',
+  );
+  const panelNoteSourcesIndex = sidepanelPage.indexOf(
+    '<script src="note-sources.js"></script>',
+  );
+  const panelExportJobsIndex = sidepanelPage.indexOf(
+    '<script src="export-jobs.js"></script>',
+  );
+  const panelRuntimeIndex = sidepanelPage.indexOf(
+    '<script src="sidepanel.js"></script>',
+  );
 
   assert.doesNotMatch(background, /importScripts\("youtube-transcript\.js"\)/);
   assert.match(background, /importScripts\("notes-backup\.js"\)/);
+  assert.ok(
+    backgroundNoteSourcesIndex >= 0 &&
+      backgroundExportJobsIndex >= 0 &&
+      backgroundNoteSourcesIndex < backgroundExportJobsIndex,
+    "background.js must load note-sources.js before export-jobs.js",
+  );
+  assert.ok(
+    panelNoteSourcesIndex >= 0 &&
+      panelExportJobsIndex >= 0 &&
+      panelRuntimeIndex >= 0 &&
+      panelNoteSourcesIndex < panelExportJobsIndex &&
+      panelExportJobsIndex < panelRuntimeIndex,
+    "sidepanel.html must load note-sources.js, then export-jobs.js, then sidepanel.js",
+  );
   assert.ok(
     optionsPage.indexOf('<script src="notes-backup.js"></script>') <
       optionsPage.indexOf('<script src="options.js"></script>'),
@@ -62,6 +104,10 @@ test("cross-platform runtime dependencies match the API-primary release surface"
   assert.ok(
     (releaseCheck.match(/"notes-backup\.js"/g) || []).length >= 2,
     "notes-backup.js must be both allowlisted and required for release",
+  );
+  assert.ok(
+    (releaseCheck.match(/"export-jobs\.js"/g) || []).length >= 2,
+    "export-jobs.js must be both allowlisted and required for release",
   );
   for (const file of ["bilibili.js", "content-bilibili.js"]) {
     assert.ok(
@@ -86,7 +132,7 @@ test("cross-platform runtime dependencies match the API-primary release surface"
     3,
     "only the icon-adjacent DigestDock brand word must emphasize D, D, and K",
   );
-  assert.match(optionsPage, /<p class="settings-version">DigestDock 1\.4\.2<\/p>/);
+  assert.match(optionsPage, /<p class="settings-version">DigestDock 1\.4\.3<\/p>/);
   assert.match(optionsPage, /<p class="eyebrow">DIGESTDOCK<\/p>/);
   assert.match(optionsStyles, /\.brand-letter\s*\{[^}]*font-weight:\s*750/);
   assert.doesNotMatch(optionsPage, /#1F2933|#F26A4F/);
@@ -144,7 +190,7 @@ test("release copy documents current scope without em dashes", () => {
     readme,
     /Select the exact project folder you chose, which must contain `manifest\.json`/,
   );
-  assert.match(readme, /upstream issues and pull requests are not accepted/i);
+  assert.doesNotMatch(readme, /^## Remix it with your coding agent$/m);
   assert.doesNotMatch(readme, /^## Contributing$/m);
   assert.match(chineseReadme, /^# DigestDock$/m);
   assert.match(chineseReadme, /DigestDock 是一个基于 Manifest V3 的 Chrome 扩展/);
@@ -166,8 +212,7 @@ test("release copy documents current scope without em dashes", () => {
     chineseReadme,
     /选择你刚才确定的那个准确项目文件夹，其中必须包含 `manifest\.json`/,
   );
-  assert.match(chineseReadme, /不接受上游 Issue 或 Pull Request/);
-  assert.match(chineseReadme, /增加更多翻译语言/);
+  assert.doesNotMatch(chineseReadme, /^## 用编程 Agent 改造成自己的版本$/m);
   assert.match(readme, /choose \*\*Original\*\*, \*\*中文\*\*, or \*\*双语\*\*/);
   assert.match(chineseReadme, /可选择 \*\*原文\*\*、\*\*中文\*\*或\*\*双语\*\*/);
   assert.match(
@@ -237,51 +282,34 @@ test("release copy documents current scope without em dashes", () => {
   assert.match(optionsScript, /确认本次使用第三方 Supadata/);
   assert.match(optionsPage, /dash\.supadata\.ai\/auth\/sign-up/i);
   assert.match(optionsPage, /platform\.deepseek\.com\/api_keys/i);
+  // The provider picker is a custom ARIA combobox, not a native <select>, and
+  // no free-form endpoint/model/legacy-provider text inputs are exposed. The
+  // retired "本地改造" remix disclosure and its customization prompt are gone
+  // from the page, styles, and script.
   assert.doesNotMatch(optionsPage, /<select\b/i);
   assert.doesNotMatch(optionsPage, /id="(?:provider|aiBaseUrl|aiModel)"/);
-  const detailsTag = optionsPage.match(
-    /<details\b[^>]*class="card customization-card"[^>]*>/,
-  );
-  assert.ok(detailsTag, "Expected a native Local remix details disclosure");
-  assert.doesNotMatch(detailsTag[0], /\sopen(?:\s|=|>)/i);
-  assert.match(
+  assert.doesNotMatch(
     optionsPage,
-    /<summary class="customization-summary">[\s\S]*想使用其他 AI 模型？[\s\S]*编辑并复制一段可安全交给编程 Agent 的提示词[\s\S]*<\/summary>/,
+    /customization-card|customization-summary|customization-steps|prompt-reminder|copyCustomizationPromptBtn/,
   );
-  assert.match(
-    optionsPage,
-    /class="customization-steps"[\s\S]*在编程 Agent 中打开 DigestDock 解压后的项目文件夹[\s\S]*把 \[PROVIDER\] 和 \[MODEL\] 替换成[\s\S]*不要在提示词或聊天中加入 API 密钥[\s\S]*<\/ol>/,
+  assert.doesNotMatch(optionsStyles, /customization-summary|customization-card/);
+  assert.doesNotMatch(
+    optionsScript,
+    /clipboard\.writeText|Edited prompt copied\.|customizationPrompt/,
   );
-  assert.match(
-    optionsPage,
-    /class="prompt-reminder"[\s\S]*复制前，请先把 \[PROVIDER\] 和 \[MODEL\] 替换成/,
-  );
+  assert.match(optionsPage, /id="providerSelectButton"[\s\S]*?role="combobox"/);
+  assert.match(optionsPage, /id="providerSelectList"[\s\S]*?role="listbox"/);
+  assert.match(optionsStyles, /\.data-card\s*\{[^}]*margin-top:\s*36px;/);
+  // A one-time legacy-shape migration is still persisted exactly once.
+  assert.match(optionsScript, /migration\.migrated[\s\S]*storage\.set/);
   assert.doesNotMatch(optionsPage, /~\/Documents\/(?:youtube-digest|digest-dock)/);
   assert.doesNotMatch(optionsPage, /%USERPROFILE%\\Documents\\(?:youtube-digest|digest-dock)/);
-  assert.match(optionsPage, /id="copyCustomizationPromptBtn"/);
-  assert.match(optionsStyles, /\.customization-summary:hover\s*\{/);
-  assert.match(optionsStyles, /\.customization-summary:focus-visible\s*\{/);
-  assert.match(optionsStyles, /\.data-card\s*\{[^}]*margin-top:\s*36px;/);
-  assert.match(optionsScript, /clipboard\.writeText/);
-  assert.match(optionsScript, /Edited prompt copied\./);
-  assert.match(optionsScript, /migration\.migrated[\s\S]*storage\.set/);
 
-  const customizationPrompt = options.translate("zh-CN", "customizationPrompt");
-  assert.ok(optionsPage.includes(`>${customizationPrompt}</textarea>`));
-  assert.doesNotMatch(customizationPrompt, /Documents|USERPROFILE/);
-
-  assert.match(readme, /^## Remix it with your coding agent$/m);
-  assert.match(readme, /more translation languages/i);
-  assert.match(readme, /customized summary templates/i);
-  assert.match(readme, /vocabulary notebook/i);
-  assert.match(
-    readme,
-    /first open the exact DigestDock project folder that Chrome loaded through \*\*Load unpacked\*\* in your coding agent/,
-  );
-  assert.match(
-    chineseReadme,
-    /先在编程 Agent 中打开 Chrome 通过“加载已解压的扩展程序”使用的那个准确的 DigestDock 项目文件夹/,
-  );
+  assert.doesNotMatch(chineseReadme, /^## 用编程 Agent 改造成自己的版本$/m);
+  assert.match(readme, /exports the current video, selected source videos, all notes, or one source group as UTF-8 TXT/i);
+  assert.match(chineseReadme, /当前视频、所选视频、全部笔记和单个视频来源的 UTF-8 TXT 导出/);
+  assert.match(readme, /Tencent Hunyuan Translation[\s\S]*unavailable/i);
+  assert.match(chineseReadme, /腾讯混元翻译[\s\S]*暂不可用/);
 
   const publishedDocs = [
     readme,
@@ -293,8 +321,22 @@ test("release copy documents current scope without em dashes", () => {
   assert.doesNotMatch(publishedDocs, /optional custom-origin/i);
   assert.doesNotMatch(publishedDocs, /chosen AI provider/i);
   assert.doesNotMatch(publishedDocs, /configure a different OpenAI-compatible/i);
-  assert.match(readme, /published version supports DeepSeek V4 Flash as its only AI provider/i);
-  assert.match(chineseReadme, /发布版本只支持 DeepSeek V4 Flash/);
+  assert.doesNotMatch(publishedDocs, /Markdown note exports|note Markdown|笔记 Markdown|可导出 Markdown/i);
+  // The retired remix mechanism and the DeepSeek-only claim are gone; the
+  // published build now ships a preset provider picker with DeepSeek as default.
+  assert.doesNotMatch(publishedDocs, /only AI provider/i);
+  assert.doesNotMatch(publishedDocs, /Copy customization prompt/i);
+  assert.match(readme, /select one AI provider from a preset list/i);
+  assert.match(chineseReadme, /从预设列表选择一个 AI 服务商/);
+  assert.match(readme, /DeepSeek is the default provider/i);
+  assert.match(chineseReadme, /DeepSeek 是默认服务商/);
+  for (const modelLabel of ["GLM-4.7-Flash", "Qwen3-8B", "Fireworks"]) {
+    assert.ok(readme.includes(modelLabel), `README should list ${modelLabel}`);
+    assert.ok(
+      chineseReadme.includes(modelLabel),
+      `zh-CN README should list ${modelLabel}`,
+    );
+  }
   assert.match(readme, /github\.com\/zarazhangrui\/youtube-digest/);
   assert.match(chineseReadme, /github\.com\/zarazhangrui\/youtube-digest/);
   assert.match(read("LICENSE"), /Copyright \(c\) 2026 Zara Zhang/);
@@ -316,9 +358,66 @@ test("release copy documents current scope without em dashes", () => {
   assert.match(read("options.js"), /PREVIEW_STORAGE_PREFIX = "youtubeDigestPreview:"/);
   assert.match(read("background.js"), /["']ytd_notes["']/);
   assert.match(
+    read("note-sources.js"),
+    /const STORAGE_KEY = "ytd_note_sources_v2"/,
+  );
+  assert.match(
+    read("note-sources.js"),
+    /const LEGACY_STORAGE_KEY = "ytd_note_sources"/,
+  );
+  assert.match(
+    read("export-jobs.js"),
+    /const STORAGE_KEY = "ytd_note_export_jobs_v1"/,
+  );
+  assert.match(
     read("notes-backup.js"),
     /const FORMAT = "youtube-digest-notes-backup"/,
   );
+});
+
+test("export jobs persist coordination metadata without credentials or content", () => {
+  const jobs = require("../export-jobs.js");
+  const sentinel = "private-credential-sentinel";
+  const job = jobs.createExportJob(
+    {
+      state: "planned",
+      intent: {
+        scope: "current_video",
+        mediaKeys: ["youtube:video-a"],
+        mode: "bilingual",
+        format: "markdown",
+        autoExport: true,
+      },
+      sourceRevisions: { "youtube:video-a": 2 },
+      notesRevision: "notes-r1",
+      orderedUnitKeys: ["transcript:youtube:video-a:segment-1"],
+      completedUnitKeys: [],
+      currentBatch: null,
+      cursor: 0,
+      roundBudget: { maxBatches: 20 },
+      providerSnapshot: {
+        providerId: "deepseek",
+        modelId: "deepseek-v4-flash",
+        routeKey: "deepseek:deepseek-v4-flash",
+        apiKey: sentinel,
+        requestBody: { text: "must not persist" },
+      },
+      sourceText: "full transcript must not persist",
+      translatedText: "完整译文不得写入任务",
+      exportClaim: null,
+      lastError: null,
+    },
+    { now: 1 },
+  );
+  const persisted = JSON.stringify(job);
+
+  assert.equal(jobs.STORAGE_KEY, "ytd_note_export_jobs_v1");
+  assert.equal(Object.hasOwn(job, "sourceText"), false);
+  assert.equal(Object.hasOwn(job, "translatedText"), false);
+  assert.equal(Object.hasOwn(job.providerSnapshot, "apiKey"), false);
+  assert.equal(Object.hasOwn(job.providerSnapshot, "requestBody"), false);
+  assert.doesNotMatch(persisted, new RegExp(sentinel));
+  assert.doesNotMatch(persisted, /full transcript|完整译文|must not persist/);
 });
 
 test("notes filters preserve selected contrast and expose pressed state", () => {
@@ -353,6 +452,89 @@ test("notes filters preserve selected contrast and expose pressed state", () => 
   assert.match(js, /setAttribute\("aria-pressed", String\(showAll\)\)/);
 });
 
+test("all-notes export exposes an accessible multi-video scope picker", () => {
+  const html = read("sidepanel.html");
+  const css = read("sidepanel.css");
+  const js = read("sidepanel.js");
+  assert.match(html, /id="selectNotesForExport"[\s\S]*?选择视频导出/);
+  assert.match(html, /id="notesExportPicker"[\s\S]*?<fieldset>/);
+  assert.match(html, /id="notesExportSelectAll"[^>]*type="checkbox"/);
+  assert.match(html, /id="confirmNotesExportSelection"[\s\S]*?disabled/);
+  assert.match(html, /id="directNotesExportSelection"[\s\S]*?disabled/);
+  assert.match(html, /完整导出（0）/);
+  assert.match(html, /直接导出（0）/);
+  assert.match(css, /\.notes-export-picker-list\s*\{[^}]*max-height:\s*240px;[^}]*overflow-y:\s*auto/);
+  assert.match(js, /let selectedNoteExportMediaKeys = new Set\(\)/);
+  assert.match(js, /confirm\.disabled = selected === 0/);
+  assert.match(js, /selectAll\.indeterminate = selected > 0 && selected < total/);
+  assert.match(js, /event\.key !== "Escape"/);
+  assert.doesNotMatch(
+    js,
+    /showNoteExportSupplementGuide|noteExportSupplementIsReady|补充导出|打开补充|重新检查并导出|放弃导出/,
+  );
+});
+
+test("notes TXT and completion jobs stay scoped away from full transcripts", () => {
+  const exporter = read("note-export.js");
+  const sources = read("note-sources.js");
+  const panel = read("sidepanel.js");
+  assert.doesNotMatch(
+    exporter,
+    /lines\.push\(`\$\{sub\} 字幕`\)/,
+    "notes reading exports must not append the full transcript section",
+  );
+  assert.match(sources, /function buildExportPrecheck\([\s\S]*?includeTranscript = true/);
+  assert.match(panel, /const EXPORT_CONTENT_CONTRACT_VERSION = 4/);
+  assert.match(panel, /buildCurrentVideoText/);
+  assert.match(panel, /buildAllNotesText/);
+  assert.doesNotMatch(panel, /buildCurrentVideoMarkdown|buildAllNotesMarkdown|text\/markdown/);
+  assert.match(
+    panel,
+    /function buildNotesExportPrecheck[\s\S]*?includeTranscript: false/,
+    "the shared note precheck must exclude full transcripts",
+  );
+  assert.match(
+    panel,
+    /function buildNotesExportTranslationPlan[\s\S]*?includeTranscript: false/,
+    "the shared note completion plan must exclude full transcripts",
+  );
+  assert.match(
+    panel,
+    /async function exportCurrentVideoNotes\(\) \{[\s\S]*?await exportAllNotes\(\[selectedMediaKey\]\);[\s\S]*?\n\}/,
+    "the current-video shortcut must delegate to the shared notes export flow",
+  );
+  assert.match(
+    panel,
+    /if \(!outcome\.complete\) \{[\s\S]*?await exportAllNotes\(frozenMediaKeys,\s*\{/,
+  );
+  assert.match(
+    panel,
+    /async function exportSingleSourceGroup\(group\) \{[\s\S]*?await exportAllNotes\(\[selectedMediaKey\]\);[\s\S]*?\n\}/,
+    "the per-source shortcut must delegate to the shared notes export flow",
+  );
+  assert.match(
+    panel,
+    /if \(!outcome\.complete\) \{[\s\S]*?await exportTranscript\(\)/,
+  );
+});
+
+test("YouTube metadata capture binds page info to the exact video identity", () => {
+  const content = read("content.js");
+  assert.match(
+    content,
+    /function extractVideoInfo\(\)[\s\S]*?new URLSearchParams\(window\.location\.search\)\.get\("v"\)[\s\S]*?return \{[\s\S]*?videoId,/,
+  );
+  assert.match(content, /descriptionStatus:[\s\S]*?"confirmed-empty"/);
+  assert.match(
+    content,
+    /descriptionTruncated:\s*!embeddedDescription\.found && !!description/,
+  );
+  assert.match(
+    content,
+    /function extractEmbeddedVideoDescription\(videoId\)[\s\S]*?250_000[\s\S]*?"shortDescription"/,
+  );
+});
+
 test("runtime has no source-file credential dependency or retired model", () => {
   const runtime = [
     "background.js",
@@ -362,6 +544,7 @@ test("runtime has no source-file credential dependency or retired model", () => 
     "sidepanel.js",
     "options.js",
     "settings.js",
+    "ai-providers.js",
   ]
     .map(read)
     .join("\n");
@@ -369,7 +552,8 @@ test("runtime has no source-file credential dependency or retired model", () => 
   assert.doesNotMatch(runtime, /\bCONFIG\./);
   assert.doesNotMatch(runtime, /importScripts\(["']config\.js/);
   assert.doesNotMatch(runtime, /\bdeepseek-chat\b/);
-  assert.match(runtime, /deepseek-v4-flash/);
+  // The current DeepSeek model id now lives once in the provider registry.
+  assert.match(read("ai-providers.js"), /deepseek-v4-flash/);
 });
 
 test("retired Remix and reader files are absent", () => {

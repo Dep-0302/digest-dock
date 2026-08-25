@@ -5,6 +5,8 @@ const path = require("node:path");
 const vm = require("node:vm");
 
 const notesBackup = require("../notes-backup.js");
+const noteSources = require("../note-sources.js");
+const exportJobs = require("../export-jobs.js");
 const options = require("../options.js");
 
 const root = path.resolve(__dirname, "..");
@@ -146,6 +148,8 @@ function loadBackgroundBackupHelpers({
     clearTimeout,
     importScripts() {},
     YTD_NOTES_BACKUP: notesBackup,
+    YTD_NOTE_SOURCES: noteSources,
+    YTD_EXPORT_JOBS: exportJobs,
     YTD_SETTINGS: {
       STORAGE_KEY: "ytd_settings",
       normalize: (value) => value || {},
@@ -231,6 +235,9 @@ test("notes backups round-trip only the allowed fields and rebuild derived value
     "videoId",
     "textLanguage",
     "videoTitle",
+    "videoTitleZh",
+    "videoTitleZhValidated",
+    "videoTitleZhValidationVersion",
     "channelName",
     "timestampSeconds",
     "text",
@@ -253,7 +260,7 @@ test("notes backups round-trip only the allowed fields and rebuild derived value
     assert.doesNotMatch(serialized, new RegExp(privateValue));
   }
   assert.doesNotMatch(serialized, /apiKey|settings|transcriptCache|digestCache/);
-  assert.equal(backup.schemaVersion, 2);
+  assert.equal(backup.schemaVersion, 3);
   assert.equal(backup.notes[0].platform, "youtube");
   assert.equal(backup.notes[0].mediaKey, source.videoId);
 
@@ -314,7 +321,7 @@ test("schema v2 Bilibili notes round-trip strict media identity and rebuild time
   const backup = validBackupObject([source]);
   const serialized = JSON.stringify(backup);
 
-  assert.equal(backup.schemaVersion, 2);
+  assert.equal(backup.schemaVersion, 3);
   assert.deepEqual(Object.keys(backup.notes[0]), [
     "id",
     "platform",
@@ -325,6 +332,9 @@ test("schema v2 Bilibili notes round-trip strict media identity and rebuild time
     "page",
     "textLanguage",
     "videoTitle",
+    "videoTitleZh",
+    "videoTitleZhValidated",
+    "videoTitleZhValidationVersion",
     "channelName",
     "timestampSeconds",
     "text",
@@ -454,6 +464,9 @@ test("backup parsing rejects damaged JSON, newer versions, oversized input, and 
     ["translatedValidated", "yes"],
     ["translatedValidationVersion", -1],
     ["translatedUnchanged", "yes"],
+    ["videoTitleZhValidated", "yes"],
+    ["videoTitleZhValidationVersion", 5],
+    ["videoTitleZh", "z".repeat(501)],
   ];
   for (const [field, value] of invalidCases) {
     const invalid = validBackupObject();
@@ -463,6 +476,74 @@ test("backup parsing rejects damaged JSON, newer versions, oversized input, and 
       "INVALID_NOTES_BACKUP",
     );
   }
+});
+
+test("schema v3 round-trips validated Chinese video titles", () => {
+  const source = makeNote(30, {
+    videoTitle: "The Future of AI",
+    videoTitleZh: "人工智能的未来",
+    videoTitleZhValidated: true,
+    videoTitleZhValidationVersion: 1,
+  });
+  const backup = validBackupObject([source]);
+  assert.equal(backup.schemaVersion, 3);
+  assert.equal(backup.notes[0].videoTitleZh, "人工智能的未来");
+
+  const [restored] = notesBackup.parseBackupText(JSON.stringify(backup));
+  assert.equal(restored.videoTitle, "The Future of AI");
+  assert.equal(restored.videoTitleZh, "人工智能的未来");
+  assert.equal(restored.videoTitleZhValidated, true);
+  assert.equal(restored.videoTitleZhValidationVersion, 1);
+});
+
+test("schema v1 and v2 backups import with empty title translation fields", () => {
+  const v1 = validV1BackupObject([makeNote(31)]);
+  const v2 = validBackupObject([makeNote(32)]);
+  v2.schemaVersion = 2;
+  v2.notes.forEach((note) => {
+    delete note.videoTitleZh;
+    delete note.videoTitleZhValidated;
+    delete note.videoTitleZhValidationVersion;
+  });
+
+  for (const backup of [v1, v2]) {
+    const [restored] = notesBackup.parseBackupText(JSON.stringify(backup));
+    assert.equal(restored.videoTitleZh, "");
+    assert.equal(restored.videoTitleZhValidated, false);
+    assert.equal(restored.videoTitleZhValidationVersion, 0);
+  }
+});
+
+test("merging fills an empty title but never overwrites a different validated title", () => {
+  const local = makeNote(33, {
+    videoTitleZh: "",
+    videoTitleZhValidated: false,
+    videoTitleZhValidationVersion: 0,
+  });
+  const imported = makeNote(33, {
+    videoTitleZh: "已验证的中文标题",
+    videoTitleZhValidated: true,
+    videoTitleZhValidationVersion: 1,
+  });
+  const filled = notesBackup.mergeNotes([local], [imported]);
+  assert.equal(filled.enrichedCount, 1);
+  assert.equal(filled.notes[0].videoTitleZh, "已验证的中文标题");
+  assert.equal(filled.notes[0].videoTitleZhValidated, true);
+
+  // A different, already-validated local title is kept; the import cannot clobber it.
+  const localValidated = makeNote(34, {
+    videoTitleZh: "本地已验证标题",
+    videoTitleZhValidated: true,
+    videoTitleZhValidationVersion: 1,
+  });
+  const importedOther = makeNote(34, {
+    videoTitleZh: "导入的不同标题",
+    videoTitleZhValidated: true,
+    videoTitleZhValidationVersion: 1,
+  });
+  const kept = notesBackup.mergeNotes([localValidated], [importedOther]);
+  assert.equal(kept.enrichedCount, 0);
+  assert.equal(kept.notes[0].videoTitleZh, "本地已验证标题");
 });
 
 test("backups preserve legacy notes that exceed current save-time field limits", () => {

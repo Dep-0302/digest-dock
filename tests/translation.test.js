@@ -8,10 +8,55 @@ const root = path.resolve(__dirname, "..");
 const read = (file) => fs.readFileSync(path.join(root, file), "utf8");
 const bilibiliAdapter = require("../bilibili.js");
 
+function createMemoryStorageArea(initial = {}) {
+  const values = JSON.parse(JSON.stringify(initial));
+  const clone = (value) => JSON.parse(JSON.stringify(value));
+  return {
+    async get(keys) {
+      if (keys === null || keys === undefined) return clone(values);
+      if (typeof keys === "object" && !Array.isArray(keys)) {
+        const result = clone(keys);
+        for (const key of Object.keys(keys)) {
+          if (Object.hasOwn(values, key)) result[key] = clone(values[key]);
+        }
+        return result;
+      }
+      const requested = Array.isArray(keys) ? keys : [keys];
+      return Object.fromEntries(
+        requested
+          .filter((key) => Object.hasOwn(values, key))
+          .map((key) => [key, clone(values[key])]),
+      );
+    },
+    async set(next) {
+      Object.assign(values, clone(next));
+    },
+    async remove(keys) {
+      for (const key of Array.isArray(keys) ? keys : [keys]) delete values[key];
+    },
+    async clear() {
+      for (const key of Object.keys(values)) delete values[key];
+    },
+    snapshot() {
+      return clone(values);
+    },
+  };
+}
+
 function loadSidepanelRuntime({
   sendMessage = () => Promise.resolve({}),
   setTimeoutImpl = () => 0,
   clearTimeoutImpl = () => {},
+  storageLocal = {
+    get: async () => ({}),
+    set: async () => {},
+    remove: async () => {},
+    clear: async () => {},
+  },
+  storageSession = createMemoryStorageArea(),
+  documentImpl,
+  noteSourcesImpl = require("../note-sources.js"),
+  exportJobsImpl = require("../export-jobs.js"),
 } = {}) {
   const listeners = { addListener() {} };
   const tabUpdatedListeners = [];
@@ -28,7 +73,7 @@ function loadSidepanelRuntime({
     IntersectionObserver: class {},
     CSS: { escape: (value) => value },
     window: { getSelection: () => null, close() {} },
-    document: {
+    document: documentImpl || {
       addEventListener() {},
       querySelectorAll: () => [],
       querySelector: () => null,
@@ -50,6 +95,7 @@ function loadSidepanelRuntime({
       },
     },
     chrome: {
+      storage: { local: storageLocal, session: storageSession },
       runtime: { onMessage: listeners, sendMessage },
       windows: { getCurrent: () => Promise.resolve({ id: 1 }) },
       tabs: {
@@ -67,6 +113,9 @@ function loadSidepanelRuntime({
     },
     YTD_SETTINGS: {},
     BILIBILI_ADAPTER: bilibiliAdapter,
+    YTD_NOTE_EXPORT: require("../note-export.js"),
+    YTD_NOTE_SOURCES: noteSourcesImpl,
+    YTD_EXPORT_JOBS: exportJobsImpl,
   };
   sandbox.globalThis = sandbox;
   const context = vm.createContext(sandbox);
@@ -96,8 +145,15 @@ function loadBackgroundHelpers({
   clearTimeoutImpl = () => {},
   storageGetImpl,
   storageSetImpl = async () => {},
+  storageRemoveImpl = async () => {},
+  storageClearImpl = async () => {},
   tabsImpl = {},
+  scriptingImpl = { executeScript: async () => [] },
+  pageDocumentImpl = {},
+  pageWindowImpl = {},
   bilibiliAdapterImpl = bilibiliAdapter,
+  noteSourcesImpl = require("../note-sources.js"),
+  exportJobsImpl = require("../export-jobs.js"),
 } = {}) {
   const listeners = { addListener() {} };
   const runtimeMessageListeners = [];
@@ -108,6 +164,8 @@ function loadBackgroundHelpers({
     TextEncoder,
     fetch: fetchImpl,
     AbortController,
+    document: pageDocumentImpl,
+    window: pageWindowImpl,
     setTimeout: setTimeoutImpl,
     clearTimeout: clearTimeoutImpl,
     importScripts() {},
@@ -119,9 +177,12 @@ function loadBackgroundHelpers({
             storageGetImpl ||
             (async () => ({ ytd_settings: settings })),
           set: storageSetImpl,
+          remove: storageRemoveImpl,
+          clear: storageClearImpl,
         },
       },
       action: { onClicked: listeners },
+      scripting: scriptingImpl,
       sidePanel: {
         setPanelBehavior() {},
         setOptions: () => Promise.resolve(),
@@ -139,13 +200,17 @@ function loadBackgroundHelpers({
       },
       tabs: { onUpdated: listeners, onActivated: listeners, ...tabsImpl },
     },
-    YTD_SETTINGS: {
-      STORAGE_KEY: "ytd_settings",
-      normalize: (value) => value,
-      chatCompletionsUrl: (baseUrl) => `${baseUrl}/chat/completions`,
-      canonicalYouTubeUrl: (videoId) =>
-        `https://www.youtube.com/watch?v=${videoId}`,
-    },
+    // Load the real, published logic modules the service worker derives its
+    // provider config from, instead of a hand-written stub. background.js calls
+    // YTD_SETTINGS.hasActiveApiKey()/apiKeyFor()/normalize() and
+    // YTD_AI_PROVIDERS.resolveProviderId()/getProvider()/describeProvider(), so
+    // the harness must honor the same contract the extension ships. All three
+    // are pure logic (no network, chrome.*, or DOM) and safe to require here.
+    YTD_AI_PROVIDERS: require("../ai-providers.js"),
+    YTD_SETTINGS: require("../settings.js"),
+    YTD_NOTES_BACKUP: require("../notes-backup.js"),
+    YTD_NOTE_SOURCES: noteSourcesImpl,
+    YTD_EXPORT_JOBS: exportJobsImpl,
     BILIBILI_ADAPTER: bilibiliAdapterImpl,
   };
   sandbox.globalThis = sandbox;
@@ -211,6 +276,1657 @@ function streamingResponse(chunks, { ok = true, status = 200 } = {}) {
 const encode = (value) => new TextEncoder().encode(value);
 const nextTurn = () => new Promise((resolve) => setImmediate(resolve));
 
+function createAsyncGate() {
+  let enteredResolve;
+  let releaseResolve;
+  const entered = new Promise((resolve) => {
+    enteredResolve = resolve;
+  });
+  const blocked = new Promise((resolve) => {
+    releaseResolve = resolve;
+  });
+  return {
+    entered,
+    enter() {
+      enteredResolve();
+      return blocked;
+    },
+    release() {
+      releaseResolve();
+    },
+  };
+}
+
+test("export precheck names every translation gap and forbids original-text substitution", () => {
+  const helpers = loadSidepanelHelpers();
+  const summary = helpers.describeExportPrecheck({
+    videoCount: 2,
+    noteCount: 3,
+    hasBlocking: false,
+    blockingVideos: [],
+    hasTranslationGaps: true,
+    translationGaps: {
+      titles: 1,
+      descriptions: 1,
+      transcriptSegments: 4,
+      notes: 2,
+    },
+  });
+  assert.match(summary, /1 个标题/);
+  assert.match(summary, /1 个简介/);
+  assert.match(summary, /4 段字幕/);
+  assert.match(summary, /2 条笔记/);
+  assert.match(summary, /不会用原文冒充中文导出/);
+  assert.doesNotMatch(summary, /缺失部分将以原文呈现/);
+});
+
+test("one confirmed export round starts at most 20 batches and never auto-downloads", async () => {
+  const controller = createSidepanelJobController();
+  const documentImpl = createInteractiveDocument();
+  const fixture = makeNoteRoundFixture(21);
+  const runtime = loadSidepanelRuntime({
+    sendMessage: controller.sendMessage,
+    documentImpl,
+    exportJobsImpl: createExportJobsBridge(),
+  });
+  let downloadCount = 0;
+  runtime.sandbox.__downloadProbe = () => {
+    downloadCount += 1;
+  };
+  runtime.evaluate("downloadTextFile = () => globalThis.__downloadProbe() ");
+
+  const outcome = await runtime.helpers.runConfirmedExportTranslation({
+    plan: fixture.plan,
+    sourcesByKey: {},
+    groups: fixture.groups,
+    scope: "notes-current",
+    mode: "bilingual",
+    format: "txt",
+    panelId: "notesExportPrecheck",
+    setStatus() {},
+  });
+
+  assert.equal(outcome.complete, false);
+  assert.equal(outcome.remainingCount, 1);
+  assert.equal(
+    controller.actions.filter(
+      (action) => action === "translateExportNotesBatch",
+    ).length,
+    20,
+  );
+  assert.equal(controller.translatedNoteIds.length, 20);
+  assert.equal(controller.translatedNoteIds.includes("round-note-21"), false);
+  assert.equal(controller.job().state, "paused");
+  assert.equal(downloadCount, 0, "an incomplete round never creates a file");
+
+  runtime.helpers.showNoteExportPrecheck(
+    {
+      videoCount: 1,
+      noteCount: 21,
+      hasBlocking: false,
+      blockingVideos: [],
+      hasTranslationGaps: true,
+      translationGaps: {
+        titles: 0,
+        descriptionChunks: 0,
+        transcriptSegments: 0,
+        notes: 1,
+      },
+    },
+    () => {},
+    () => {},
+    {
+      overLimit: false,
+      estimatedBatches: 1,
+      progress: {
+        totalUnits: 21,
+        completedUnits: 20,
+        remainingUnits: 1,
+        remainingBatches: 1,
+        roundMaxBatches: 20,
+      },
+    },
+  );
+  assert.equal(documentImpl.element("notesExportPrecheck").hidden, false);
+  assert.ok(
+    documentImpl.findButton(
+      "notesExportPrecheck",
+      "继续完整导出",
+    ),
+    "durable progress is re-presented as an actionable continuation",
+  );
+});
+
+test("a completed notes batch claims, downloads once, and finishes the durable job", async () => {
+  const controller = createSidepanelJobController();
+  const documentImpl = createInteractiveDocument();
+  const fixture = makeNoteRoundFixture(1);
+  const runtime = loadSidepanelRuntime({
+    sendMessage: controller.sendMessage,
+    documentImpl,
+    exportJobsImpl: createExportJobsBridge(),
+  });
+  const outcome = await runtime.helpers.runConfirmedExportTranslation({
+    plan: fixture.plan,
+    sourcesByKey: {},
+    groups: fixture.groups,
+    scope: "notes-current",
+    mode: "bilingual",
+    format: "txt",
+    panelId: "notesExportPrecheck",
+    setStatus() {},
+  });
+  assert.equal(outcome.complete, true);
+  assert.equal(controller.job().state, "paused");
+  let downloads = 0;
+  await runtime.helpers.finalizeExportJobDownload(outcome, () => {
+    downloads += 1;
+  });
+  assert.equal(downloads, 1);
+  assert.equal(controller.job().state, "completed");
+  assert.equal(controller.job().exportClaim, null);
+});
+
+test("notes precheck exposes one complete action and one direct fallback", () => {
+  const documentImpl = createInteractiveDocument();
+  const actions = [];
+  const runtime = loadSidepanelRuntime({
+    documentImpl,
+    sendMessage(message) {
+      actions.push(message.action);
+      return Promise.resolve({});
+    },
+  });
+  let generated = 0;
+  let exportedDirect = 0;
+  runtime.helpers.showNoteExportPrecheck(
+    {
+      videoCount: 1,
+      noteCount: 1,
+      hasBlocking: false,
+      blockingVideos: [],
+      hasTranslationGaps: true,
+      translationGaps: {
+        titles: 0,
+        descriptionChunks: 0,
+        transcriptSegments: 0,
+        notes: 1,
+      },
+    },
+    () => {
+      exportedDirect += 1;
+    },
+    () => {
+      generated += 1;
+    },
+    {
+      overLimit: false,
+      estimatedBatches: 1,
+      progress: {
+        totalUnits: 1,
+        completedUnits: 0,
+        remainingUnits: 1,
+        remainingBatches: 1,
+        roundMaxBatches: 20,
+      },
+    },
+    null,
+  );
+  const complete = documentImpl.findButton(
+    "notesExportPrecheck",
+    "完整导出",
+  );
+  const direct = documentImpl.findButton(
+    "notesExportPrecheck",
+    "直接导出",
+  );
+  const cancel = documentImpl.findButton(
+    "notesExportPrecheck",
+    "取消",
+  );
+  assert.ok(complete);
+  assert.ok(direct);
+  assert.ok(cancel);
+  assert.equal(documentImpl.findButton("notesExportPrecheck", "导出原文"), null);
+  assert.equal(documentImpl.findButton("notesExportPrecheck", "补充导出"), null);
+  complete.click();
+  assert.equal(generated, 1);
+  direct.click();
+  assert.equal(exportedDirect, 1);
+  assert.deepEqual(actions, []);
+});
+
+test("metadata workspace exposes one next-video action and a direct fallback", async () => {
+  const documentImpl = createInteractiveDocument();
+  const messages = [];
+  const runtime = loadSidepanelRuntime({
+    documentImpl,
+    sendMessage(message) {
+      messages.push(message);
+      return Promise.resolve({ success: true });
+    },
+  });
+  let directExports = 0;
+  runtime.helpers.showNoteExportMetadataWorkspace(
+    {
+      hasTranslationGaps: false,
+      blockingVideos: [
+        {
+          mediaKey: "video-a",
+          title: "Video A",
+          blockingReasons: ["缺少视频简介状态"],
+        },
+      ],
+    },
+    [
+      {
+        mediaKey: "video-a",
+        representative: {
+          mediaKey: "video-a",
+          videoId: "video-a",
+          videoTitle: "Video A",
+          timestampedUrl: "https://www.youtube.com/watch?v=video-a&t=5s",
+        },
+        notes: [],
+      },
+    ],
+    { mediaKeys: ["video-a"], mode: "bilingual" },
+    {
+      autoOpenMetadata: false,
+      onDirect() {
+        directExports += 1;
+      },
+    },
+  );
+
+  assert.ok(documentImpl.findButton("notesExportPrecheck", "打开并补齐"));
+  const direct = documentImpl.findButton("notesExportPrecheck", "直接导出");
+  assert.ok(direct);
+  assert.ok(documentImpl.findButton("notesExportPrecheck", "取消"));
+  assert.equal(
+    documentImpl.findButton("notesExportPrecheck", "重新检查并导出"),
+    null,
+  );
+  direct.click();
+  assert.equal(directExports, 1);
+  assert.deepEqual(messages, [], "rendering the workspace starts no provider");
+});
+
+test("metadata workspace shows a single next action for a multi-video queue", async () => {
+  const documentImpl = createInteractiveDocument();
+  const runtime = loadSidepanelRuntime({ documentImpl });
+  runtime.helpers.showNoteExportMetadataWorkspace(
+    {
+      hasTranslationGaps: false,
+      blockingVideos: [
+        {
+          mediaKey: "video-a",
+          title: "Video A",
+          blockingReasons: ["缺少视频简介状态"],
+        },
+        {
+          mediaKey: "video-b",
+          title: "Video B",
+          blockingReasons: ["缺少频道名称"],
+        },
+      ],
+    },
+    [
+      {
+        mediaKey: "video-a",
+        representative: {
+          mediaKey: "video-a",
+          videoId: "video-a",
+          videoTitle: "Video A",
+          timestampedUrl: "https://www.youtube.com/watch?v=video-a&t=5s",
+        },
+        notes: [],
+      },
+      {
+        mediaKey: "video-b",
+        representative: {
+          mediaKey: "video-b",
+          videoId: "video-b",
+          videoTitle: "Video B",
+          timestampedUrl: "https://www.youtube.com/watch?v=video-b&t=5s",
+        },
+        notes: [],
+      },
+    ],
+    { mediaKeys: ["video-a", "video-b"], mode: "bilingual" },
+    { autoOpenMetadata: false },
+  );
+  assert.ok(documentImpl.findButton(
+    "notesExportPrecheck",
+    "打开下一个（还剩 2 个）",
+  ));
+  assert.equal(
+    documentImpl.findButton("notesExportPrecheck", "重新检查并导出"),
+    null,
+  );
+});
+
+test("metadata workspace restores its retry action when a video tab cannot open", async () => {
+  const documentImpl = createInteractiveDocument();
+  const runtime = loadSidepanelRuntime({ documentImpl });
+  runtime.sandbox.chrome.tabs.create = async () => {
+    throw new Error("tab creation rejected");
+  };
+  runtime.helpers.showNoteExportMetadataWorkspace(
+    {
+      hasTranslationGaps: false,
+      blockingVideos: [
+        {
+          mediaKey: "video-open-failure",
+          title: "Video open failure",
+          blockingReasons: ["缺少视频简介状态"],
+        },
+      ],
+    },
+    [
+      {
+        mediaKey: "video-open-failure",
+        representative: {
+          mediaKey: "video-open-failure",
+          videoId: "video-open-failure",
+          videoTitle: "Video open failure",
+          timestampedUrl:
+            "https://www.youtube.com/watch?v=video-open-failure&t=5s",
+        },
+        notes: [],
+      },
+    ],
+    { mediaKeys: ["video-open-failure"], mode: "bilingual" },
+    { autoOpenMetadata: false },
+  );
+
+  const open = documentImpl.findButton(
+    "notesExportPrecheck",
+    "打开并补齐",
+  );
+  assert.ok(open);
+  open.click();
+  await nextTurn();
+  await nextTurn();
+
+  assert.equal(open.disabled, false);
+  assert.equal(open.textContent, "重试当前视频");
+  assert.match(
+    documentImpl.element("notesExportStatus").textContent,
+    /页面资料尚未就绪/,
+  );
+});
+
+test("metadata workspace restores its retry action when the new tab cannot activate", async () => {
+  const documentImpl = createInteractiveDocument();
+  const runtime = loadSidepanelRuntime({ documentImpl });
+  const removedTabs = [];
+  runtime.sandbox.chrome.tabs.create = async ({ url }) => ({
+    id: 88,
+    url,
+    pendingUrl: url,
+  });
+  runtime.sandbox.chrome.tabs.update = async () => {
+    throw new Error("tab activation rejected");
+  };
+  runtime.sandbox.chrome.tabs.remove = async (tabId) => {
+    removedTabs.push(tabId);
+  };
+  runtime.helpers.showNoteExportMetadataWorkspace(
+    {
+      hasTranslationGaps: false,
+      blockingVideos: [
+        {
+          mediaKey: "video-activation-failure",
+          title: "Video activation failure",
+          blockingReasons: ["缺少视频简介状态"],
+        },
+      ],
+    },
+    [
+      {
+        mediaKey: "video-activation-failure",
+        representative: {
+          mediaKey: "video-activation-failure",
+          videoId: "video-activation-failure",
+          videoTitle: "Video activation failure",
+          timestampedUrl:
+            "https://www.youtube.com/watch?v=video-activation-failure&t=5s",
+        },
+        notes: [],
+      },
+    ],
+    { mediaKeys: ["video-activation-failure"], mode: "bilingual" },
+    { autoOpenMetadata: false },
+  );
+
+  const open = documentImpl.findButton(
+    "notesExportPrecheck",
+    "打开并补齐",
+  );
+  open.click();
+  await nextTurn();
+  await nextTurn();
+
+  assert.equal(open.disabled, false);
+  assert.equal(open.textContent, "重试当前视频");
+  assert.deepEqual(removedTabs, [88]);
+});
+
+test("metadata workspace restores its retry action when the current page is not ready", async () => {
+  const documentImpl = createInteractiveDocument();
+  const mediaKey = "current-page-not-ready";
+  const runtime = loadSidepanelRuntime({
+    documentImpl,
+    async sendMessage(message) {
+      if (message.action === "relayToContent") {
+        return {
+          success: false,
+          error: "PAGE_REFRESH_REQUIRED",
+          message: "请刷新当前视频页后重试。",
+        };
+      }
+      throw new Error(`Unexpected action: ${message.action}`);
+    },
+  });
+  runtime.sandbox.chrome.tabs.get = async () => ({
+    id: 77,
+    url: `https://www.youtube.com/watch?v=${mediaKey}`,
+  });
+  runtime.evaluate(`
+    currentVideoId = ${JSON.stringify(mediaKey)};
+    currentRouteKey = ${JSON.stringify(`youtube:${mediaKey}`)};
+    currentVideoUrl = ${JSON.stringify(
+      `https://www.youtube.com/watch?v=${mediaKey}`,
+    )};
+    currentMediaRef = {
+      platform: "youtube",
+      mediaKey: ${JSON.stringify(mediaKey)},
+      videoId: ${JSON.stringify(mediaKey)},
+      routeKey: ${JSON.stringify(`youtube:${mediaKey}`)},
+      canonicalUrl: currentVideoUrl,
+    };
+    currentVideoTitle = "Current page not ready";
+    videoTabId = 77;
+  `);
+  runtime.helpers.showNoteExportMetadataWorkspace(
+    {
+      hasTranslationGaps: false,
+      blockingVideos: [
+        {
+          mediaKey,
+          title: "Current page not ready",
+          blockingReasons: ["缺少视频简介状态"],
+        },
+      ],
+    },
+    [
+      {
+        mediaKey,
+        representative: {
+          mediaKey,
+          videoId: mediaKey,
+          videoTitle: "Current page not ready",
+          timestampedUrl: `https://www.youtube.com/watch?v=${mediaKey}&t=5s`,
+        },
+        notes: [],
+      },
+    ],
+    { mediaKeys: [mediaKey], mode: "bilingual" },
+    { autoOpenMetadata: false },
+  );
+
+  const open = documentImpl.findButton(
+    "notesExportPrecheck",
+    "打开并补齐",
+  );
+  open.click();
+  await nextTurn();
+  await nextTurn();
+
+  assert.equal(open.disabled, false);
+  assert.equal(open.textContent, "重试当前视频");
+  assert.match(
+    documentImpl.element("notesExportStatus").textContent,
+    /刷新当前视频页后重试/,
+  );
+});
+
+test("export picker shows ready, metadata, and translation preparation before submit", () => {
+  const documentImpl = createInteractiveDocument();
+  const runtime = loadSidepanelRuntime({ documentImpl });
+  runtime.evaluate(
+    'currentConfigStatus = { provider: { displayName: "DeepSeek" } }',
+  );
+  const groups = [
+    {
+      mediaKey: "ready-video",
+      representative: {
+        mediaKey: "ready-video",
+        videoTitle: "已就绪",
+        channelName: "频道",
+        sourceLanguage: "zh-CN",
+      },
+      notes: [{ id: "r", text: "中文笔记", sourceLanguage: "zh-CN" }],
+    },
+    {
+      mediaKey: "metadata-video",
+      representative: {
+        mediaKey: "metadata-video",
+        videoTitle: "缺资料",
+        channelName: "频道",
+      },
+      notes: [{ id: "m", text: "English note" }],
+    },
+    {
+      mediaKey: "translation-video",
+      representative: {
+        mediaKey: "translation-video",
+        videoTitle: "Needs translation",
+        channelName: "Channel",
+      },
+      notes: [{ id: "t", text: "English note" }],
+    },
+  ];
+  const sourcesByKey = {
+    "ready-video": {
+      mediaKey: "ready-video",
+      platform: "youtube",
+      canonicalUrl: "https://www.youtube.com/watch?v=ready-video",
+      titleOriginal: "已就绪",
+      channelName: "频道",
+      descriptionOriginal: "中文简介",
+      descriptionStatus: "present",
+      sourceLanguage: "zh-CN",
+    },
+    "translation-video": {
+      mediaKey: "translation-video",
+      platform: "youtube",
+      canonicalUrl: "https://www.youtube.com/watch?v=translation-video",
+      titleOriginal: "Needs translation",
+      channelName: "Channel",
+      descriptionOriginal: "English description",
+      descriptionStatus: "present",
+      sourceLanguage: "en",
+    },
+  };
+
+  runtime.helpers.renderNoteExportPicker(
+    groups,
+    sourcesByKey,
+    groups.map((group) => group.mediaKey),
+  );
+
+  const list = documentImpl.element("notesExportPickerList");
+  const statuses = list.children.map((label) => label.children.at(-1).textContent);
+  assert.deepEqual(statuses, ["可导出", "需补资料", "需补译 3 项"]);
+  assert.equal(
+    documentImpl.element("confirmNotesExportSelection").textContent,
+    "完整导出（3）",
+  );
+  assert.equal(
+    documentImpl.element("directNotesExportSelection").textContent,
+    "直接导出（3）",
+  );
+  assert.match(
+    documentImpl.element("notesExportPickerDisclosure").textContent,
+    /范围：3 个视频；模式：双语.*页面资料：1 个需访问原视频补充.*AI 补译：当前可识别 4 项，服务为DeepSeek.*单轮最多 20 批/,
+  );
+
+  runtime.evaluate('currentNotesMode = "original"');
+  runtime.helpers.renderNoteExportPicker(
+    groups,
+    sourcesByKey,
+    groups.map((group) => group.mediaKey),
+  );
+  assert.match(
+    documentImpl.element("notesExportPickerDisclosure").textContent,
+    /范围：3 个视频；模式：原文.*AI 补译：不使用/,
+  );
+});
+
+test("export picker event wiring freezes the same sorted selection for complete and direct export", async () => {
+  const documentImpl = createInteractiveDocument();
+  const runtime = loadSidepanelRuntime({
+    documentImpl,
+    sendMessage: async () => ({ runtimeProtocolVersion: 0 }),
+  });
+  runtime.sandbox.__pickerExportCalls = [];
+  runtime.evaluate(`
+    exportAllNotes = (mediaKeys, options = {}) => {
+      globalThis.__pickerExportCalls.push({
+        mediaKeys: [...mediaKeys],
+        options: { ...options },
+      });
+      return Promise.resolve();
+    };
+  `);
+
+  await documentImpl.dispatchEvent({ type: "DOMContentLoaded" });
+
+  const groups = ["video-z", "video-a", "video-m"].map((mediaKey) => ({
+    mediaKey,
+    representative: {
+      mediaKey,
+      videoTitle: mediaKey,
+      channelName: "Channel",
+      sourceLanguage: "en",
+    },
+    notes: [{ id: `note-${mediaKey}`, text: "Saved note", sourceLanguage: "en" }],
+  }));
+  const sourcesByKey = Object.fromEntries(
+    groups.map(({ mediaKey }) => [
+      mediaKey,
+      {
+        mediaKey,
+        platform: "youtube",
+        canonicalUrl: `https://www.youtube.com/watch?v=${mediaKey}`,
+        titleOriginal: mediaKey,
+        channelName: "Channel",
+        descriptionOriginal: "Description",
+        descriptionStatus: "present",
+        sourceLanguage: "en",
+      },
+    ]),
+  );
+  runtime.helpers.renderNoteExportPicker(groups, sourcesByKey, []);
+
+  const inputs = documentImpl
+    .element("notesExportPickerList")
+    .children.map((label) => label.children[0]);
+  for (const input of inputs.filter((candidate) =>
+    ["video-z", "video-a"].includes(candidate.value),
+  )) {
+    input.checked = true;
+    input.dispatchEvent({ type: "change" });
+  }
+
+  const submitEvent = { type: "submit", preventDefaultCalled: false };
+  submitEvent.preventDefault = () => {
+    submitEvent.preventDefaultCalled = true;
+  };
+  documentImpl.element("notesExportPicker").dispatchEvent(submitEvent);
+  documentImpl.element("directNotesExportSelection").click();
+
+  assert.equal(submitEvent.preventDefaultCalled, true);
+  assert.deepEqual(clonePlain(runtime.sandbox.__pickerExportCalls), [
+    {
+      mediaKeys: ["video-a", "video-z"],
+      options: { grantAuthorization: true, autoOpenMetadata: true },
+    },
+    {
+      mediaKeys: ["video-a", "video-z"],
+      options: { direct: true },
+    },
+  ]);
+});
+
+test("direct selected export downloads once with missing markers and starts no provider", async () => {
+  const noteSources = require("../note-sources.js");
+  const storageLocal = createMemoryStorageArea();
+  const mediaKey = "direct-video";
+  await noteSources.writeNoteSource(storageLocal, {
+    mediaKey,
+    platform: "youtube",
+    canonicalUrl: `https://www.youtube.com/watch?v=${mediaKey}`,
+    titleOriginal: "Direct video",
+    channelName: "Channel",
+    descriptionStatus: "unknown",
+    sourceLanguage: "en",
+  });
+  const note = {
+    id: "direct-note",
+    mediaKey,
+    videoId: mediaKey,
+    platform: "youtube",
+    canonicalUrl: `https://www.youtube.com/watch?v=${mediaKey}`,
+    videoTitle: "Direct video",
+    channelName: "Channel",
+    timestampSeconds: 7,
+    text: "English saved note.",
+    translatedText: "",
+    sourceLanguage: "en",
+  };
+  const messages = [];
+  const documentImpl = createInteractiveDocument();
+  const runtime = loadSidepanelRuntime({
+    documentImpl,
+    storageLocal,
+    async sendMessage(message) {
+      messages.push(JSON.parse(JSON.stringify(message)));
+      if (message.action === "getNotes") return { success: true, notes: [note] };
+      if (message.action === "upsertNoteSource") {
+        const write = await noteSources.writeNoteSource(storageLocal, message.source);
+        return {
+          success: true,
+          changed: write.changed,
+          source: await noteSources.readNoteSource(storageLocal, mediaKey),
+        };
+      }
+      if (message.action === "cancelExportTranslationJob") {
+        return { success: true };
+      }
+      throw new Error(`Unexpected background action: ${message.action}`);
+    },
+  });
+  const downloads = [];
+  runtime.sandbox.__downloadProbe = (text, filename) => {
+    downloads.push({ text, filename });
+  };
+  runtime.evaluate(
+    "downloadTextFile = (text, filename) => globalThis.__downloadProbe(text, filename)",
+  );
+
+  await runtime.helpers.exportAllNotes([mediaKey], { direct: true });
+
+  assert.equal(downloads.length, 1);
+  assert.match(downloads[0].text, /缺失：原文视频简介/);
+  assert.equal(downloads[0].filename.endsWith(".txt"), true);
+  assert.equal(
+    messages.some((message) =>
+      [
+        "translateExportNotesBatch",
+        "translateExportSourceBatch",
+        "fetchTranscript",
+        "relayToContent",
+      ].includes(message.action),
+    ),
+    false,
+  );
+});
+
+test("opening the picker can recover a frozen retry selection without resuming work", async () => {
+  const actions = [];
+  const runtime = loadSidepanelRuntime({
+    async sendMessage(message) {
+      actions.push(message.action);
+      if (message.action === "listExportJobs") {
+        return {
+          success: true,
+          jobs: [
+            {
+              state: "paused",
+              updatedAt: 20,
+              intent: {
+                scope: "notes-retry-v4-test",
+                mediaKeys: ["video-b", "video-a"],
+                mode: "bilingual",
+              },
+            },
+          ],
+        };
+      }
+      throw new Error(`Unexpected action: ${message.action}`);
+    },
+  });
+
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(await runtime.helpers.recoverNotesExportSelection())),
+    ["video-a", "video-b"],
+  );
+  assert.deepEqual(actions, ["listExportJobs"]);
+});
+
+test("cross-page complete-export authorization freezes provider, notes, and complete sources", async () => {
+  const noteSources = require("../note-sources.js");
+  let provider = {
+    id: "deepseek",
+    displayName: "DeepSeek",
+    modelId: "deepseek-v4-flash",
+    routeKey: "deepseek:deepseek-v4-flash",
+  };
+  const actions = [];
+  const runtime = loadSidepanelRuntime({
+    async sendMessage(message) {
+      actions.push(message.action);
+      if (message.action === "checkConfig") {
+        return { hasAiKey: true, provider: { ...provider } };
+      }
+      throw new Error(`Unexpected action: ${message.action}`);
+    },
+  });
+  const note = {
+    id: "authorization-note",
+    mediaKey: "authorization-video",
+    videoId: "authorization-video",
+    videoTitle: "Authorization video",
+    text: "Saved English note.",
+    sourceLanguage: "en",
+  };
+  const groups = [
+    {
+      mediaKey: note.mediaKey,
+      representative: note,
+      notes: [note],
+    },
+  ];
+  const source = noteSources.normalizeNoteSource({
+    mediaKey: note.mediaKey,
+    platform: "youtube",
+    canonicalUrl: `https://www.youtube.com/watch?v=${note.mediaKey}`,
+    titleOriginal: note.videoTitle,
+    channelName: "Channel",
+    descriptionOriginal: "Complete description.",
+    descriptionStatus: "present",
+    sourceLanguage: "en",
+  });
+  const sourcesByKey = { [note.mediaKey]: source };
+  const precheck = runtime.helpers.buildNotesExportPrecheck(
+    groups,
+    sourcesByKey,
+    "bilingual",
+  );
+  const continuation = runtime.helpers.createNoteExportContinuation([
+    note.mediaKey,
+  ]);
+
+  await runtime.helpers.grantNoteExportAuthorization(continuation, {
+    groups,
+    sourcesByKey,
+    precheck,
+  });
+  provider = {
+    id: "zhipu",
+    displayName: "智谱 GLM",
+    modelId: "glm-4.7-flash",
+    routeKey: "zhipu:glm-4.7-flash",
+  };
+  assert.equal(
+    await runtime.helpers.validateNoteExportAuthorization(continuation, {
+      groups,
+      sourcesByKey,
+      precheck,
+    }),
+    false,
+    "a provider change invalidates the disclosed click",
+  );
+
+  provider = {
+    id: "deepseek",
+    displayName: "DeepSeek",
+    modelId: "deepseek-v4-flash",
+    routeKey: "deepseek:deepseek-v4-flash",
+  };
+  await runtime.helpers.grantNoteExportAuthorization(continuation, {
+    groups,
+    sourcesByKey,
+    precheck,
+  });
+  const changedGroups = [
+    {
+      ...groups[0],
+      notes: [{ ...note, text: "Changed note after confirmation." }],
+    },
+  ];
+  assert.equal(
+    await runtime.helpers.validateNoteExportAuthorization(continuation, {
+      groups: changedGroups,
+      sourcesByKey,
+      precheck,
+    }),
+    false,
+    "a note change requires another confirmation",
+  );
+
+  await runtime.helpers.grantNoteExportAuthorization(continuation, {
+    groups,
+    sourcesByKey,
+    precheck,
+  });
+  const changedSource = noteSources.normalizeNoteSource({
+    ...source,
+    descriptionOriginal: "Changed complete description.",
+  });
+  assert.equal(
+    await runtime.helpers.validateNoteExportAuthorization(continuation, {
+      groups,
+      sourcesByKey: { [note.mediaKey]: changedSource },
+      precheck: runtime.helpers.buildNotesExportPrecheck(
+        groups,
+        { [note.mediaKey]: changedSource },
+        "bilingual",
+      ),
+    }),
+    false,
+    "a source that was complete at confirmation is frozen",
+  );
+  assert.equal(
+    actions.some((action) => action.startsWith("translateExport")),
+    false,
+  );
+});
+
+test("authorized metadata completion is accepted once and its new revision is then frozen", async () => {
+  const noteSources = require("../note-sources.js");
+  const runtime = loadSidepanelRuntime({
+    async sendMessage(message) {
+      if (message.action === "checkConfig") {
+        return {
+          hasAiKey: true,
+          provider: {
+            id: "deepseek",
+            modelId: "deepseek-v4-flash",
+            routeKey: "deepseek:deepseek-v4-flash",
+          },
+        };
+      }
+      throw new Error(`Unexpected action: ${message.action}`);
+    },
+  });
+  const note = {
+    id: "metadata-authorization-note",
+    mediaKey: "metadata-authorization-video",
+    videoId: "metadata-authorization-video",
+    videoTitle: "Metadata authorization video",
+    text: "Saved English note.",
+    sourceLanguage: "en",
+  };
+  const groups = [
+    { mediaKey: note.mediaKey, representative: note, notes: [note] },
+  ];
+  const incompleteSource = noteSources.normalizeNoteSource({
+    mediaKey: note.mediaKey,
+    platform: "youtube",
+    canonicalUrl: `https://www.youtube.com/watch?v=${note.mediaKey}`,
+    titleOriginal: note.videoTitle,
+    channelName: "Channel",
+    descriptionStatus: "unknown",
+    sourceLanguage: "en",
+  });
+  const initialSources = { [note.mediaKey]: incompleteSource };
+  const initialPrecheck = runtime.helpers.buildNotesExportPrecheck(
+    groups,
+    initialSources,
+    "bilingual",
+  );
+  const continuation = runtime.helpers.createNoteExportContinuation([
+    note.mediaKey,
+  ]);
+  await runtime.helpers.grantNoteExportAuthorization(continuation, {
+    groups,
+    sourcesByKey: initialSources,
+    precheck: initialPrecheck,
+  });
+
+  const completedSource = noteSources.normalizeNoteSource({
+    ...incompleteSource,
+    descriptionOriginal: "Captured complete description.",
+    descriptionStatus: "present",
+  });
+  const completedSources = { [note.mediaKey]: completedSource };
+  const completedPrecheck = runtime.helpers.buildNotesExportPrecheck(
+    groups,
+    completedSources,
+    "bilingual",
+  );
+  assert.equal(
+    await runtime.helpers.validateNoteExportAuthorization(continuation, {
+      groups,
+      sourcesByKey: completedSources,
+      precheck: completedPrecheck,
+    }),
+    true,
+  );
+
+  const changedAgain = noteSources.normalizeNoteSource({
+    ...completedSource,
+    descriptionOriginal: "Changed after metadata completion.",
+  });
+  assert.equal(
+    await runtime.helpers.validateNoteExportAuthorization(continuation, {
+      groups,
+      sourcesByKey: { [note.mediaKey]: changedAgain },
+      precheck: runtime.helpers.buildNotesExportPrecheck(
+        groups,
+        { [note.mediaKey]: changedAgain },
+        "bilingual",
+      ),
+    }),
+    false,
+  );
+});
+
+test("cancel and direct export both revoke a pending complete-export grant", async () => {
+  for (const actionText of ["取消", "直接导出"]) {
+    let resolveConfig;
+    const documentImpl = createInteractiveDocument();
+    const runtime = loadSidepanelRuntime({
+      documentImpl,
+      async sendMessage(message) {
+        if (message.action === "checkConfig") {
+          return new Promise((resolve) => {
+            resolveConfig = resolve;
+          });
+        }
+        throw new Error(`Unexpected action: ${message.action}`);
+      },
+    });
+    const note = {
+      id: `pending-${actionText}`,
+      mediaKey: `pending-video-${actionText}`,
+      videoId: `pending-video-${actionText}`,
+      videoTitle: "Pending authorization",
+      text: "English note.",
+      sourceLanguage: "en",
+    };
+    const groups = [
+      { mediaKey: note.mediaKey, representative: note, notes: [note] },
+    ];
+    const sourcesByKey = {
+      [note.mediaKey]: require("../note-sources.js").normalizeNoteSource({
+        mediaKey: note.mediaKey,
+        platform: "youtube",
+        canonicalUrl: `https://www.youtube.com/watch?v=${encodeURIComponent(note.mediaKey)}`,
+        titleOriginal: note.videoTitle,
+        channelName: "Channel",
+        descriptionOriginal: "English description.",
+        descriptionStatus: "present",
+        sourceLanguage: "en",
+      }),
+    };
+    const precheck = runtime.helpers.buildNotesExportPrecheck(
+      groups,
+      sourcesByKey,
+      "bilingual",
+    );
+    const continuation = runtime.helpers.createNoteExportContinuation([
+      note.mediaKey,
+    ]);
+    let grantPromise = null;
+    runtime.helpers.showNoteExportPrecheck(
+      precheck,
+      () => {},
+      () => {
+        grantPromise = runtime.helpers.grantNoteExportAuthorization(
+          continuation,
+          { groups, sourcesByKey, precheck },
+        );
+      },
+      { overLimit: false, estimatedBatches: 1 },
+    );
+
+    documentImpl.findButton("notesExportPrecheck", "完整导出").click();
+    await nextTurn();
+    assert.ok(grantPromise, "the deferred grant has started");
+    documentImpl.findButton("notesExportPrecheck", actionText).click();
+    resolveConfig({
+      hasAiKey: true,
+      provider: {
+        id: "deepseek",
+        modelId: "deepseek-v4-flash",
+        routeKey: "deepseek:deepseek-v4-flash",
+      },
+    });
+    assert.equal(await grantPromise, null);
+    assert.equal(
+      runtime.helpers.noteExportContinuationIsAuthorized(continuation),
+      false,
+    );
+  }
+});
+
+test("cancelling while authorization validation waits cannot return a stale true", async () => {
+  let deferValidation = false;
+  let resolveValidation;
+  const runtime = loadSidepanelRuntime({
+    async sendMessage(message) {
+      if (message.action !== "checkConfig") {
+        throw new Error(`Unexpected action: ${message.action}`);
+      }
+      const config = {
+        hasAiKey: true,
+        provider: {
+          id: "deepseek",
+          modelId: "deepseek-v4-flash",
+          routeKey: "deepseek:deepseek-v4-flash",
+        },
+      };
+      if (!deferValidation) return config;
+      return new Promise((resolve) => {
+        resolveValidation = () => resolve(config);
+      });
+    },
+  });
+  const note = {
+    id: "validation-cancel-note",
+    mediaKey: "validation-cancel-video",
+    videoId: "validation-cancel-video",
+    videoTitle: "Validation cancel video",
+    text: "English note.",
+    sourceLanguage: "en",
+  };
+  const groups = [
+    { mediaKey: note.mediaKey, representative: note, notes: [note] },
+  ];
+  const sourcesByKey = {
+    [note.mediaKey]: require("../note-sources.js").normalizeNoteSource({
+      mediaKey: note.mediaKey,
+      platform: "youtube",
+      canonicalUrl: `https://www.youtube.com/watch?v=${note.mediaKey}`,
+      titleOriginal: note.videoTitle,
+      channelName: "Channel",
+      descriptionOriginal: "English description.",
+      descriptionStatus: "present",
+      sourceLanguage: "en",
+    }),
+  };
+  const precheck = runtime.helpers.buildNotesExportPrecheck(
+    groups,
+    sourcesByKey,
+    "bilingual",
+  );
+  const continuation = runtime.helpers.createNoteExportContinuation([
+    note.mediaKey,
+  ]);
+  await runtime.helpers.grantNoteExportAuthorization(continuation, {
+    groups,
+    sourcesByKey,
+    precheck,
+  });
+
+  deferValidation = true;
+  const validation = runtime.helpers.validateNoteExportAuthorization(
+    continuation,
+    { groups, sourcesByKey, precheck },
+  );
+  await nextTurn();
+  runtime.helpers.revokeNoteExportAuthorization();
+  resolveValidation();
+  await assert.rejects(validation, {
+    code: "NOTE_EXPORT_AUTHORIZATION_CANCELLED",
+  });
+});
+
+test("a provider change between the disclosed click and first round starts zero work", async () => {
+  const actions = [];
+  const runtime = loadSidepanelRuntime({
+    async sendMessage(message) {
+      actions.push(message.action);
+      if (message.action === "checkConfig") {
+        return {
+          hasAiKey: true,
+          provider: {
+            id: "zhipu",
+            displayName: "智谱 GLM",
+            modelId: "glm-4.7-flash",
+            routeKey: "zhipu:glm-4.7-flash",
+            capabilities: ["translate"],
+          },
+        };
+      }
+      throw new Error(`Unexpected action: ${message.action}`);
+    },
+  });
+  const fixture = makeNoteRoundFixture(1);
+
+  await assert.rejects(
+    runtime.helpers.runConfirmedExportTranslation({
+      plan: fixture.plan,
+      sourcesByKey: {},
+      groups: fixture.groups,
+      scope: "notes-selected",
+      mode: "bilingual",
+      format: "txt",
+      panelId: "notesExportPrecheck",
+      setStatus() {},
+      expectedProviderSnapshot: {
+        providerId: "deepseek",
+        modelId: "deepseek-v4-flash",
+        routeKey: "deepseek:deepseek-v4-flash",
+        targetLanguage: "zh",
+        translationVersion: "export-v2",
+      },
+    }),
+    { code: "EXPORT_JOB_PROVIDER_MISMATCH" },
+  );
+  assert.deepEqual(actions, ["checkConfig"]);
+});
+
+test("provider mismatch refreshes the confirmation copy before another click", async () => {
+  const noteSources = require("../note-sources.js");
+  const storageLocal = createMemoryStorageArea();
+  const documentImpl = createInteractiveDocument();
+  const mediaKey = "provider-disclosure-refresh";
+  const note = {
+    id: "provider-disclosure-note",
+    mediaKey,
+    videoId: mediaKey,
+    videoTitle: "Provider disclosure video",
+    channelName: "Channel",
+    text: "English note that needs translation.",
+    sourceLanguage: "en",
+  };
+  await noteSources.writeNoteSource(storageLocal, {
+    mediaKey,
+    platform: "youtube",
+    canonicalUrl: `https://www.youtube.com/watch?v=${mediaKey}`,
+    titleOriginal: note.videoTitle,
+    channelName: note.channelName,
+    descriptionOriginal: "English description that needs translation.",
+    descriptionStatus: "present",
+    sourceLanguage: "en",
+  });
+  const deepseek = {
+    id: "deepseek",
+    displayName: "DeepSeek",
+    modelId: "deepseek-v4-flash",
+    routeKey: "deepseek:deepseek-v4-flash",
+    capabilities: ["translate"],
+  };
+  const zhipu = {
+    id: "zhipu",
+    displayName: "智谱 GLM",
+    modelId: "glm-4.7-flash",
+    routeKey: "zhipu:glm-4.7-flash",
+    capabilities: ["translate"],
+  };
+  let configReads = 0;
+  const actions = [];
+  const runtime = loadSidepanelRuntime({
+    storageLocal,
+    documentImpl,
+    async sendMessage(message) {
+      actions.push(message.action);
+      if (message.action === "getNotes") return { success: true, notes: [note] };
+      if (message.action === "upsertNoteSource") {
+        await noteSources.writeNoteSource(storageLocal, message.source);
+        return {
+          success: true,
+          source: await noteSources.readNoteSource(storageLocal, mediaKey),
+        };
+      }
+      if (message.action === "checkConfig") {
+        configReads += 1;
+        return {
+          hasAiKey: true,
+          provider: configReads === 1 ? deepseek : zhipu,
+        };
+      }
+      throw new Error(`Unexpected action: ${message.action}`);
+    },
+  });
+  runtime.evaluate(
+    `currentConfigStatus = { hasAiKey: true, provider: ${JSON.stringify(deepseek)} }`,
+  );
+
+  await runtime.helpers.exportAllNotes([mediaKey]);
+  const panel = documentImpl.element("notesExportPrecheck");
+  assert.match(panel.children[0].textContent, /DeepSeek/);
+  documentImpl.findButton("notesExportPrecheck", "完整导出").click();
+  for (let index = 0; index < 8; index += 1) await nextTurn();
+
+  assert.match(panel.children[0].textContent, /智谱 GLM/);
+  assert.ok(documentImpl.findButton("notesExportPrecheck", "完整导出"));
+  assert.equal(
+    actions.some((action) =>
+      [
+        "createOrResumeExportJob",
+        "translateExportNotesBatch",
+        "translateExportSourceBatch",
+      ].includes(action),
+    ),
+    false,
+  );
+});
+
+test("a rebuilt side panel restores the frozen scope but never resumes AI without a fresh click", async () => {
+  const noteSources = require("../note-sources.js");
+  const storageLocal = createMemoryStorageArea();
+  const mediaKey = "rebuild-video";
+  await noteSources.writeNoteSource(storageLocal, {
+    mediaKey,
+    platform: "youtube",
+    canonicalUrl: `https://www.youtube.com/watch?v=${mediaKey}`,
+    titleOriginal: "Rebuild video",
+    channelName: "Channel",
+    descriptionOriginal: "English description.",
+    descriptionStatus: "present",
+    sourceLanguage: "en",
+  });
+  const note = {
+    id: "rebuild-note",
+    mediaKey,
+    videoId: mediaKey,
+    videoTitle: "Rebuild video",
+    channelName: "Channel",
+    text: "English note.",
+    sourceLanguage: "en",
+  };
+  const actions = [];
+  const documentImpl = createInteractiveDocument();
+  const runtime = loadSidepanelRuntime({
+    storageLocal,
+    documentImpl,
+    async sendMessage(message) {
+      actions.push(message.action);
+      if (message.action === "getNotes") return { success: true, notes: [note] };
+      if (message.action === "upsertNoteSource") {
+        await noteSources.writeNoteSource(storageLocal, message.source);
+        return {
+          success: true,
+          source: await noteSources.readNoteSource(storageLocal, mediaKey),
+        };
+      }
+      if (message.action === "cancelExportTranslationJob") {
+        return { success: true };
+      }
+      throw new Error(`Unexpected action: ${message.action}`);
+    },
+  });
+
+  await runtime.helpers.resumeNoteExportContinuation({
+    mediaKeys: [mediaKey],
+    mode: "bilingual",
+  });
+
+  assert.ok(
+    documentImpl.findButton("notesExportPrecheck", "完整导出"),
+    "rebuild returns to confirmation instead of silently calling AI",
+  );
+  assert.equal(
+    actions.some((action) => action.startsWith("translateExport")),
+    false,
+  );
+  assert.equal(actions.includes("checkConfig"), false);
+});
+
+test("changing the notes language revokes the old grant and resumes only at confirmation", async () => {
+  const noteSources = require("../note-sources.js");
+  const storageLocal = createMemoryStorageArea();
+  const mediaKey = "mode-change-video";
+  await noteSources.writeNoteSource(storageLocal, {
+    mediaKey,
+    platform: "youtube",
+    canonicalUrl: `https://www.youtube.com/watch?v=${mediaKey}`,
+    titleOriginal: "Mode change video",
+    channelName: "Channel",
+    descriptionOriginal: "English description.",
+    descriptionStatus: "present",
+    sourceLanguage: "en",
+  });
+  const note = {
+    id: "mode-change-note",
+    mediaKey,
+    videoId: mediaKey,
+    videoTitle: "Mode change video",
+    channelName: "Channel",
+    text: "English note.",
+    sourceLanguage: "en",
+  };
+  const actions = [];
+  const documentImpl = createInteractiveDocument();
+  const runtime = loadSidepanelRuntime({
+    storageLocal,
+    documentImpl,
+    async sendMessage(message) {
+      actions.push(message.action);
+      if (message.action === "checkConfig") {
+        return {
+          hasAiKey: true,
+          provider: {
+            id: "deepseek",
+            modelId: "deepseek-v4-flash",
+            routeKey: "deepseek:deepseek-v4-flash",
+          },
+        };
+      }
+      if (message.action === "getNotes") return { success: true, notes: [note] };
+      if (message.action === "upsertNoteSource") {
+        await noteSources.writeNoteSource(storageLocal, message.source);
+        return {
+          success: true,
+          source: await noteSources.readNoteSource(storageLocal, mediaKey),
+        };
+      }
+      throw new Error(`Unexpected action: ${message.action}`);
+    },
+  });
+  const groups = [{ mediaKey, representative: note, notes: [note] }];
+  const sourcesByKey = {
+    [mediaKey]: await noteSources.readNoteSource(storageLocal, mediaKey),
+  };
+  const continuation = runtime.helpers.createNoteExportContinuation([mediaKey]);
+  const precheck = runtime.helpers.buildNotesExportPrecheck(
+    groups,
+    sourcesByKey,
+    "bilingual",
+  );
+  await runtime.helpers.grantNoteExportAuthorization(continuation, {
+    groups,
+    sourcesByKey,
+    precheck,
+  });
+  actions.length = 0;
+
+  runtime.helpers.handleNotesModeChange("original");
+  await runtime.helpers.resumeNoteExportContinuation({
+    mediaKeys: [mediaKey],
+    mode: "original",
+  });
+
+  assert.equal(
+    runtime.helpers.noteExportContinuationIsAuthorized(continuation),
+    false,
+  );
+  assert.ok(documentImpl.findButton("notesExportPrecheck", "完整导出"));
+  assert.equal(actions.includes("checkConfig"), false);
+  assert.equal(
+    actions.some((action) => action.startsWith("translateExport")),
+    false,
+  );
+});
+
+test("fresh confirmation for a ready original export downloads without AI configuration", async () => {
+  const noteSources = require("../note-sources.js");
+  const storageLocal = createMemoryStorageArea();
+  const storageSession = createMemoryStorageArea();
+  const mediaKey = "ready-original-video";
+  await noteSources.writeNoteSource(storageLocal, {
+    mediaKey,
+    platform: "youtube",
+    canonicalUrl: `https://www.youtube.com/watch?v=${mediaKey}`,
+    titleOriginal: "Ready original video",
+    channelName: "Channel",
+    descriptionOriginal: "Complete original description.",
+    descriptionStatus: "present",
+    sourceLanguage: "en",
+  });
+  const note = {
+    id: "ready-original-note",
+    mediaKey,
+    videoId: mediaKey,
+    videoTitle: "Ready original video",
+    channelName: "Channel",
+    text: "Original note.",
+    sourceLanguage: "en",
+  };
+  const actions = [];
+  const downloads = [];
+  const documentImpl = createInteractiveDocument();
+  const firstRuntime = loadSidepanelRuntime({ storageSession });
+  await firstRuntime.helpers.persistNoteNavigationState({
+    schemaVersion: 1,
+    phase: "active",
+    token: "ready-original-continuation",
+    tabId: 77,
+    routeKey: `youtube:${mediaKey}`,
+    mediaKey,
+    platform: "youtube",
+    canonicalUrl: `https://www.youtube.com/watch?v=${mediaKey}`,
+    timestampedUrl: `https://www.youtube.com/watch?v=${mediaKey}&t=5s`,
+    videoTitle: note.videoTitle,
+    channelName: note.channelName,
+    sourceLanguage: "en",
+    duration: 120,
+    showAll: true,
+    captureMetadata: false,
+    exportContinuation: { mediaKeys: [mediaKey], mode: "original" },
+    createdAt: Date.now(),
+    expiresAt: 0,
+    activatedAt: Date.now(),
+  });
+  const runtime = loadSidepanelRuntime({
+    storageLocal,
+    storageSession,
+    documentImpl,
+    async sendMessage(message) {
+      actions.push(message.action);
+      if (message.action === "getNotes") return { success: true, notes: [note] };
+      if (message.action === "upsertNoteSource") {
+        await noteSources.writeNoteSource(storageLocal, message.source);
+        return {
+          success: true,
+          source: await noteSources.readNoteSource(storageLocal, mediaKey),
+        };
+      }
+      throw new Error(`Unexpected action: ${message.action}`);
+    },
+  });
+  runtime.sandbox.__downloadProbe = (text, filename) => {
+    downloads.push({ text, filename });
+  };
+  runtime.evaluate(`
+    downloadTextFile = (text, filename) =>
+      globalThis.__downloadProbe(text, filename);
+  `);
+  await runtime.helpers.hydrateNoteNavigationState();
+  const restored = JSON.parse(
+    runtime.evaluate(
+      "JSON.stringify((activeNotesOnlyContext || pendingNoteNavigation)?.exportContinuation || null)",
+    ),
+  );
+  assert.equal(restored.mode, "original");
+
+  await runtime.helpers.resumeNoteExportContinuation(restored);
+  assert.equal(runtime.evaluate("currentNotesMode"), "original");
+  assert.match(
+    documentImpl.element("notesExportPrecheck").children[0].textContent,
+    /范围：1 个视频、1 条笔记/,
+  );
+  const complete = documentImpl.findButton(
+    "notesExportPrecheck",
+    "完整导出",
+  );
+  assert.ok(complete);
+  complete.click();
+  await nextTurn();
+  await nextTurn();
+
+  assert.equal(downloads.length, 1);
+  assert.equal(downloads[0].filename.endsWith(".txt"), true);
+  assert.equal(actions.includes("checkConfig"), false);
+  assert.equal(
+    actions.some((action) => action.startsWith("translateExport")),
+    false,
+  );
+});
+
+test("notes export job identity includes the v4 TXT content contract", () => {
+  const helpers = loadSidepanelHelpers();
+  const intent = helpers.buildFrozenExportIntent({
+    scope: "notes-current",
+    mediaKeys: ["video-a"],
+    mode: "bilingual",
+    format: "txt",
+    sourceRevisions: { "video-a": "source-r1" },
+    notesRevision: "notes-r1",
+    providerSnapshot: {
+      providerId: "deepseek",
+      modelId: "deepseek-v4-flash",
+      routeKey: "deepseek:deepseek-v4-flash",
+      targetLanguage: "zh",
+      translationVersion: "export-v2",
+    },
+  });
+  assert.match(intent.scope, /^notes-current-v4-/);
+  assert.equal(intent.format, "txt");
+});
+
+test("selected note export freezes only requested media keys and fails closed when one disappears", () => {
+  const helpers = loadSidepanelHelpers();
+  const groups = [
+    { mediaKey: "video-b", notes: [{ id: "b" }] },
+    { mediaKey: "video-a", notes: [{ id: "a" }] },
+    { mediaKey: "video-c", notes: [{ id: "c" }] },
+  ];
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(
+      helpers.normalizeExportMediaKeys(["video-c", "video-a", "video-a"]),
+    )),
+    ["video-a", "video-c"],
+  );
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(
+      helpers
+        .filterNoteGroupsByMediaKeys(groups, ["video-c", "video-a"])
+        .map((group) => group.mediaKey),
+    )),
+    ["video-a", "video-c"],
+  );
+  assert.throws(
+    () => helpers.filterNoteGroupsByMediaKeys(groups, ["video-a", "deleted"]),
+    (error) => error.code === "EXPORT_SELECTION_STALE",
+  );
+});
+
+test("the real progress cancel button cancels the durable job and starts no later batch", async () => {
+  const controller = createSidepanelJobController({
+    holdFirstTranslation: true,
+  });
+  const documentImpl = createInteractiveDocument();
+  const fixture = makeNoteRoundFixture(2);
+  const runtime = loadSidepanelRuntime({
+    sendMessage: controller.sendMessage,
+    documentImpl,
+    exportJobsImpl: createExportJobsBridge(),
+  });
+  const task = runtime.helpers.runConfirmedExportTranslation({
+    plan: fixture.plan,
+    sourcesByKey: {},
+    groups: fixture.groups,
+    scope: "notes-current",
+    mode: "bilingual",
+    format: "txt",
+    panelId: "notesExportPrecheck",
+    setStatus() {},
+  });
+  for (
+    let attempt = 0;
+    attempt < 20 && !controller.hasPendingTranslation();
+    attempt += 1
+  ) {
+    await nextTurn();
+  }
+  assert.equal(controller.hasPendingTranslation(), true);
+  const cancel = documentImpl.findButton(
+    "notesExportPrecheck",
+    "取消后续批次",
+  );
+  assert.ok(cancel, "the rendered progress panel exposes a real cancel button");
+  cancel.click();
+  await nextTurn();
+  assert.equal(
+    controller.actions.filter(
+      (action) => action === "cancelExportTranslationJob",
+    ).length,
+    1,
+  );
+
+  controller.releaseFirstTranslation();
+  await assert.rejects(task, (error) => {
+    assert.equal(error.code, "EXPORT_TRANSLATION_CANCELLED");
+    return true;
+  });
+  assert.equal(
+    controller.actions.filter(
+      (action) => action === "translateExportNotesBatch",
+    ).length,
+    1,
+    "cancellation never starts the second batch",
+  );
+  assert.equal(controller.job().state, "cancelled");
+});
+
 function dispatchBackgroundMessage(background, message, sender = {}) {
   const listener = background.__runtimeMessageListeners[0];
   assert.equal(typeof listener, "function", "background message listener must exist");
@@ -223,6 +1939,1565 @@ function dispatchBackgroundMessage(background, message, sender = {}) {
     }
   });
 }
+
+function createMemoryStorage(initial = {}) {
+  const clone = (value) => JSON.parse(JSON.stringify(value));
+  const state = clone(initial);
+  return {
+    async get(keys) {
+      if (keys === null || keys === undefined) return clone(state);
+      if (typeof keys === "string") {
+        return Object.hasOwn(state, keys) ? { [keys]: clone(state[keys]) } : {};
+      }
+      if (Array.isArray(keys)) {
+        return Object.fromEntries(
+          keys
+            .filter((key) => Object.hasOwn(state, key))
+            .map((key) => [key, clone(state[key])]),
+        );
+      }
+      if (keys && typeof keys === "object") {
+        return Object.fromEntries(
+          Object.entries(keys).map(([key, fallback]) => [
+            key,
+            Object.hasOwn(state, key) ? clone(state[key]) : clone(fallback),
+          ]),
+        );
+      }
+      return {};
+    },
+    async set(items) {
+      Object.entries(items || {}).forEach(([key, value]) => {
+        state[key] = clone(value);
+      });
+    },
+    async remove(keys) {
+      (Array.isArray(keys) ? keys : [keys]).forEach((key) => delete state[key]);
+    },
+    async clear() {
+      Object.keys(state).forEach((key) => delete state[key]);
+    },
+    snapshot() {
+      return clone(state);
+    },
+  };
+}
+
+const clonePlain = (value) => JSON.parse(JSON.stringify(value));
+
+function createNoteSourcesBridge(
+  noteSources = require("../note-sources.js"),
+) {
+  return {
+    ...noteSources,
+    normalizeNoteSource: (value) =>
+      noteSources.normalizeNoteSource(clonePlain(value)),
+    readNoteSource: (adapter, key) => noteSources.readNoteSource(adapter, key),
+    writeNoteSource: (adapter, value, options) =>
+      noteSources.writeNoteSource(adapter, clonePlain(value), {
+        ...clonePlain(options || {}),
+        protectedKeys: new Set(options?.protectedKeys || []),
+      }),
+    preflightNoteSourceStorage: (adapter) =>
+      noteSources.preflightNoteSourceStorage(adapter),
+    clearNoteSources: (adapter) => noteSources.clearNoteSources(adapter),
+    validateExportSourceTranslationUnits: (storedSource, request) =>
+      noteSources.validateExportSourceTranslationUnits(
+        clonePlain(storedSource),
+        clonePlain(request),
+      ),
+    commitExportSourceTranslationBatch: (adapter, payload, options) =>
+      noteSources.commitExportSourceTranslationBatch(
+        adapter,
+        {
+          ...clonePlain(payload),
+          translationsById: Object.fromEntries(payload.translationsById || []),
+        },
+        clonePlain({
+          ...options,
+          protectedKeys: [...(options?.protectedKeys || [])],
+        }),
+      ),
+  };
+}
+
+function createExportJobsBridge(
+  exportJobs = require("../export-jobs.js"),
+) {
+  return {
+    ...exportJobs,
+    normalizeExportJob: (value) =>
+      exportJobs.normalizeExportJob(clonePlain(value)),
+    createExportJob: (value) =>
+      exportJobs.createExportJob(clonePlain(value)),
+    readExportJob: (adapter, id) => exportJobs.readExportJob(adapter, id),
+    upsertExportJob: (adapter, value, options) =>
+      exportJobs.upsertExportJob(
+        adapter,
+        clonePlain(value),
+        clonePlain(options || {}),
+      ),
+    preflightExportJobs: (adapter) => exportJobs.preflightExportJobs(adapter),
+    clearExportJobs: (adapter) => exportJobs.clearExportJobs(adapter),
+    checkpointExportJob: (adapter, id, patch, options) =>
+      exportJobs.checkpointExportJob(
+        adapter,
+        id,
+        clonePlain(patch),
+        clonePlain(options || {}),
+      ),
+  };
+}
+
+function createInteractiveDocument() {
+  const elements = new Map();
+  const documentListeners = {};
+  const dispatchToListeners = (listeners, event, currentTarget) => {
+    const normalizedEvent = {
+      type: String(event?.type || ""),
+      target: currentTarget,
+      currentTarget,
+      defaultPrevented: false,
+      preventDefault() {
+        this.defaultPrevented = true;
+      },
+      stopPropagation() {},
+      ...(event || {}),
+    };
+    let result;
+    for (const listener of listeners[normalizedEvent.type] || []) {
+      result = listener(normalizedEvent);
+    }
+    return result;
+  };
+  const createElement = (tagName = "div") => {
+    let text = "";
+    const listeners = {};
+    const classes = new Set();
+    return {
+      tagName: String(tagName).toUpperCase(),
+      children: [],
+      hidden: false,
+      disabled: false,
+      className: "",
+      style: {},
+      classList: {
+        toggle(name, force) {
+          const enabled = force === undefined ? !classes.has(name) : !!force;
+          if (enabled) classes.add(name);
+          else classes.delete(name);
+          return enabled;
+        },
+        add(...names) {
+          names.forEach((name) => classes.add(name));
+        },
+        remove(...names) {
+          names.forEach((name) => classes.delete(name));
+        },
+        contains(name) {
+          return classes.has(name);
+        },
+      },
+      setAttribute() {},
+      addEventListener(type, listener) {
+        if (!listeners[type]) listeners[type] = [];
+        listeners[type].push(listener);
+      },
+      appendChild(child) {
+        this.children.push(child);
+        return child;
+      },
+      append(...children) {
+        this.children.push(...children);
+      },
+      click() {
+        if (this.disabled) return undefined;
+        return this.dispatchEvent({ type: "click" });
+      },
+      dispatchEvent(event) {
+        return dispatchToListeners(listeners, event, this);
+      },
+      set textContent(value) {
+        text = String(value);
+      },
+      get textContent() {
+        return text;
+      },
+      set innerHTML(value) {
+        text = String(value);
+        this.children = [];
+      },
+      get innerHTML() {
+        return text;
+      },
+    };
+  };
+  const element = (id) => {
+    if (!elements.has(id)) {
+      const node = createElement("div");
+      node.id = id;
+      elements.set(id, node);
+    }
+    return elements.get(id);
+  };
+  return {
+    addEventListener(type, listener) {
+      if (!documentListeners[type]) documentListeners[type] = [];
+      documentListeners[type].push(listener);
+    },
+    dispatchEvent(event) {
+      return dispatchToListeners(documentListeners, event, this);
+    },
+    querySelectorAll: () => [],
+    querySelector: () => null,
+    getElementById: element,
+    createElement,
+    element,
+    findButton(id, text) {
+      const queue = [...element(id).children];
+      while (queue.length) {
+        const node = queue.shift();
+        if (node.tagName === "BUTTON" && node.textContent === text) return node;
+        queue.push(...(node.children || []));
+      }
+      return null;
+    },
+  };
+}
+
+function createSidepanelJobController({ holdFirstTranslation = false } = {}) {
+  const actions = [];
+  const translatedNoteIds = [];
+  let job = null;
+  let releaseFirstTranslation;
+  const deepClone = (value) => (value === null ? null : clonePlain(value));
+  const sendMessage = async (message) => {
+    actions.push(message.action);
+    if (message.action === "checkConfig") {
+      return {
+        hasAiKey: true,
+        provider: {
+          id: "deepseek",
+          displayName: "DeepSeek",
+          modelId: "deepseek-v4-flash",
+          routeKey: "deepseek:deepseek-v4-flash",
+          capabilities: ["translate"],
+        },
+      };
+    }
+    if (message.action === "getExportJob") {
+      return job
+        ? { success: true, code: "OK", job: deepClone(job) }
+        : { success: false, code: "EXPORT_JOB_NOT_FOUND" };
+    }
+    if (message.action === "createOrResumeExportJob") {
+      if (!job) job = deepClone(message.job);
+      return { success: true, code: "OK", job: deepClone(job) };
+    }
+    if (message.action === "checkpointExportJob") {
+      assert.ok(job, "checkpoint requires a persisted job");
+      const patch = deepClone(message.patch || {});
+      if (patch.completedUnitKeys) {
+        const completed = new Set([
+          ...(job.completedUnitKeys || []),
+          ...patch.completedUnitKeys,
+        ]);
+        job.completedUnitKeys = job.orderedUnitKeys.filter((key) =>
+          completed.has(key),
+        );
+      }
+      for (const field of [
+        "state",
+        "currentBatch",
+        "cursor",
+        "exportClaim",
+        "lastError",
+      ]) {
+        if (Object.hasOwn(patch, field)) job[field] = patch[field];
+      }
+      return { success: true, code: "OK", job: deepClone(job) };
+    }
+    if (message.action === "cancelExportTranslationJob") {
+      if (job) {
+        job.state = "cancelled";
+        job.currentBatch = null;
+        job.exportClaim = null;
+      }
+      return {
+        success: true,
+        code: "EXPORT_JOB_CANCELLED",
+        jobState: "cancelled",
+      };
+    }
+    if (message.action === "translateExportNotesBatch") {
+      if (holdFirstTranslation && !releaseFirstTranslation) {
+        await new Promise((resolve) => {
+          releaseFirstTranslation = resolve;
+        });
+      }
+      const translations = (message.notes || []).map((note) => {
+        translatedNoteIds.push(String(note.id));
+        return { id: note.id, textZh: `中文 ${note.id}` };
+      });
+      const titles = (message.titles || []).map((title) => ({
+        mediaKey: title.mediaKey,
+        titleZh: `中文 ${title.mediaKey}`,
+      }));
+      return { success: true, translations, titles };
+    }
+    throw new Error(`Unexpected sidepanel action: ${message.action}`);
+  };
+  return {
+    sendMessage,
+    actions,
+    translatedNoteIds,
+    job: () => deepClone(job),
+    hasPendingTranslation: () => typeof releaseFirstTranslation === "function",
+    releaseFirstTranslation: () => {
+      assert.equal(
+        typeof releaseFirstTranslation,
+        "function",
+        "first translation must be pending",
+      );
+      const release = releaseFirstTranslation;
+      releaseFirstTranslation = null;
+      release();
+    },
+  };
+}
+
+function makeNoteRoundFixture(batchCount) {
+  const notes = Array.from({ length: batchCount }, (_, index) => ({
+    id: `round-note-${index + 1}`,
+    mediaKey: "round-video",
+    videoId: "round-video",
+    videoTitle: "Round test",
+    text: `English note ${index + 1}`,
+  }));
+  return {
+    notes,
+    groups: [{ mediaKey: "round-video", notes }],
+    plan: {
+      overLimit: false,
+      estimatedBatches: batchCount,
+      maxProviderCalls: batchCount * 5,
+      unitCount: batchCount,
+      progress: {
+        totalUnits: batchCount,
+        completedUnits: 0,
+        remainingUnits: batchCount,
+        remainingBatches: batchCount,
+        roundMaxBatches: 20,
+      },
+      noteBatches: notes.map((note) => [note]),
+      titleBatches: [],
+      sourceBatches: [],
+      sourceWorkByKey: {},
+    },
+  };
+}
+
+function makeExportNotesBackground({ switchProviderBeforeFetch = false } = {}) {
+  const noteSources = require("../note-sources.js");
+  const exportJobs = require("../export-jobs.js");
+  const mediaKey = "canonical-note-video";
+  const note = {
+    id: "canonical-note-1",
+    mediaKey,
+    videoId: mediaKey,
+    platform: "youtube",
+    videoTitle: "Canonical Stored Video Title",
+    text: "Canonical stored English note body.",
+    rawText: "Canonical stored English note body.",
+    sourceLanguage: "en",
+    textLanguage: "en",
+    translatedText: "",
+  };
+  const noteUnitKey = `note:${noteSources.hashSourceText(note.id)}:${noteSources.hashSourceText(note.text)}`;
+  const titleUnitKey = `title:${noteSources.hashSourceText(mediaKey)}:${noteSources.hashSourceText(note.videoTitle)}`;
+  const notesRevision = noteSources.hashSourceText(
+    JSON.stringify([[note.id, mediaKey, note.text, note.videoTitle]]),
+  );
+  const intent = {
+    scope: "notes-current",
+    mediaKeys: [mediaKey],
+    mode: "bilingual",
+    format: "markdown",
+    autoExport: true,
+  };
+  const job = exportJobs.createExportJob({
+    state: "running",
+    intent,
+    sourceRevisions: {},
+    notesRevision,
+    orderedUnitKeys: [noteUnitKey, titleUnitKey],
+    completedUnitKeys: [],
+    currentBatch: null,
+    cursor: 0,
+    roundBudget: { maxBatches: 20 },
+    providerSnapshot: {
+      providerId: "deepseek",
+      modelId: "deepseek-v4-flash",
+      routeKey: "deepseek:deepseek-v4-flash",
+      targetLanguage: "zh",
+      translationVersion: "export-v2",
+    },
+    exportClaim: null,
+    lastError: null,
+  });
+  const deepseekSettings = {
+    provider: "deepseek",
+    aiApiKeys: {
+      deepseek: "deepseek-test-key-never-returned",
+      zhipu: "zhipu-test-key-never-returned",
+      dashscope: "",
+      "tencent-hymt": "",
+      siliconflow: "",
+      fireworks: "",
+    },
+  };
+  const zhipuSettings = { ...deepseekSettings, provider: "zhipu" };
+  const storage = createMemoryStorage({
+    ytd_settings: deepseekSettings,
+    ytd_notes: [note],
+    [exportJobs.STORAGE_KEY]: {
+      schemaVersion: exportJobs.SCHEMA_VERSION,
+      jobs: { [job.jobId]: job },
+    },
+  });
+  let settingsReads = 0;
+  let providerCalls = 0;
+  const providerInputs = [];
+  const background = loadBackgroundHelpers({
+    storageGetImpl: async (keys) => {
+      if (keys === "ytd_settings") {
+        settingsReads += 1;
+        return {
+          ytd_settings:
+            switchProviderBeforeFetch && settingsReads >= 2
+              ? zhipuSettings
+              : deepseekSettings,
+        };
+      }
+      return storage.get(keys);
+    },
+    storageSetImpl: storage.set,
+    storageRemoveImpl: storage.remove,
+    storageClearImpl: storage.clear,
+    noteSourcesImpl: createNoteSourcesBridge(noteSources),
+    exportJobsImpl: createExportJobsBridge(exportJobs),
+    fetchImpl: async (url, options = {}) => {
+      if (String(url).startsWith("chrome-extension://")) {
+        return { ok: true, text: async () => read("prompts/translation.md") };
+      }
+      providerCalls += 1;
+      const body = JSON.parse(options.body);
+      const input = JSON.parse(body.messages.at(-1).content);
+      providerInputs.push(input);
+      const content = Array.isArray(input.notes)
+        ? JSON.stringify({
+            notes: input.notes.map((item) => ({
+              id: item.id,
+              textZh: "持久保存的中文笔记。",
+            })),
+          })
+        : JSON.stringify({
+            titles: input.titles.map((item) => ({
+              mediaKey: item.mediaKey,
+              titleZh: "持久保存的中文标题",
+            })),
+          });
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [
+            {
+              finish_reason: "stop",
+              message: { content },
+            },
+          ],
+        }),
+      };
+    },
+  });
+  return {
+    background,
+    storage,
+    noteSources,
+    exportJobs,
+    job,
+    mediaKey,
+    note,
+    noteUnitKey,
+    titleUnitKey,
+    providerCalls: () => providerCalls,
+    providerInputs,
+  };
+}
+
+function publicExportSourceUnit(unit) {
+  const common = {
+    unitKey: unit.id,
+    sourceHash: unit.sourceHash,
+    text: unit.text,
+    kind: unit.kind,
+  };
+  return unit.kind === "description"
+    ? { ...common, chunkIndex: unit.chunkIndex }
+    : {
+        ...common,
+        segmentId: unit.segmentId,
+        start: unit.start,
+      };
+}
+
+function makeExportSourceProvider({
+  holdFirst = false,
+  holdPrompt = false,
+  partialFirst = false,
+  errorPayload = null,
+  errorStatus = 500,
+} = {}) {
+  let providerCalls = 0;
+  let releaseFirst;
+  let releasePrompt;
+  let promptPending = false;
+  const fetchImpl = async (url, options = {}) => {
+    if (String(url).startsWith("chrome-extension://")) {
+      if (holdPrompt && !promptPending && !releasePrompt) {
+        promptPending = true;
+        await new Promise((resolve) => {
+          releasePrompt = resolve;
+        });
+      }
+      return { ok: true, text: async () => read("prompts/translation.md") };
+    }
+    providerCalls += 1;
+    const body = JSON.parse(options.body);
+    const userPayload = JSON.parse(body.messages.at(-1).content);
+    if (holdFirst && providerCalls === 1) {
+      await new Promise((resolve) => {
+        releaseFirst = resolve;
+      });
+    }
+    if (errorPayload) {
+      return streamingResponse([encode(JSON.stringify(errorPayload))], {
+        ok: false,
+        status: errorStatus,
+      });
+    }
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        choices: [
+          {
+            finish_reason: "stop",
+            message: {
+              content: JSON.stringify({
+                segments: userPayload.segments
+                  .map((segment, index) => ({
+                    id: segment.id,
+                    text: `第 ${providerCalls} 批第 ${index + 1} 段中文译文。`,
+                  }))
+                  .filter(
+                    (_segment, index) =>
+                      !(partialFirst && providerCalls === 1 && index > 0),
+                  ),
+              }),
+            },
+          },
+        ],
+      }),
+    };
+  };
+  return {
+    fetchImpl,
+    calls: () => providerCalls,
+    promptPending: () => promptPending,
+    releasePrompt: () => {
+      assert.equal(typeof releasePrompt, "function", "prompt load is pending");
+      const release = releasePrompt;
+      releasePrompt = null;
+      release();
+    },
+    releaseFirst: () => {
+      assert.equal(typeof releaseFirst, "function", "first provider call is pending");
+      releaseFirst();
+    },
+  };
+}
+
+function makeExportSourceBackground({
+  segmentCount = 5,
+  holdFirst = false,
+  holdPrompt = false,
+  descriptionOriginal = "",
+  partialFirst = false,
+  providerErrorPayload = null,
+  providerErrorStatus = 500,
+} = {}) {
+  const noteSources = require("../note-sources.js");
+  const exportJobs = require("../export-jobs.js");
+  const mediaKey = "export-video-1";
+  const titleOriginal = "Resumable export source translation";
+  const source = noteSources.normalizeNoteSource({
+    mediaKey,
+    platform: "youtube",
+    titleOriginal,
+    descriptionOriginal,
+    descriptionStatus: descriptionOriginal ? "present" : "confirmed-empty",
+    transcriptOriginal: Array.from({ length: segmentCount }, (_, index) => ({
+      segmentId: `segment-${index}`,
+      start: index + 0.125,
+      text: `English source segment ${index + 1} contains enough words for a real translation check.`,
+    })),
+    transcriptTruncated: false,
+    updatedAt: 10,
+  });
+  const plan = noteSources.buildExportTranslationPlan({
+    groups: [
+      {
+        mediaKey,
+        representative: { videoTitle: titleOriginal },
+        notes: [],
+      },
+    ],
+    sourcesByKey: { [mediaKey]: source },
+    mode: "bilingual",
+    includeTitles: false,
+    includeNotes: false,
+    includeDescriptions: true,
+    includeTranscript: true,
+  });
+  assert.ok(plan.sourceBatches.length >= 1, "fixture must create source batches");
+  const orderedUnitKeys = plan.sourceBatches.flat().map((unit) => unit.id);
+  const intent = {
+    scope: "current",
+    mediaKeys: [mediaKey],
+    mode: "bilingual",
+    format: "markdown",
+    autoExport: true,
+  };
+  const job = exportJobs.createExportJob(
+    {
+      state: "running",
+      intent,
+      sourceRevisions: { [mediaKey]: source.sourceRevision },
+      notesRevision: null,
+      orderedUnitKeys,
+      completedUnitKeys: [],
+      currentBatch: null,
+      cursor: 0,
+      roundBudget: { maxBatches: 20 },
+      providerSnapshot: {
+        providerId: "deepseek",
+        modelId: "deepseek-v4-flash",
+        routeKey: "deepseek:deepseek-v4-flash",
+        targetLanguage: "zh",
+        translationVersion: "export-v2",
+      },
+      exportClaim: null,
+      lastError: null,
+    },
+    { now: 20 },
+  );
+  const settings = {
+    provider: "deepseek",
+    aiApiKey: "test-key-never-returned",
+    aiBaseUrl: "https://api.deepseek.com",
+    aiModel: "deepseek-v4-flash",
+  };
+  const storage = createMemoryStorage({
+    ytd_settings: settings,
+    [noteSources.STORAGE_KEY]: { [mediaKey]: source },
+    [exportJobs.STORAGE_KEY]: {
+      schemaVersion: exportJobs.SCHEMA_VERSION,
+      jobs: { [job.jobId]: job },
+    },
+  });
+  const provider = makeExportSourceProvider({
+    holdFirst,
+    holdPrompt,
+    partialFirst,
+    errorPayload: providerErrorPayload,
+    errorStatus: providerErrorStatus,
+  });
+  // background.js executes in a vm realm while CommonJS modules execute in the
+  // Node realm. Bridge structured inputs so the modules' strict plain-object
+  // checks model one Chromium service-worker realm instead of rejecting test
+  // objects solely because their prototypes come from different realms.
+  const noteSourcesBridge = createNoteSourcesBridge(noteSources);
+  const exportJobsBridge = createExportJobsBridge(exportJobs);
+  const background = loadBackgroundHelpers({
+    settings,
+    storageGetImpl: storage.get,
+    storageSetImpl: storage.set,
+    storageRemoveImpl: storage.remove,
+    storageClearImpl: storage.clear,
+    fetchImpl: provider.fetchImpl,
+    noteSourcesImpl: noteSourcesBridge,
+    exportJobsImpl: exportJobsBridge,
+  });
+  const messageForBatch = (index) => ({
+    action: "translateExportSourceBatch",
+    jobId: job.jobId,
+    mediaKey,
+    sourceRevision: source.sourceRevision,
+    units: plan.sourceBatches[index].map(publicExportSourceUnit),
+    videoTitle: titleOriginal,
+  });
+  return {
+    background,
+    storage,
+    provider,
+    noteSources,
+    exportJobs,
+    mediaKey,
+    source,
+    plan,
+    job,
+    messageForBatch,
+  };
+}
+
+async function waitForProviderCall(provider, count = 1) {
+  for (let attempt = 0; attempt < 20 && provider.calls() < count; attempt += 1) {
+    await nextTurn();
+  }
+  assert.equal(provider.calls(), count, `expected ${count} mocked provider call(s)`);
+}
+
+async function waitForPromptGate(provider) {
+  for (let attempt = 0; attempt < 20 && !provider.promptPending(); attempt += 1) {
+    await nextTurn();
+  }
+  assert.equal(provider.promptPending(), true, "expected prompt load gate");
+}
+
+test("export source batch duplicate submissions share one provider call and one commit", async () => {
+  const fixture = makeExportSourceBackground({
+    segmentCount: 2,
+    holdFirst: true,
+  });
+  const message = fixture.messageForBatch(0);
+  const first = dispatchBackgroundMessage(fixture.background, message);
+  const duplicate = dispatchBackgroundMessage(fixture.background, {
+    ...message,
+    units: message.units.map((unit) => ({ ...unit })),
+  });
+  await waitForProviderCall(fixture.provider);
+  fixture.provider.releaseFirst();
+  const [firstResult, duplicateResult] = await Promise.all([first, duplicate]);
+
+  assert.equal(firstResult.success, true);
+  assert.deepEqual(firstResult, duplicateResult);
+  assert.equal(firstResult.actualProviderCalls, 1);
+  assert.equal(fixture.provider.calls(), 1, "single-flight spends one mocked request");
+  assert.doesNotMatch(JSON.stringify(firstResult), /test-key-never-returned/);
+  assert.doesNotMatch(JSON.stringify(firstResult), /中文译文/);
+
+  const snapshot = fixture.storage.snapshot();
+  const persistedSource =
+    snapshot[fixture.noteSources.STORAGE_KEY][fixture.mediaKey];
+  const persistedJob =
+    snapshot[fixture.exportJobs.STORAGE_KEY].jobs[fixture.job.jobId];
+  assert.equal(persistedSource.transcriptZh.length, 2);
+  assert.deepEqual(persistedJob.completedUnitKeys, fixture.job.orderedUnitKeys);
+  assert.equal(persistedJob.currentBatch, null);
+});
+
+test("description chunks use the same background commit path as transcript units", async () => {
+  const fixture = makeExportSourceBackground({
+    segmentCount: 0,
+    descriptionOriginal:
+      "This full video description is already present on the page and only needs its reusable Chinese translation.",
+  });
+  const result = await dispatchBackgroundMessage(
+    fixture.background,
+    fixture.messageForBatch(0),
+  );
+  assert.equal(result.success, true);
+  assert.equal(result.actualProviderCalls, 1);
+  const snapshot = fixture.storage.snapshot();
+  const persistedSource =
+    snapshot[fixture.noteSources.STORAGE_KEY][fixture.mediaKey];
+  assert.equal(persistedSource.descriptionZhChunks.length, 1);
+  assert.match(persistedSource.descriptionZh, /中文译文/);
+});
+
+test("completed job progress cannot override a changed source revision", async () => {
+  const fixture = makeExportSourceBackground({ segmentCount: 1 });
+  const first = await dispatchBackgroundMessage(
+    fixture.background,
+    fixture.messageForBatch(0),
+  );
+  assert.equal(first.success, true);
+  const changedSource = fixture.noteSources.normalizeNoteSource({
+    ...fixture.source,
+    transcriptOriginal: [
+      {
+        ...fixture.source.transcriptOriginal[0],
+        text: `${fixture.source.transcriptOriginal[0].text} Updated original.`,
+      },
+    ],
+    transcriptZh: [],
+  });
+  await fixture.storage.set({
+    [fixture.noteSources.STORAGE_KEY]: {
+      [fixture.mediaKey]: changedSource,
+    },
+  });
+  const repeated = await dispatchBackgroundMessage(
+    fixture.background,
+    fixture.messageForBatch(0),
+  );
+  assert.equal(repeated.success, false);
+  assert.equal(repeated.code, "EXPORT_SOURCE_STALE");
+  assert.equal(repeated.actualProviderCalls, 0);
+  assert.equal(fixture.provider.calls(), 1);
+  const snapshot = fixture.storage.snapshot();
+  assert.equal(
+    snapshot[fixture.exportJobs.STORAGE_KEY].jobs[fixture.job.jobId].state,
+    "stale",
+  );
+});
+
+test("export source translations commit after every batch instead of at round end", async () => {
+  const fixture = makeExportSourceBackground({ segmentCount: 5 });
+  assert.equal(fixture.plan.sourceBatches.length, 2);
+
+  const first = await dispatchBackgroundMessage(
+    fixture.background,
+    fixture.messageForBatch(0),
+  );
+  assert.equal(first.success, true, JSON.stringify(first));
+  assert.equal(first.actualProviderCalls, 1);
+  assert.equal(first.remainingCount, 1);
+  let snapshot = fixture.storage.snapshot();
+  let persistedSource =
+    snapshot[fixture.noteSources.STORAGE_KEY][fixture.mediaKey];
+  let persistedJob =
+    snapshot[fixture.exportJobs.STORAGE_KEY].jobs[fixture.job.jobId];
+  assert.equal(persistedSource.transcriptZh.length, 4);
+  assert.equal(persistedJob.completedUnitKeys.length, 4);
+  assert.equal(persistedJob.currentBatch, null);
+
+  const second = await dispatchBackgroundMessage(
+    fixture.background,
+    fixture.messageForBatch(1),
+  );
+  assert.equal(second.success, true);
+  assert.equal(second.remainingCount, 0);
+  assert.equal(fixture.provider.calls(), 2);
+  snapshot = fixture.storage.snapshot();
+  persistedSource = snapshot[fixture.noteSources.STORAGE_KEY][fixture.mediaKey];
+  persistedJob = snapshot[fixture.exportJobs.STORAGE_KEY].jobs[fixture.job.jobId];
+  assert.equal(persistedSource.transcriptZh.length, 5);
+  assert.equal(persistedJob.completedUnitKeys.length, 5);
+
+  const repeated = await dispatchBackgroundMessage(
+    fixture.background,
+    fixture.messageForBatch(1),
+  );
+  assert.equal(repeated.success, true);
+  assert.equal(repeated.code, "EXPORT_BATCH_ALREADY_COMPLETED");
+  assert.equal(repeated.actualProviderCalls, 0);
+  assert.equal(fixture.provider.calls(), 2, "completed units are never retranslated");
+});
+
+test("reopening from persisted source skips completed units and resumes at the first gap", async () => {
+  const fixture = makeExportSourceBackground({ segmentCount: 5 });
+  const firstRound = await dispatchBackgroundMessage(
+    fixture.background,
+    fixture.messageForBatch(0),
+  );
+  assert.equal(firstRound.success, true);
+  assert.equal(fixture.provider.calls(), 1);
+
+  // Rebuild exclusively from the durable storage snapshot, like reopening the
+  // side panel after the service worker and page-local state have disappeared.
+  const persisted = await fixture.noteSources.readNoteSource(
+    fixture.storage,
+    fixture.mediaKey,
+  );
+  assert.equal(persisted.transcriptZh.length, 4);
+  const resumedPlan = fixture.noteSources.buildExportTranslationPlan({
+    groups: [
+      {
+        mediaKey: fixture.mediaKey,
+        representative: { videoTitle: persisted.titleOriginal },
+        notes: [],
+      },
+    ],
+    sourcesByKey: { [fixture.mediaKey]: persisted },
+    mode: "bilingual",
+    includeTitles: false,
+    includeNotes: false,
+    includeDescriptions: true,
+    includeTranscript: true,
+  });
+  const resumedUnits = resumedPlan.sourceBatches.flat();
+  assert.equal(resumedUnits.length, 1);
+  assert.equal(resumedUnits[0].id, fixture.plan.sourceBatches[1][0].id);
+  assert.equal(
+    resumedUnits.some((unit) =>
+      fixture.plan.sourceBatches[0].some((completed) => completed.id === unit.id),
+    ),
+    false,
+  );
+
+  const resumed = await dispatchBackgroundMessage(fixture.background, {
+    action: "translateExportSourceBatch",
+    jobId: fixture.job.jobId,
+    mediaKey: fixture.mediaKey,
+    sourceRevision: persisted.sourceRevision,
+    units: resumedUnits.map(publicExportSourceUnit),
+    videoTitle: persisted.titleOriginal,
+  });
+  assert.equal(resumed.success, true);
+  assert.equal(resumed.actualProviderCalls, 1);
+  assert.equal(fixture.provider.calls(), 2);
+  const complete = await fixture.noteSources.readNoteSource(
+    fixture.storage,
+    fixture.mediaKey,
+  );
+  assert.equal(complete.transcriptZh.length, 5);
+});
+
+test("cancelling an in-flight export batch caches its valid response but starts no next batch", async () => {
+  const fixture = makeExportSourceBackground({
+    segmentCount: 5,
+    holdFirst: true,
+  });
+  const current = dispatchBackgroundMessage(
+    fixture.background,
+    fixture.messageForBatch(0),
+  );
+  await waitForProviderCall(fixture.provider);
+  const cancelled = await dispatchBackgroundMessage(fixture.background, {
+    action: "cancelExportTranslationJob",
+    jobId: fixture.job.jobId,
+  });
+  assert.equal(cancelled.success, true);
+  assert.equal(cancelled.jobState, "cancelled");
+
+  fixture.provider.releaseFirst();
+  const currentResult = await current;
+  assert.equal(currentResult.success, true);
+  assert.equal(currentResult.code, "EXPORT_CANCELLED_BATCH_COMMITTED");
+  assert.equal(currentResult.jobState, "cancelled");
+
+  const later = await dispatchBackgroundMessage(
+    fixture.background,
+    fixture.messageForBatch(1),
+  );
+  assert.equal(later.success, false);
+  assert.equal(later.code, "EXPORT_JOB_NOT_RUNNING");
+  assert.equal(fixture.provider.calls(), 1, "cancellation prevents the next request");
+
+  const snapshot = fixture.storage.snapshot();
+  const persistedSource =
+    snapshot[fixture.noteSources.STORAGE_KEY][fixture.mediaKey];
+  const persistedJob =
+    snapshot[fixture.exportJobs.STORAGE_KEY].jobs[fixture.job.jobId];
+  assert.equal(persistedSource.transcriptZh.length, 4);
+  assert.equal(persistedJob.completedUnitKeys.length, 4);
+  assert.equal(persistedJob.state, "cancelled");
+  assert.equal(persistedJob.exportClaim, null);
+});
+
+test("cancellation after batch claim but before fetch starts zero provider calls", async () => {
+  const fixture = makeExportSourceBackground({
+    segmentCount: 2,
+    holdPrompt: true,
+  });
+  const pending = dispatchBackgroundMessage(
+    fixture.background,
+    fixture.messageForBatch(0),
+  );
+  await waitForPromptGate(fixture.provider);
+  const cancelled = await dispatchBackgroundMessage(fixture.background, {
+    action: "cancelExportTranslationJob",
+    jobId: fixture.job.jobId,
+  });
+  assert.equal(cancelled.success, true);
+  fixture.provider.releasePrompt();
+  const result = await pending;
+  assert.equal(result.success, false);
+  assert.equal(result.code, "EXPORT_JOB_NOT_RUNNING");
+  assert.equal(result.actualProviderCalls, 0);
+  assert.equal(fixture.provider.calls(), 0);
+  const snapshot = fixture.storage.snapshot();
+  const persistedJob =
+    snapshot[fixture.exportJobs.STORAGE_KEY].jobs[fixture.job.jobId];
+  assert.equal(persistedJob.state, "cancelled");
+  assert.equal(persistedJob.currentBatch, null);
+});
+
+test("provider route changes after confirmation fail closed before the request", async () => {
+  const fixture = makeExportSourceBackground({ segmentCount: 1 });
+  await fixture.storage.set({
+    ytd_settings: {
+      provider: "zhipu",
+      aiApiKeys: {
+        deepseek: "test-key-never-returned",
+        zhipu: "zhipu-test-key-never-returned",
+        dashscope: "",
+        "tencent-hymt": "",
+        siliconflow: "",
+        fireworks: "",
+      },
+      supadataApiKey: "",
+    },
+  });
+  const result = await dispatchBackgroundMessage(
+    fixture.background,
+    fixture.messageForBatch(0),
+  );
+  assert.equal(result.success, false);
+  assert.equal(result.code, "EXPORT_JOB_PROVIDER_MISMATCH");
+  assert.equal(result.actualProviderCalls, 0);
+  assert.equal(fixture.provider.calls(), 0);
+  assert.doesNotMatch(JSON.stringify(result), /zhipu-test-key-never-returned/);
+  const snapshot = fixture.storage.snapshot();
+  const persistedJob =
+    snapshot[fixture.exportJobs.STORAGE_KEY].jobs[fixture.job.jobId];
+  assert.equal(persistedJob.state, "paused");
+  assert.equal(persistedJob.currentBatch, null);
+  assert.equal(persistedJob.lastError.code, "EXPORT_JOB_PROVIDER_MISMATCH");
+});
+
+test("provider error bodies and non-typical secret keys never enter job snapshots", async () => {
+  const rawMessage = "provider body credential=RAW_BODY_SECRET_7a91";
+  const unusualSecret = "UNUSUAL_SECRET_VALUE_9931";
+  const fixture = makeExportSourceBackground({
+    segmentCount: 1,
+    providerErrorPayload: {
+      error: { message: rawMessage },
+      "x-vendor-private-credential": unusualSecret,
+      nested: { signing_material: "NESTED_SECRET_4432" },
+    },
+    providerErrorStatus: 500,
+  });
+  const result = await dispatchBackgroundMessage(
+    fixture.background,
+    fixture.messageForBatch(0),
+  );
+  assert.equal(result.success, false);
+  assert.equal(result.code, "EXPORT_SOURCE_PROVIDER_FAILED");
+  assert.equal(result.actualProviderCalls, 1);
+  const serializedResult = JSON.stringify(result);
+  const snapshot = fixture.storage.snapshot();
+  const persistedJob =
+    snapshot[fixture.exportJobs.STORAGE_KEY].jobs[fixture.job.jobId];
+  const serializedJob = JSON.stringify(persistedJob);
+  for (const secret of [rawMessage, unusualSecret, "NESTED_SECRET_4432"]) {
+    assert.doesNotMatch(serializedResult, new RegExp(secret));
+    assert.doesNotMatch(serializedJob, new RegExp(secret));
+  }
+  assert.deepEqual(Object.keys(persistedJob.lastError).sort(), [
+    "at",
+    "code",
+    "message",
+    "retryable",
+  ]);
+  assert.equal(persistedJob.lastError.code, "EXPORT_SOURCE_PROVIDER_FAILED");
+});
+
+test("an incomplete provider batch writes nothing and leaves a resumable failed job", async () => {
+  const fixture = makeExportSourceBackground({
+    segmentCount: 2,
+    partialFirst: true,
+  });
+  const result = await dispatchBackgroundMessage(
+    fixture.background,
+    fixture.messageForBatch(0),
+  );
+  assert.equal(result.success, false);
+  assert.equal(result.code, "EXPORT_SOURCE_BATCH_PARTIAL");
+  assert.equal(result.actualProviderCalls, 1);
+  const snapshot = fixture.storage.snapshot();
+  const persistedSource =
+    snapshot[fixture.noteSources.STORAGE_KEY][fixture.mediaKey];
+  const persistedJob =
+    snapshot[fixture.exportJobs.STORAGE_KEY].jobs[fixture.job.jobId];
+  assert.equal(persistedSource.transcriptZh.length, 0);
+  assert.equal(persistedJob.state, "failed");
+  assert.equal(persistedJob.currentBatch, null);
+});
+
+test("clearing notes removes source/job state and a late response cannot recreate it", async () => {
+  const fixture = makeExportSourceBackground({
+    segmentCount: 2,
+    holdFirst: true,
+  });
+  await fixture.storage.set({
+    ytd_notes: [
+      {
+        id: "note-clear-1",
+        mediaKey: fixture.mediaKey,
+        videoId: fixture.mediaKey,
+        text: "Saved note",
+      },
+    ],
+  });
+  const pending = dispatchBackgroundMessage(
+    fixture.background,
+    fixture.messageForBatch(0),
+  );
+  await waitForProviderCall(fixture.provider);
+  const cleared = await dispatchBackgroundMessage(fixture.background, {
+    action: "clearAllNotes",
+  });
+  assert.equal(cleared.success, true);
+  fixture.provider.releaseFirst();
+  const late = await pending;
+  assert.equal(late.success, false);
+  assert.equal(late.code, "EXPORT_JOB_NOT_FOUND");
+  assert.equal(late.actualProviderCalls, 1);
+  await nextTurn();
+  const snapshot = fixture.storage.snapshot();
+  assert.equal(Object.hasOwn(snapshot, "ytd_notes"), false);
+  assert.equal(Object.hasOwn(snapshot, fixture.noteSources.STORAGE_KEY), false);
+  assert.equal(Object.hasOwn(snapshot, fixture.exportJobs.STORAGE_KEY), false);
+});
+
+test("clearAllNotes generation barrier rejects a concurrent source upsert without resurrection", async () => {
+  const fixture = makeExportSourceBackground({ segmentCount: 1 });
+  const gate = createAsyncGate();
+  let holdNotesRead = true;
+  const storage = createMemoryStorage({
+    ytd_settings: {
+      provider: "deepseek",
+      aiApiKey: "test-key-never-returned",
+      aiBaseUrl: "https://api.deepseek.com",
+      aiModel: "deepseek-v4-flash",
+    },
+    ytd_notes: [
+      {
+        id: "clear-race-note",
+        mediaKey: fixture.mediaKey,
+        videoId: fixture.mediaKey,
+        text: "Saved note",
+      },
+    ],
+    [fixture.noteSources.STORAGE_KEY]: {
+      [fixture.mediaKey]: fixture.source,
+    },
+    [fixture.exportJobs.STORAGE_KEY]: {
+      schemaVersion: fixture.exportJobs.SCHEMA_VERSION,
+      jobs: { [fixture.job.jobId]: fixture.job },
+    },
+  });
+  const background = loadBackgroundHelpers({
+    storageGetImpl: async (keys) => {
+      if (keys === "ytd_notes" && holdNotesRead) {
+        holdNotesRead = false;
+        await gate.enter();
+      }
+      return storage.get(keys);
+    },
+    storageSetImpl: storage.set,
+    storageRemoveImpl: storage.remove,
+    storageClearImpl: storage.clear,
+    noteSourcesImpl: createNoteSourcesBridge(fixture.noteSources),
+    exportJobsImpl: createExportJobsBridge(fixture.exportJobs),
+  });
+  const incoming = fixture.noteSources.normalizeNoteSource({
+    ...fixture.source,
+    channelName: "must never return after clear",
+    updatedAt: 80,
+  });
+  const pendingUpsert = dispatchBackgroundMessage(background, {
+    action: "upsertNoteSource",
+    source: incoming,
+  });
+  await gate.entered;
+  const cleared = await dispatchBackgroundMessage(background, {
+    action: "clearAllNotes",
+  });
+  assert.equal(cleared.success, true);
+  gate.release();
+  const late = await pendingUpsert;
+  assert.equal(late.success, false);
+  assert.equal(late.code, "EXPORT_JOB_NOT_FOUND");
+  const snapshot = storage.snapshot();
+  assert.equal(Object.hasOwn(snapshot, "ytd_notes"), false);
+  assert.equal(Object.hasOwn(snapshot, fixture.noteSources.STORAGE_KEY), false);
+  assert.equal(Object.hasOwn(snapshot, fixture.exportJobs.STORAGE_KEY), false);
+});
+
+test("reset generation barrier rejects a concurrent job create without resurrection", async () => {
+  const fixture = makeExportSourceBackground({ segmentCount: 1 });
+  const gate = createAsyncGate();
+  const storage = createMemoryStorage({
+    ytd_settings: {
+      provider: "deepseek",
+      aiApiKey: "test-key-never-returned",
+      aiBaseUrl: "https://api.deepseek.com",
+      aiModel: "deepseek-v4-flash",
+    },
+    ytd_notes: [],
+    [fixture.noteSources.STORAGE_KEY]: {
+      [fixture.mediaKey]: fixture.source,
+    },
+    [fixture.exportJobs.STORAGE_KEY]: {
+      schemaVersion: fixture.exportJobs.SCHEMA_VERSION,
+      jobs: { [fixture.job.jobId]: fixture.job },
+    },
+  });
+  const exportJobsBridge = createExportJobsBridge(fixture.exportJobs);
+  let holdJobRead = true;
+  const baseReadExportJob = exportJobsBridge.readExportJob;
+  exportJobsBridge.readExportJob = async (adapter, jobId) => {
+    if (holdJobRead) {
+      holdJobRead = false;
+      await gate.enter();
+    }
+    return baseReadExportJob(adapter, jobId);
+  };
+  const background = loadBackgroundHelpers({
+    storageGetImpl: storage.get,
+    storageSetImpl: storage.set,
+    storageRemoveImpl: storage.remove,
+    storageClearImpl: storage.clear,
+    noteSourcesImpl: createNoteSourcesBridge(fixture.noteSources),
+    exportJobsImpl: exportJobsBridge,
+  });
+  const pendingCreate = dispatchBackgroundMessage(background, {
+    action: "createOrResumeExportJob",
+    job: fixture.job,
+  });
+  await gate.entered;
+  const reset = await dispatchBackgroundMessage(background, {
+    action: "resetAllExtensionData",
+    preferredLanguage: "zh-CN",
+  });
+  assert.equal(reset.success, true);
+  gate.release();
+  const late = await pendingCreate;
+  assert.equal(late.success, false);
+  assert.equal(late.code, "EXPORT_JOB_NOT_FOUND");
+  assert.deepEqual(storage.snapshot(), { ytd_options_language: "zh-CN" });
+});
+
+test("clearAllNotes is all-or-nothing when either export store has a future schema", async () => {
+  const noteSources = require("../note-sources.js");
+  const exportJobs = require("../export-jobs.js");
+  const cases = [
+    {
+      label: "future jobs",
+      sources: {},
+      jobs: { schemaVersion: exportJobs.SCHEMA_VERSION + 1, jobs: {} },
+      expectedCode: "UNSUPPORTED_EXPORT_JOBS_SCHEMA",
+    },
+    {
+      label: "future sources",
+      sources: { schemaVersion: noteSources.SCHEMA_VERSION + 1 },
+      jobs: { schemaVersion: exportJobs.SCHEMA_VERSION, jobs: {} },
+      expectedCode: "UNSUPPORTED_NOTE_SOURCE_SCHEMA",
+    },
+  ];
+  for (const item of cases) {
+    const initial = {
+      ytd_settings: {
+        provider: "deepseek",
+        aiApiKey: "test-key-never-returned",
+      },
+      ytd_notes: [{ id: `note-${item.label}`, text: "must survive" }],
+      [noteSources.STORAGE_KEY]: item.sources,
+      [exportJobs.STORAGE_KEY]: item.jobs,
+    };
+    const storage = createMemoryStorage(initial);
+    const background = loadBackgroundHelpers({
+      storageGetImpl: storage.get,
+      storageSetImpl: storage.set,
+      storageRemoveImpl: storage.remove,
+      storageClearImpl: storage.clear,
+      noteSourcesImpl: createNoteSourcesBridge(noteSources),
+      exportJobsImpl: createExportJobsBridge(exportJobs),
+    });
+    const result = await dispatchBackgroundMessage(background, {
+      action: "clearAllNotes",
+    });
+    assert.equal(result.success, false, item.label);
+    assert.equal(result.code, item.expectedCode, item.label);
+    assert.deepEqual(storage.snapshot(), initial, item.label);
+  }
+});
+
+test("note source writes are available through the shared background queue action", async () => {
+  const fixture = makeExportSourceBackground({ segmentCount: 1 });
+  const incoming = fixture.noteSources.normalizeNoteSource({
+    ...fixture.source,
+    channelName: "Background-owned source queue",
+    updatedAt: 40,
+  });
+  const result = await dispatchBackgroundMessage(fixture.background, {
+    action: "upsertNoteSource",
+    source: incoming,
+  });
+  assert.equal(result.success, true);
+  assert.equal(result.mediaKey, fixture.mediaKey);
+  assert.equal(result.sourceRevision, incoming.sourceRevision);
+  const snapshot = fixture.storage.snapshot();
+  assert.equal(
+    snapshot[fixture.noteSources.STORAGE_KEY][fixture.mediaKey].channelName,
+    "Background-owned source queue",
+  );
+});
+
+test("export job create/resume and checkpoint mutations stay in the background realm", async () => {
+  const fixture = makeExportSourceBackground({ segmentCount: 1 });
+  const paused = await dispatchBackgroundMessage(fixture.background, {
+    action: "checkpointExportJob",
+    jobId: fixture.job.jobId,
+    patch: { state: "paused", currentBatch: null },
+  });
+  assert.equal(paused.success, true);
+  assert.equal(paused.job.state, "paused");
+
+  const resumed = await dispatchBackgroundMessage(fixture.background, {
+    action: "createOrResumeExportJob",
+    job: {
+      ...fixture.job,
+      state: "running",
+      updatedAt: Date.now() + 1000,
+    },
+  });
+  assert.equal(resumed.success, true);
+  assert.equal(resumed.job.state, "running");
+  assert.doesNotMatch(JSON.stringify(resumed), /test-key-never-returned/);
+
+  const rejected = await dispatchBackgroundMessage(fixture.background, {
+    action: "checkpointExportJob",
+    jobId: fixture.job.jobId,
+    patch: { sourceText: "must never enter job metadata" },
+  });
+  assert.equal(rejected.success, false);
+  assert.equal(rejected.code, "INVALID_EXPORT_JOB_PATCH");
+});
+
+test("recoverable export jobs can be listed without exposing provider keys or content", async () => {
+  const fixture = makeExportNotesBackground();
+  const result = await fixture.background.handleListExportTranslationJobs();
+  assert.equal(result.success, true);
+  assert.equal(result.jobs.length, 1);
+  assert.equal(result.jobs[0].jobId, fixture.job.jobId);
+  const serialized = JSON.stringify(result.jobs);
+  assert.doesNotMatch(serialized, /test-key|Canonical stored English note body/);
+  assert.deepEqual(result.jobs[0].intent.mediaKeys, [fixture.mediaKey]);
+});
+
+test("duplicate create or resume preserves a running job's current batch lease", async () => {
+  const fixture = makeExportSourceBackground({ segmentCount: 1 });
+  const currentBatch = {
+    batchId: "active-batch-lease",
+    unitKeys: [...fixture.job.orderedUnitKeys],
+    leaseUntil: Date.now() + 60_000,
+  };
+  const claimed = await dispatchBackgroundMessage(fixture.background, {
+    action: "checkpointExportJob",
+    jobId: fixture.job.jobId,
+    patch: { currentBatch },
+  });
+  assert.equal(claimed.success, true);
+  assert.deepEqual(clonePlain(claimed.job.currentBatch), currentBatch);
+
+  const duplicate = await dispatchBackgroundMessage(fixture.background, {
+    action: "createOrResumeExportJob",
+    job: {
+      ...fixture.job,
+      state: "running",
+      currentBatch: null,
+      updatedAt: Date.now() + 120_000,
+    },
+  });
+  assert.equal(duplicate.success, true);
+  assert.deepEqual(clonePlain(duplicate.job.currentBatch), currentBatch);
+  const snapshot = fixture.storage.snapshot();
+  assert.deepEqual(
+    snapshot[fixture.exportJobs.STORAGE_KEY].jobs[fixture.job.jobId].currentBatch,
+    currentBatch,
+  );
+});
+
+test("job-aware note and title batches use canonical storage and persist validated translations", async () => {
+  const fixture = makeExportNotesBackground();
+  const noteResult = await dispatchBackgroundMessage(fixture.background, {
+    action: "translateExportNotesBatch",
+    jobId: fixture.job.jobId,
+    unitKeys: [fixture.noteUnitKey],
+    notes: [
+      {
+        id: fixture.note.id,
+        text: "SPOOFED CALLER NOTE MUST NOT REACH PROVIDER",
+        videoTitle: "Spoofed caller title",
+      },
+    ],
+    titles: [],
+  });
+  assert.equal(noteResult.success, true, JSON.stringify(noteResult));
+  assert.equal(noteResult.translations[0].textZh, "持久保存的中文笔记。");
+  assert.equal(fixture.providerCalls(), 1);
+  assert.match(
+    JSON.stringify(fixture.providerInputs[0]),
+    /Canonical stored English note body/,
+  );
+  assert.doesNotMatch(JSON.stringify(fixture.providerInputs[0]), /SPOOFED CALLER/);
+
+  const titleResult = await dispatchBackgroundMessage(fixture.background, {
+    action: "translateExportNotesBatch",
+    jobId: fixture.job.jobId,
+    unitKeys: [fixture.titleUnitKey],
+    notes: [],
+    titles: [
+      {
+        mediaKey: fixture.mediaKey,
+        title: "SPOOFED CALLER TITLE MUST NOT REACH PROVIDER",
+      },
+    ],
+  });
+  assert.equal(titleResult.success, true, JSON.stringify(titleResult));
+  assert.equal(titleResult.titles[0].titleZh, "持久保存的中文标题");
+  assert.equal(fixture.providerCalls(), 2);
+  assert.match(
+    JSON.stringify(fixture.providerInputs[1]),
+    /Canonical Stored Video Title/,
+  );
+  assert.doesNotMatch(JSON.stringify(fixture.providerInputs[1]), /SPOOFED CALLER/);
+
+  const persisted = fixture.storage.snapshot().ytd_notes[0];
+  assert.equal(persisted.translatedText, "持久保存的中文笔记。");
+  assert.equal(persisted.translatedValidated, true);
+  assert.equal(persisted.videoTitleZh, "持久保存的中文标题");
+  assert.equal(persisted.videoTitleZhValidated, true);
+  assert.equal(
+    persisted.videoTitleZhSourceHash,
+    fixture.noteSources.hashSourceText("Canonical Stored Video Title"),
+  );
+});
+
+test("job-aware note translation rechecks the frozen route before provider fetch", async () => {
+  const fixture = makeExportNotesBackground({
+    switchProviderBeforeFetch: true,
+  });
+  const result = await dispatchBackgroundMessage(fixture.background, {
+    action: "translateExportNotesBatch",
+    jobId: fixture.job.jobId,
+    unitKeys: [fixture.noteUnitKey],
+    notes: [{ id: fixture.note.id, text: fixture.note.text }],
+    titles: [],
+  });
+  assert.equal(result.success, false);
+  assert.equal(result.code, "EXPORT_JOB_PROVIDER_MISMATCH");
+  assert.equal(fixture.providerCalls(), 0);
+  const persistedJob =
+    fixture.storage.snapshot()[fixture.exportJobs.STORAGE_KEY].jobs[
+      fixture.job.jobId
+    ];
+  const serializedJob = JSON.stringify(persistedJob);
+  assert.doesNotMatch(serializedJob, /deepseek-test-key-never-returned/);
+  assert.doesNotMatch(serializedJob, /zhipu-test-key-never-returned/);
+  assert.doesNotMatch(serializedJob, /Canonical stored English note body/);
+});
+
+test("a late export response writes nothing after the source revision changes", async () => {
+  const fixture = makeExportSourceBackground({
+    segmentCount: 2,
+    holdFirst: true,
+  });
+  const pending = dispatchBackgroundMessage(
+    fixture.background,
+    fixture.messageForBatch(0),
+  );
+  await waitForProviderCall(fixture.provider);
+
+  const changedSource = fixture.noteSources.normalizeNoteSource({
+    ...fixture.source,
+    transcriptOriginal: fixture.source.transcriptOriginal.map((entry, index) =>
+      index === 0
+        ? { ...entry, text: `${entry.text} The original source changed.` }
+        : entry,
+    ),
+    transcriptZh: [],
+    updatedAt: 30,
+  });
+  assert.notEqual(changedSource.sourceRevision, fixture.source.sourceRevision);
+  await fixture.storage.set({
+    [fixture.noteSources.STORAGE_KEY]: {
+      [fixture.mediaKey]: changedSource,
+    },
+  });
+
+  fixture.provider.releaseFirst();
+  const result = await pending;
+  assert.equal(result.success, false);
+  assert.equal(result.code, "EXPORT_SOURCE_STALE");
+  assert.equal(result.actualProviderCalls, 1);
+  await nextTurn();
+  const snapshot = fixture.storage.snapshot();
+  const persistedSource =
+    snapshot[fixture.noteSources.STORAGE_KEY][fixture.mediaKey];
+  const persistedJob =
+    snapshot[fixture.exportJobs.STORAGE_KEY].jobs[fixture.job.jobId];
+  assert.equal(persistedSource.sourceRevision, changedSource.sourceRevision);
+  assert.equal(persistedSource.transcriptZh.length, 0);
+  assert.equal(persistedJob.completedUnitKeys.length, 0);
+  assert.equal(persistedJob.state, "stale");
+  assert.equal(persistedJob.currentBatch, null);
+});
+
+test("export source action enforces four-unit and 12000-character hard limits", () => {
+  const fixture = makeExportSourceBackground({ segmentCount: 1 });
+  const base = fixture.messageForBatch(0);
+  const makeUnit = (index, text = base.units[0].text) => ({
+    ...base.units[0],
+    unitKey: `t:fnv1a-0000000000000001:${index}:fnv1a-0000000000000002`,
+    segmentId: `bounded-${index}`,
+    start: index + 0.25,
+    text,
+  });
+  assert.throws(
+    () =>
+      fixture.background.validateExportSourceBatchRequest({
+        ...base,
+        units: Array.from({ length: 5 }, (_, index) => makeUnit(index)),
+      }),
+    (error) => error.code === "INVALID_EXPORT_SOURCE_BATCH",
+  );
+  assert.throws(
+    () =>
+      fixture.background.validateExportSourceBatchRequest({
+        ...base,
+        units: Array.from({ length: 4 }, (_, index) =>
+          makeUnit(index, "a".repeat(3001)),
+        ),
+      }),
+    (error) => error.code === "INVALID_EXPORT_SOURCE_BATCH",
+  );
+});
+
+test("export source action rejects supplied credentials before any provider request", async () => {
+  const fixture = makeExportSourceBackground({ segmentCount: 1 });
+  const config = await dispatchBackgroundMessage(fixture.background, {
+    action: "checkConfig",
+  });
+  assert.equal(config.provider.modelId, "deepseek-v4-flash");
+  assert.equal(config.provider.routeKey, "deepseek:deepseek-v4-flash");
+  assert.doesNotMatch(JSON.stringify(config), /test-key-never-returned/);
+  const result = await dispatchBackgroundMessage(fixture.background, {
+    ...fixture.messageForBatch(0),
+    ["api" + "Key"]: "must-not-be-accepted",
+  });
+  assert.equal(result.success, false);
+  assert.equal(result.code, "INVALID_EXPORT_SOURCE_BATCH");
+  assert.equal(result.actualProviderCalls, 0);
+  assert.equal(fixture.provider.calls(), 0);
+  assert.doesNotMatch(JSON.stringify(result), /must-not-be-accepted/);
+});
 
 function installSidepanelDigestFixture(runtime) {
   return runtime.evaluate(`
@@ -403,6 +3678,525 @@ function installSidepanelDigestFixture(runtime) {
   `);
 }
 
+/**
+ * Exercises saved-note navigation through the real side-panel entry points.
+ * The fixture intentionally does not inspect the implementation's pending
+ * intent object: it observes only browser navigation, background messages and
+ * visible panel state so the regression contract stays implementation-agnostic.
+ */
+function installNoteNavigationFixture(runtime, options = {}) {
+  const targetPlatform =
+    options.targetPlatform === "bilibili" ? "bilibili" : "youtube";
+  const targetVideoId = String(
+    options.targetVideoId ||
+      (targetPlatform === "bilibili" ? "BV1e3411j7ZM" : "target-video"),
+  );
+  const targetMediaKey = String(
+    options.targetMediaKey ||
+      (targetPlatform === "bilibili"
+        ? `bilibili:${targetVideoId}:200`
+        : targetVideoId),
+  );
+  const targetUrl = String(
+    options.targetUrl ||
+      (targetPlatform === "bilibili"
+        ? `https://www.bilibili.com/video/${targetVideoId}/?p=2&t=56`
+        : `https://www.youtube.com/watch?v=${targetVideoId}&t=56s`),
+  );
+  const fixtureOptions = JSON.stringify({
+    targetPlatform,
+    targetVideoId,
+    targetMediaKey,
+    targetUrl,
+    hasAiKey: options.hasAiKey !== false,
+    authorizedTranscriptSuccess: options.authorizedTranscriptSuccess === true,
+    cachedTranscript: options.cachedTranscript === true,
+    authorizedError: String(options.authorizedError || ""),
+    omitMetadataVideoId: options.omitMetadataVideoId === true,
+    metadataVideoId:
+      options.metadataVideoId === undefined
+        ? null
+        : String(options.metadataVideoId),
+    metadataTitle: String(options.metadataTitle || "Target video"),
+    metadataRelayFailure: options.metadataRelayFailure || null,
+    deferMetadataRelay: options.deferMetadataRelay === true,
+  });
+  return runtime.evaluate(`
+    (() => {
+      const fixtureOptions = ${fixtureOptions};
+      const sourceVideoId = "source-video";
+      const targetPlatform = fixtureOptions.targetPlatform;
+      const targetVideoId = fixtureOptions.targetVideoId;
+      const targetMediaKey = fixtureOptions.targetMediaKey;
+      const targetUrl = fixtureOptions.targetUrl;
+      const targetLocator = extractMediaLocator(targetUrl);
+      const targetRouteKey = targetLocator.routeKey;
+      const messages = [];
+      const openedUrls = [];
+      const createdTabs = [];
+      const updatedTabs = [];
+      const renderedNotes = [];
+      let noteExportDownloads = 0;
+      const elements = new Map();
+      let panelClosed = false;
+      let activeUrlValue =
+        "https://www.youtube.com/watch?v=" + sourceVideoId;
+      let activeTabId = 101;
+      let nextCreatedTabId = 202;
+      const createdTabById = new Map();
+      let releaseMetadataRelay = null;
+      let resolveMetadataRelayStarted = null;
+      let metadataRelayBlocked = fixtureOptions.deferMetadataRelay;
+      const metadataRelayStarted = new Promise((resolve) => {
+        resolveMetadataRelayStarted = resolve;
+      });
+
+      const element = (id) => {
+        if (!elements.has(id)) {
+          elements.set(id, {
+            id,
+            style: { display: id === "resultsState" ? "block" : "none" },
+            hidden: false,
+            innerHTML: "",
+            textContent: "",
+            disabled: false,
+            classList: {
+              toggle() {},
+              add() {},
+              remove() {},
+              contains() { return false; },
+            },
+            setAttribute() {},
+            addEventListener() {},
+            removeEventListener() {},
+            focus() {},
+          });
+        }
+        return elements.get(id);
+      };
+
+      const tabElements = ["transcript", "overview", "notes"].map((name) => {
+        const entry = {
+          dataset: { tab: name },
+          active: name === "notes",
+          classList: {
+            toggle(className, force) {
+              if (className === "active") entry.active = Boolean(force);
+            },
+          },
+        };
+        return entry;
+      });
+      const panelElements = ["transcript", "overview", "notes"].map((name) => ({
+        dataset: { panel: name },
+        classList: { toggle() {} },
+      }));
+
+      document.getElementById = element;
+      document.querySelectorAll = (selector) => {
+        if (selector === ".tab") return tabElements;
+        if (selector === ".tab-panel") return panelElements;
+        return [];
+      };
+      document.querySelector = (selector) => {
+        if (selector === ".tab.active") {
+          return tabElements.find((entry) => entry.active) || null;
+        }
+        return null;
+      };
+      window.close = () => {
+        panelClosed = true;
+      };
+
+      renderNotes = (notes, filterVideoId) => {
+        renderedNotes.push({
+          filterVideoId: filterVideoId === undefined ? "undefined" : filterVideoId,
+          ids: notes.map((note) => note.id),
+        });
+      };
+      renderTranscript = () => {};
+      renderAnalysisResults = () => {};
+      highlightMomentsOnPage = () => {};
+      downloadTextFile = () => { noteExportDownloads += 1; };
+      setupExplainFeature = () => {};
+      translateTranscript = () => {};
+      loadFromCache = async (videoId) => {
+        if (!fixtureOptions.cachedTranscript || videoId !== targetMediaKey) {
+          return null;
+        }
+        return {
+          analysis: null,
+          analysisVideoId: targetMediaKey,
+          transcript: [{ start: 0, text: "Cached target transcript" }],
+          transcriptText: "Cached target transcript",
+          transcriptTimestamped: "[0:00] Cached target transcript",
+          transcriptLanguage: "en",
+          transcriptSource: "supadata",
+          transcriptSourceAttempt: "SUPADATA",
+          routeKey: targetRouteKey,
+          mediaRef: {
+            ...targetLocator,
+            platform: targetPlatform,
+            mediaKey: targetMediaKey,
+          },
+          timestamp: Date.now(),
+        };
+      };
+      saveToCache = async () => {};
+
+      const targetNote = {
+        id: "target-note",
+        platform: targetPlatform,
+        mediaKey: targetMediaKey,
+        videoId: targetPlatform === "bilibili" ? targetMediaKey : targetVideoId,
+        videoTitle: "Target video",
+        videoTitleZh: "目标视频",
+        videoTitleZhValidated: true,
+        videoTitleZhValidationVersion: 1,
+        channelName: "Target channel",
+        timestamp: "0:56",
+        timestampSeconds: 56,
+        canonicalUrl: targetLocator.canonicalUrl,
+        timestampedUrl: targetUrl,
+        text: "Saved English note.",
+        rawText: "Saved English note.",
+        translatedText: "已保存的中文笔记。",
+        translatedValidated: true,
+        translatedValidationVersion: 1,
+        sourceLanguage: targetPlatform === "bilibili" ? "zh-CN" : "en",
+      };
+
+      const activeTab = () => ({
+        id: activeTabId,
+        active: true,
+        windowId: 1,
+        url: activeUrlValue,
+      });
+      chrome.tabs.create = async ({ url, active = true }) => {
+        openedUrls.push(url);
+        const parsed = extractMediaLocator(url);
+        const created = {
+          id: nextCreatedTabId++,
+          active: active !== false,
+          windowId: 1,
+          pendingUrl: url,
+          url,
+          routeKey: parsed?.routeKey || "",
+        };
+        createdTabById.set(created.id, created);
+        createdTabs.push({ id: created.id, active: created.active, url });
+        if (created.active) {
+          activeTabId = created.id;
+          activeUrlValue = created.url;
+        }
+        return { ...created };
+      };
+      chrome.tabs.update = async (tabId, changes) => {
+        const created = createdTabById.get(tabId);
+        if (!created) throw new Error("Unknown created tab: " + tabId);
+        Object.assign(created, changes);
+        updatedTabs.push({ tabId, ...changes });
+        if (changes.active === true) {
+          activeTabId = tabId;
+          activeUrlValue = created.url;
+        }
+        return { ...created };
+      };
+      chrome.tabs.query = async () => [activeTab()];
+      chrome.tabs.get = async () => activeTab();
+      chrome.tabs.sendMessage = async (tabId, payload) => {
+        messages.push({ action: "tabs.sendMessage", tabId, payload });
+        return { success: true };
+      };
+      chrome.runtime.sendMessage = async (message) => {
+        messages.push(JSON.parse(JSON.stringify(message)));
+        if (message.action === "relayToContent") {
+          if (fixtureOptions.metadataRelayFailure) {
+            return { ...fixtureOptions.metadataRelayFailure };
+          }
+          const activeLocator = extractMediaLocator(activeUrlValue);
+          const metadataResponse = {
+            success: true,
+            response: {
+              ...(fixtureOptions.omitMetadataVideoId
+                ? {}
+                : {
+                    videoId:
+                      fixtureOptions.metadataVideoId ??
+                      activeLocator?.videoId ??
+                      "",
+                  }),
+              title: activeLocator?.routeKey === targetRouteKey
+                ? fixtureOptions.metadataTitle
+                : "Unrelated video",
+              channelName: "Target channel",
+              description: "Video description",
+              descriptionStatus: "present",
+              duration: 1800,
+              sourceLanguage: "en",
+            },
+          };
+          if (metadataRelayBlocked) {
+            metadataRelayBlocked = false;
+            resolveMetadataRelayStarted?.();
+            await new Promise((resolve) => {
+              releaseMetadataRelay = resolve;
+            });
+          }
+          return metadataResponse;
+        }
+        if (message.action === "resolveBilibiliMedia") {
+          return {
+            success: true,
+            mediaRef: {
+              ...targetLocator,
+              platform: "bilibili",
+              bvid: targetVideoId,
+              page: 2,
+              cid: 200,
+              mediaKey: targetMediaKey,
+              title: "Target video",
+              channelName: "Target channel",
+              description: "Video description",
+              descriptionStatus: "present",
+              duration: 1800,
+            },
+          };
+        }
+        if (message.action === "getNotes") {
+          return { success: true, notes: [targetNote] };
+        }
+        if (message.action === "upsertNoteSource") {
+          await YTD_NOTE_SOURCES.writeNoteSource(
+            chrome.storage.local,
+            message.source,
+          );
+          const persisted = await YTD_NOTE_SOURCES.readNoteSource(
+            chrome.storage.local,
+            message.source.mediaKey,
+          );
+          return { success: true, source: persisted };
+        }
+        if (message.action === "fetchTranscript") {
+          if (
+            message.supadataConsent === true &&
+            fixtureOptions.authorizedTranscriptSuccess
+          ) {
+            return {
+              success: true,
+              source: "supadata",
+              sourceAttempt: "SUPADATA",
+              selectedTrack: null,
+              transcript: [
+                {
+                  text: "Authorized target transcript",
+                  start: 0,
+                  duration: 2,
+                  language: "en",
+                },
+              ],
+              transcriptText: "Authorized target transcript",
+              transcriptTextTimestamped: "[0:00] Authorized target transcript",
+              language: "en",
+            };
+          }
+          if (message.supadataConsent === true && fixtureOptions.authorizedError) {
+            return {
+              success: false,
+              error: fixtureOptions.authorizedError,
+              message: "Authorized provider failed.",
+            };
+          }
+          return {
+            success: false,
+            error: "SUPADATA_CONSENT_REQUIRED",
+            message: "Choose whether to use Supadata.",
+          };
+        }
+        if (message.action === "cancelExportTranslationJob") {
+          return { success: true };
+        }
+        return { success: true };
+      };
+
+      currentConfigStatus = { hasAiKey: fixtureOptions.hasAiKey };
+      currentVideoId = sourceVideoId;
+      currentVideoUrl =
+        "https://www.youtube.com/watch?v=" + sourceVideoId;
+      currentMediaRef = {
+        platform: "youtube",
+        videoId: sourceVideoId,
+        mediaKey: sourceVideoId,
+        routeKey: "youtube:" + sourceVideoId,
+      };
+      currentRouteKey = "youtube:" + sourceVideoId;
+      currentVideoTitle = "Source video";
+      currentChannelName = "Source channel";
+      currentVideoDescription = "Source description";
+      currentVideoDescriptionState = "present";
+      currentVideoDuration = 1200;
+      currentVideoSourceLanguage = "en";
+      currentTranscript = [{ start: 0, text: "Source transcript" }];
+      currentTranscriptText = "Source transcript";
+      currentTranscriptTimestamped = "[0:00] Source transcript";
+      currentTranscriptLanguage = "en";
+      videoTabId = 101;
+      notesFilterShowAll = true;
+      currentNotesFilterVideoId = null;
+      showState("results");
+      setNotesFilter(true);
+
+      const fetchCount = () =>
+        messages.filter((message) => message.action === "fetchTranscript").length;
+      const noteLoadMessages = () =>
+        messages.filter((message) => message.action === "getNotes");
+      return {
+        targetVideoId,
+        targetMediaKey,
+        targetRouteKey,
+        targetUrl,
+        playTarget: () => playNote(targetNote),
+        playTargetForSupplement: () =>
+          playNote(targetNote, { captureMetadata: true }),
+        playTargetForCompleteExport: async () => {
+          currentNotesMode = "original";
+          const exportContinuation = createNoteExportContinuation([
+            targetMediaKey,
+          ]);
+          const groups = [
+            {
+              mediaKey: targetMediaKey,
+              representative: targetNote,
+              notes: [targetNote],
+            },
+          ];
+          const sourcesByKey = {};
+          const precheck = buildNotesExportPrecheck(
+            groups,
+            sourcesByKey,
+            currentNotesMode,
+          );
+          await grantNoteExportAuthorization(exportContinuation, {
+            groups,
+            sourcesByKey,
+            precheck,
+          });
+          return playNote(targetNote, {
+            captureMetadata: true,
+            exportContinuation,
+          });
+        },
+        inspectActive: () => checkCurrentTab(),
+        waitForMetadataRelay: () => metadataRelayStarted,
+        releaseMetadataRelay: () => {
+          const release = releaseMetadataRelay;
+          releaseMetadataRelay = null;
+          release?.();
+        },
+        openTranscript: () => switchTab("transcript"),
+        clickConsentPrimary: () => errorAction?.(),
+        clickConsentSecondary: () => errorSecondaryAction?.(),
+        navigateFront: (url) => handleFrontTabUrl(url),
+        setActiveVideo: (videoId) => {
+          activeUrlValue =
+            "https://www.youtube.com/watch?v=" + videoId +
+            (videoId === targetVideoId ? "&t=56s" : "");
+          activeTabId += 1;
+        },
+        setActiveTab: (url, tabId) => {
+          activeUrlValue = url;
+          activeTabId = tabId;
+        },
+        setHasAiKey: (value) => {
+          currentConfigStatus = { hasAiKey: value === true };
+        },
+        setCurrentVideo: (videoId) => {
+          currentVideoId = videoId;
+          currentRouteKey = "youtube:" + videoId;
+          currentMediaRef = {
+            platform: "youtube",
+            videoId,
+            mediaKey: videoId,
+            routeKey: currentRouteKey,
+          };
+          videoTabId = activeTabId;
+        },
+        snapshot: () => JSON.stringify({
+          activeTab: tabElements.find((entry) => entry.active)?.dataset.tab || null,
+          currentVideoId,
+          currentRouteKey,
+          videoTabId,
+          currentMediaRef: currentMediaRef
+            ? {
+                platform: currentMediaRef.platform,
+                mediaKey: currentMediaRef.mediaKey,
+                bvid: currentMediaRef.bvid || "",
+                cid: currentMediaRef.cid || 0,
+                page: currentMediaRef.page || 0,
+              }
+            : null,
+          notesFilterShowAll,
+          currentNotesFilterVideoId:
+            currentNotesFilterVideoId === undefined
+              ? "undefined"
+              : currentNotesFilterVideoId,
+          resultsVisible: element("resultsState").style.display !== "none",
+          errorVisible: element("errorState").style.display !== "none",
+          panelClosed,
+          errorTitle: element("errorTitle").textContent,
+          errorSecondaryText: element("errorSecondaryBtn").textContent,
+          errorSecondaryHidden: element("errorSecondaryBtn").hidden,
+          noteExportStatus: element("notesExportStatus").textContent,
+          fetchCount: fetchCount(),
+          noteExportDownloads,
+          metadataRelayCount: messages.filter(
+            (message) =>
+              message.action === "relayToContent" &&
+              message.payload?.action === "getVideoInfo",
+          ).length,
+          bilibiliResolveCount: messages.filter(
+            (message) => message.action === "resolveBilibiliMedia",
+          ).length,
+          upsertCount: messages.filter(
+            (message) => message.action === "upsertNoteSource",
+          ).length,
+          supadataConsents: messages
+            .filter((message) => message.action === "fetchTranscript")
+            .map((message) => message.supadataConsent),
+          currentTranscriptText,
+          noteLoadCount: noteLoadMessages().length,
+          noteLoadVideoIds: noteLoadMessages().map((message) =>
+            message.videoId === undefined ? "undefined" : message.videoId),
+          openedUrls,
+          createdTabs,
+          updatedTabs,
+          sessionKeys: Object.keys(
+            chrome.storage.session.snapshot?.() || {},
+          ).sort(),
+          sessionPhase:
+            Object.values(chrome.storage.session.snapshot?.() || {})[0]?.phase || "",
+          sessionCaptureMetadata:
+            Object.values(chrome.storage.session.snapshot?.() || {})[0]
+              ?.captureMetadata === true,
+          backgroundActions: messages.map((message) => message.action),
+          renderedNotes,
+          tabSeekCount: messages.filter(
+            (message) => message.action === "tabs.sendMessage",
+          ).length,
+          tabSeekTabIds: messages
+            .filter((message) => message.action === "tabs.sendMessage")
+            .map((message) => message.tabId),
+          runtimeSeekCount: messages.filter(
+            (message) =>
+              message.action === "relayToContent" &&
+              message.payload?.action === "seekTo",
+          ).length,
+        }),
+      };
+    })()
+  `);
+}
+
 test("Header exposes tab-specific transcript, overview, and notes language modes", () => {
   const html = read("sidepanel.html");
   const css = read("sidepanel.css");
@@ -456,7 +4250,29 @@ test("Header exposes tab-specific transcript, overview, and notes language modes
   assert.match(css, /\.language-mode-control\[hidden\]\s*\{[^}]*display:\s*none/);
   assert.match(
     js,
-    /function updateHeaderLanguageControlsVisibility\(\)[\s\S]*?transcriptControl\.hidden = !\(showingResults && activeTab === "transcript"\)[\s\S]*?overviewControl\.hidden = !\(showingResults && activeTab === "overview"\)[\s\S]*?notesControl\.hidden = !\(showingResults && activeTab === "notes"\)/,
+    /function updateHeaderLanguageControlsVisibility\(\)[\s\S]*?const isBilibili = currentPlatformIsBilibili\(\)[\s\S]*?activeTab === "transcript" &&\s*!isBilibili[\s\S]*?activeTab === "overview" &&\s*!isBilibili[\s\S]*?notesControl\.hidden = !\(showingResults && activeTab === "notes"\)/,
+  );
+  // Bilibili notes keep the language control: the notes line closes right after
+  // the "notes" tab check with no platform gate (positive match above pins it).
+  assert.match(
+    js,
+    /function currentPlatformIsBilibili\(\)[\s\S]*?currentMediaRef\?\.platform === "bilibili"/,
+  );
+  // applyMediaLanguageDefaults must clear per-button hidden state so a switch
+  // back to YouTube never inherits a Bilibili button that was left hidden.
+  assert.match(
+    js,
+    /function applyMediaLanguageDefaults\(\)[\s\S]*?currentNotesMode = isBilibili \? "zh" : "bilingual"[\s\S]*?\.transcript-mode-btn, \.overview-mode-btn, \.notes-mode-btn[\s\S]*?button\.hidden = false/,
+  );
+  assert.doesNotMatch(
+    js,
+    /button\.hidden = directChinese/,
+  );
+  // Bilibili original-mode badge folds the language into the source label
+  // instead of appending the redundant 原文 mode word.
+  assert.match(
+    js,
+    /function transcriptOriginalBadgeText\(\)[\s\S]*?currentPlatformIsBilibili\(\)[\s\S]*?\$\{transcriptSourceLabel\(\)\}（\$\{language\}）/,
   );
   assert.match(js, /function showState\(state\)[\s\S]*?updateHeaderLanguageControlsVisibility\(\)/);
   assert.match(js, /function switchTab\(tabName\)[\s\S]*?updateHeaderLanguageControlsVisibility\(\)/);
@@ -473,14 +4289,14 @@ test("Header exposes tab-specific transcript, overview, and notes language modes
     js,
     /function ensureNotesChinese\(\)[\s\S]*?await sendTranslationMessage\(\{[\s\S]*?action: "translateNotes"/,
   );
-  assert.match(js, /const REQUIRED_RUNTIME_PROTOCOL_VERSION = 9/);
+  assert.match(js, /const REQUIRED_RUNTIME_PROTOCOL_VERSION = 11/);
   assert.match(
     js,
     /runtimeProtocolVersion\s*!==\s*REQUIRED_RUNTIME_PROTOCOL_VERSION[\s\S]*?showRuntimeVersionError\(\)/,
   );
   assert.match(js, /扩展后台未响应原文翻译请求，请重新加载扩展/);
   const backgroundSource = read("background.js");
-  assert.match(backgroundSource, /const RUNTIME_PROTOCOL_VERSION = 9/);
+  assert.match(backgroundSource, /const RUNTIME_PROTOCOL_VERSION = 11/);
   assert.match(
     backgroundSource,
     /runtimeProtocolVersion: RUNTIME_PROTOCOL_VERSION/,
@@ -602,6 +4418,614 @@ test("duplicate digest starts for the same video share one in-flight task", asyn
   assert.equal(await videoB, "b");
   assert.equal(await videoA, "a");
   assert.equal(await duplicateVideoA, "a");
+});
+
+test("opening another video's saved note stays in All Notes without requesting Supadata", async () => {
+  const runtime = loadSidepanelRuntime();
+  const fixture = installNoteNavigationFixture(runtime);
+
+  await fixture.playTarget();
+  await fixture.inspectActive();
+  await nextTurn();
+
+  const snapshot = JSON.parse(fixture.snapshot());
+  assert.equal(snapshot.fetchCount, 0);
+  assert.equal(snapshot.errorTitle, "");
+  assert.equal(snapshot.activeTab, "notes");
+  assert.equal(snapshot.resultsVisible, true);
+  assert.equal(snapshot.currentVideoId, fixture.targetVideoId);
+  assert.equal(snapshot.currentRouteKey, `youtube:${fixture.targetVideoId}`);
+  assert.equal(snapshot.notesFilterShowAll, true);
+  assert.equal(snapshot.currentNotesFilterVideoId, null);
+  assert.deepEqual(snapshot.noteLoadVideoIds, [null]);
+  assert.deepEqual(snapshot.openedUrls, [
+    `https://www.youtube.com/watch?v=${fixture.targetVideoId}&t=56s`,
+  ]);
+  assert.deepEqual(snapshot.createdTabs.map(({ active }) => active), [false]);
+  assert.deepEqual(snapshot.updatedTabs, [
+    { tabId: snapshot.createdTabs[0].id, active: true },
+  ]);
+  assert.equal(snapshot.sessionKeys.length, 1);
+});
+
+test("supplementing a YouTube note reads page metadata once and never fetches subtitles", async () => {
+  const storageLocal = createMemoryStorageArea();
+  const runtime = loadSidepanelRuntime({ storageLocal });
+  const fixture = installNoteNavigationFixture(runtime, { hasAiKey: false });
+
+  await fixture.playTargetForSupplement();
+  await fixture.inspectActive();
+  await nextTurn();
+
+  const snapshot = JSON.parse(fixture.snapshot());
+  assert.equal(snapshot.metadataRelayCount, 1);
+  assert.equal(snapshot.bilibiliResolveCount, 0);
+  assert.equal(snapshot.upsertCount, 1);
+  assert.equal(snapshot.fetchCount, 0);
+  assert.equal(snapshot.sessionCaptureMetadata, false);
+  assert.equal(snapshot.activeTab, "notes");
+
+  await fixture.inspectActive();
+  await nextTurn();
+  const repeated = JSON.parse(fixture.snapshot());
+  assert.equal(repeated.metadataRelayCount, 1, "completed capture is not repeated");
+  assert.equal(repeated.fetchCount, 0);
+
+  const persisted = await require("../note-sources.js").readNoteSource(
+    storageLocal,
+    fixture.targetMediaKey,
+  );
+  assert.equal(persisted.descriptionStatus, "present");
+  assert.equal(persisted.descriptionTruncated, false);
+  assert.equal(JSON.parse(fixture.snapshot()).fetchCount, 0);
+});
+
+test("one complete-export click captures missing metadata and automatically downloads", async () => {
+  const storageLocal = createMemoryStorageArea();
+  const runtime = loadSidepanelRuntime({ storageLocal });
+  const fixture = installNoteNavigationFixture(runtime, { hasAiKey: false });
+
+  await fixture.playTargetForCompleteExport();
+  await fixture.inspectActive();
+  for (let index = 0; index < 5; index += 1) await nextTurn();
+
+  const snapshot = JSON.parse(fixture.snapshot());
+  assert.equal(snapshot.metadataRelayCount, 1);
+  assert.equal(snapshot.upsertCount >= 1, true);
+  assert.equal(snapshot.noteExportDownloads, 1);
+  assert.equal(snapshot.fetchCount, 0);
+  assert.equal(snapshot.supadataConsents.length, 0);
+  assert.equal(snapshot.sessionCaptureMetadata, false);
+});
+
+test("metadata supplement requires a refreshed content script even when a legacy title matches", async () => {
+  const matchingRuntime = loadSidepanelRuntime();
+  const matching = installNoteNavigationFixture(matchingRuntime, {
+    omitMetadataVideoId: true,
+  });
+  await matching.playTargetForSupplement();
+  await matching.inspectActive();
+  await nextTurn();
+  const matched = JSON.parse(matching.snapshot());
+  assert.equal(matched.upsertCount, 0);
+  assert.equal(matched.fetchCount, 0);
+  assert.equal(matched.sessionCaptureMetadata, true);
+  assert.match(matched.noteExportStatus, /刷新页面后再补充/);
+
+  const staleRuntime = loadSidepanelRuntime();
+  const stale = installNoteNavigationFixture(staleRuntime, {
+    omitMetadataVideoId: true,
+    metadataTitle: "Different stale video",
+  });
+  await stale.playTargetForSupplement();
+  await stale.inspectActive();
+  await nextTurn();
+  const rejected = JSON.parse(stale.snapshot());
+  assert.equal(rejected.upsertCount, 0);
+  assert.equal(rejected.fetchCount, 0);
+  assert.equal(rejected.sessionCaptureMetadata, true);
+  assert.match(rejected.noteExportStatus, /刷新当前视频页/);
+});
+
+test("metadata supplement preserves the relay's actionable page-state error", async () => {
+  const runtime = loadSidepanelRuntime();
+  const fixture = installNoteNavigationFixture(runtime, {
+    metadataRelayFailure: {
+      success: false,
+      error: "PAGE_CONTEXT_CHANGED",
+      message: "视频页面正在加载，请稍后重试。",
+    },
+  });
+  await fixture.playTargetForSupplement();
+  await fixture.inspectActive();
+  await nextTurn();
+
+  const snapshot = JSON.parse(fixture.snapshot());
+  assert.equal(snapshot.upsertCount, 0);
+  assert.equal(snapshot.fetchCount, 0);
+  assert.equal(snapshot.sessionCaptureMetadata, true);
+  assert.equal(snapshot.noteExportStatus, "视频页面正在加载，请稍后重试。");
+});
+
+test("metadata supplement preserves an explicit refresh requirement", async () => {
+  const runtime = loadSidepanelRuntime();
+  const fixture = installNoteNavigationFixture(runtime, {
+    metadataRelayFailure: {
+      success: false,
+      error: "PAGE_REFRESH_REQUIRED",
+      message: "DigestDock 已更新，请刷新当前 YouTube 页面后重试。",
+    },
+  });
+  await fixture.playTargetForSupplement();
+  await fixture.inspectActive();
+  await nextTurn();
+
+  const snapshot = JSON.parse(fixture.snapshot());
+  assert.equal(snapshot.upsertCount, 0);
+  assert.equal(snapshot.fetchCount, 0);
+  assert.equal(snapshot.sessionCaptureMetadata, true);
+  assert.equal(
+    snapshot.noteExportStatus,
+    "DigestDock 已更新，请刷新当前 YouTube 页面后重试。",
+  );
+});
+
+test("metadata supplement rejects an explicit response for another video", async () => {
+  const runtime = loadSidepanelRuntime();
+  const fixture = installNoteNavigationFixture(runtime, {
+    metadataVideoId: "different-video",
+  });
+  await fixture.playTargetForSupplement();
+  await fixture.inspectActive();
+  await nextTurn();
+
+  const snapshot = JSON.parse(fixture.snapshot());
+  assert.equal(snapshot.upsertCount, 0);
+  assert.equal(snapshot.fetchCount, 0);
+  assert.equal(snapshot.sessionCaptureMetadata, true);
+  assert.match(snapshot.noteExportStatus, /页面已切换，未写入旧视频资料/);
+});
+
+test("metadata supplement never writes after the target tab navigates during relay", async () => {
+  const storageLocal = createMemoryStorageArea();
+  const runtime = loadSidepanelRuntime({ storageLocal });
+  const fixture = installNoteNavigationFixture(runtime, {
+    deferMetadataRelay: true,
+  });
+  await fixture.playTargetForSupplement();
+
+  const inspection = fixture.inspectActive();
+  await fixture.waitForMetadataRelay();
+  const openedTabId = JSON.parse(fixture.snapshot()).createdTabs[0].id;
+  fixture.setActiveTab(
+    "https://www.youtube.com/watch?v=navigated-away",
+    openedTabId,
+  );
+  fixture.releaseMetadataRelay();
+  await inspection;
+  await nextTurn();
+
+  const snapshot = JSON.parse(fixture.snapshot());
+  assert.equal(snapshot.upsertCount, 0);
+  assert.equal(snapshot.fetchCount, 0);
+  assert.equal(
+    await require("../note-sources.js").readNoteSource(
+      storageLocal,
+      fixture.targetMediaKey,
+    ),
+    null,
+  );
+});
+
+test("supplementing the ordinary current video works without a transcript or note-only context", async () => {
+  const runtime = loadSidepanelRuntime();
+  const fixture = installNoteNavigationFixture(runtime, { hasAiKey: false });
+  fixture.setActiveTab(fixture.targetUrl, 909);
+  fixture.setCurrentVideo(fixture.targetVideoId);
+
+  await fixture.playTargetForSupplement();
+  await nextTurn();
+
+  const snapshot = JSON.parse(fixture.snapshot());
+  assert.equal(snapshot.metadataRelayCount, 1);
+  assert.equal(snapshot.upsertCount, 1);
+  assert.equal(snapshot.fetchCount, 0);
+  assert.deepEqual(snapshot.openedUrls, []);
+});
+
+test("supplementing a Bilibili P2 note keeps the exact CID and never uses Supadata", async () => {
+  const runtime = loadSidepanelRuntime();
+  const fixture = installNoteNavigationFixture(runtime, {
+    targetPlatform: "bilibili",
+    targetVideoId: "BV1e3411j7ZM",
+    targetMediaKey: "bilibili:BV1e3411j7ZM:200",
+    targetUrl: "https://www.bilibili.com/video/BV1e3411j7ZM/?p=2&t=56",
+    hasAiKey: false,
+  });
+
+  await fixture.playTargetForSupplement();
+  await fixture.inspectActive();
+  await nextTurn();
+
+  const snapshot = JSON.parse(fixture.snapshot());
+  assert.equal(snapshot.bilibiliResolveCount, 1);
+  assert.equal(snapshot.metadataRelayCount, 0);
+  assert.equal(snapshot.upsertCount, 1);
+  assert.equal(snapshot.fetchCount, 0);
+  assert.equal(snapshot.currentVideoId, fixture.targetMediaKey);
+  assert.equal(snapshot.sessionCaptureMetadata, false);
+});
+
+test("duplicate navigation events stay note-only until transcript is requested explicitly", async () => {
+  const runtime = loadSidepanelRuntime();
+  const fixture = installNoteNavigationFixture(runtime);
+
+  await fixture.playTarget();
+  await fixture.inspectActive();
+  // New tabs commonly emit activation, URL and complete events. A consumed
+  // one-shot intent must therefore leave a route-scoped note-only state; a
+  // second automatic inspection must not immediately reopen Supadata consent.
+  await fixture.inspectActive();
+  await nextTurn();
+  assert.equal(JSON.parse(fixture.snapshot()).fetchCount, 0);
+
+  await fixture.openTranscript();
+  await nextTurn();
+  await nextTurn();
+  const afterExplicitTranscript = JSON.parse(fixture.snapshot());
+  assert.equal(afterExplicitTranscript.fetchCount, 1);
+  assert.equal(afterExplicitTranscript.activeTab, "transcript");
+  assert.equal(
+    afterExplicitTranscript.errorTitle,
+    "是否使用 Supadata 获取字幕？",
+  );
+  assert.equal(afterExplicitTranscript.errorSecondaryText, "返回笔记");
+  assert.deepEqual(afterExplicitTranscript.supadataConsents, [false]);
+});
+
+test("declining consent after a saved-note jump returns to All Notes without a third-party request", async () => {
+  const runtime = loadSidepanelRuntime();
+  const fixture = installNoteNavigationFixture(runtime);
+
+  await fixture.playTarget();
+  await fixture.inspectActive();
+  await fixture.openTranscript();
+  await nextTurn();
+  await nextTurn();
+
+  const consent = JSON.parse(fixture.snapshot());
+  assert.equal(consent.errorTitle, "是否使用 Supadata 获取字幕？");
+  assert.equal(consent.errorSecondaryText, "返回笔记");
+  assert.equal(consent.errorSecondaryHidden, false);
+  assert.deepEqual(consent.supadataConsents, [false]);
+  assert.equal(consent.sessionPhase, "active");
+
+  await fixture.clickConsentSecondary();
+  await nextTurn();
+
+  const returned = JSON.parse(fixture.snapshot());
+  assert.equal(returned.activeTab, "notes");
+  assert.equal(returned.resultsVisible, true);
+  assert.equal(returned.errorVisible, false);
+  assert.equal(returned.notesFilterShowAll, true);
+  assert.equal(returned.currentNotesFilterVideoId, null);
+  assert.equal(returned.sessionPhase, "active");
+  assert.deepEqual(returned.supadataConsents, [false]);
+  assert.deepEqual(returned.noteLoadVideoIds, [null, null]);
+
+  // An ordinary automatic inspection must continue to honor the restored
+  // notes-only context instead of treating the decline as a digest request.
+  await fixture.inspectActive();
+  await nextTurn();
+  const afterAutomaticCheck = JSON.parse(fixture.snapshot());
+  assert.equal(afterAutomaticCheck.activeTab, "notes");
+  assert.deepEqual(afterAutomaticCheck.supadataConsents, [false]);
+
+  // A later explicit Transcript click starts a fresh unconsented probe. It
+  // still cannot authorize Supadata without another primary-button click.
+  await fixture.openTranscript();
+  await nextTurn();
+  await nextTurn();
+  const secondConsent = JSON.parse(fixture.snapshot());
+  assert.equal(secondConsent.errorTitle, "是否使用 Supadata 获取字幕？");
+  assert.deepEqual(secondConsent.supadataConsents, [false, false]);
+});
+
+test("confirming consent after a saved-note jump is exactly false then true and clears the context on success", async () => {
+  const runtime = loadSidepanelRuntime();
+  const fixture = installNoteNavigationFixture(runtime, {
+    authorizedTranscriptSuccess: true,
+  });
+
+  await fixture.playTarget();
+  await fixture.inspectActive();
+  await fixture.openTranscript();
+  await nextTurn();
+  await nextTurn();
+  assert.deepEqual(JSON.parse(fixture.snapshot()).supadataConsents, [false]);
+
+  await fixture.clickConsentPrimary();
+  await nextTurn();
+
+  const completed = JSON.parse(fixture.snapshot());
+  assert.deepEqual(completed.supadataConsents, [false, true]);
+  assert.equal(completed.currentTranscriptText, "Authorized target transcript");
+  assert.equal(completed.activeTab, "transcript");
+  assert.equal(completed.resultsVisible, true);
+  assert.deepEqual(completed.sessionKeys, []);
+});
+
+test("a cached transcript opened from saved notes needs no consent and clears the notes-only context", async () => {
+  const runtime = loadSidepanelRuntime();
+  const fixture = installNoteNavigationFixture(runtime, {
+    cachedTranscript: true,
+  });
+
+  await fixture.playTarget();
+  await fixture.inspectActive();
+  await fixture.openTranscript();
+  await nextTurn();
+  await nextTurn();
+
+  const completed = JSON.parse(fixture.snapshot());
+  assert.deepEqual(completed.supadataConsents, []);
+  assert.equal(completed.currentTranscriptText, "Cached target transcript");
+  assert.equal(completed.activeTab, "transcript");
+  assert.equal(completed.resultsVisible, true);
+  assert.deepEqual(completed.sessionKeys, []);
+});
+
+test("a provider failure after saved-note consent keeps a safe return to All Notes", async () => {
+  const runtime = loadSidepanelRuntime();
+  const fixture = installNoteNavigationFixture(runtime, {
+    authorizedError: "RATE_LIMITED",
+  });
+
+  await fixture.playTarget();
+  await fixture.inspectActive();
+  await fixture.openTranscript();
+  await nextTurn();
+  await nextTurn();
+  await fixture.clickConsentPrimary();
+  await nextTurn();
+
+  const failed = JSON.parse(fixture.snapshot());
+  assert.deepEqual(failed.supadataConsents, [false, true]);
+  assert.equal(failed.errorTitle, "Supadata 暂时限流");
+  assert.equal(failed.errorSecondaryText, "返回笔记");
+  assert.equal(failed.errorSecondaryHidden, false);
+  assert.equal(failed.sessionPhase, "active");
+
+  await fixture.clickConsentSecondary();
+  await nextTurn();
+  const returned = JSON.parse(fixture.snapshot());
+  assert.equal(returned.activeTab, "notes");
+  assert.equal(returned.resultsVisible, true);
+  assert.deepEqual(returned.supadataConsents, [false, true]);
+});
+
+test("a stale consent return cannot resurrect notes-only state on another route", async () => {
+  const runtime = loadSidepanelRuntime();
+  const fixture = installNoteNavigationFixture(runtime);
+
+  await fixture.playTarget();
+  await fixture.inspectActive();
+  await fixture.openTranscript();
+  await nextTurn();
+  await nextTurn();
+  const consent = JSON.parse(fixture.snapshot());
+  const targetTabId = consent.createdTabs[0].id;
+
+  fixture.setActiveTab(
+    "https://www.youtube.com/watch?v=another-video",
+    targetTabId,
+  );
+  const returned = await fixture.clickConsentSecondary();
+  await nextTurn();
+
+  assert.equal(returned, false);
+  const stale = JSON.parse(fixture.snapshot());
+  assert.equal(stale.resultsVisible, false);
+  assert.equal(stale.errorVisible, true);
+  assert.deepEqual(stale.sessionKeys, []);
+  assert.deepEqual(stale.supadataConsents, [false]);
+});
+
+test("saved-note navigation suppression is bound to one target route and is not reused", async () => {
+  const unrelatedRuntime = loadSidepanelRuntime();
+  const unrelated = installNoteNavigationFixture(unrelatedRuntime);
+  await unrelated.playTarget();
+  unrelated.setActiveVideo("unrelated-video");
+  await unrelated.inspectActive();
+  await nextTurn();
+  assert.equal(
+    JSON.parse(unrelated.snapshot()).fetchCount,
+    1,
+    "a pending target-video note intent must not suppress another video",
+  );
+
+  const oneShotRuntime = loadSidepanelRuntime();
+  const oneShot = installNoteNavigationFixture(oneShotRuntime);
+  await oneShot.playTarget();
+  await oneShot.inspectActive();
+  await nextTurn();
+  assert.equal(JSON.parse(oneShot.snapshot()).fetchCount, 0);
+
+  // Leaving the matched route ends its note-only navigation session. Returning
+  // later without another saved-note click must use the ordinary transcript
+  // flow rather than reusing the old intent.
+  oneShot.setActiveVideo("later-video");
+  await oneShot.inspectActive();
+  oneShot.setActiveVideo(oneShot.targetVideoId);
+  await oneShot.inspectActive();
+  await nextTurn();
+  assert.equal(JSON.parse(oneShot.snapshot()).fetchCount, 2);
+});
+
+test("playing a saved note for the current video still seeks without opening a tab", async () => {
+  const runtime = loadSidepanelRuntime();
+  const fixture = installNoteNavigationFixture(runtime);
+  fixture.setActiveTab(fixture.targetUrl, 303);
+  fixture.setCurrentVideo(fixture.targetVideoId);
+
+  await fixture.playTarget();
+  await nextTurn();
+
+  const snapshot = JSON.parse(fixture.snapshot());
+  assert.deepEqual(snapshot.openedUrls, []);
+  assert.equal(snapshot.fetchCount, 0);
+  assert.equal(snapshot.tabSeekCount + snapshot.runtimeSeekCount, 1);
+  assert.deepEqual(snapshot.tabSeekTabIds, [303]);
+});
+
+test("an active saved-note context survives side-panel reconstruction without fetching a transcript", async () => {
+  const sharedSession = createMemoryStorageArea();
+  const firstRuntime = loadSidepanelRuntime({ storageSession: sharedSession });
+  const first = installNoteNavigationFixture(firstRuntime);
+
+  await first.playTarget();
+  await first.inspectActive();
+  await nextTurn();
+  const firstSnapshot = JSON.parse(first.snapshot());
+  assert.equal(firstSnapshot.fetchCount, 0);
+  assert.equal(Object.values(sharedSession.snapshot())[0]?.phase, "active");
+
+  // A newly constructed side panel starts with no in-memory intent. It must
+  // hydrate the active tab+route context from chrome.storage.session and keep
+  // the local All Notes view instead of treating reconstruction as a new visit.
+  const rebuiltRuntime = loadSidepanelRuntime({ storageSession: sharedSession });
+  const rebuilt = installNoteNavigationFixture(rebuiltRuntime);
+  rebuilt.setActiveTab(
+    first.targetUrl,
+    firstSnapshot.createdTabs[0].id,
+  );
+  await rebuilt.inspectActive();
+  await nextTurn();
+
+  const rebuiltSnapshot = JSON.parse(rebuilt.snapshot());
+  assert.equal(rebuiltSnapshot.fetchCount, 0);
+  assert.equal(rebuiltSnapshot.errorTitle, "");
+  assert.equal(rebuiltSnapshot.activeTab, "notes");
+  assert.equal(rebuiltSnapshot.currentVideoId, first.targetMediaKey);
+  assert.equal(rebuiltSnapshot.notesFilterShowAll, true);
+  assert.deepEqual(rebuiltSnapshot.noteLoadVideoIds, [null]);
+});
+
+test("a Bilibili P2 note jump preserves its CID media identity and stays local without an AI key", async () => {
+  const runtime = loadSidepanelRuntime();
+  const fixture = installNoteNavigationFixture(runtime, {
+    targetPlatform: "bilibili",
+    targetVideoId: "BV1e3411j7ZM",
+    targetMediaKey: "bilibili:BV1e3411j7ZM:200",
+    targetUrl: "https://www.bilibili.com/video/BV1e3411j7ZM/?p=2&t=56",
+    hasAiKey: false,
+  });
+
+  await fixture.playTarget();
+  await fixture.inspectActive();
+  await nextTurn();
+
+  const snapshot = JSON.parse(fixture.snapshot());
+  assert.equal(snapshot.fetchCount, 0);
+  assert.equal(snapshot.errorTitle, "");
+  assert.equal(snapshot.currentVideoId, "bilibili:BV1e3411j7ZM:200");
+  assert.equal(snapshot.currentRouteKey, "bilibili:BV1e3411j7ZM:p2");
+  assert.equal(snapshot.currentMediaRef.platform, "bilibili");
+  assert.equal(
+    snapshot.currentMediaRef.mediaKey,
+    "bilibili:BV1e3411j7ZM:200",
+  );
+  assert.equal(snapshot.currentMediaRef.bvid, "BV1e3411j7ZM");
+  assert.equal(snapshot.currentMediaRef.page, 2);
+  assert.equal(snapshot.activeTab, "notes");
+  assert.equal(snapshot.notesFilterShowAll, true);
+  assert.deepEqual(snapshot.noteLoadVideoIds, [null]);
+  assert.deepEqual(snapshot.backgroundActions, ["getNotes"]);
+});
+
+test("a matching saved-note jump can read local notes when no AI provider key is configured", async () => {
+  const runtime = loadSidepanelRuntime();
+  const fixture = installNoteNavigationFixture(runtime, { hasAiKey: false });
+
+  await fixture.playTarget();
+  await fixture.inspectActive();
+  await nextTurn();
+
+  const snapshot = JSON.parse(fixture.snapshot());
+  assert.equal(snapshot.fetchCount, 0);
+  assert.equal(snapshot.errorTitle, "");
+  assert.equal(snapshot.resultsVisible, true);
+  assert.equal(snapshot.activeTab, "notes");
+  assert.deepEqual(snapshot.noteLoadVideoIds, [null]);
+  assert.deepEqual(snapshot.backgroundActions, ["getNotes"]);
+});
+
+test("leaving an active saved-note route for an unsupported page clears the session context", async () => {
+  const sharedSession = createMemoryStorageArea();
+  const runtime = loadSidepanelRuntime({ storageSession: sharedSession });
+  const fixture = installNoteNavigationFixture(runtime);
+
+  await fixture.playTarget();
+  await fixture.inspectActive();
+  assert.equal(Object.values(sharedSession.snapshot())[0]?.phase, "active");
+
+  fixture.navigateFront("https://example.com/not-a-video");
+  await nextTurn();
+  await nextTurn();
+
+  const snapshot = JSON.parse(fixture.snapshot());
+  assert.equal(snapshot.panelClosed, true);
+  assert.deepEqual(snapshot.sessionKeys, []);
+  assert.deepEqual(sharedSession.snapshot(), {});
+});
+
+test("activating the same video in another tab clears note-only state and rebinds later seeks", async () => {
+  const timers = new Map();
+  let nextTimerId = 1;
+  const runtime = loadSidepanelRuntime({
+    setTimeoutImpl(callback, delay) {
+      const id = nextTimerId++;
+      timers.set(id, { callback, delay, cancelled: false });
+      return id;
+    },
+    clearTimeoutImpl(id) {
+      if (timers.has(id)) timers.get(id).cancelled = true;
+    },
+  });
+  const fixture = installNoteNavigationFixture(runtime);
+
+  await fixture.playTarget();
+  await fixture.inspectActive();
+  const noteOnly = JSON.parse(fixture.snapshot());
+  assert.equal(noteOnly.fetchCount, 0);
+  assert.equal(noteOnly.videoTabId, noteOnly.createdTabs[0].id);
+  assert.equal(noteOnly.sessionKeys.length, 1);
+
+  const secondTabId = 909;
+  fixture.setActiveTab(fixture.targetUrl, secondTabId);
+  await runtime.tabActivatedListeners[0]({ tabId: secondTabId, windowId: 1 });
+  await nextTurn();
+
+  const afterActivation = JSON.parse(fixture.snapshot());
+  assert.deepEqual(afterActivation.sessionKeys, []);
+  const scheduledRefreshes = [...timers.values()].filter(
+    (timer) => !timer.cancelled,
+  );
+  assert.equal(scheduledRefreshes.length, 1);
+  assert.equal(scheduledRefreshes[0].delay, 600);
+
+  scheduledRefreshes[0].callback();
+  await nextTurn();
+  await nextTurn();
+  const afterRefresh = JSON.parse(fixture.snapshot());
+  assert.equal(afterRefresh.videoTabId, secondTabId);
+  assert.equal(afterRefresh.fetchCount, 1);
+
+  await fixture.playTarget();
+  await nextTurn();
+  const afterPlay = JSON.parse(fixture.snapshot());
+  assert.deepEqual(afterPlay.tabSeekTabIds, [secondTabId]);
+  assert.equal(afterPlay.openedUrls.length, 1);
 });
 
 test("Supadata is requested only after the user confirms the third-party action", async () => {
@@ -2782,6 +7206,167 @@ test("a note saved before the first caption uses the first line instead of the l
   assert.match(storedNotes[0].text, /^第一条字幕/);
 });
 
+test("saving a YouTube note also freezes exact page metadata for later export", async () => {
+  const videoId = "save-source-yt";
+  const noteSources = require("../note-sources.js");
+  const storage = createMemoryStorage({
+    ytd_settings: {},
+    ytd_notes: [],
+    [`digest_${videoId}`]: {
+      transcriptSourcePolicyVersion: 4,
+      transcriptSource: "supadata",
+      transcriptLanguage: "zh-CN",
+      transcript: [
+        { start: 0, text: "保存笔记时同时保存页面资料。", language: "zh-CN" },
+      ],
+    },
+  });
+  const background = loadBackgroundHelpers({
+    storageGetImpl: storage.get,
+    storageSetImpl: storage.set,
+    storageRemoveImpl: storage.remove,
+    storageClearImpl: storage.clear,
+    scriptingImpl: {
+      async executeScript() {
+        return [{
+          result: {
+            videoId,
+            title: "精确页面标题",
+            channelName: "精确频道",
+            description: "这是完整的视频简介。",
+            descriptionStatus: "present",
+            descriptionTruncated: false,
+            duration: 900,
+            sourceLanguage: "en",
+          },
+        }];
+      },
+    },
+  });
+
+  const result = await background.handleSaveNote(
+    videoId,
+    1,
+    "按钮标题",
+    "按钮频道",
+    `https://www.youtube.com/watch?v=${videoId}`,
+    77,
+  );
+
+  assert.equal(result.success, true);
+  const source = await noteSources.readNoteSource(storage, videoId);
+  assert.equal(source.titleOriginal, "精确页面标题");
+  assert.equal(source.channelName, "精确频道");
+  assert.equal(source.canonicalUrl, `https://www.youtube.com/watch?v=${videoId}`);
+  assert.equal(source.descriptionOriginal, "这是完整的视频简介。");
+  assert.equal(source.descriptionStatus, "present");
+  assert.equal(source.descriptionTruncated, false);
+  assert.equal(source.sourceLanguage, "zh-CN", "actual caption language wins");
+  assert.equal(source.transcriptOriginal.length, 1);
+});
+
+test("a stale YouTube player cannot block the note or attach another video's source", async () => {
+  const videoId = "save-source-current";
+  const noteSources = require("../note-sources.js");
+  const storage = createMemoryStorage({
+    ytd_settings: {},
+    ytd_notes: [],
+    [`digest_${videoId}`]: {
+      transcriptSourcePolicyVersion: 4,
+      transcriptSource: "supadata",
+      transcriptLanguage: "zh-CN",
+      transcript: [{ start: 0, text: "当前视频字幕。", language: "zh-CN" }],
+    },
+  });
+  const background = loadBackgroundHelpers({
+    storageGetImpl: storage.get,
+    storageSetImpl: storage.set,
+    storageRemoveImpl: storage.remove,
+    storageClearImpl: storage.clear,
+    scriptingImpl: {
+      async executeScript() {
+        return [{
+          result: {
+            videoId: "different-video",
+            title: "错误视频",
+            channelName: "错误频道",
+            description: "错误简介",
+            descriptionStatus: "present",
+            descriptionTruncated: false,
+          },
+        }];
+      },
+    },
+  });
+
+  const result = await background.handleSaveNote(
+    videoId,
+    1,
+    "当前视频",
+    "当前频道",
+    `https://www.youtube.com/watch?v=${videoId}`,
+    78,
+  );
+
+  assert.equal(result.success, true);
+  assert.equal((await storage.get("ytd_notes")).ytd_notes.length, 1);
+  assert.equal(await noteSources.readNoteSource(storage, videoId), null);
+  assert.equal(await noteSources.readNoteSource(storage, "different-video"), null);
+});
+
+test("source persistence failure never reverses a successful note save", async () => {
+  const videoId = "save-source-failure";
+  const noteSources = require("../note-sources.js");
+  const storage = createMemoryStorage({
+    ytd_settings: {},
+    ytd_notes: [],
+    [`digest_${videoId}`]: {
+      transcriptSourcePolicyVersion: 4,
+      transcriptSource: "supadata",
+      transcriptLanguage: "zh-CN",
+      transcript: [{ start: 0, text: "笔记应继续保存。", language: "zh-CN" }],
+    },
+  });
+  const background = loadBackgroundHelpers({
+    storageGetImpl: storage.get,
+    storageSetImpl: storage.set,
+    storageRemoveImpl: storage.remove,
+    storageClearImpl: storage.clear,
+    noteSourcesImpl: {
+      ...noteSources,
+      async writeNoteSource() {
+        throw new Error("simulated source storage failure");
+      },
+    },
+    scriptingImpl: {
+      async executeScript() {
+        return [{
+          result: {
+            videoId,
+            title: "视频",
+            channelName: "频道",
+            description: "简介",
+            descriptionStatus: "present",
+            descriptionTruncated: false,
+          },
+        }];
+      },
+    },
+  });
+
+  const result = await background.handleSaveNote(
+    videoId,
+    1,
+    "视频",
+    "频道",
+    `https://www.youtube.com/watch?v=${videoId}`,
+    79,
+  );
+
+  assert.equal(result.success, true);
+  assert.equal((await storage.get("ytd_notes")).ytd_notes.length, 1);
+});
+
 test("new polished Chinese notes display cleaned text while legacy notes keep raw text", () => {
   const sidepanel = loadSidepanelHelpers();
   const polished = {
@@ -2910,6 +7495,192 @@ test("Traditional Bilibili notes make one provider call and persist Simplified C
     read("sidepanel.js"),
     /sourceLanguage: note\.sourceLanguage \|\| "",[\s\S]*?platform: note\.platform === "bilibili"[\s\S]*?textLanguage: note\.textLanguage \|\| ""/,
   );
+});
+
+// ----------------------------------------------------------------
+// Note video title translation
+// ----------------------------------------------------------------
+
+function loadTitleTranslationBackground({
+  notesResponse,
+  titlesResponse,
+  onProviderCall = () => {},
+  storedNotesRef,
+} = {}) {
+  const isTitleRequest = (options) => {
+    try {
+      const body = JSON.parse(options.body);
+      return String(body.messages?.[1]?.content || "").includes('"titles"');
+    } catch (_error) {
+      return false;
+    }
+  };
+  return loadBackgroundHelpers({
+    storageGetImpl: async (key) => {
+      if (key === "ytd_settings") return { ytd_settings: { aiApiKey: "test-key" } };
+      if (key === "ytd_notes") return { ytd_notes: storedNotesRef.notes };
+      return {};
+    },
+    storageSetImpl: async (items) => {
+      if (Array.isArray(items.ytd_notes)) storedNotesRef.notes = items.ytd_notes;
+    },
+    fetchImpl: async (url, options) => {
+      if (String(url).startsWith("chrome-extension://")) {
+        return { ok: true, text: async () => read("prompts/translation.md") };
+      }
+      const forTitles = isTitleRequest(options);
+      onProviderCall(forTitles ? "titles" : "notes");
+      const content = forTitles ? titlesResponse : notesResponse;
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ choices: [{ message: { content } }] }),
+      };
+    },
+  });
+}
+
+test("one title translation is generated per media identity and backfilled to every note", async () => {
+  const notes = [
+    {
+      id: "n1",
+      videoId: "vid1",
+      mediaKey: "vid1",
+      platform: "youtube",
+      videoTitle: "The Future of AI",
+      text: "First english note.",
+      translatedText: "",
+    },
+    {
+      id: "n2",
+      videoId: "vid1",
+      mediaKey: "vid1",
+      platform: "youtube",
+      videoTitle: "The Future of AI",
+      text: "Second english note.",
+      translatedText: "",
+    },
+  ];
+  const storedNotesRef = { notes };
+  const providerCalls = [];
+  const background = loadTitleTranslationBackground({
+    storedNotesRef,
+    onProviderCall: (kind) => providerCalls.push(kind),
+    notesResponse: JSON.stringify({
+      notes: [
+        { id: "n1", textZh: "第一条中文笔记。" },
+        { id: "n2", textZh: "第二条中文笔记。" },
+      ],
+    }),
+    titlesResponse: JSON.stringify({
+      titles: [{ mediaKey: "vid1", titleZh: "人工智能的未来" }],
+    }),
+  });
+
+  const result = await background.handleTranslateNotes({
+    notes: notes.map((note) => ({ id: note.id, text: note.text, videoTitle: note.videoTitle, platform: "youtube" })),
+    titles: [{ mediaKey: "vid1", title: "The Future of AI" }],
+  });
+
+  assert.equal(result.success, true);
+  assert.equal(providerCalls.filter((kind) => kind === "titles").length, 1, "exactly one title provider call for the shared media");
+  assert.equal(result.titles.length, 1);
+  assert.equal(result.titles[0].mediaKey, "vid1");
+  assert.equal(result.titles[0].titleZh, "人工智能的未来");
+  // Both notes of the same media are backfilled with the validated title.
+  assert.equal(storedNotesRef.notes.length, 2);
+  storedNotesRef.notes.forEach((note) => {
+    assert.equal(note.videoTitleZh, "人工智能的未来");
+    assert.equal(note.videoTitleZhValidated, true);
+    assert.equal(note.videoTitleZhValidationVersion, 1);
+  });
+});
+
+test("a failed body still lets the title translate, and vice versa", async () => {
+  // Body fails (empty), title succeeds.
+  const bodyFail = { notes: [{ id: "n1", mediaKey: "vid1", videoId: "vid1", platform: "youtube", videoTitle: "Deep Dive", text: "English body.", translatedText: "" }] };
+  const refA = { notes: bodyFail.notes };
+  const backgroundA = loadTitleTranslationBackground({
+    storedNotesRef: refA,
+    notesResponse: JSON.stringify({ notes: [{ id: "n1", textZh: "" }] }),
+    titlesResponse: JSON.stringify({ titles: [{ mediaKey: "vid1", titleZh: "深入解析" }] }),
+  });
+  const resultA = await backgroundA.handleTranslateNotes({
+    notes: [{ id: "n1", text: "English body.", videoTitle: "Deep Dive", platform: "youtube" }],
+    titles: [{ mediaKey: "vid1", title: "Deep Dive" }],
+  });
+  assert.equal(resultA.translations.length, 0, "body did not translate");
+  assert.ok(resultA.failures.some((f) => f.id === "n1"));
+  assert.equal(resultA.titles.length, 1, "title still translated");
+  assert.equal(resultA.titles[0].titleZh, "深入解析");
+  assert.equal(refA.notes[0].videoTitleZh, "深入解析");
+  assert.equal(refA.notes[0].translatedText, "");
+
+  // Body succeeds, title fails validation (returns English).
+  const refB = { notes: [{ id: "n1", mediaKey: "vid2", videoId: "vid2", platform: "youtube", videoTitle: "Another One", text: "English body.", translatedText: "" }] };
+  const backgroundB = loadTitleTranslationBackground({
+    storedNotesRef: refB,
+    notesResponse: JSON.stringify({ notes: [{ id: "n1", textZh: "英文正文的中文翻译。" }] }),
+    titlesResponse: JSON.stringify({ titles: [{ mediaKey: "vid2", titleZh: "Another One" }] }),
+  });
+  const resultB = await backgroundB.handleTranslateNotes({
+    notes: [{ id: "n1", text: "English body.", videoTitle: "Another One", platform: "youtube" }],
+    titles: [{ mediaKey: "vid2", title: "Another One" }],
+  });
+  assert.equal(resultB.translations[0].textZh, "英文正文的中文翻译。", "body translated");
+  assert.equal(resultB.titles.length, 0, "English title rejected");
+  assert.ok(resultB.titleFailures.some((f) => f.mediaKey === "vid2" && f.code === "INVALID_TRANSLATION"));
+  assert.equal(refB.notes[0].videoTitleZh, undefined, "no invalid title persisted");
+  assert.equal(refB.notes[0].translatedText, "英文正文的中文翻译。");
+});
+
+test("a title-only request translates without any note bodies", async () => {
+  const refC = { notes: [{ id: "n1", mediaKey: "vid3", videoId: "vid3", platform: "youtube", videoTitle: "Title Only", text: "已经翻译好的中文笔记。", translatedText: "已经翻译好的中文笔记。", translatedValidated: true, translatedValidationVersion: 1 }] };
+  const providerCalls = [];
+  const backgroundC = loadTitleTranslationBackground({
+    storedNotesRef: refC,
+    onProviderCall: (kind) => providerCalls.push(kind),
+    notesResponse: JSON.stringify({ notes: [] }),
+    titlesResponse: JSON.stringify({ titles: [{ mediaKey: "vid3", titleZh: "只有标题" }] }),
+  });
+  const resultC = await backgroundC.handleTranslateNotes({
+    notes: [],
+    titles: [{ mediaKey: "vid3", title: "Title Only" }],
+  });
+  assert.equal(resultC.success, true);
+  assert.equal(providerCalls.length, 1, "no note-body provider call when notes are empty");
+  assert.equal(providerCalls[0], "titles");
+  assert.equal(resultC.titles.length, 1);
+  assert.equal(resultC.titles[0].titleZh, "只有标题");
+  assert.equal(refC.notes[0].videoTitleZh, "只有标题");
+});
+
+test("note title request/candidate validators enforce the contract", () => {
+  const background = loadBackgroundHelpers();
+  // De-dup by mediaKey, skip invalid, cap at 10.
+  const normalized = background.validateNoteTitleTranslationRequest([
+    { mediaKey: "vid1", title: "A" },
+    { mediaKey: "vid1", title: "duplicate skipped" },
+    { mediaKey: "bad key!", title: "invalid" },
+    { mediaKey: "vid2", title: "" },
+    { mediaKey: "vid3", title: "B" },
+  ]);
+  assert.equal(normalized.length, 2);
+  assert.equal(normalized[0].mediaKey, "vid1");
+  assert.equal(normalized[0].title, "A");
+  assert.equal(normalized[1].mediaKey, "vid3");
+  assert.equal(background.validateNoteTitleTranslationRequest(undefined).length, 0);
+
+  assert.equal(background.validateNoteTitleCandidate({ titleZh: "人工智能" }).titleZh, "人工智能");
+  assert.equal(background.validateNoteTitleCandidate({ titleZh: "All English Title" }).failureCode, "INVALID_TRANSLATION");
+  assert.equal(background.validateNoteTitleCandidate({ titleZh: "" }).failureCode, "EMPTY_RESPONSE");
+
+  const mapped = background.normalizeNoteTitleTranslation(
+    { titles: [{ mediaKey: "vid1", titleZh: "标题一" }, { mediaKey: "vid1", titleZh: "冲突" }] },
+    [{ mediaKey: "vid1", title: "T1" }, { mediaKey: "vid2", title: "T2" }],
+  );
+  assert.equal(mapped[0].failureCode, "MULTIPLE_CANDIDATES");
+  assert.equal(mapped[1].failureCode, "MISSING_ITEM");
 });
 
 test("notes generate Chinese once from polished English and persist it", async () => {
@@ -4175,7 +8946,7 @@ test("concurrent requests for the same note serialize and call the API once", as
     background.handleTranslateNotes(request),
     background.handleTranslateNotes(request),
   ]);
-  assert.equal(first.success, true);
+  assert.equal(first.success, true, JSON.stringify(first));
   assert.equal(second.success, true);
   assert.equal(apiCalls, 1);
   assert.equal(storedNotes[0].translatedText, "中文笔记。");
@@ -4341,6 +9112,574 @@ test("content messaging retries normal document startup without reinjection", as
   assert.equal(sendCount, 2);
   assert.deepEqual(waitCalls, [150]);
   assert.deepEqual(injectionCalls, []);
+});
+
+test("YouTube getVideoInfo prefers exact player metadata and preserves completeness fields", async () => {
+  const tab = {
+    id: 31,
+    url: "https://www.youtube.com/watch?v=player-video",
+  };
+  let contentMessageCount = 0;
+  const background = loadBackgroundHelpers({
+    tabsImpl: {
+      async get() {
+        return tab;
+      },
+      async query() {
+        return [tab];
+      },
+      async sendMessage() {
+        contentMessageCount += 1;
+        return {
+          videoId: "player-video",
+          title: "DOM fallback title",
+          channelName: "DOM fallback channel",
+          description: "Truncated fallback",
+          descriptionStatus: "unknown",
+          descriptionTruncated: true,
+        };
+      },
+    },
+    scriptingImpl: {
+      async executeScript() {
+        return [
+          {
+            result: {
+              videoId: "player-video",
+              title: "Canonical title",
+              channelName: "Canonical channel",
+              description: "Complete canonical description",
+              descriptionStatus: "present",
+              descriptionTruncated: false,
+              duration: 123,
+              sourceLanguage: "en",
+            },
+          },
+        ];
+      },
+    },
+  });
+
+  const response = await dispatchBackgroundMessage(background, {
+    action: "relayToContent",
+    tabId: tab.id,
+    payload: { action: "getVideoInfo" },
+  });
+
+  assert.equal(contentMessageCount, 0, "canonical player data needs no content receiver");
+  assert.deepEqual(JSON.parse(JSON.stringify(response)), {
+    success: true,
+    response: {
+      videoId: "player-video",
+      title: "Canonical title",
+      channelName: "Canonical channel",
+      description: "Complete canonical description",
+      descriptionStatus: "present",
+      descriptionTruncated: false,
+      duration: 123,
+      sourceLanguage: "en",
+    },
+  });
+});
+
+test("the real MAIN-world player callback emits complete present-description metadata", async () => {
+  const tab = {
+    id: 40,
+    url: "https://www.youtube.com/watch?v=real-player-callback",
+  };
+  let contentMessageCount = 0;
+  const playerResponse = {
+    videoDetails: {
+      videoId: "real-player-callback",
+      title: "Real callback title",
+      author: "Real callback channel",
+      shortDescription: "Real callback description",
+      lengthSeconds: "321",
+      defaultAudioLanguage: "en",
+    },
+  };
+  const background = loadBackgroundHelpers({
+    pageDocumentImpl: {
+      getElementById(id) {
+        return id === "movie_player"
+          ? { getPlayerResponse: () => playerResponse }
+          : null;
+      },
+    },
+    pageWindowImpl: {},
+    tabsImpl: {
+      async get() {
+        return tab;
+      },
+      async query() {
+        return [tab];
+      },
+      async sendMessage() {
+        contentMessageCount += 1;
+        return null;
+      },
+    },
+    scriptingImpl: {
+      async executeScript({ func }) {
+        return [{ result: func() }];
+      },
+    },
+  });
+
+  const response = await dispatchBackgroundMessage(background, {
+    action: "relayToContent",
+    tabId: tab.id,
+    payload: { action: "getVideoInfo" },
+  });
+
+  assert.equal(contentMessageCount, 0);
+  assert.deepEqual(JSON.parse(JSON.stringify(response.response)), {
+    videoId: "real-player-callback",
+    title: "Real callback title",
+    channelName: "Real callback channel",
+    duration: 321,
+    sourceLanguage: "en",
+    description: "Real callback description",
+    descriptionStatus: "present",
+    descriptionTruncated: false,
+  });
+});
+
+test("the real MAIN-world callback recognizes a confirmed-empty window fallback", async () => {
+  const tab = {
+    id: 41,
+    url: "https://www.youtube.com/watch?v=window-player-fallback",
+  };
+  let contentMessageCount = 0;
+  const background = loadBackgroundHelpers({
+    pageDocumentImpl: { getElementById: () => null },
+    pageWindowImpl: {
+      ytInitialPlayerResponse: {
+        videoDetails: {
+          videoId: "window-player-fallback",
+          title: "Window fallback title",
+          author: "Window fallback channel",
+          shortDescription: "",
+          lengthSeconds: "12",
+        },
+      },
+    },
+    tabsImpl: {
+      async get() {
+        return tab;
+      },
+      async query() {
+        return [tab];
+      },
+      async sendMessage() {
+        contentMessageCount += 1;
+        return null;
+      },
+    },
+    scriptingImpl: {
+      async executeScript({ func }) {
+        return [{ result: func() }];
+      },
+    },
+  });
+
+  const response = await dispatchBackgroundMessage(background, {
+    action: "relayToContent",
+    tabId: tab.id,
+    payload: { action: "getVideoInfo" },
+  });
+
+  assert.equal(contentMessageCount, 0);
+  assert.equal(response.response.videoId, "window-player-fallback");
+  assert.equal(response.response.description, "");
+  assert.equal(response.response.descriptionStatus, "confirmed-empty");
+  assert.equal(response.response.descriptionTruncated, false);
+});
+
+test("YouTube getVideoInfo ignores stale player data and accepts the exact content response", async () => {
+  const tab = {
+    id: 32,
+    url: "https://www.youtube.com/watch?v=current-video",
+  };
+  const background = loadBackgroundHelpers({
+    tabsImpl: {
+      async get() {
+        return tab;
+      },
+      async query() {
+        return [tab];
+      },
+      async sendMessage() {
+        return {
+          videoId: "current-video",
+          title: "Current title",
+          channelName: "Current channel",
+          description: "Current complete description",
+          descriptionStatus: "present",
+          descriptionTruncated: false,
+          duration: 456,
+          sourceLanguage: "en",
+        };
+      },
+    },
+    scriptingImpl: {
+      async executeScript() {
+        return [
+          {
+            result: {
+              videoId: "previous-video",
+              title: "Stale title",
+              channelName: "Stale channel",
+              description: "Stale description",
+              descriptionStatus: "present",
+              descriptionTruncated: false,
+              duration: 999,
+              sourceLanguage: "fr",
+            },
+          },
+        ];
+      },
+    },
+  });
+
+  const response = await dispatchBackgroundMessage(background, {
+    action: "relayToContent",
+    tabId: tab.id,
+    payload: { action: "getVideoInfo" },
+  });
+
+  assert.equal(response.success, true);
+  assert.equal(response.response.videoId, "current-video");
+  assert.equal(response.response.title, "Current title");
+  assert.equal(response.response.description, "Current complete description");
+  assert.equal(response.response.descriptionStatus, "present");
+  assert.equal(response.response.descriptionTruncated, false);
+});
+
+test("YouTube getVideoInfo falls back to exact content when player description is not ready", async () => {
+  const tab = {
+    id: 34,
+    url: "https://www.youtube.com/watch?v=description-fallback",
+  };
+  let contentMessageCount = 0;
+  const background = loadBackgroundHelpers({
+    tabsImpl: {
+      async get() {
+        return tab;
+      },
+      async query() {
+        return [tab];
+      },
+      async sendMessage() {
+        contentMessageCount += 1;
+        return {
+          videoId: "description-fallback",
+          title: "Content title",
+          channelName: "Content channel",
+          description: "Exact embedded description",
+          descriptionStatus: "present",
+          descriptionTruncated: false,
+        };
+      },
+    },
+    scriptingImpl: {
+      async executeScript() {
+        return [
+          {
+            result: {
+              videoId: "description-fallback",
+              title: "Player title",
+              channelName: "Player channel",
+              description: "",
+              descriptionStatus: "unknown",
+              descriptionTruncated: false,
+            },
+          },
+        ];
+      },
+    },
+  });
+
+  const response = await dispatchBackgroundMessage(background, {
+    action: "relayToContent",
+    tabId: tab.id,
+    payload: { action: "getVideoInfo" },
+  });
+
+  assert.equal(contentMessageCount, 1);
+  assert.equal(response.success, true);
+  assert.equal(response.response.videoId, "description-fallback");
+  assert.equal(response.response.title, "Player title");
+  assert.equal(response.response.description, "Exact embedded description");
+  assert.equal(response.response.descriptionStatus, "present");
+  assert.equal(response.response.descriptionTruncated, false);
+});
+
+test("YouTube getVideoInfo rejects mismatched player and content identities", async () => {
+  const tab = {
+    id: 35,
+    url: "https://www.youtube.com/watch?v=expected-video",
+  };
+  const background = loadBackgroundHelpers({
+    tabsImpl: {
+      async get() {
+        return tab;
+      },
+      async query() {
+        return [tab];
+      },
+      async sendMessage() {
+        return {
+          videoId: "other-content-video",
+          title: "Wrong content title",
+          descriptionStatus: "present",
+          description: "Wrong content description",
+        };
+      },
+    },
+    scriptingImpl: {
+      async executeScript() {
+        return [
+          {
+            result: {
+              videoId: "other-player-video",
+              title: "Wrong player title",
+              descriptionStatus: "present",
+              description: "Wrong player description",
+            },
+          },
+        ];
+      },
+    },
+  });
+
+  const response = await dispatchBackgroundMessage(background, {
+    action: "relayToContent",
+    tabId: tab.id,
+    payload: { action: "getVideoInfo" },
+  });
+
+  assert.equal(response.success, false);
+  assert.equal(response.error, "PAGE_CONTEXT_CHANGED");
+  assert.match(response.message, /页面已切换/);
+});
+
+test("YouTube getVideoInfo rejects mismatched content while exact player data is incomplete", async () => {
+  const tab = {
+    id: 39,
+    url: "https://www.youtube.com/watch?v=expected-incomplete",
+  };
+  const background = loadBackgroundHelpers({
+    tabsImpl: {
+      async get() {
+        return tab;
+      },
+      async query() {
+        return [tab];
+      },
+      async sendMessage() {
+        return {
+          videoId: "other-content-video",
+          title: "Wrong content title",
+          channelName: "Wrong content channel",
+          description: "Wrong content description",
+          descriptionStatus: "present",
+          descriptionTruncated: false,
+        };
+      },
+    },
+    scriptingImpl: {
+      async executeScript() {
+        return [
+          {
+            result: {
+              videoId: "expected-incomplete",
+              title: "Expected title",
+              channelName: "Expected channel",
+              description: "",
+              descriptionStatus: "unknown",
+              descriptionTruncated: false,
+            },
+          },
+        ];
+      },
+    },
+  });
+
+  const response = await dispatchBackgroundMessage(background, {
+    action: "relayToContent",
+    tabId: tab.id,
+    payload: { action: "getVideoInfo" },
+  });
+
+  assert.equal(response.success, false);
+  assert.equal(response.error, "PAGE_CONTEXT_CHANGED");
+  assert.match(response.message, /页面已切换/);
+  assert.equal(response.response, undefined);
+});
+
+test("YouTube getVideoInfo requires refresh for a legacy response without videoId", async () => {
+  const tab = {
+    id: 37,
+    url: "https://www.youtube.com/watch?v=legacy-response",
+  };
+  const background = loadBackgroundHelpers({
+    tabsImpl: {
+      async get() {
+        return tab;
+      },
+      async query() {
+        return [tab];
+      },
+      async sendMessage() {
+        return {
+          title: "Legacy title without identity",
+          channelName: "Legacy channel",
+          description: "Legacy description",
+        };
+      },
+    },
+  });
+
+  const response = await dispatchBackgroundMessage(background, {
+    action: "relayToContent",
+    tabId: tab.id,
+    payload: { action: "getVideoInfo" },
+  });
+
+  assert.equal(response.success, false);
+  assert.equal(response.error, "PAGE_REFRESH_REQUIRED");
+  assert.match(response.message, /刷新页面后再补充/);
+  assert.equal(response.response, undefined);
+});
+
+test("YouTube getVideoInfo requires refresh when legacy content omits truncation evidence", async () => {
+  const tab = {
+    id: 38,
+    url: "https://www.youtube.com/watch?v=legacy-truncation",
+  };
+  const background = loadBackgroundHelpers({
+    tabsImpl: {
+      async get() {
+        return tab;
+      },
+      async query() {
+        return [tab];
+      },
+      async sendMessage() {
+        return {
+          videoId: "legacy-truncation",
+          title: "Legacy title",
+          channelName: "Legacy channel",
+          description: "Collapsed legacy description...",
+          descriptionStatus: "present",
+        };
+      },
+    },
+  });
+
+  const response = await dispatchBackgroundMessage(background, {
+    action: "relayToContent",
+    tabId: tab.id,
+    payload: { action: "getVideoInfo" },
+  });
+
+  assert.equal(response.success, false);
+  assert.equal(response.error, "PAGE_REFRESH_REQUIRED");
+  assert.match(response.message, /刷新页面后再补充/);
+  assert.equal(response.response, undefined);
+});
+
+test("a confirmed-empty player description never adopts a truncated DOM fallback", async () => {
+  const tab = {
+    id: 36,
+    url: "https://www.youtube.com/watch?v=empty-description",
+  };
+  let contentMessageCount = 0;
+  const background = loadBackgroundHelpers({
+    tabsImpl: {
+      async get() {
+        return tab;
+      },
+      async query() {
+        return [tab];
+      },
+      async sendMessage() {
+        contentMessageCount += 1;
+        return {
+          videoId: "empty-description",
+          description: "Stale truncated text...",
+          descriptionStatus: "unknown",
+          descriptionTruncated: true,
+        };
+      },
+    },
+    scriptingImpl: {
+      async executeScript() {
+        return [
+          {
+            result: {
+              videoId: "empty-description",
+              title: "Empty description video",
+              channelName: "Channel",
+              description: "",
+              descriptionStatus: "confirmed-empty",
+              descriptionTruncated: false,
+            },
+          },
+        ];
+      },
+    },
+  });
+
+  const response = await dispatchBackgroundMessage(background, {
+    action: "relayToContent",
+    tabId: tab.id,
+    payload: { action: "getVideoInfo" },
+  });
+
+  assert.equal(contentMessageCount, 0);
+  assert.equal(response.success, true);
+  assert.equal(response.response.description, "");
+  assert.equal(response.response.descriptionStatus, "confirmed-empty");
+  assert.equal(response.response.descriptionTruncated, false);
+});
+
+test("relayToContent honors a supported pending URL while a new tab is committing", async () => {
+  const tab = {
+    id: 33,
+    url: "about:blank",
+    pendingUrl: "https://www.youtube.com/watch?v=pending-video",
+  };
+  const background = loadBackgroundHelpers({
+    tabsImpl: {
+      async get() {
+        return tab;
+      },
+      async query() {
+        return [];
+      },
+      async sendMessage() {
+        return {
+          videoId: "pending-video",
+          title: "Pending video",
+          channelName: "Channel",
+          description: "Description",
+          descriptionStatus: "present",
+          descriptionTruncated: false,
+        };
+      },
+    },
+  });
+
+  const response = await dispatchBackgroundMessage(background, {
+    action: "relayToContent",
+    tabId: tab.id,
+    payload: { action: "getVideoInfo" },
+  });
+
+  assert.equal(response.success, true);
+  assert.equal(response.response.videoId, "pending-video");
 });
 
 test("missing content receiver classification stays narrow", () => {
@@ -4967,6 +10306,116 @@ test("DeepSeek retries one empty transcript JSON response without response_forma
   assert.equal(requests[0].max_tokens, 1536);
 });
 
+test("an unterminated translation JSON response retries once and recovers", async () => {
+  const requests = [];
+  const helpers = loadBackgroundHelpers({
+    fetchImpl: async (url, options) => {
+      if (url.startsWith("chrome-extension://")) {
+        return { ok: true, text: async () => read("prompts/translation.md") };
+      }
+      requests.push(JSON.parse(options.body));
+      return {
+        ok: true,
+        json: async () => ({
+          choices: [{
+            finish_reason: "stop",
+            message: {
+              content: requests.length === 1
+                ? '{"segments":[{"id":"segment-0-0","text":"没有结束的字符串'
+                : '{"segments":[{"id":"segment-0-0","text":"完整中文译文。"}]}',
+            },
+          }],
+        }),
+      };
+    },
+  });
+  const result = await helpers.handleTranslateContent(
+    { segments: [{ id: "segment-0-0", text: "English source sentence." }] },
+    "transcriptBatch",
+    "zh",
+    "Video",
+  );
+  assert.equal(result.success, true);
+  assert.equal(requests.length, 2);
+  assert.deepEqual(requests[0].response_format, { type: "json_object" });
+  assert.equal(Object.hasOwn(requests[1], "response_format"), false);
+  assert.equal(result.translatedContent.segments[0].text, "完整中文译文。");
+});
+
+test("repeated unterminated translation JSON becomes a product error, not a throw", async () => {
+  let providerCalls = 0;
+  const helpers = loadBackgroundHelpers({
+    fetchImpl: async (url) => {
+      if (url.startsWith("chrome-extension://")) {
+        return { ok: true, text: async () => read("prompts/translation.md") };
+      }
+      providerCalls += 1;
+      return {
+        ok: true,
+        json: async () => ({
+          choices: [{
+            finish_reason: "stop",
+            message: {
+              content: '{"segments":[{"id":"segment-0-0","text":"仍然被截断',
+            },
+          }],
+        }),
+      };
+    },
+  });
+  const result = await helpers.handleTranslateContent(
+    { segments: [{ id: "segment-0-0", text: "English source sentence." }] },
+    "transcriptBatch",
+    "zh",
+    "Video",
+  );
+  assert.equal(result.success, false);
+  assert.equal(result.code, "INVALID_JSON");
+  assert.match(result.error, /JSON 不完整.*重试/);
+  assert.equal(providerCalls, 2, "malformed output recovery stays bounded");
+});
+
+test("long export translation batches receive a scaled output budget", async () => {
+  let body;
+  const helpers = loadBackgroundHelpers({
+    fetchImpl: async (url, options) => {
+      if (url.startsWith("chrome-extension://")) {
+        return { ok: true, text: async () => read("prompts/translation.md") };
+      }
+      body = JSON.parse(options.body);
+      return {
+        ok: true,
+        json: async () => ({
+          choices: [{
+            finish_reason: "stop",
+            message: {
+              content: JSON.stringify({
+                segments: Array.from({ length: 4 }, (_, index) => ({
+                  id: `s${index}`,
+                  text: `第${index + 1}段完整译文。`,
+                })),
+              }),
+            },
+          }],
+        }),
+      };
+    },
+  });
+  const result = await helpers.handleTranslateContent(
+    {
+      segments: Array.from({ length: 4 }, (_, index) => ({
+        id: `s${index}`,
+        text: "a".repeat(3000),
+      })),
+    },
+    "transcriptBatch",
+    "zh",
+    "Long video",
+  );
+  assert.equal(result.success, true);
+  assert.equal(body.max_tokens, 8192);
+});
+
 test("translation message watchdog rejects, clears its timer, and ignores late replies", async () => {
   let timeoutCallback;
   let timeoutDelay;
@@ -5283,6 +10732,34 @@ test("non-Chinese transcripts still enter the translation path", async () => {
     translateCalls: 1,
     mode: "bilingual",
   });
+});
+
+test("Bilibili original badge folds the language into the source label", () => {
+  const runtime = loadSidepanelRuntime();
+  const read = (code) => runtime.evaluate(code);
+  read(`currentTranscriptSource = "bilibili"; currentTranscriptLanguage = "zh-CN";`);
+
+  read(`currentMediaRef = { platform: "bilibili" };`);
+  assert.equal(runtime.helpers.currentPlatformIsBilibili(), true);
+  assert.equal(
+    runtime.helpers.transcriptOriginalBadgeText(),
+    "B 站视频字幕（zh-CN）",
+    "Bilibili badge must not append the redundant 原文 mode word",
+  );
+
+  // A missing / non-code language degrades to the plain source label.
+  read(`currentTranscriptLanguage = "";`);
+  assert.equal(runtime.helpers.transcriptOriginalBadgeText(), "B 站视频字幕");
+
+  // YouTube keeps its "<source> · 原文（<lang>）" form.
+  read(
+    `currentMediaRef = { platform: "youtube" }; currentTranscriptSource = ""; currentTranscriptLanguage = "en";`,
+  );
+  assert.equal(runtime.helpers.currentPlatformIsBilibili(), false);
+  assert.equal(
+    runtime.helpers.transcriptOriginalBadgeText(),
+    "来自视频字幕 · 原文（en）",
+  );
 });
 
 test("switching between bilingual and Chinese reuses active translation work", async () => {

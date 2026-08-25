@@ -112,6 +112,7 @@ test("resolveMedia selects the current part and returns a stable media reference
     channelName: "创作者",
     creator: "创作者",
     description: "视频简介",
+    descriptionStatus: "present",
     duration: 90,
     partTitle: "第二P",
   });

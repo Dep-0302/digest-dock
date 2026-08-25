@@ -6,7 +6,8 @@
  */
 
 const DEBUG = false;
-const REQUIRED_RUNTIME_PROTOCOL_VERSION = 9;
+const REQUIRED_RUNTIME_PROTOCOL_VERSION = 11;
+const EXPORT_CONTENT_CONTRACT_VERSION = 4;
 const debugLog = (...args) => {
   if (DEBUG) console.log(...args);
 };
@@ -43,6 +44,7 @@ function createSingleFlight() {
 }
 
 const runDigestSingleFlight = createSingleFlight();
+const runMetadataCaptureSingleFlight = createSingleFlight();
 
 // ============================================================
 // STATE
@@ -63,6 +65,9 @@ let currentTranscriptSourceAttempt = "";
 let currentVideoTitle = "";
 let currentChannelName = "";
 let currentVideoDescription = "";
+let currentVideoDescriptionZh = "";
+let currentVideoDescriptionState = "unknown";
+let currentVideoDescriptionTruncated = false;
 let currentVideoDuration = 0;
 let currentVideoSourceLanguage = "";
 let isAnalysisLoading = false; // Track if analysis is in progress
@@ -73,6 +78,24 @@ let errorSecondaryAction = null;
 let tabCheckGeneration = 0;
 let digestGeneration = 0;
 
+// A cross-video click from the saved-notes library means "open this note",
+// not "start acquiring subtitles".  Keep that intent in session storage so
+// it survives Chrome swapping/recreating the global side-panel document while
+// the new tab is activated.  The pending phase is short-lived and exact-tab
+// bound; after it matches, the active phase lasts only while that tab remains
+// on the same media route or until the user explicitly requests a digest tab.
+const NOTE_NAVIGATION_SESSION_KEY = "ytd_note_navigation";
+const NOTE_NAVIGATION_SCHEMA_VERSION = 1;
+const NOTE_NAVIGATION_PENDING_TTL_MS = 15_000;
+const NOTE_EXPORT_AUTHORIZATION_TTL_MS = 10 * 60_000;
+let pendingNoteNavigation = null;
+let activeNotesOnlyContext = null;
+let noteNavigationResumePromise = null;
+let noteNavigationStorageQueue = Promise.resolve();
+let noteExportContinuationResumePromise = null;
+let activeNoteExportAuthorization = null;
+let noteExportAuthorizationGeneration = 0;
+
 // --- Translation state ---
 // The public transcript control intentionally supports only the original
 // subtitles, Chinese, and an aligned source + Chinese view.
@@ -82,6 +105,10 @@ let currentNotesMode = "bilingual";
 let currentNotes = [];
 let currentNotesFilterVideoId;
 let notesFilterShowAll = false;
+let noteExportPickerGroups = [];
+let noteExportPickerPrecheck = null;
+let noteExportPickerSourcesByKey = {};
+let selectedNoteExportMediaKeys = new Set();
 let isOverviewTranslationLoading = false;
 let isNotesTranslationLoading = false;
 let isNotesLoading = false;
@@ -89,14 +116,23 @@ let notesTranslationGeneration = 0;
 let notesLoadGeneration = 0;
 let lastNotesManualRetryAt = 0;
 let noteTranslationAttemptCountById = new Map();
+// Bounds re-requests of a persistently failing title translation (keyed by
+// mediaKey) so repeated mode toggles cannot loop on the same failure.
+let noteTitleTranslationAttemptByKey = new Map();
+const NOTE_TITLE_TRANSLATION_MAX_ATTEMPTS = 3;
 let translationGeneration = 0; // Invalidates responses from older UI modes/videos.
 let translationWorkCount = 0;
 let transcriptScrollObserver = null;
 // Stable keys include the video, source mode, language, and semantic segment ID.
 let transcriptParagraphCache = new Map();
+let exportTranslationGeneration = 0;
+let isExportTranslationRunning = false;
+let activeExportJobId = "";
+let currentPersistedNoteSource = null;
 const TRANSLATION_MESSAGE_TIMEOUT_MS = 130_000;
 const NOTES_MANUAL_RETRY_DEBOUNCE_MS = 400;
 const NOTE_TRANSLATION_VALIDATION_VERSION = 1;
+const NOTE_TITLE_TRANSLATION_VALIDATION_VERSION = 1;
 const TRANSCRIPT_TRANSLATION_CACHE_VERSION = 2;
 const TRANSCRIPT_SOURCE_POLICY_VERSION = 4;
 
@@ -122,6 +158,22 @@ function transcriptSourceLabel() {
   if (currentTranscriptSource === "supadata") return "Supadata 原生字幕";
   if (currentTranscriptSource === "bilibili") return "B 站视频字幕";
   return "来自视频字幕";
+}
+
+/**
+ * Text for the original-mode transcript source badge. Bilibili has no language
+ * control, so the language subtag folds into the source label itself
+ * (`B 站视频字幕（zh-cn）`) rather than the redundant `原文（zh-cn）` mode word.
+ * YouTube keeps its existing `<source> · 原文（<lang>）` form.
+ */
+function transcriptOriginalBadgeText() {
+  if (currentPlatformIsBilibili()) {
+    const language = String(currentTranscriptLanguage || "").trim();
+    return /^[A-Za-z0-9-]{1,20}$/.test(language)
+      ? `${transcriptSourceLabel()}（${language}）`
+      : transcriptSourceLabel();
+  }
+  return `${transcriptSourceLabel()} · ${getOriginalTranscriptLabel()}`;
 }
 
 function normalizeLanguageCode(value) {
@@ -448,7 +500,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     // seen this video before (no API calls); fetched fresh otherwise.
     // (This used to force-clear the cache on every click, which silently
     // burned a transcript credit + analysis tokens per click.)
-    checkCurrentTab();
+    // A page-level Digest click is an explicit request to leave a local-only
+    // saved-note jump and load the video's digest. It may therefore reach the
+    // ordinary per-attempt Supadata consent gate if no local transcript exists.
+    void clearNoteNavigationState()
+      .then(() => checkCurrentTab())
+      .catch((error) => {
+        console.error("[DigestDock Panel] Digest button retry error:", error);
+      });
     sendResponse({ success: true });
   }
   if (message.action === "transcriptProgress") {
@@ -462,6 +521,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     loadNotes(notesFilterShowAll ? null : currentVideoId, {
       translateMissing: message.action === "noteSaved",
     });
+    // Capture this video's export material once it has a note.
+    if (message.action === "noteSaved") {
+      const savedMediaKey = String(
+        message.note?.mediaKey || message.note?.videoId || "",
+      );
+      const currentMediaKey = String(
+        currentVideoId || currentMediaRef?.mediaKey || "",
+      );
+      if (savedMediaKey && savedMediaKey === currentMediaKey) {
+        void persistCurrentVideoNoteSourceIfNoted();
+      }
+    }
     sendResponse({ success: true });
   }
   return false;
@@ -538,6 +609,262 @@ function extractMediaLocator(url) {
   }
 }
 
+function noteNavigationStorage() {
+  return chrome.storage?.session || null;
+}
+
+function queueNoteNavigationStorage(task) {
+  const queued = noteNavigationStorageQueue.then(task, task);
+  noteNavigationStorageQueue = queued.catch(() => undefined);
+  return queued;
+}
+
+function normalizeNoteExportContinuation(value) {
+  if (!value || typeof value !== "object") return null;
+  const mediaKeys = [
+    ...new Set(
+      (Array.isArray(value.mediaKeys) ? value.mediaKeys : [])
+        .map((key) => String(key || "").trim().slice(0, 220))
+        .filter(Boolean),
+    ),
+  ].sort();
+  if (!mediaKeys.length || mediaKeys.length > 200) return null;
+  const mode = ["original", "zh", "bilingual"].includes(value.mode)
+    ? value.mode
+    : "bilingual";
+  return {
+    mediaKeys,
+    mode,
+  };
+}
+
+function normalizeNoteNavigationState(value) {
+  if (!value || typeof value !== "object") return null;
+  const phase = value.phase === "active" ? "active" : "pending";
+  const token = String(value.token || "").trim().slice(0, 120);
+  const routeKey = String(value.routeKey || "").trim().slice(0, 220);
+  const mediaKey = String(value.mediaKey || "").trim().slice(0, 220);
+  const platform = value.platform === "bilibili" ? "bilibili" : "youtube";
+  const tabId = Number(value.tabId);
+  const createdAt = Number(value.createdAt);
+  const expiresAt = Number(value.expiresAt);
+  if (
+    value.schemaVersion !== NOTE_NAVIGATION_SCHEMA_VERSION ||
+    !token ||
+    !routeKey ||
+    !mediaKey ||
+    !Number.isInteger(tabId) ||
+    tabId < 0 ||
+    !Number.isFinite(createdAt) ||
+    createdAt <= 0
+  ) {
+    return null;
+  }
+  if (
+    phase === "pending" &&
+    (!Number.isFinite(expiresAt) || expiresAt <= Date.now())
+  ) {
+    return null;
+  }
+  return {
+    schemaVersion: NOTE_NAVIGATION_SCHEMA_VERSION,
+    phase,
+    token,
+    tabId,
+    routeKey,
+    mediaKey,
+    platform,
+    canonicalUrl: String(value.canonicalUrl || "").trim().slice(0, 2_000),
+    timestampedUrl: String(value.timestampedUrl || "").trim().slice(0, 2_000),
+    videoTitle: String(value.videoTitle || "").trim().slice(0, 500),
+    channelName: String(value.channelName || "").trim().slice(0, 300),
+    sourceLanguage: normalizeLanguageCode(value.sourceLanguage),
+    duration: Math.max(0, Number(value.duration) || 0),
+    showAll: value.showAll === true,
+    captureMetadata: value.captureMetadata === true,
+    exportContinuation: normalizeNoteExportContinuation(
+      value.exportContinuation,
+    ),
+    createdAt,
+    expiresAt: phase === "pending" ? expiresAt : 0,
+    activatedAt:
+      phase === "active" ? Math.max(0, Number(value.activatedAt) || 0) : 0,
+  };
+}
+
+async function persistNoteNavigationState(state) {
+  const normalized = normalizeNoteNavigationState(state);
+  if (!normalized) return false;
+  if (normalized.phase === "active") {
+    activeNotesOnlyContext = normalized;
+    pendingNoteNavigation = null;
+  } else {
+    pendingNoteNavigation = normalized;
+    activeNotesOnlyContext = null;
+  }
+  const storage = noteNavigationStorage();
+  if (!storage?.set) return true;
+  await queueNoteNavigationStorage(async () => {
+    try {
+      await storage.set({ [NOTE_NAVIGATION_SESSION_KEY]: normalized });
+    } catch (error) {
+      // The in-memory state still protects the current global panel instance.
+      console.warn("[DigestDock] Could not persist note navigation:", error);
+    }
+  });
+  return true;
+}
+
+async function hydrateNoteNavigationState() {
+  if (activeNotesOnlyContext || pendingNoteNavigation) return;
+  const storage = noteNavigationStorage();
+  if (!storage?.get) return;
+  await queueNoteNavigationStorage(async () => {
+    if (activeNotesOnlyContext || pendingNoteNavigation) return;
+    try {
+      const stored = await storage.get(NOTE_NAVIGATION_SESSION_KEY);
+      if (activeNotesOnlyContext || pendingNoteNavigation) return;
+      const normalized = normalizeNoteNavigationState(
+        stored?.[NOTE_NAVIGATION_SESSION_KEY],
+      );
+      if (!normalized) {
+        if (stored?.[NOTE_NAVIGATION_SESSION_KEY] && storage.remove) {
+          await storage.remove(NOTE_NAVIGATION_SESSION_KEY);
+        }
+        return;
+      }
+      if (normalized.phase === "active") {
+        activeNotesOnlyContext = normalized;
+      } else {
+        pendingNoteNavigation = normalized;
+      }
+    } catch (error) {
+      console.warn("[DigestDock] Could not restore note navigation:", error);
+    }
+  });
+}
+
+async function clearNoteNavigationState(expectedToken = "") {
+  const token = String(expectedToken || "");
+  if (
+    token &&
+    activeNotesOnlyContext?.token !== token &&
+    pendingNoteNavigation?.token !== token
+  ) {
+    return false;
+  }
+  activeNotesOnlyContext = null;
+  pendingNoteNavigation = null;
+  const storage = noteNavigationStorage();
+  if (!storage?.remove) return true;
+  return queueNoteNavigationStorage(async () => {
+    try {
+      if (token && storage.get) {
+        const stored = await storage.get(NOTE_NAVIGATION_SESSION_KEY);
+        const storedToken = String(
+          stored?.[NOTE_NAVIGATION_SESSION_KEY]?.token || "",
+        );
+        if (storedToken && storedToken !== token) return false;
+      }
+      await storage.remove(NOTE_NAVIGATION_SESSION_KEY);
+    } catch (error) {
+      console.warn("[DigestDock] Could not clear note navigation:", error);
+    }
+    return true;
+  });
+}
+
+function noteNavigationMatches(state, tab, locator) {
+  if (!state || !tab || !locator) return false;
+  if (state.tabId !== tab.id || state.routeKey !== locator.routeKey) return false;
+  if (state.platform !== locator.platform) return false;
+  if (locator.platform === "youtube" && state.mediaKey !== locator.mediaKey) {
+    return false;
+  }
+  return true;
+}
+
+async function resolveNoteNavigationForTab(tab, locator) {
+  await hydrateNoteNavigationState();
+
+  if (activeNotesOnlyContext) {
+    if (noteNavigationMatches(activeNotesOnlyContext, tab, locator)) {
+      return activeNotesOnlyContext;
+    }
+    // Once activated, leaving the exact tab or media route ends notes-only
+    // mode. Returning later is an ordinary video visit and may request a
+    // transcript only through the existing consent flow.
+    await clearNoteNavigationState(activeNotesOnlyContext.token);
+    return null;
+  }
+
+  const pending = normalizeNoteNavigationState(pendingNoteNavigation);
+  if (!pending) {
+    if (pendingNoteNavigation) {
+      await clearNoteNavigationState(pendingNoteNavigation.token);
+    }
+    return null;
+  }
+  pendingNoteNavigation = pending;
+  if (!noteNavigationMatches(pending, tab, locator)) return null;
+
+  const active = {
+    ...pending,
+    phase: "active",
+    expiresAt: 0,
+    activatedAt: Date.now(),
+  };
+  await persistNoteNavigationState(active);
+  return activeNotesOnlyContext;
+}
+
+function buildNoteNavigationIntent(
+  note,
+  tabId,
+  { captureMetadata = false, exportContinuation = null } = {},
+) {
+  const timestampedUrl = String(
+    note?.timestampedUrl || note?.canonicalUrl || "",
+  ).trim();
+  const locator = extractMediaLocator(timestampedUrl);
+  const mediaKey = String(note?.mediaKey || note?.videoId || "").trim();
+  if (!locator || !mediaKey || !Number.isInteger(tabId)) return null;
+  if (locator.platform === "youtube" && mediaKey !== locator.mediaKey) {
+    return null;
+  }
+  const now = Date.now();
+  return {
+    schemaVersion: NOTE_NAVIGATION_SCHEMA_VERSION,
+    phase: "pending",
+    token: `${now.toString(36)}:${Math.random().toString(36).slice(2)}`,
+    tabId,
+    routeKey: locator.routeKey,
+    mediaKey,
+    platform: locator.platform,
+    canonicalUrl: String(note?.canonicalUrl || locator.canonicalUrl || ""),
+    timestampedUrl,
+    videoTitle: noteOriginalVideoTitle(note),
+    channelName: String(note?.channelName || ""),
+    sourceLanguage: String(note?.sourceLanguage || ""),
+    duration: Number(note?.duration) || 0,
+    showAll: notesFilterShowAll,
+    captureMetadata: captureMetadata === true,
+    exportContinuation: normalizeNoteExportContinuation(exportContinuation),
+    createdAt: now,
+    expiresAt: now + NOTE_NAVIGATION_PENDING_TTL_MS,
+    activatedAt: 0,
+  };
+}
+
+function isActiveNotesOnlyContext() {
+  return (
+    !!activeNotesOnlyContext &&
+    activeNotesOnlyContext.tabId === videoTabId &&
+    activeNotesOnlyContext.routeKey === currentRouteKey &&
+    activeNotesOnlyContext.mediaKey === currentVideoId
+  );
+}
+
 function isBilibiliChineseMedia() {
   return (
     currentMediaRef?.platform === "bilibili" &&
@@ -545,27 +872,39 @@ function isBilibiliChineseMedia() {
   );
 }
 
+/**
+ * Whether the media currently in front of the panel is a Bilibili video.
+ * Platform is the ONLY input for hiding Bilibili's subtitle/overview language
+ * controls, so a plain `zh` tag and a `zh-CN` tag lay out identically instead
+ * of the layout shifting with the language subtag.
+ */
+function currentPlatformIsBilibili() {
+  return currentMediaRef?.platform === "bilibili";
+}
+
 function applyMediaLanguageDefaults() {
-  const directChinese = isBilibiliChineseMedia();
+  const isBilibili = currentPlatformIsBilibili();
   currentTranscriptMode = "original";
-  // The current product contract is Chinese-first on every platform. Bilibili
-  // Chinese tracks additionally hide controls that would only duplicate the
-  // same text.
+  // The current product contract is Chinese-first on every platform.
   currentOverviewMode = "zh";
-  currentNotesMode = directChinese ? "zh" : "bilingual";
+  // Bilibili notes default to Chinese but keep all three modes: the "All notes"
+  // view aggregates YouTube + Bilibili and can hold multiple original
+  // languages, so its language control must stay available on Bilibili too.
+  currentNotesMode = isBilibili ? "zh" : "bilingual";
   setTranscriptModeButtons(currentTranscriptMode);
   setOverviewModeButtons(currentOverviewMode);
   setNotesModeButtons(currentNotesMode);
 
-  document.querySelectorAll(".transcript-mode-btn").forEach((button) => {
-    button.hidden = directChinese && button.dataset.transcriptMode !== "original";
-  });
-  document.querySelectorAll(".overview-mode-btn").forEach((button) => {
-    button.hidden = directChinese && button.dataset.overviewMode !== "zh";
-  });
-  document.querySelectorAll(".notes-mode-btn").forEach((button) => {
-    button.hidden = directChinese && button.dataset.notesMode !== "zh";
-  });
+  // Whole containers are shown/hidden by platform in
+  // updateHeaderLanguageControlsVisibility(); never leave per-button `hidden`
+  // state behind that would survive a switch back to YouTube.
+  document
+    .querySelectorAll(
+      ".transcript-mode-btn, .overview-mode-btn, .notes-mode-btn",
+    )
+    .forEach((button) => {
+      button.hidden = false;
+    });
 }
 
 function updateHeaderLanguageControlsVisibility() {
@@ -574,11 +913,23 @@ function updateHeaderLanguageControlsVisibility() {
   const notesControl = document.getElementById("notesModeControl");
   const activeTab = document.querySelector(".tab.active")?.dataset.tab;
   const showingResults = panelIsShowingResults();
+  const isBilibili = currentPlatformIsBilibili();
+  // Bilibili subtitles and overview are Chinese-only, so their language pills
+  // would be meaningless — hide the whole container by platform. Notes keep
+  // their control on every platform.
   if (transcriptControl) {
-    transcriptControl.hidden = !(showingResults && activeTab === "transcript");
+    transcriptControl.hidden = !(
+      showingResults &&
+      activeTab === "transcript" &&
+      !isBilibili
+    );
   }
   if (overviewControl) {
-    overviewControl.hidden = !(showingResults && activeTab === "overview");
+    overviewControl.hidden = !(
+      showingResults &&
+      activeTab === "overview" &&
+      !isBilibili
+    );
   }
   if (notesControl) {
     notesControl.hidden = !(showingResults && activeTab === "notes");
@@ -589,17 +940,39 @@ function updateHeaderLanguageControlsVisibility() {
  * Reacts to the URL now in front of the panel: close on non-YouTube,
  * refresh the digest when the video changed.
  */
-function handleFrontTabUrl(url) {
+function handleFrontTabUrl(url, tabId = null) {
   const locator = extractMediaLocator(url);
   if (!locator) {
-    window.close();
+    const activeToken = activeNotesOnlyContext?.token || "";
+    if (activeToken) {
+      void clearNoteNavigationState(activeToken).finally(() => window.close());
+    } else {
+      window.close();
+    }
     return;
   }
 
   const newRouteKey = locator.routeKey;
+  const exactTabChanged =
+    Number.isInteger(tabId) &&
+    Number.isInteger(videoTabId) &&
+    tabId !== videoTabId;
+  if (
+    activeNotesOnlyContext &&
+    (activeNotesOnlyContext.routeKey !== newRouteKey ||
+      (Number.isInteger(tabId) && activeNotesOnlyContext.tabId !== tabId))
+  ) {
+    void clearNoteNavigationState(activeNotesOnlyContext.token);
+  }
   // Refresh when the video changed, or when we're not currently showing
-  // results (e.g. user went home, then clicked back into the same video).
-  if (newRouteKey !== currentRouteKey || !panelIsShowingResults()) {
+  // results (e.g. user went home, then clicked back into the same video), or
+  // when another tab shows the same route. The latter must rebind videoTabId so
+  // note seek/play messages never target a background copy of the video.
+  if (
+    newRouteKey !== currentRouteKey ||
+    exactTabChanged ||
+    !panelIsShowingResults()
+  ) {
     scheduleDigestRefresh();
   }
 }
@@ -609,7 +982,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (!tab.active) return;
   if (panelWindowId !== null && tab.windowId !== panelWindowId) return;
   if (changeInfo.url) {
-    handleFrontTabUrl(changeInfo.url);
+    handleFrontTabUrl(changeInfo.url, tabId);
     return;
   }
   if (changeInfo.status === "complete" && tabId === videoTabId) {
@@ -625,9 +998,16 @@ chrome.tabs.onActivated.addListener(async ({ tabId, windowId }) => {
     const tab = await chrome.tabs.get(tabId);
     // Brand-new tabs may not have committed their URL yet — fall back to
     // the pending one so we judge where the tab is actually going.
-    handleFrontTabUrl(tab.pendingUrl || tab.url || "");
+    handleFrontTabUrl(tab.pendingUrl || tab.url || "", tabId);
   } catch (e) {
     // Tab closed before we could read it — nothing to do.
+  }
+});
+
+chrome.tabs.onRemoved?.addListener((tabId) => {
+  const state = activeNotesOnlyContext || pendingNoteNavigation;
+  if (state?.tabId === tabId) {
+    void clearNoteNavigationState(state.token);
   }
 });
 
@@ -709,6 +1089,66 @@ function setupEventListeners() {
     setNotesFilter(true);
     loadNotes(null); // Load all notes
   });
+
+  // Note export menu
+  document
+    .getElementById("notesExportBtn")
+    ?.addEventListener("click", (event) => {
+      event.stopPropagation();
+      toggleNoteExportMenu();
+    });
+  document
+    .getElementById("exportCurrentNotes")
+    ?.addEventListener("click", exportCurrentVideoNotes);
+  document
+    .getElementById("selectNotesForExport")
+    ?.addEventListener("click", () => void openNoteExportPicker());
+  document
+    .getElementById("exportAllNotes")
+    ?.addEventListener("click", () => void openNoteExportPicker({ selectAll: true }));
+  document
+    .getElementById("notesExportSelectAll")
+    ?.addEventListener("change", handleNoteExportSelectAll);
+  document
+    .getElementById("cancelNotesExportSelection")
+    ?.addEventListener("click", () => closeNoteExportPicker({ restoreFocus: true }));
+  document
+    .getElementById("directNotesExportSelection")
+    ?.addEventListener("click", () => {
+      const frozenKeys = [...selectedNoteExportMediaKeys].sort();
+      if (!frozenKeys.length) return;
+      void exportAllNotes(frozenKeys, { direct: true });
+    });
+  document
+    .getElementById("notesExportPicker")
+    ?.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const frozenKeys = [...selectedNoteExportMediaKeys].sort();
+      if (!frozenKeys.length) return;
+      void exportAllNotes(frozenKeys, {
+        grantAuthorization: true,
+        autoOpenMetadata: true,
+      });
+    });
+  document.addEventListener("click", (event) => {
+    const wrap = document.getElementById("notesExport");
+    if (wrap && !wrap.contains(event.target)) hideNoteExportMenu();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape") return;
+    const picker = document.getElementById("notesExportPicker");
+    if (picker && !picker.hidden) {
+      event.preventDefault();
+      closeNoteExportPicker({ restoreFocus: true });
+      return;
+    }
+    const menu = document.getElementById("notesExportMenu");
+    if (menu && !menu.hidden) {
+      event.preventDefault();
+      hideNoteExportMenu();
+      document.getElementById("notesExportBtn")?.focus();
+    }
+  });
 }
 
 function setNotesFilter(showAll) {
@@ -719,15 +1159,17 @@ function setNotesFilter(showAll) {
   thisVideoButton?.setAttribute("aria-pressed", String(!showAll));
   allNotesButton?.classList.toggle("active", showAll);
   allNotesButton?.setAttribute("aria-pressed", String(showAll));
+  updateNoteExportMenuContext();
+  if (!showAll) closeNoteExportPicker();
 }
 
 // ============================================================
 // VIDEO DETECTION
 // ============================================================
 
-function checkCurrentTab() {
+function checkCurrentTab(options = {}) {
   const generation = ++tabCheckGeneration;
-  return runCheckCurrentTab(generation);
+  return runCheckCurrentTab(generation, options);
 }
 
 function isTransientTabLookupError(error) {
@@ -739,7 +1181,22 @@ function isTransientTabLookupError(error) {
   );
 }
 
-async function runCheckCurrentTab(generation) {
+function requireContentRelayResponse(
+  result,
+  fallbackMessage = "YouTube 页面资料尚未就绪。",
+) {
+  if (result?.success && result.response) return result.response;
+  const error = new Error(result?.message || fallbackMessage);
+  if (
+    result?.error === "PAGE_REFRESH_REQUIRED" ||
+    result?.error === "PAGE_CONTEXT_CHANGED"
+  ) {
+    error.code = result.error;
+  }
+  throw error;
+}
+
+async function runCheckCurrentTab(generation, options = {}) {
   const isLatestCheck = () => generation === tabCheckGeneration;
   try {
     let tab = null;
@@ -748,7 +1205,10 @@ async function runCheckCurrentTab(generation) {
       lastFocusedWindow: true,
     });
     if (!isLatestCheck()) return;
-    if (extractMediaLocator(tabs[0]?.url)) tab = tabs[0];
+    const frontTabUrl = tabs[0]?.pendingUrl || tabs[0]?.url || "";
+    if (extractMediaLocator(frontTabUrl)) {
+      tab = { ...tabs[0], url: frontTabUrl };
+    }
 
     if (!tab) {
       tabs = await chrome.tabs.query({
@@ -780,9 +1240,27 @@ async function runCheckCurrentTab(generation) {
       return;
     }
 
-    const locator = extractMediaLocator(tab.url);
+    const locator = extractMediaLocator(tab.pendingUrl || tab.url);
     if (!locator) {
       showState("welcome");
+      return;
+    }
+
+    // Capture the exact supported tab before any navigation-intent lookup or
+    // content relay. Viewing an already-saved note is a local action and must
+    // remain available even when no AI key is configured.
+    videoTabId = tab.id;
+    const noteNavigation = await resolveNoteNavigationForTab(tab, locator);
+    if (!isLatestCheck()) return;
+    const resumeNoteNavigationToken = String(
+      options?.resumeNoteNavigationToken || "",
+    );
+    const isExplicitNoteDigestResume =
+      !!noteNavigation &&
+      !!resumeNoteNavigationToken &&
+      noteNavigation.token === resumeNoteNavigationToken;
+    if (noteNavigation && !isExplicitNoteDigestResume) {
+      await enterNotesOnlyView(noteNavigation, tab, locator);
       return;
     }
 
@@ -791,15 +1269,13 @@ async function runCheckCurrentTab(generation) {
       return;
     }
 
-    // Capture the exact supported tab before any content relay so a
-    // refresh-required response can reload the tab that actually failed.
-    videoTabId = tab.id;
-
     let nextMediaRef = locator;
     let nextVideoUrl = tab.url;
     let nextVideoTitle = "";
     let nextChannelName = "";
     let nextVideoDescription = "";
+    let nextVideoDescriptionState = "unknown";
+    let nextVideoDescriptionTruncated = false;
     let nextVideoDuration = 0;
     let nextSourceLanguage = "";
 
@@ -820,6 +1296,14 @@ async function runCheckCurrentTab(generation) {
       nextVideoTitle = nextMediaRef.title || "";
       nextChannelName = nextMediaRef.channelName || "";
       nextVideoDescription = nextMediaRef.description || "";
+      nextVideoDescriptionState = ["unknown", "confirmed-empty", "present"].includes(
+        nextMediaRef.descriptionStatus,
+      )
+        ? nextMediaRef.descriptionStatus
+        : nextVideoDescription
+          ? "present"
+          : "unknown";
+      nextVideoDescriptionTruncated = nextMediaRef.descriptionTruncated === true;
       nextVideoDuration = nextMediaRef.duration || 0;
     } else {
       let videoInfo = null;
@@ -831,28 +1315,31 @@ async function runCheckCurrentTab(generation) {
         });
         if (!isLatestCheck()) return;
         debugLog("[DigestDock Panel] getVideoInfo result:", result);
-        if (
-          result?.error === "PAGE_REFRESH_REQUIRED" ||
-          result?.error === "PAGE_CONTEXT_CHANGED"
-        ) {
-          const refreshError = new Error(
-            result.message ||
-              "DigestDock 已更新，请刷新当前 YouTube 页面后重试。",
-          );
-          refreshError.code = "PAGE_REFRESH_REQUIRED";
-          throw refreshError;
-        }
-        if (result.success && result.response) {
-          videoInfo = result.response;
-        }
+        videoInfo = requireContentRelayResponse(
+          result,
+          "YouTube 页面资料尚未就绪。",
+        );
       } catch (e) {
         if (!isLatestCheck()) return;
-        if (e?.code === "PAGE_REFRESH_REQUIRED") throw e;
+        if (
+          e?.code === "PAGE_REFRESH_REQUIRED" ||
+          e?.code === "PAGE_CONTEXT_CHANGED"
+        ) {
+          throw e;
+        }
         console.error("[DigestDock Panel] getVideoInfo error:", e);
       }
       nextVideoTitle = videoInfo?.title || "";
       nextChannelName = videoInfo?.channelName || "";
       nextVideoDescription = videoInfo?.description || "";
+      nextVideoDescriptionState = ["unknown", "confirmed-empty", "present"].includes(
+        videoInfo?.descriptionStatus,
+      )
+        ? videoInfo.descriptionStatus
+        : nextVideoDescription
+          ? "present"
+          : "unknown";
+      nextVideoDescriptionTruncated = videoInfo?.descriptionTruncated === true;
       nextVideoDuration = videoInfo?.duration || 0;
       nextSourceLanguage = normalizeLanguageCode(videoInfo?.sourceLanguage);
     }
@@ -873,6 +1360,9 @@ async function runCheckCurrentTab(generation) {
     currentVideoTitle = nextVideoTitle;
     currentChannelName = nextChannelName;
     currentVideoDescription = nextVideoDescription;
+    currentVideoDescriptionState = nextVideoDescriptionState;
+    currentVideoDescriptionTruncated = nextVideoDescriptionTruncated;
+    currentVideoDescriptionZh = "";
     currentVideoDuration = nextVideoDuration;
     currentVideoSourceLanguage = nextSourceLanguage;
 
@@ -894,6 +1384,11 @@ async function runCheckCurrentTab(generation) {
       showPageRefreshRequired(videoTabId, error.message);
       return;
     }
+    if (error?.code === "PAGE_CONTEXT_CHANGED") {
+      debugLog("[DigestDock Panel] Video page is still changing");
+      scheduleDigestRefresh();
+      return;
+    }
     console.error("Tab check error:", error);
     showError(
       "无法打开摘要",
@@ -905,6 +1400,299 @@ async function runCheckCurrentTab(generation) {
 // ============================================================
 // DIGEST PIPELINE
 // ============================================================
+
+function resetDigestStateForVideo(videoId, videoUrl, mediaRef, routeKey) {
+  const previousExportJobId = activeExportJobId;
+  digestGeneration += 1;
+  translationGeneration += 1;
+  exportTranslationGeneration += 1;
+  notesLoadGeneration += 1;
+  notesTranslationGeneration += 1;
+  isOverviewTranslationLoading = false;
+  isAnalysisLoading = false;
+  isNotesLoading = false;
+  isNotesTranslationLoading = false;
+  if (transcriptScrollObserver) transcriptScrollObserver.disconnect();
+  transcriptScrollObserver = null;
+  currentVideoId = videoId;
+  currentVideoUrl = videoUrl;
+  currentMediaRef = mediaRef;
+  currentRouteKey = routeKey;
+  currentAnalysis = null;
+  currentTranscript = null;
+  currentTranscriptText = null;
+  currentTranscriptTimestamped = null;
+  currentTranscriptLanguage = null;
+  currentTranscriptSource = "";
+  currentTranscriptSelectedTrack = null;
+  currentTranscriptSourceAttempt = "";
+  currentPersistedNoteSource = null;
+  activeExportJobId = "";
+  if (previousExportJobId) {
+    chrome.runtime
+      .sendMessage({
+        action: "cancelExportTranslationJob",
+        jobId: previousExportJobId,
+      })
+      .catch(() => {});
+  }
+  currentOverviewMode = "zh";
+  setOverviewModeButtons(currentOverviewMode);
+  clearOverviewResults();
+}
+
+async function captureNotesOnlyMetadata(
+  context,
+  tab,
+  locator,
+  { requireActiveContext = true } = {},
+) {
+  if (!context?.captureMetadata || !noteNavigationMatches(context, tab, locator)) {
+    return null;
+  }
+  return runMetadataCaptureSingleFlight(context.token, async () => {
+    const ownsCapture = () =>
+      requireActiveContext
+        ? activeNotesOnlyContext?.token === context.token &&
+          isActiveNotesOnlyContext()
+        : currentVideoId === context.mediaKey &&
+          videoTabId === context.tabId &&
+          currentRouteKey === context.routeKey;
+    if (!ownsCapture()) return null;
+
+    try {
+      let metadata = null;
+      let resolvedMediaRef = currentMediaRef;
+      if (locator.platform === "bilibili") {
+        const resolved = await chrome.runtime.sendMessage({
+          action: "resolveBilibiliMedia",
+          url: tab.pendingUrl || tab.url || context.timestampedUrl,
+        });
+        if (
+          !resolved?.success ||
+          !resolved.mediaRef ||
+          resolved.mediaRef.mediaKey !== context.mediaKey
+        ) {
+          throw new Error("B 站页面资料尚未就绪。");
+        }
+        resolvedMediaRef = resolved.mediaRef;
+        metadata = resolved.mediaRef;
+      } else {
+        const result = await chrome.runtime.sendMessage({
+          action: "relayToContent",
+          tabId: context.tabId,
+          payload: { action: "getVideoInfo" },
+        });
+        const response = requireContentRelayResponse(
+          result,
+          "YouTube 页面资料尚未就绪。",
+        );
+        const responseVideoId = String(response.videoId || "").trim();
+        if (responseVideoId && responseVideoId !== locator.videoId) {
+          const pageChangedError = new Error(
+            "YouTube 页面已切换，未写入旧视频资料。",
+          );
+          pageChangedError.code = "PAGE_CONTEXT_CHANGED";
+          throw pageChangedError;
+        }
+        if (!responseVideoId) {
+          const normalizeTitle = (value) =>
+            String(value || "")
+              .normalize("NFKC")
+              .replace(/\s+/g, " ")
+              .trim()
+              .toLocaleLowerCase();
+          const expectedTitle = normalizeTitle(context.videoTitle);
+          const responseTitle = normalizeTitle(response.title);
+          if (!expectedTitle || !responseTitle || expectedTitle !== responseTitle) {
+            const staleError = new Error(
+              "页面仍在使用旧版 DigestDock 内容脚本，请刷新当前视频页后再补充。",
+            );
+            staleError.code = "PAGE_REFRESH_REQUIRED";
+            throw staleError;
+          }
+          const refreshError = new Error(
+            "当前视频页尚未加载新版 DigestDock 内容脚本，请刷新页面后再补充。",
+          );
+          refreshError.code = "PAGE_REFRESH_REQUIRED";
+          throw refreshError;
+        }
+        metadata = response;
+      }
+
+      const latestTab = await chrome.tabs.get(context.tabId);
+      const latestLocator = extractMediaLocator(
+        latestTab?.pendingUrl || latestTab?.url || "",
+      );
+      if (!ownsCapture() || !noteNavigationMatches(context, latestTab, latestLocator)) {
+        return null;
+      }
+
+      currentMediaRef = {
+        ...(resolvedMediaRef || locator),
+        platform: context.platform,
+        mediaKey: context.mediaKey,
+        canonicalUrl:
+          resolvedMediaRef?.canonicalUrl ||
+          context.canonicalUrl ||
+          locator.canonicalUrl,
+      };
+      currentVideoTitle = String(metadata.title || context.videoTitle || "");
+      currentChannelName = String(
+        metadata.channelName || context.channelName || "",
+      );
+      currentVideoDescription = String(metadata.description || "");
+      currentVideoDescriptionState = ["unknown", "confirmed-empty", "present"].includes(
+        metadata.descriptionStatus,
+      )
+        ? metadata.descriptionStatus
+        : currentVideoDescription
+          ? "present"
+          : "unknown";
+      currentVideoDescriptionTruncated = metadata.descriptionTruncated === true;
+      currentVideoDuration = Math.max(0, Number(metadata.duration) || 0);
+      currentVideoSourceLanguage = normalizeLanguageCode(
+        metadata.sourceLanguage || context.sourceLanguage,
+      );
+
+      const stored = await YTD_NOTE_SOURCES.readNoteSource(
+        chrome.storage.local,
+        context.mediaKey,
+      );
+      if (!ownsCapture()) return null;
+      const persisted = await upsertNoteSourceInBackground({
+        mediaKey: context.mediaKey,
+        platform: context.platform,
+        canonicalUrl: currentMediaRef.canonicalUrl || "",
+        titleOriginal: currentVideoTitle,
+        titleZh: stored?.titleZh || currentVideoTitleZh(),
+        channelName: currentChannelName,
+        descriptionOriginal: currentVideoDescription,
+        descriptionStatus: currentVideoDescriptionState,
+        descriptionTruncated: currentVideoDescriptionTruncated,
+        descriptionZh: stored?.descriptionZh || "",
+        sourceLanguage:
+          stored?.sourceLanguage || currentVideoSourceLanguage || "",
+        transcriptOriginal: stored?.transcriptOriginal || [],
+        transcriptZh: stored?.transcriptZh || [],
+        transcriptTruncated: stored?.transcriptTruncated === true,
+      });
+      if (!ownsCapture()) return persisted;
+
+      applyPersistedSourceToCurrentVideo(persisted);
+      const videoTitle = document.getElementById("videoTitle");
+      if (videoTitle) videoTitle.textContent = currentVideoTitle;
+      updateVideoMetaLine();
+      const metadataComplete =
+        !!currentVideoTitle &&
+        !!currentChannelName &&
+        !!currentMediaRef.canonicalUrl &&
+        currentVideoDescriptionState !== "unknown" &&
+        !currentVideoDescriptionTruncated;
+      if (requireActiveContext) {
+        await persistNoteNavigationState({
+          ...context,
+          phase: "active",
+          captureMetadata: !metadataComplete,
+          videoTitle: currentVideoTitle,
+          channelName: currentChannelName,
+          duration: currentVideoDuration,
+          sourceLanguage: currentVideoSourceLanguage,
+          canonicalUrl: currentMediaRef.canonicalUrl || context.canonicalUrl,
+        });
+      }
+      setNoteExportStatus(
+        metadataComplete
+          ? context.exportContinuation
+            ? `已补充《${currentVideoTitle || "当前视频"}》的页面资料，正在继续完整导出…`
+            : `已补充《${currentVideoTitle || "当前视频"}》的页面资料。`
+          : "已保存当前可读取的资料，但页面仍未加载完整。请刷新视频页后再次补充。",
+        !metadataComplete,
+      );
+      return persisted;
+    } catch (error) {
+      if (
+        error?.code === "PAGE_REFRESH_REQUIRED" ||
+        error?.code === "PAGE_CONTEXT_CHANGED"
+      ) {
+        debugLog("[DigestDock] Metadata page state not ready:", error.code);
+      } else {
+        console.warn("[DigestDock] Capture note metadata error:", error);
+      }
+      if (ownsCapture()) {
+        setNoteExportStatus(
+          error?.code === "PAGE_REFRESH_REQUIRED" ||
+            error?.code === "PAGE_CONTEXT_CHANGED"
+            ? error.message
+            : "页面资料暂未读取完整。请等待页面加载后刷新，或稍后再次补充。",
+          error?.code !== "PAGE_CONTEXT_CHANGED",
+        );
+      }
+      return null;
+    }
+  });
+}
+
+async function enterNotesOnlyView(context, tab, locator) {
+  if (!noteNavigationMatches(context, tab, locator)) return false;
+  const mediaRef = {
+    ...locator,
+    platform: context.platform,
+    mediaKey: context.mediaKey,
+    canonicalUrl: context.canonicalUrl || locator.canonicalUrl,
+  };
+  const videoChanged =
+    context.mediaKey !== currentVideoId ||
+    context.routeKey !== currentRouteKey;
+
+  currentVideoTitle = context.videoTitle || "";
+  currentChannelName = context.channelName || "";
+  currentVideoDescription = "";
+  currentVideoDescriptionZh = "";
+  currentVideoDescriptionState = "unknown";
+  currentVideoDescriptionTruncated = false;
+  currentVideoDuration = context.duration || 0;
+  currentVideoSourceLanguage = context.sourceLanguage || "";
+
+  if (videoChanged) {
+    resetDigestStateForVideo(
+      context.mediaKey,
+      tab.pendingUrl || tab.url || context.timestampedUrl,
+      mediaRef,
+      context.routeKey,
+    );
+    applyMediaLanguageDefaults();
+  } else {
+    currentVideoUrl = tab.pendingUrl || tab.url || context.timestampedUrl;
+    currentMediaRef = mediaRef;
+    currentRouteKey = context.routeKey;
+  }
+
+  const videoInfo = document.getElementById("videoInfo");
+  const videoTitle = document.getElementById("videoTitle");
+  if (videoTitle) videoTitle.textContent = currentVideoTitle;
+  updateVideoMetaLine();
+  if (videoInfo) videoInfo.style.display = "block";
+
+  showState("results");
+  switchTab("notes");
+  await loadNotes(context.showAll ? null : context.mediaKey, {
+    translateMissing: false,
+  });
+  let capturedSource = null;
+  if (context.captureMetadata) {
+    capturedSource = await captureNotesOnlyMetadata(context, tab, locator);
+  }
+  if (
+    context.exportContinuation &&
+    (!context.captureMetadata || capturedSource)
+  ) {
+    Promise.resolve().then(() => {
+      void resumeNoteExportContinuation(context.exportContinuation);
+    });
+  }
+  return true;
+}
 
 function startDigest(
   videoId,
@@ -929,28 +1717,12 @@ function startDigest(
     nextRouteKey !== currentRouteKey ||
     sourceTrackChanged;
   if (videoChanged) {
-    digestGeneration += 1;
-    translationGeneration += 1;
-    notesLoadGeneration += 1;
-    notesTranslationGeneration += 1;
-    isOverviewTranslationLoading = false;
-    isAnalysisLoading = false;
-    isNotesLoading = false;
-    isNotesTranslationLoading = false;
-    if (transcriptScrollObserver) transcriptScrollObserver.disconnect();
-    transcriptScrollObserver = null;
-    currentVideoId = videoId;
-    currentVideoUrl = videoUrl;
-    currentMediaRef = nextMediaRef;
-    currentRouteKey = nextRouteKey;
-    currentAnalysis = null;
-    currentTranscript = null;
-    currentTranscriptText = null;
-    currentTranscriptTimestamped = null;
-    currentTranscriptLanguage = null;
-    currentOverviewMode = "zh";
-    setOverviewModeButtons(currentOverviewMode);
-    clearOverviewResults();
+    resetDigestStateForVideo(
+      videoId,
+      videoUrl,
+      nextMediaRef,
+      nextRouteKey,
+    );
   } else {
     currentVideoUrl = videoUrl;
     currentMediaRef = nextMediaRef;
@@ -1082,6 +1854,8 @@ async function runDigestLoad(
         }
       }
     }
+    await hydrateCurrentVideoNoteSource();
+    if (!isCurrentDigest(videoId, generation, routeKey)) return;
 
     if (currentVideoTitle || currentChannelName) {
       const videoInfo = document.getElementById("videoInfo");
@@ -1102,8 +1876,10 @@ async function runDigestLoad(
     showState("results");
     document.getElementById("tabsNav").style.display = "flex";
 
-    // Load notes for this video
-    loadNotes(videoId);
+    // Respect the user's explicit All Notes filter. A saved-note navigation
+    // must not silently collapse the library back to the current video after
+    // they later request Transcript or Overview.
+    loadNotes(notesFilterShowAll ? null : videoId);
 
     // Setup explain feature
     setupExplainFeature();
@@ -1147,32 +1923,48 @@ async function runDigestLoad(
       transcriptResult.error === "SUPADATA_CONSENT_REQUIRED" &&
       supadataConsent !== true
     ) {
-      showSupadataConsent(async () => {
-        if (!isCurrentDigest(videoId, generation, routeKey)) return;
-        const requestKey = `${generation}:${videoId}`;
-        // A same-video refresh may already own the ordinary consent-gated
-        // single-flight. Wait for it to finish, then start a fresh consented
-        // attempt. This preserves ordering without running the unconsented
-        // probe and the Supadata-authorized request in parallel or swallowing
-        // the click.
-        await runDigestSingleFlight(
-          requestKey,
-          async () => undefined,
-        );
-        if (!isCurrentDigest(videoId, generation, routeKey)) return;
-        await runDigestSingleFlight(
-          requestKey,
-          () =>
-            runDigestLoad(
-              videoId,
-              generation,
-              false,
-              requestMediaRef,
-              routeKey,
-              true,
-            ),
-        );
-      });
+      const notesOnlyContext = isActiveNotesOnlyContext()
+        ? activeNotesOnlyContext
+        : null;
+      showSupadataConsent(
+        async () => {
+          if (!isCurrentDigest(videoId, generation, routeKey)) return;
+          const requestKey = `${generation}:${videoId}`;
+          // A same-video refresh may already own the ordinary consent-gated
+          // single-flight. Wait for it to finish, then start a fresh consented
+          // attempt. This preserves ordering without running the unconsented
+          // probe and the Supadata-authorized request in parallel or swallowing
+          // the click.
+          await runDigestSingleFlight(
+            requestKey,
+            async () => undefined,
+          );
+          if (!isCurrentDigest(videoId, generation, routeKey)) return;
+          await runDigestSingleFlight(
+            requestKey,
+            () =>
+              runDigestLoad(
+                videoId,
+                generation,
+                false,
+                requestMediaRef,
+                routeKey,
+                true,
+              ),
+          );
+          if (
+            currentTranscript &&
+            notesOnlyContext &&
+            activeNotesOnlyContext?.token === notesOnlyContext.token &&
+            isActiveNotesOnlyContext()
+          ) {
+            await clearNoteNavigationState(notesOnlyContext.token);
+          }
+        },
+        notesOnlyContext
+          ? () => returnToNotesOnlyContext(notesOnlyContext)
+          : null,
+      );
       return;
     }
     if (transcriptResult.error === "SUPADATA_NOT_CONFIGURED") {
@@ -1233,13 +2025,16 @@ async function runDigestLoad(
   }
   applyMediaLanguageDefaults();
 
+  await hydrateCurrentVideoNoteSource();
+  if (!isCurrentDigest(videoId, generation, routeKey)) return;
+
   // Render transcript immediately (no LLM needed)
   renderTranscript();
   showState("results");
   document.getElementById("tabsNav").style.display = "flex";
 
-  // Load notes for this video
-  loadNotes(videoId);
+  // Preserve an explicitly selected All Notes view across digest loading.
+  loadNotes(notesFilterShowAll ? null : videoId);
 
   // Setup explain feature for text selection
   setupExplainFeature();
@@ -1752,7 +2547,7 @@ function renderTranscript() {
   const badge = document.createElement("div");
   badge.id = "transcriptSourceBadge";
   badge.className = "transcript-source-badge";
-  badge.innerHTML = `<span class="source-dot source-dot--subs"></span> ${escapeHtml(transcriptSourceLabel())} · ${escapeHtml(getOriginalTranscriptLabel())}`;
+  badge.innerHTML = `<span class="source-dot source-dot--subs"></span> ${escapeHtml(transcriptOriginalBadgeText())}`;
   transcriptList.parentElement.insertBefore(badge, transcriptList);
 
   // Group entries using smart sentence-boundary + time-guardrail logic
@@ -1784,30 +2579,2451 @@ function copyTranscript() {
   copyToClipboardWithFeedback(currentTranscriptText || "", "copyTranscriptBtn");
 }
 
-function exportTranscript() {
-  const transcriptContent = currentTranscriptText || "";
-  const videoUrl =
-    currentMediaRef?.canonicalUrl || currentVideoUrl || "";
+/**
+ * Read-only export mode for the transcript download. Bilibili tracks are
+ * Chinese-only with no language control, so their content is exported as-is
+ * under the "zh" file suffix; every other platform follows the active
+ * transcript language mode.
+ */
+function transcriptExportMode() {
+  if (currentPlatformIsBilibili() || currentVideoIsChinese()) return "zh";
+  return currentTranscriptMode === "bilingual" ? "bilingual" : currentTranscriptMode;
+}
 
-  let exportText = "";
-  exportText += `字幕\n`;
-  exportText += `${"=".repeat(60)}\n\n`;
-  exportText += `标题：${currentVideoTitle || "未知"}\n`;
-  exportText += `频道：${currentChannelName || "未知"}\n`;
-  exportText += `网址：${videoUrl}\n`;
-  exportText += `\n${"—".repeat(60)}\n\n`;
+function currentTranscriptOriginalSegments() {
+  return groupTranscriptEntries(currentTranscript || []).map((segment) => ({
+    segmentId: segment.id,
+    start: segment.start,
+    text: segment.text,
+    sourceHash: YTD_NOTE_SOURCES.hashSourceText(segment.text),
+  }));
+}
 
-  if (currentVideoDescription) {
-    exportText += `视频简介：\n${currentVideoDescription}\n`;
-    exportText += `\n${"—".repeat(60)}\n\n`;
+function applyPersistedSourceToCurrentVideo(source) {
+  const key = currentVideoId || currentMediaRef?.mediaKey || "";
+  const normalized = YTD_NOTE_SOURCES.normalizeNoteSource(source);
+  if (!normalized || normalized.mediaKey !== key) return false;
+
+  if (
+    currentVideoDescriptionTruncated &&
+    normalized.descriptionTruncated !== true &&
+    (normalized.descriptionStatus === "present" ||
+      normalized.descriptionStatus === "confirmed-empty")
+  ) {
+    currentVideoDescription = normalized.descriptionOriginal || "";
+    currentVideoDescriptionState = normalized.descriptionStatus;
+    currentVideoDescriptionTruncated = false;
+  } else if (
+    currentVideoDescriptionState === "unknown" &&
+    normalized.descriptionStatus === "present" &&
+    normalized.descriptionOriginal
+  ) {
+    currentVideoDescription = normalized.descriptionOriginal;
+    currentVideoDescriptionState = "present";
+    currentVideoDescriptionTruncated = normalized.descriptionTruncated === true;
+  } else if (
+    currentVideoDescriptionState === "unknown" &&
+    normalized.descriptionStatus === "confirmed-empty"
+  ) {
+    currentVideoDescriptionState = "confirmed-empty";
+    currentVideoDescriptionTruncated = false;
   }
 
-  exportText += `字幕：\n\n${transcriptContent}\n`;
-  exportText += `\n${"—".repeat(60)}\n`;
-  exportText += `由 DigestDock 导出\n`;
+  const currentDescriptionHash = currentVideoDescription
+    ? YTD_NOTE_SOURCES.hashSourceText(currentVideoDescription)
+    : "";
+  if (
+    normalized.descriptionZh &&
+    normalized.descriptionSourceHash &&
+    normalized.descriptionSourceHash === currentDescriptionHash
+  ) {
+    currentVideoDescriptionZh = normalized.descriptionZh;
+  }
 
-  const filename = `${sanitizeFilename(currentVideoTitle)}-transcript.txt`;
-  downloadTextFile(exportText, filename);
+  const byIdentity = new Map();
+  const byStartHash = new Map();
+  normalized.transcriptZh.forEach((entry) => {
+    byIdentity.set(
+      `${entry.segmentId}\u0000${entry.startMs}\u0000${entry.sourceHash}`,
+      entry.text,
+    );
+    const fallback = `${entry.startMs}\u0000${entry.sourceHash}`;
+    const values = byStartHash.get(fallback) || [];
+    values.push(entry.text);
+    byStartHash.set(fallback, values);
+  });
+  getActiveTranscriptSegments().forEach((segment) => {
+    const startMs = Math.round((Number(segment.start) || 0) * 1000);
+    const sourceHash = YTD_NOTE_SOURCES.hashSourceText(segment.text);
+    const exact = byIdentity.get(
+      `${segment.id}\u0000${startMs}\u0000${sourceHash}`,
+    );
+    const fallback = byStartHash.get(`${startMs}\u0000${sourceHash}`) || [];
+    const translated = exact || (fallback.length === 1 ? fallback[0] : "");
+    if (translated) {
+      transcriptParagraphCache.set(
+        transcriptTranslationCacheKey(key, segment),
+        translated,
+      );
+    }
+  });
+  currentPersistedNoteSource = normalized;
+  return true;
+}
+
+async function hydrateCurrentVideoNoteSource() {
+  const key = currentVideoId || currentMediaRef?.mediaKey || "";
+  if (!key || !currentTranscript?.length) return null;
+  try {
+    const source = await YTD_NOTE_SOURCES.readNoteSource(
+      chrome.storage.local,
+      key,
+    );
+    if (key !== currentVideoId) return null;
+    if (source) applyPersistedSourceToCurrentVideo(source);
+    return source || null;
+  } catch (error) {
+    console.error("[DigestDock] Hydrate note source error:", error);
+    return null;
+  }
+}
+
+async function upsertNoteSourceInBackground(source) {
+  const result = await chrome.runtime.sendMessage({
+    action: "upsertNoteSource",
+    source,
+  });
+  if (!result?.success) {
+    const error = new Error(result?.message || "视频资料保存失败。");
+    error.code = result?.code || "SOURCE_WRITE_FAILED";
+    throw error;
+  }
+  const currentKey = currentVideoId || currentMediaRef?.mediaKey || "";
+  if (result.source?.mediaKey === currentKey) {
+    currentPersistedNoteSource = result.source;
+  }
+  return result.source || source;
+}
+
+/**
+ * Resolves the current video's FULL, timecode-ordered original + Chinese
+ * transcript segments for the requested mode, purely from the in-memory
+ * segments and the translation cache. Read-only: a segment with no cached
+ * Chinese is reported via `missingCount` rather than translated here, so a
+ * partial lazy-loaded translation is never silently completed. Shared by the
+ * transcript download, the note-source library and the note export.
+ */
+function resolveCurrentVideoTranscript(mode) {
+  const segments = groupTranscriptEntries(currentTranscript || []);
+  const transcriptOriginal = currentTranscriptOriginalSegments();
+  // A confirmed-Chinese track needs no translation: its "original" IS Chinese,
+  // so the zh/bilingual assembly reuses the original text.
+  const originalIsChinese =
+    currentPlatformIsBilibili() || currentVideoIsChinese();
+  const needsTranslation = mode !== "original" && !originalIsChinese;
+  const transcriptZh = [];
+  let missingCount = 0;
+  segments.forEach((segment) => {
+    if (originalIsChinese) {
+      transcriptZh.push({
+        segmentId: segment.id,
+        start: segment.start,
+        sourceHash: YTD_NOTE_SOURCES.hashSourceText(segment.text),
+        text: segment.text,
+      });
+      return;
+    }
+    if (!needsTranslation) return;
+    const cached = transcriptParagraphCache.get(
+      transcriptTranslationCacheKey(currentVideoId, segment),
+    );
+    const text = typeof cached === "string" ? cached.trim() : "";
+    if (text) {
+      transcriptZh.push({
+        segmentId: segment.id,
+        start: segment.start,
+        sourceHash: YTD_NOTE_SOURCES.hashSourceText(segment.text),
+        text,
+      });
+    }
+    else missingCount += 1;
+  });
+  return {
+    segments,
+    transcriptOriginal,
+    transcriptZh,
+    originalIsChinese,
+    missingCount,
+    total: segments.length,
+  };
+}
+
+/** The validated Chinese video title held on the current media's notes. */
+function currentVideoTitleZh() {
+  const key = currentVideoId || currentMediaRef?.mediaKey || "";
+  const note = (currentNotes || []).find(
+    (candidate) => String(candidate?.mediaKey || candidate?.videoId || "") === key,
+  );
+  return note ? noteChineseVideoTitle(note) : "";
+}
+
+/**
+ * Assembles the current-video transcript export source. Kept read-only and
+ * with the transcript-download title semantics (title translation is owned by
+ * notes, so a non-Chinese title is left original here).
+ */
+function buildTranscriptExportSource(mode) {
+  const resolved = resolveCurrentVideoTranscript(mode);
+  const source = {
+    mediaKey: currentVideoId || currentMediaRef?.mediaKey || "",
+    platform: currentPlatformIsBilibili() ? "bilibili" : "youtube",
+    canonicalUrl: currentMediaRef?.canonicalUrl || currentVideoUrl || "",
+    titleOriginal: currentVideoTitle || "",
+    titleZh: resolved.originalIsChinese ? currentVideoTitle || "" : "",
+    channelName: currentChannelName || "",
+    descriptionOriginal: currentVideoDescription || "",
+    descriptionStatus: currentVideoDescriptionState,
+    descriptionTruncated: currentVideoDescriptionTruncated,
+    descriptionZh: resolved.originalIsChinese
+      ? currentVideoDescription || ""
+      : currentVideoDescriptionZh,
+    transcriptOriginal: resolved.transcriptOriginal,
+    transcriptZh: resolved.transcriptZh,
+    sourceLanguage:
+      currentTranscriptLanguage || currentVideoSourceLanguage || "",
+  };
+  return { source, missingCount: resolved.missingCount, total: resolved.total };
+}
+
+function exportTranslationProgressText(plan) {
+  const progress = plan?.progress || {};
+  const completed = Number(progress.completedUnits) || 0;
+  const total = Math.max(
+    completed + (Number(progress.remainingUnits) || 0),
+    Number(progress.totalUnits) || 0,
+  );
+  return {
+    completed,
+    total,
+    remainingBatches:
+      Number(progress.remainingBatches) || Number(plan?.estimatedBatches) || 0,
+    roundMax: Number(progress.roundMaxBatches) || 20,
+    hasProgress: completed > 0,
+  };
+}
+
+function showTranscriptExportPrecheck(
+  plan,
+  missingCount,
+  onGenerate,
+  onExportOriginal,
+) {
+  const panel = document.getElementById("transcriptExportPrecheck");
+  if (!panel) return;
+  panel.innerHTML = "";
+  const summary = document.createElement("p");
+  summary.className = "notes-export-precheck-text";
+  summary.tabIndex = -1;
+  const progress = exportTranslationProgressText(plan);
+  summary.textContent = plan.overLimit
+    ? `还有 ${missingCount} 段字幕未翻译。本次补译未启动：${plan.limitReasons.join("、")}。请缩小导出范围。`
+    : `还有 ${missingCount} 段字幕未翻译。当前已完成 ${progress.completed}/${progress.total} 个翻译单元，剩余约 ${progress.remainingBatches} 批；每次确认最多继续 ${progress.roundMax} 批，全部完成后自动导出。`;
+  panel.appendChild(summary);
+  const actions = document.createElement("div");
+  actions.className = "notes-export-precheck-actions";
+  const generate = document.createElement("button");
+  generate.type = "button";
+  generate.className = "enhance-btn active";
+  generate.textContent = progress.hasProgress
+    ? `继续补齐（本轮最多 ${progress.roundMax} 批）`
+    : `生成中文（本轮最多 ${progress.roundMax} 批）`;
+  generate.disabled = plan.overLimit;
+  generate.addEventListener("click", () => {
+    if (!generate.disabled) void onGenerate();
+  });
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.className = "enhance-btn";
+  cancel.textContent = "取消";
+  cancel.addEventListener("click", () => {
+    panel.hidden = true;
+    setTranscriptExportStatus("已取消导出。");
+  });
+  actions.append(generate, cancel);
+  if (onExportOriginal) {
+    const original = document.createElement("button");
+    original.type = "button";
+    original.className = "enhance-btn";
+    original.textContent = "改为导出原文";
+    original.addEventListener("click", () => {
+      panel.hidden = true;
+      onExportOriginal();
+    });
+    actions.insertBefore(original, cancel);
+  }
+  panel.appendChild(actions);
+  panel.hidden = false;
+  summary.focus?.();
+}
+
+async function exportTranscript() {
+  const exportBtn = document.getElementById("exportTranscriptBtn");
+  const precheckPanel = document.getElementById("transcriptExportPrecheck");
+  setTranscriptExportStatus();
+  if (!currentTranscript || !currentTranscript.length) {
+    if (exportBtn) flashIconDone(exportBtn, "暂无可导出的字幕", "导出完整字幕", 2200);
+    return;
+  }
+  const mode = transcriptExportMode();
+  let persistedSource = null;
+  try {
+    persistedSource = await persistCurrentVideoSourceForExport();
+  } catch (error) {
+    setTranscriptExportStatus(
+      error?.message || "无法保存字幕资料，请重试。",
+      true,
+    );
+    return;
+  }
+  const built = buildTranscriptExportSource(mode);
+  const source = persistedSource
+    ? {
+        ...persistedSource,
+        ...built.source,
+        descriptionZhChunks: persistedSource.descriptionZhChunks || [],
+      }
+    : built.source;
+  const missingCount = built.missingCount;
+  // Never emit a file that claims to be complete Chinese while segments remain
+  // untranslated. A user may explicitly authorize one bounded completion job.
+  if (missingCount > 0) {
+    const mediaKey = source.mediaKey;
+    const group = {
+      mediaKey,
+      representative: {
+        videoTitle: currentVideoTitle,
+        platform: source.platform,
+      },
+      notes: [],
+    };
+    const sourceMap = { [mediaKey]: source };
+    const plan = YTD_NOTE_SOURCES.buildExportTranslationPlan({
+      groups: [group],
+      sourcesByKey: sourceMap,
+      mode,
+      isChineseText: looksLikeLegacyChineseNote,
+      includeTitles: false,
+      includeNotes: false,
+      includeDescriptions: false,
+      includeTranscript: true,
+    });
+    showTranscriptExportPrecheck(plan, missingCount, async () => {
+      try {
+        const outcome = await runConfirmedExportTranslationRound({
+          plan,
+          sourcesByKey: sourceMap,
+          groups: [group],
+          scope: "transcript-current",
+          mode,
+          format: "txt",
+          panelId: "transcriptExportPrecheck",
+          setStatus: setTranscriptExportStatus,
+        });
+        if (!exportRunIsCurrent(outcome.owner)) throw exportCancelledError();
+        if (!outcome.complete) {
+          await exportTranscript();
+          return;
+        }
+        const latestSource = await YTD_NOTE_SOURCES.readNoteSource(
+          chrome.storage.local,
+          mediaKey,
+        );
+        assertFrozenExportOutcome(outcome, {
+          mediaKeys: [mediaKey],
+          mode,
+          format: "txt",
+        });
+        assertFrozenExportMaterial(
+          outcome,
+          [group],
+          latestSource ? { [mediaKey]: latestSource } : {},
+        );
+        const finalPlan = YTD_NOTE_SOURCES.buildExportTranslationPlan({
+          groups: [group],
+          sourcesByKey: latestSource ? { [mediaKey]: latestSource } : {},
+          mode,
+          isChineseText: looksLikeLegacyChineseNote,
+          includeTitles: false,
+          includeNotes: false,
+          includeDescriptions: false,
+          includeTranscript: true,
+        });
+        if (finalPlan.unitCount) {
+          throw new Error("字幕补译尚未完整写入，请再次点击导出继续。");
+        }
+        await finalizeExportJobDownload(outcome, () => {
+          assertExportRunCurrent(outcome.owner);
+          const text = YTD_NOTE_EXPORT.buildTranscriptText(latestSource, mode);
+          const filename = YTD_NOTE_EXPORT.transcriptExportFilename(
+            latestSource.titleOriginal || currentVideoTitle,
+            mode,
+          );
+          downloadTextFile(text, filename);
+        });
+        setTranscriptExportStatus("已导出完整字幕。");
+      } catch (error) {
+        const cancelled = error?.code === "EXPORT_TRANSLATION_CANCELLED";
+        setTranscriptExportStatus(
+          error?.message || "补译失败，请重试。",
+          !cancelled,
+        );
+      }
+    }, () => {
+      abandonActiveExportTranslation();
+      const text = YTD_NOTE_EXPORT.buildTranscriptText(source, "original");
+      const filename = YTD_NOTE_EXPORT.transcriptExportFilename(
+        source.titleOriginal || currentVideoTitle,
+        "original",
+      );
+      downloadTextFile(text, filename);
+      setTranscriptExportStatus("已导出原文字幕。");
+    });
+    return;
+  }
+  if (precheckPanel) precheckPanel.hidden = true;
+  const text = YTD_NOTE_EXPORT.buildTranscriptText(source, mode);
+  const filename = YTD_NOTE_EXPORT.transcriptExportFilename(
+    currentVideoTitle,
+    mode,
+  );
+  downloadTextFile(text, filename);
+  setTranscriptExportStatus("已导出完整字幕。");
+}
+
+// ============================================================
+// NOTE EXPORT (TXT) — current video, selected videos, and all notes
+// ============================================================
+// Reading exports reuse the shared note-export assembly and note-source
+// library. Precheck is strictly read-only. Missing translations trigger no
+// request unless the user explicitly chooses the bounded "生成中文并导出" action;
+// source gaps never trigger Supadata or another provider implicitly.
+
+/** Per-note original/Chinese text for exports, reusing the UI's validated logic. */
+function resolveNoteExportEntry(note) {
+  return { original: noteOriginalText(note), zh: noteChineseText(note) };
+}
+
+function noteCanonicalUrl(note) {
+  const direct = String(note?.canonicalUrl || "").trim();
+  const directLocator = extractMediaLocator(direct);
+  if (directLocator?.canonicalUrl) return directLocator.canonicalUrl;
+  const locator = extractMediaLocator(note?.timestampedUrl || "");
+  if (locator?.canonicalUrl) return locator.canonicalUrl;
+  if (note?.platform !== "bilibili") {
+    const videoId = String(note?.videoId || note?.mediaKey || "").trim();
+    if (/^[A-Za-z0-9_-]{6,20}$/.test(videoId)) {
+      return `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}`;
+    }
+  }
+  return "";
+}
+
+function normalizeExportMediaKeys(mediaKeys) {
+  if (mediaKeys === null || mediaKeys === undefined) return null;
+  return [...new Set((Array.isArray(mediaKeys) ? mediaKeys : []).map((key) =>
+    String(key || "").trim(),
+  ).filter(Boolean))].sort();
+}
+
+function filterNoteGroupsByMediaKeys(groups, mediaKeys, { requireAll = true } = {}) {
+  const requested = normalizeExportMediaKeys(mediaKeys);
+  const safeGroups = Array.isArray(groups) ? groups : [];
+  if (requested === null) return safeGroups;
+  const requestedSet = new Set(requested);
+  const selected = safeGroups.filter((group) => requestedSet.has(group.mediaKey));
+  if (requireAll && selected.length !== requestedSet.size) {
+    const error = new Error("所选视频的笔记已发生变化，请重新选择导出范围。");
+    error.code = "EXPORT_SELECTION_STALE";
+    throw error;
+  }
+  return selected;
+}
+
+/**
+ * Builds the note-source record for the current video from in-memory state, so
+ * the durable library can back the "all notes" export even after the video is
+ * unloaded. Only the fields we actually have are filled; description is only
+ * available from a live capture (the digest cache never stored it).
+ */
+function buildCurrentVideoSourceRecord() {
+  const resolved = resolveCurrentVideoTranscript("bilingual");
+  return {
+    mediaKey: currentVideoId || currentMediaRef?.mediaKey || "",
+    platform: currentPlatformIsBilibili() ? "bilibili" : "youtube",
+    canonicalUrl: currentMediaRef?.canonicalUrl || currentVideoUrl || "",
+    titleOriginal: currentVideoTitle || "",
+    titleZh: resolved.originalIsChinese
+      ? currentVideoTitle || ""
+      : currentVideoTitleZh(),
+    channelName: currentChannelName || "",
+    descriptionOriginal: currentVideoDescription || "",
+    descriptionStatus: currentVideoDescriptionState,
+    descriptionTruncated: currentVideoDescriptionTruncated,
+    descriptionZh: resolved.originalIsChinese
+      ? currentVideoDescription || ""
+      : currentVideoDescriptionZh,
+    sourceLanguage:
+      currentTranscriptLanguage || currentVideoSourceLanguage || "",
+    transcriptOriginal: resolved.transcriptOriginal,
+    transcriptZh: resolved.transcriptZh,
+  };
+}
+
+/**
+ * Persists the current video's source material when at least one saved note
+ * references it. Idempotent (the library no-ops when nothing changed), so it is
+ * safe to call after saves, translations and cache writes.
+ */
+async function persistCurrentVideoNoteSourceIfNoted() {
+  const key = currentVideoId || currentMediaRef?.mediaKey || "";
+  if (!key) return null;
+  try {
+    const stored = await chrome.storage.local.get("ytd_notes");
+    const notes = Array.isArray(stored.ytd_notes) ? stored.ytd_notes : [];
+    const hasNote = notes.some(
+      (note) => String(note?.mediaKey || note?.videoId || "") === key,
+    );
+    if (!hasNote) return null;
+    const persisted = await upsertNoteSourceInBackground(
+      buildCurrentVideoSourceRecord(),
+    );
+    applyPersistedSourceToCurrentVideo(persisted);
+    return persisted;
+  } catch (error) {
+    console.error("[DigestDock] Persist note source error:", error);
+    return null;
+  }
+}
+
+async function persistCurrentVideoSourceForExport() {
+  const key = currentVideoId || currentMediaRef?.mediaKey || "";
+  if (!key || !currentTranscript?.length) return null;
+  const persisted = await upsertNoteSourceInBackground(
+    buildCurrentVideoSourceRecord(),
+  );
+  applyPersistedSourceToCurrentVideo(persisted);
+  return persisted;
+}
+
+/**
+ * Assembles the note-export "source" for one group, preferring the stored/
+ * backfilled source and filling identity + title from the group's notes.
+ */
+function exportSourceForGroup(group, storedSource) {
+  const rep = group.representative || group.notes[0] || {};
+  const base = storedSource
+    ? { ...storedSource }
+    : {
+        mediaKey: group.mediaKey,
+        platform: rep.platform === "bilibili" ? "bilibili" : "youtube",
+        canonicalUrl: noteCanonicalUrl(rep),
+        titleOriginal: "",
+        titleZh: "",
+        channelName: "",
+        descriptionOriginal: "",
+        descriptionStatus: "unknown",
+        descriptionZh: "",
+        sourceLanguage: rep.sourceLanguage || "",
+        transcriptOriginal: [],
+        transcriptZh: [],
+      };
+  base.titleOriginal = base.titleOriginal || noteOriginalVideoTitle(rep);
+  if (!base.titleZh) base.titleZh = noteChineseVideoTitle(rep);
+  base.channelName = base.channelName || rep.channelName || "";
+  base.canonicalUrl = base.canonicalUrl || noteCanonicalUrl(rep);
+  base.sourceLanguage = base.sourceLanguage || rep.sourceLanguage || "";
+  return YTD_NOTE_SOURCES.toExportSource(base, group.notes, {
+    resolveNote: resolveNoteExportEntry,
+  });
+}
+
+/** No-network backfill using one shared semantic grouping for original + zh. */
+function resolveDigestTranscriptMaterial(mediaKey, digest) {
+  const segments = groupTranscriptEntries(
+    Array.isArray(digest?.transcript) ? digest.transcript : [],
+  );
+  const cache = digest?.paragraphCache || {};
+  const original = segments.map((segment) => ({
+    segmentId: segment.id,
+    start: segment.start,
+    sourceHash: YTD_NOTE_SOURCES.hashSourceText(segment.text),
+    text: segment.text,
+  }));
+  const zh = [];
+  segments.forEach((segment) => {
+    const value = cache[transcriptTranslationCacheKey(mediaKey, segment)];
+    const text = typeof value === "string" ? value.trim() : "";
+    if (text) {
+      zh.push({
+        segmentId: segment.id,
+        start: segment.start,
+        sourceHash: YTD_NOTE_SOURCES.hashSourceText(segment.text),
+        text,
+      });
+    }
+  });
+  return { transcriptOriginal: original, transcriptZh: zh };
+}
+
+/**
+ * Collects the "all notes" export inputs: every note grouped by source, the
+ * stored source library, and a strictly no-network backfill from the local
+ * digest cache for any noted video without a stored source. Also enriches each
+ * source with the validated title held on its notes so the precheck does not
+ * ask to re-translate an already-translated title.
+ */
+async function collectAllNotesExport(mediaKeys = null) {
+  const result = await chrome.runtime.sendMessage({
+    action: "getNotes",
+    videoId: null,
+  });
+  const notes = result?.success && Array.isArray(result.notes) ? result.notes : [];
+  const allGroups = sortNoteGroups(
+    groupNotesBySource(notes),
+    (representative) =>
+      noteVideoTitleSortKey(representative, currentNotesMode),
+  );
+  const groups = filterNoteGroupsByMediaKeys(allGroups, mediaKeys);
+  const storedSources = await YTD_NOTE_SOURCES.readAllSources(
+    chrome.storage.local,
+  );
+  const sourcesByKey = {};
+  for (const group of groups) {
+    const rep = group.representative || group.notes[0] || {};
+    if (storedSources[group.mediaKey]) {
+      sourcesByKey[group.mediaKey] = storedSources[group.mediaKey];
+    }
+    if (!sourcesByKey[group.mediaKey]) {
+      try {
+        const cacheKey = `digest_${group.mediaKey}`;
+        const cached = await chrome.storage.local.get(cacheKey);
+        const digest = cached[cacheKey];
+        if (digest) {
+          const backfilled = YTD_NOTE_SOURCES.sourceFromDigest(
+            group.mediaKey,
+            digest,
+            resolveDigestTranscriptMaterial(group.mediaKey, digest),
+          );
+          if (backfilled) {
+            sourcesByKey[group.mediaKey] = await upsertNoteSourceInBackground(
+              backfilled,
+            );
+          }
+        }
+      } catch (error) {
+        console.error("[DigestDock] Backfill source error:", error);
+      }
+    }
+    // Enrich (or synthesize a minimal source) with note-held identity + title.
+    const sourceWasAvailable = !!sourcesByKey[group.mediaKey];
+    const source = sourcesByKey[group.mediaKey] || {
+      mediaKey: group.mediaKey,
+      platform: rep.platform === "bilibili" ? "bilibili" : "youtube",
+      canonicalUrl: noteCanonicalUrl(rep),
+      titleOriginal: "",
+      titleZh: "",
+      channelName: "",
+      descriptionOriginal: "",
+      descriptionStatus: "unknown",
+      descriptionZh: "",
+      transcriptOriginal: [],
+      transcriptZh: [],
+      sourceLanguage: rep.sourceLanguage || "",
+    };
+    source.titleOriginal = source.titleOriginal || noteOriginalVideoTitle(rep);
+    if (!source.titleZh) source.titleZh = noteChineseVideoTitle(rep);
+    source.channelName = source.channelName || rep.channelName || "";
+    source.canonicalUrl = source.canonicalUrl || noteCanonicalUrl(rep);
+    sourcesByKey[group.mediaKey] = sourceWasAvailable
+      ? await upsertNoteSourceInBackground(source)
+      : source;
+  }
+  return {
+    notes: groups.flatMap((group) => group.notes),
+    groups,
+    sourcesByKey,
+  };
+}
+
+function requireKnownExportDescriptions(precheck) {
+  const videos = (precheck?.videos || []).map((video) => {
+    if (video.descriptionStatus !== "unknown") return video;
+    const existingReasons = video.blockingReasons || [];
+    const blockingReasons = existingReasons.some((reason) =>
+      String(reason).includes("简介"),
+    )
+      ? existingReasons
+      : [...existingReasons, "尚未读取视频简介"];
+    return { ...video, blocking: true, blockingReasons };
+  });
+  const blockingVideos = videos.filter((video) => video.blocking);
+  return {
+    ...precheck,
+    videos,
+    blockingVideos,
+    hasBlocking: blockingVideos.length > 0,
+  };
+}
+
+/** Human-readable summary of a precheck for the inline confirmation panel. */
+function describeExportPrecheck(precheck) {
+  const lines = [];
+  lines.push(
+    `范围：${precheck.videoCount} 个视频、${precheck.noteCount} 条笔记。`,
+  );
+  if (precheck.hasBlocking) {
+    const names = precheck.blockingVideos
+      .map((video) => `「${video.title}」（${video.blockingReasons.join("、")}）`)
+      .join("；");
+    lines.push(`缺少完整资料，将以「缺失」标注：${names}`);
+  }
+  if (precheck.hasTranslationGaps) {
+    const gaps = [];
+    if (precheck.translationGaps.titles)
+      gaps.push(`${precheck.translationGaps.titles} 个标题`);
+    if (precheck.translationGaps.descriptionChunks)
+      gaps.push(`${precheck.translationGaps.descriptionChunks} 段简介`);
+    else if (precheck.translationGaps.descriptions)
+      gaps.push(`${precheck.translationGaps.descriptions} 个简介`);
+    if (precheck.translationGaps.transcriptSegments)
+      gaps.push(`${precheck.translationGaps.transcriptSegments} 段字幕`);
+    if (precheck.translationGaps.notes)
+      gaps.push(`${precheck.translationGaps.notes} 条笔记`);
+    lines.push(
+      `尚有 ${gaps.join("、")} 未翻译；不会自动联网补译，也不会用原文冒充中文导出。`,
+    );
+  }
+  return lines.join("\n");
+}
+
+function noteExportModeLabel(mode = currentNotesMode) {
+  if (mode === "original") return "原文";
+  if (mode === "zh") return "中文";
+  return "双语";
+}
+
+function buildNotesExportPrecheck(groups, sourcesByKey, mode = currentNotesMode) {
+  return requireKnownExportDescriptions(
+    YTD_NOTE_SOURCES.buildExportPrecheck({
+      groups,
+      sourcesByKey,
+      mode,
+      titleOf: (group) =>
+        noteVideoTitleSortKey(group.representative || group.notes?.[0], mode),
+      isChineseText: looksLikeLegacyChineseNote,
+      resolveNote: resolveNoteExportEntry,
+      includeTranscript: false,
+    }),
+  );
+}
+
+function buildNotesExportTranslationPlan(
+  groups,
+  sourcesByKey,
+  mode = currentNotesMode,
+) {
+  return YTD_NOTE_SOURCES.buildExportTranslationPlan({
+    groups,
+    sourcesByKey,
+    mode,
+    isChineseText: looksLikeLegacyChineseNote,
+    resolveNote: resolveNoteExportEntry,
+    includeTranscript: false,
+  });
+}
+
+function noteExportVideoTranslationGapCount(video) {
+  return (
+    (video?.needsTitleTranslation ? 1 : 0) +
+    (Number(video?.descriptionMissingChunkCount) || 0) +
+    (Number(video?.noteTranslationCount) || 0)
+  );
+}
+
+function noteExportVideoPreparation(video) {
+  if (video?.blocking) {
+    return { label: "需补资料", className: "is-metadata" };
+  }
+  const missing = noteExportVideoTranslationGapCount(video);
+  if (missing) {
+    return { label: `需补译 ${missing} 项`, className: "is-translation" };
+  }
+  return { label: "可导出", className: "is-ready" };
+}
+
+function createNoteExportContinuation(mediaKeys) {
+  return normalizeNoteExportContinuation({
+    mediaKeys: normalizeExportMediaKeys(mediaKeys) || [],
+    mode: currentNotesMode,
+  });
+}
+
+function noteExportContinuationIsAuthorized(continuation) {
+  const normalized = normalizeNoteExportContinuation(continuation);
+  return (
+    !!normalized &&
+    activeNoteExportAuthorization?.expiresAt >= Date.now() &&
+    activeNoteExportAuthorization.signature === JSON.stringify(normalized)
+  );
+}
+
+function revokeNoteExportAuthorization(expectedAuthorization = null) {
+  if (
+    expectedAuthorization &&
+    activeNoteExportAuthorization !== expectedAuthorization
+  ) {
+    return false;
+  }
+  noteExportAuthorizationGeneration += 1;
+  activeNoteExportAuthorization = null;
+  return true;
+}
+
+function noteExportAuthorizationCancelledError() {
+  const error = new Error("已取消本次完整导出。");
+  error.code = "NOTE_EXPORT_AUTHORIZATION_CANCELLED";
+  return error;
+}
+
+function assertNoteExportAuthorizationCurrent(authorization) {
+  if (!authorization) return;
+  if (
+    activeNoteExportAuthorization !== authorization ||
+    noteExportAuthorizationGeneration !== authorization.generation ||
+    authorization.expiresAt < Date.now()
+  ) {
+    throw noteExportAuthorizationCancelledError();
+  }
+}
+
+function exportFlowWasCancelled(error) {
+  return (
+    error?.code === "EXPORT_TRANSLATION_CANCELLED" ||
+    error?.code === "NOTE_EXPORT_AUTHORIZATION_CANCELLED"
+  );
+}
+
+async function grantNoteExportAuthorization(
+  continuation,
+  { groups = [], sourcesByKey = {}, precheck = null } = {},
+) {
+  const normalized = normalizeNoteExportContinuation(continuation);
+  if (!normalized) return null;
+  const generation = noteExportAuthorizationGeneration + 1;
+  noteExportAuthorizationGeneration = generation;
+  activeNoteExportAuthorization = null;
+  const effectivePrecheck =
+    precheck || buildNotesExportPrecheck(groups, sourcesByKey, normalized.mode);
+  const blockingMediaKeys = new Set(
+    (effectivePrecheck.blockingVideos || []).map((video) =>
+      String(video.mediaKey || ""),
+    ),
+  );
+  const sourceRevisions = exportPlanSourceRevisions(
+    sourcesByKey,
+    normalized.mediaKeys,
+  );
+  const stableSourceRevisions = Object.fromEntries(
+    Object.entries(sourceRevisions).filter(
+      ([mediaKey]) => !blockingMediaKeys.has(mediaKey),
+    ),
+  );
+  const providerRequired =
+    normalized.mode !== "original" &&
+    (effectivePrecheck.hasBlocking || effectivePrecheck.hasTranslationGaps);
+  let providerSnapshot = null;
+  if (providerRequired) {
+    const config = await chrome.runtime.sendMessage({ action: "checkConfig" });
+    if (noteExportAuthorizationGeneration !== generation) return null;
+    currentConfigStatus = config;
+    providerSnapshot = exportProviderSnapshot(config);
+  }
+  if (noteExportAuthorizationGeneration !== generation) return null;
+  activeNoteExportAuthorization = {
+    generation,
+    signature: JSON.stringify(normalized),
+    expiresAt: Date.now() + NOTE_EXPORT_AUTHORIZATION_TTL_MS,
+    notesRevision: exportNotesRevision(groups),
+    stableSourceRevisions,
+    blockingMediaKeys: [...blockingMediaKeys].sort(),
+    providerRequired,
+    providerSnapshot,
+  };
+  return normalized;
+}
+
+async function validateNoteExportAuthorization(
+  continuation,
+  { groups = [], sourcesByKey = {}, precheck = null } = {},
+) {
+  const normalized = normalizeNoteExportContinuation(continuation);
+  const authorization = activeNoteExportAuthorization;
+  if (
+    !normalized ||
+    !authorization ||
+    authorization.expiresAt < Date.now() ||
+    authorization.signature !== JSON.stringify(normalized) ||
+    authorization.notesRevision !== exportNotesRevision(groups)
+  ) {
+    revokeNoteExportAuthorization(authorization);
+    return false;
+  }
+
+  for (const [mediaKey, expectedRevision] of Object.entries(
+    authorization.stableSourceRevisions || {},
+  )) {
+    const source = YTD_NOTE_SOURCES.normalizeNoteSource(sourcesByKey?.[mediaKey]);
+    if (!source || source.sourceRevision !== expectedRevision) {
+      revokeNoteExportAuthorization(authorization);
+      return false;
+    }
+  }
+
+  if (authorization.providerRequired) {
+    const config = await chrome.runtime.sendMessage({ action: "checkConfig" });
+    if (
+      activeNoteExportAuthorization !== authorization ||
+      noteExportAuthorizationGeneration !== authorization.generation
+    ) {
+      throw noteExportAuthorizationCancelledError();
+    }
+    currentConfigStatus = config;
+    if (
+      !sameProviderSnapshot(
+        exportProviderSnapshot(config),
+        authorization.providerSnapshot,
+      )
+    ) {
+      revokeNoteExportAuthorization(authorization);
+      return false;
+    }
+  }
+
+  // Metadata collection is the only material change authorized by the click.
+  // Once an initially-blocking source becomes complete, freeze its revision so
+  // any later change requires a fresh confirmation before AI can run.
+  const effectivePrecheck =
+    precheck || buildNotesExportPrecheck(groups, sourcesByKey, normalized.mode);
+  const stillBlocking = new Set(
+    (effectivePrecheck.blockingVideos || []).map((video) =>
+      String(video.mediaKey || ""),
+    ),
+  );
+  const remainingInitiallyBlocking = [];
+  for (const mediaKey of authorization.blockingMediaKeys || []) {
+    if (stillBlocking.has(mediaKey)) {
+      remainingInitiallyBlocking.push(mediaKey);
+      continue;
+    }
+    const source = YTD_NOTE_SOURCES.normalizeNoteSource(sourcesByKey?.[mediaKey]);
+    if (!source?.sourceRevision) {
+      revokeNoteExportAuthorization(authorization);
+      return false;
+    }
+    authorization.stableSourceRevisions[mediaKey] = source.sourceRevision;
+  }
+  authorization.blockingMediaKeys = remainingInitiallyBlocking;
+  return true;
+}
+
+async function clearNoteExportContinuation() {
+  revokeNoteExportAuthorization();
+  const state = activeNotesOnlyContext || pendingNoteNavigation;
+  if (!state?.exportContinuation) return;
+  await persistNoteNavigationState({
+    ...state,
+    exportContinuation: null,
+  });
+}
+
+function resumeNoteExportContinuation(continuation) {
+  const requestedContinuation = normalizeNoteExportContinuation(continuation);
+  const liveContinuation = normalizeNoteExportContinuation(
+    (activeNotesOnlyContext || pendingNoteNavigation)?.exportContinuation,
+  );
+  const storedContinuation =
+    liveContinuation &&
+    JSON.stringify(liveContinuation.mediaKeys) ===
+      JSON.stringify(requestedContinuation?.mediaKeys)
+      ? liveContinuation
+      : requestedContinuation;
+  if (!storedContinuation) return Promise.resolve(false);
+  if (noteExportContinuationResumePromise) {
+    return noteExportContinuationResumePromise;
+  }
+  if (currentNotesMode !== storedContinuation.mode) {
+    // Platform defaults and side-panel reconstruction must not rewrite the
+    // user's persisted export mode. A real user mode change updates the live
+    // continuation in handleNotesModeChange before any resume can run.
+    currentNotesMode = storedContinuation.mode;
+    setNotesModeButtons(currentNotesMode);
+  }
+  const normalized = storedContinuation;
+  const storedAuthorizationIsActive =
+    noteExportContinuationIsAuthorized(normalized);
+  noteExportContinuationResumePromise = exportAllNotes(normalized.mediaKeys, {
+    authorized:
+      storedAuthorizationIsActive &&
+      noteExportContinuationIsAuthorized(normalized),
+    autoOpenMetadata: false,
+    resumed: true,
+    modeOverride: normalized.mode,
+    continuation: normalized,
+  })
+    .then(() => true)
+    .finally(() => {
+      noteExportContinuationResumePromise = null;
+    });
+  return noteExportContinuationResumePromise;
+}
+
+function hideNoteExportMenu() {
+  const menu = document.getElementById("notesExportMenu");
+  const btn = document.getElementById("notesExportBtn");
+  if (menu) menu.hidden = true;
+  if (btn) btn.setAttribute("aria-expanded", "false");
+}
+
+function setNoteExportStatus(message = "", isError = false) {
+  const el = document.getElementById("notesExportStatus");
+  if (!el) return;
+  el.textContent = message;
+  el.hidden = !message;
+  el.classList.toggle("is-error", !!isError);
+}
+
+function setTranscriptExportStatus(message = "", isError = false) {
+  const el = document.getElementById("transcriptExportStatus");
+  if (!el) return;
+  el.textContent = message;
+  el.hidden = !message;
+  el.classList.toggle("is-error", !!isError);
+}
+
+function exportCancelledError() {
+  const error = new Error("已取消补译；不会再启动后续请求批次。");
+  error.code = "EXPORT_TRANSLATION_CANCELLED";
+  return error;
+}
+
+function abandonActiveExportTranslation() {
+  const jobId = activeExportJobId;
+  activeExportJobId = "";
+  exportTranslationGeneration += 1;
+  if (jobId) {
+    chrome.runtime
+      .sendMessage({ action: "cancelExportTranslationJob", jobId })
+      .catch(() => {});
+  }
+}
+
+function renderExportTranslationProgress(panel, message, generation, setStatus) {
+  if (!panel) return;
+  panel.innerHTML = "";
+  const summary = document.createElement("p");
+  summary.className = "notes-export-precheck-text";
+  summary.textContent = message;
+  panel.appendChild(summary);
+  const actions = document.createElement("div");
+  actions.className = "notes-export-precheck-actions";
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.className = "enhance-btn";
+  cancel.textContent = "取消后续批次";
+  cancel.addEventListener("click", () => {
+    if (generation !== exportTranslationGeneration) return;
+    const jobId = activeExportJobId;
+    revokeNoteExportAuthorization();
+    exportTranslationGeneration += 1;
+    cancel.disabled = true;
+    summary.textContent = "正在停止；已经发送的当前批次可能仍会完成，但不会继续后续批次。";
+    setStatus("正在取消补译…");
+    if (jobId) {
+      chrome.runtime
+        .sendMessage({ action: "cancelExportTranslationJob", jobId })
+        .catch(() => {});
+    }
+  });
+  actions.appendChild(cancel);
+  panel.appendChild(actions);
+  panel.hidden = false;
+}
+
+function updateCurrentExportTranslations(source) {
+  applyPersistedSourceToCurrentVideo(source);
+}
+
+function exportNoteUnitKey(note) {
+  return `note:${YTD_NOTE_SOURCES.hashSourceText(String(note?.id || ""))}:${YTD_NOTE_SOURCES.hashSourceText(note?.text || note?.rawText || "")}`;
+}
+
+function exportTitleUnitKey(title) {
+  return `title:${YTD_NOTE_SOURCES.hashSourceText(title?.mediaKey || "")}:${YTD_NOTE_SOURCES.hashSourceText(title?.title || "")}`;
+}
+
+function exportPlanUnitKeys(plan) {
+  return [
+    ...(plan?.noteBatches || []).flat().map(exportNoteUnitKey),
+    ...(plan?.titleBatches || []).flat().map(exportTitleUnitKey),
+    ...(plan?.sourceBatches || []).flat().map((unit) => unit.id),
+  ];
+}
+
+function exportPlanSourceRevisions(sourcesByKey, mediaKeys) {
+  const revisions = {};
+  (mediaKeys || []).forEach((mediaKey) => {
+    const source = YTD_NOTE_SOURCES.normalizeNoteSource(sourcesByKey?.[mediaKey]);
+    if (source?.sourceRevision) revisions[mediaKey] = source.sourceRevision;
+  });
+  return revisions;
+}
+
+function exportNotesRevision(groups) {
+  const originals = (groups || [])
+    .flatMap((group) => group.notes || [])
+    .map((note) => [
+      String(note?.id || ""),
+      String(note?.mediaKey || note?.videoId || ""),
+      noteOriginalText(note),
+      noteOriginalVideoTitle(note),
+    ])
+    .sort((left, right) => left[0].localeCompare(right[0]));
+  return YTD_NOTE_SOURCES.hashSourceText(JSON.stringify(originals));
+}
+
+function exportProviderSnapshot(config) {
+  const provider = config?.provider || {};
+  return {
+    providerId: provider.id || "",
+    modelId: provider.modelId || "",
+    routeKey: provider.routeKey || "",
+    targetLanguage: "zh",
+    translationVersion: "export-v2",
+  };
+}
+
+function buildFrozenExportIntent({
+  scope,
+  mediaKeys,
+  mode,
+  format,
+  sourceRevisions,
+  notesRevision,
+  providerSnapshot,
+}) {
+  const canonicalSourceRevisions = Object.fromEntries(
+    Object.entries(sourceRevisions || {}).sort(([left], [right]) =>
+      left.localeCompare(right),
+    ),
+  );
+  const contractHash = YTD_NOTE_SOURCES.hashSourceText(
+    JSON.stringify({
+      sourceRevisions: canonicalSourceRevisions,
+      notesRevision,
+      providerSnapshot,
+    }),
+  );
+  return {
+    scope: `${scope}-v${EXPORT_CONTENT_CONTRACT_VERSION}-${contractHash.replace(/[^A-Za-z0-9_-]/g, "-")}`,
+    mediaKeys,
+    mode,
+    format,
+    autoExport: true,
+  };
+}
+
+function exportJobCursor(job, additionalCompleted = []) {
+  const completed = new Set([
+    ...(job?.completedUnitKeys || []),
+    ...additionalCompleted,
+  ]);
+  const ordered = job?.orderedUnitKeys || [];
+  let cursor = 0;
+  while (cursor < ordered.length && completed.has(ordered[cursor])) cursor += 1;
+  return cursor;
+}
+
+function exportRunOwner(scope, mode, generation) {
+  return {
+    scope,
+    mode,
+    generation,
+    videoId: currentVideoId || "",
+    routeKey: currentRouteKey || "",
+    digestGeneration,
+  };
+}
+
+function exportRunIsCurrent(owner) {
+  if (
+    !owner ||
+    owner.generation !== exportTranslationGeneration ||
+    owner.videoId !== (currentVideoId || "") ||
+    owner.routeKey !== (currentRouteKey || "") ||
+    owner.digestGeneration !== digestGeneration
+  ) {
+    return false;
+  }
+  return owner.scope === "transcript-current"
+    ? transcriptExportMode() === owner.mode
+    : currentNotesMode === owner.mode;
+}
+
+function assertExportRunCurrent(owner) {
+  if (!exportRunIsCurrent(owner)) throw exportCancelledError();
+}
+
+function exportJobError(result, fallback) {
+  const error = new Error(result?.message || result?.error || fallback);
+  error.code = result?.code || "EXPORT_JOB_FAILED";
+  return error;
+}
+
+async function readExportJobFromBackground(jobId, { allowMissing = false } = {}) {
+  const result = await chrome.runtime.sendMessage({ action: "getExportJob", jobId });
+  if (result?.success && result.job) return result.job;
+  if (allowMissing && result?.code === "EXPORT_JOB_NOT_FOUND") return null;
+  throw exportJobError(result, "无法读取补译进度。");
+}
+
+async function checkpointExportJobInBackground(jobId, patch) {
+  const result = await chrome.runtime.sendMessage({
+    action: "checkpointExportJob",
+    jobId,
+    patch,
+  });
+  if (!result?.success || !result.job) {
+    throw exportJobError(result, "无法保存补译进度。");
+  }
+  return result.job;
+}
+
+function assertFrozenExportOutcome(outcome, { mediaKeys, mode, format }) {
+  assertExportRunCurrent(outcome?.owner);
+  const frozen = outcome?.intent;
+  const expectedKeys = [...(mediaKeys || [])].sort();
+  if (
+    !frozen ||
+    frozen.mode !== mode ||
+    frozen.format !== format ||
+    JSON.stringify([...(frozen.mediaKeys || [])].sort()) !==
+      JSON.stringify(expectedKeys)
+  ) {
+    const error = new Error("导出范围在补译期间发生变化，请重新确认。");
+    error.code = "EXPORT_JOB_FROZEN_MISMATCH";
+    throw error;
+  }
+}
+
+function assertFrozenExportMaterial(outcome, groups, sourcesByKey) {
+  if (exportNotesRevision(groups) !== outcome?.notesRevision) {
+    const error = new Error("笔记内容在补译期间发生变化，请重新确认。");
+    error.code = "EXPORT_JOB_NOTES_REVISION_MISMATCH";
+    throw error;
+  }
+  for (const [mediaKey, expectedRevision] of Object.entries(
+    outcome?.sourceRevisions || {},
+  )) {
+    const source = YTD_NOTE_SOURCES.normalizeNoteSource(sourcesByKey?.[mediaKey]);
+    if (!source || source.sourceRevision !== expectedRevision) {
+      const error = new Error("视频资料在补译期间发生变化，请重新确认。");
+      error.code = "EXPORT_JOB_SOURCE_REVISION_MISMATCH";
+      throw error;
+    }
+  }
+}
+
+async function finalizeExportJobDownload(outcome, download) {
+  assertExportRunCurrent(outcome?.owner);
+  const claim = {
+    claimId: `claim-${Date.now()}-${outcome.owner.generation}`,
+    ownerId: "sidepanel",
+    generation: outcome.owner.generation,
+    claimedAt: Date.now(),
+  };
+  let claimed = false;
+  try {
+    await checkpointExportJobInBackground(outcome.jobId, {
+      state: "ready_to_export",
+      exportClaim: claim,
+      lastError: null,
+    });
+    claimed = true;
+    assertExportRunCurrent(outcome.owner);
+    download();
+    await checkpointExportJobInBackground(outcome.jobId, {
+      state: "completed",
+      exportClaim: null,
+      lastError: null,
+    });
+    activeExportJobId = "";
+    return true;
+  } catch (error) {
+    if (claimed) {
+      await checkpointExportJobInBackground(outcome.jobId, {
+        state: "failed",
+        exportClaim: null,
+        lastError: {
+          code: error?.code || "EXPORT_FINALIZE_FAILED",
+          retryable: true,
+          at: Date.now(),
+        },
+      }).catch(() => null);
+    }
+    throw error;
+  }
+}
+
+function sourceBatchMessage(jobId, units) {
+  const first = units[0] || {};
+  return {
+    action: "translateExportSourceBatch",
+    jobId,
+    mediaKey: first.mediaKey,
+    sourceRevision: first.sourceRevision,
+    units: units.map((unit) => ({
+      unitKey: unit.id,
+      kind: unit.kind,
+      sourceHash: unit.sourceHash,
+      text: unit.text,
+      ...(unit.kind === "description"
+        ? { chunkIndex: unit.chunkIndex }
+        : {
+            segmentId: unit.segmentId,
+            start: unit.start,
+          }),
+    })),
+  };
+}
+
+function sameProviderSnapshot(left, right) {
+  return [
+    "providerId",
+    "modelId",
+    "routeKey",
+    "targetLanguage",
+    "translationVersion",
+  ].every((field) => String(left?.[field] || "") === String(right?.[field] || ""));
+}
+
+async function assertExportProviderStillCurrent(providerSnapshot) {
+  const config = await chrome.runtime.sendMessage({ action: "checkConfig" });
+  currentConfigStatus = config;
+  if (!config?.hasAiKey) {
+    throw new Error("尚未配置当前 AI 服务商的 API 密钥，请先打开设置。");
+  }
+  const current = exportProviderSnapshot(config);
+  if (!sameProviderSnapshot(current, providerSnapshot)) {
+    const error = new Error("AI 服务商或模型已发生变化，请重新确认后继续补译。");
+    error.code = "EXPORT_JOB_PROVIDER_MISMATCH";
+    throw error;
+  }
+}
+
+async function createOrResumeExportJobForRound({
+  intent,
+  plan,
+  sourcesByKey,
+  groups,
+  providerSnapshot,
+}) {
+  let activeIntent = intent;
+  let jobId = YTD_EXPORT_JOBS.jobIdForIntent(activeIntent);
+  let existing = await readExportJobFromBackground(jobId, {
+    allowMissing: true,
+  });
+  const missingKeys = new Set(exportPlanUnitKeys(plan));
+
+  // A completed/stale job with the same immutable originals but fresh gaps is
+  // an exceptional recovery case (for example, storage was restored). Give it
+  // a new frozen identity instead of mutating terminal job history.
+  if (
+    existing &&
+    ["ready_to_export", "completed", "stale"].includes(existing.state) &&
+    missingKeys.size
+  ) {
+    const retryScope = String(intent.scope || "").startsWith("notes-")
+      ? "notes-retry"
+      : "transcript-retry";
+    activeIntent = {
+      ...intent,
+      scope: `${retryScope}-${YTD_NOTE_SOURCES.hashSourceText(
+        `${intent.scope}\u0000${[...missingKeys].join("\u0001")}`,
+      )}`,
+    };
+    jobId = YTD_EXPORT_JOBS.jobIdForIntent(activeIntent);
+    existing = await readExportJobFromBackground(jobId, { allowMissing: true });
+  }
+
+  let candidate;
+  if (existing) {
+    const completed = new Set(existing.completedUnitKeys || []);
+    existing.orderedUnitKeys.forEach((key) => {
+      if (!missingKeys.has(key)) completed.add(key);
+    });
+    const completedUnitKeys = existing.orderedUnitKeys.filter((key) =>
+      completed.has(key),
+    );
+    candidate = {
+      ...existing,
+      state: "running",
+      completedUnitKeys,
+      currentBatch: null,
+      cursor: exportJobCursor(existing, completedUnitKeys),
+      exportClaim: null,
+      lastError: null,
+    };
+  } else {
+    const orderedUnitKeys = exportPlanUnitKeys(plan);
+    candidate = YTD_EXPORT_JOBS.createExportJob({
+      state: "running",
+      intent: activeIntent,
+      sourceRevisions: exportPlanSourceRevisions(
+        sourcesByKey,
+        activeIntent.mediaKeys,
+      ),
+      notesRevision: exportNotesRevision(groups),
+      orderedUnitKeys,
+      completedUnitKeys: [],
+      currentBatch: null,
+      cursor: 0,
+      roundBudget: { maxBatches: 20 },
+      providerSnapshot,
+      exportClaim: null,
+      lastError: null,
+    });
+  }
+  const result = await chrome.runtime.sendMessage({
+    action: "createOrResumeExportJob",
+    job: candidate,
+  });
+  if (!result?.success || !result.job) {
+    throw exportJobError(result, "无法创建或恢复补译任务。");
+  }
+  if (result.job.state !== "running") {
+    return checkpointExportJobInBackground(result.job.jobId, {
+      state: "running",
+      completedUnitKeys: candidate.completedUnitKeys,
+      currentBatch: null,
+      cursor: exportJobCursor(result.job, candidate.completedUnitKeys),
+      exportClaim: null,
+      lastError: null,
+    });
+  }
+  return result.job;
+}
+
+/**
+ * Runs exactly one user-confirmed export-translation round. Every source batch
+ * is translated + committed by the service worker, while note/title progress
+ * is checkpointed immediately after its own background persistence succeeds.
+ */
+async function runConfirmedExportTranslationRound({
+  plan,
+  sourcesByKey,
+  groups = [],
+  scope,
+  mode,
+  format,
+  panelId,
+  setStatus,
+  expectedProviderSnapshot = null,
+  noteAuthorization = null,
+}) {
+  if (isExportTranslationRunning) {
+    throw new Error("已有一个补译任务正在进行，请稍候。");
+  }
+  if (!plan || plan.overLimit) {
+    throw new Error(
+      `本次补译范围过大：${plan?.limitReasons?.join("、") || "超出安全上限"}。请缩小导出范围后重试。`,
+    );
+  }
+
+  const invocation = {
+    videoId: currentVideoId || "",
+    routeKey: currentRouteKey || "",
+    digestGeneration,
+    mode,
+  };
+  const config = await chrome.runtime.sendMessage({ action: "checkConfig" });
+  assertNoteExportAuthorizationCurrent(noteAuthorization);
+  const modeStillCurrent =
+    scope === "transcript-current"
+      ? transcriptExportMode() === invocation.mode
+      : currentNotesMode === invocation.mode;
+  if (
+    invocation.videoId !== (currentVideoId || "") ||
+    invocation.routeKey !== (currentRouteKey || "") ||
+    invocation.digestGeneration !== digestGeneration ||
+    !modeStillCurrent
+  ) {
+    throw exportCancelledError();
+  }
+  currentConfigStatus = config;
+  if (!config?.hasAiKey) {
+    throw new Error("尚未配置当前 AI 服务商的 API 密钥，请先打开设置。");
+  }
+  if (!config?.provider?.capabilities?.includes("translate")) {
+    throw new Error(`${config?.provider?.displayName || "当前服务商"}不支持翻译。`);
+  }
+
+  const generation = ++exportTranslationGeneration;
+  const owner = exportRunOwner(scope, mode, generation);
+  const providerSnapshot = exportProviderSnapshot(config);
+  if (
+    expectedProviderSnapshot &&
+    !sameProviderSnapshot(providerSnapshot, expectedProviderSnapshot)
+  ) {
+    const error = new Error(
+      "AI 服务商或模型已发生变化，请重新确认后继续补译。",
+    );
+    error.code = "EXPORT_JOB_PROVIDER_MISMATCH";
+    throw error;
+  }
+  if (
+    !providerSnapshot.providerId ||
+    !providerSnapshot.modelId ||
+    !providerSnapshot.routeKey
+  ) {
+    throw new Error("当前 AI 服务商配置不完整，请重新保存设置后重试。");
+  }
+  const mediaKeys = (groups || []).map((group) => group.mediaKey);
+  const sourceRevisions = exportPlanSourceRevisions(sourcesByKey, mediaKeys);
+  const notesRevision = exportNotesRevision(groups);
+  const intent = buildFrozenExportIntent({
+    scope,
+    mediaKeys,
+    mode,
+    format,
+    sourceRevisions,
+    notesRevision,
+    providerSnapshot,
+  });
+  const panel = document.getElementById(panelId);
+  isExportTranslationRunning = true;
+  const round = YTD_NOTE_SOURCES.takeExportTranslationRound(plan);
+  const total = Math.max(1, round.estimatedBatches);
+  let completedBatches = 0;
+  let job = null;
+  const showProgress = (label) => {
+    renderExportTranslationProgress(
+      panel,
+      `${label}（本轮 ${completedBatches}/${total} 批）`,
+      generation,
+      setStatus,
+    );
+    setStatus(`${label}（本轮 ${completedBatches}/${total} 批）`);
+  };
+
+  try {
+    assertExportRunCurrent(owner);
+    job = await createOrResumeExportJobForRound({
+      intent,
+      plan,
+      sourcesByKey,
+      groups,
+      providerSnapshot,
+    });
+    assertNoteExportAuthorizationCurrent(noteAuthorization);
+    const previousJobId = activeExportJobId;
+    activeExportJobId = job.jobId;
+    // Navigation may have happened while the background created the durable
+    // job, before the side panel knew its id. Bind first, then validate, so the
+    // cancellation path below can never leave that job running.
+    assertExportRunCurrent(owner);
+    if (previousJobId && previousJobId !== job.jobId) {
+      await chrome.runtime
+        .sendMessage({
+          action: "cancelExportTranslationJob",
+          jobId: previousJobId,
+        })
+        .catch(() => null);
+    }
+    showProgress("准备补译");
+    for (const notes of round.noteBatches) {
+      assertExportRunCurrent(owner);
+      await assertExportProviderStillCurrent(providerSnapshot);
+      const result = await sendTranslationMessage({
+        action: "translateExportNotesBatch",
+        jobId: job.jobId,
+        unitKeys: notes.map(exportNoteUnitKey),
+        notes,
+        titles: [],
+      });
+      assertExportRunCurrent(owner);
+      const translatedIds = new Set(
+        (result?.translations || [])
+          .filter((entry) => String(entry?.textZh || "").trim())
+          .map((entry) => String(entry.id || "")),
+      );
+      const completedUnitKeys = notes
+        .filter((note) => translatedIds.has(String(note.id || "")))
+        .map(exportNoteUnitKey);
+      if (completedUnitKeys.length) {
+        job = await checkpointExportJobInBackground(job.jobId, {
+          completedUnitKeys,
+          cursor: exportJobCursor(job, completedUnitKeys),
+          lastError: null,
+        });
+      }
+      if (completedUnitKeys.length !== notes.length) {
+        throw new Error(result?.error || "笔记补译失败。");
+      }
+      completedBatches += 1;
+      showProgress("正在生成中文笔记");
+    }
+
+    for (const titles of round.titleBatches) {
+      assertExportRunCurrent(owner);
+      await assertExportProviderStillCurrent(providerSnapshot);
+      const result = await sendTranslationMessage({
+        action: "translateExportNotesBatch",
+        jobId: job.jobId,
+        unitKeys: titles.map(exportTitleUnitKey),
+        notes: [],
+        titles,
+      });
+      assertExportRunCurrent(owner);
+      const translatedKeys = new Set(
+        (result?.titles || [])
+          .filter((entry) => String(entry?.titleZh || "").trim())
+          .map((entry) => String(entry.mediaKey || "")),
+      );
+      const completedUnitKeys = titles
+        .filter((title) => translatedKeys.has(String(title.mediaKey || "")))
+        .map(exportTitleUnitKey);
+      if (completedUnitKeys.length) {
+        job = await checkpointExportJobInBackground(job.jobId, {
+          completedUnitKeys,
+          cursor: exportJobCursor(job, completedUnitKeys),
+          lastError: null,
+        });
+      }
+      if (completedUnitKeys.length !== titles.length) {
+        throw new Error(result?.error || "标题补译失败。");
+      }
+      completedBatches += 1;
+      showProgress("正在生成中文标题");
+    }
+
+    for (const units of round.sourceBatches) {
+      assertExportRunCurrent(owner);
+      const result = await sendTranslationMessage(
+        sourceBatchMessage(job.jobId, units),
+      );
+      assertExportRunCurrent(owner);
+      if (!result?.success) {
+        throw exportJobError(result, "字幕或简介补译失败。");
+      }
+      if (result.jobState === "cancelled") {
+        throw exportCancelledError();
+      }
+      job = await readExportJobFromBackground(job.jobId);
+      const storedSource = await YTD_NOTE_SOURCES.readNoteSource(
+        chrome.storage.local,
+        units[0].mediaKey,
+      );
+      assertExportRunCurrent(owner);
+      if (storedSource) updateCurrentExportTranslations(storedSource);
+      completedBatches += 1;
+      showProgress("正在生成中文简介与字幕");
+    }
+
+    assertExportRunCurrent(owner);
+    job = await readExportJobFromBackground(job.jobId);
+    const remainingCount = Math.max(
+      0,
+      job.orderedUnitKeys.length - job.completedUnitKeys.length,
+    );
+    job = await checkpointExportJobInBackground(job.jobId, {
+      // Final file assembly owns the ready/claim/completed transition. Keep a
+      // fully translated job paused until latest storage has been revalidated.
+      state: "paused",
+      currentBatch: null,
+      cursor: exportJobCursor(job),
+      lastError: null,
+    });
+    assertExportRunCurrent(owner);
+    if (panel) panel.hidden = true;
+    if (remainingCount) {
+      setStatus(`本轮已保存，仍有 ${remainingCount} 个翻译单元；请继续补齐。`);
+    } else {
+      setStatus("补译完成，正在生成文件…");
+    }
+    return {
+      complete: remainingCount === 0,
+      remainingCount,
+      owner,
+      jobId: job.jobId,
+      intent: job.intent,
+      sourceRevisions: job.sourceRevisions,
+      notesRevision: job.notesRevision,
+    };
+  } catch (error) {
+    if (job?.jobId && exportFlowWasCancelled(error)) {
+      await chrome.runtime
+        .sendMessage({
+          action: "cancelExportTranslationJob",
+          jobId: job.jobId,
+        })
+        .catch(() => null);
+    }
+    if (job?.jobId && !exportFlowWasCancelled(error)) {
+      try {
+        const latest = await readExportJobFromBackground(job.jobId);
+        if (["planned", "running", "paused", "failed"].includes(latest.state)) {
+          await checkpointExportJobInBackground(job.jobId, {
+            state:
+              error?.code === "EXPORT_JOB_PROVIDER_MISMATCH"
+                ? "paused"
+                : "failed",
+            currentBatch: null,
+            lastError: {
+              code: error?.code || "EXPORT_TRANSLATION_FAILED",
+              retryable: true,
+              at: Date.now(),
+            },
+          });
+        }
+      } catch (_checkpointError) {
+        // Preserve the original provider/validation error for the user.
+      }
+    }
+    throw error;
+  } finally {
+    isExportTranslationRunning = false;
+  }
+}
+
+/** Renders the export precheck; AI work is offered only by explicit click. */
+function showNoteExportPrecheck(
+  precheck,
+  onConfirm,
+  onGenerate,
+  plan,
+  _onExportOriginal,
+  onAbandon = null,
+) {
+  const panel = document.getElementById("notesExportPrecheck");
+  if (!panel) {
+    if (!precheck.hasTranslationGaps) onConfirm();
+    return;
+  }
+  panel.innerHTML = "";
+  const summary = document.createElement("p");
+  summary.className = "notes-export-precheck-text";
+  summary.tabIndex = -1;
+  const progress = exportTranslationProgressText(plan);
+  const planSummary = precheck.hasTranslationGaps
+    ? plan?.overLimit
+      ? `\n本次补译未启动：${plan.limitReasons.join("、")}。`
+      : `\n当前已完成 ${progress.completed}/${progress.total} 个翻译单元，剩余约 ${progress.remainingBatches} 批；每次确认最多继续 ${progress.roundMax} 批。`
+    : "";
+  const providerDisclosure = precheck.hasTranslationGaps
+    ? `\n完整导出将使用${currentConfigStatus?.provider?.displayName || "当前 AI 服务"}；本轮最多 20 批，可取消。`
+    : "";
+  summary.textContent = `${describeExportPrecheck(precheck)}${planSummary}${providerDisclosure}`;
+  panel.appendChild(summary);
+
+  const actions = document.createElement("div");
+  actions.className = "notes-export-precheck-actions";
+  const completeBtn = document.createElement("button");
+  completeBtn.type = "button";
+  completeBtn.className = "enhance-btn active";
+  completeBtn.textContent = progress.completed > 0 ? "继续完整导出" : "完整导出";
+  completeBtn.disabled =
+    !onGenerate || (!precheck.hasBlocking && !!plan?.overLimit);
+  completeBtn.addEventListener("click", () => {
+    if (!completeBtn.disabled) void onGenerate();
+  });
+
+  const directBtn = document.createElement("button");
+  directBtn.type = "button";
+  directBtn.className = "enhance-btn";
+  directBtn.textContent = "直接导出";
+  directBtn.addEventListener("click", () => {
+    panel.hidden = true;
+    void clearNoteExportContinuation();
+    onConfirm();
+  });
+
+  const cancelBtn = document.createElement("button");
+  cancelBtn.type = "button";
+  cancelBtn.className = "enhance-btn notes-export-cancel";
+  cancelBtn.textContent = "取消";
+  cancelBtn.addEventListener("click", () => {
+    panel.hidden = true;
+    void clearNoteExportContinuation();
+    abandonActiveExportTranslation();
+    if (onAbandon) onAbandon();
+    else setNoteExportStatus("已取消导出。");
+  });
+  actions.append(cancelBtn, directBtn, completeBtn);
+  panel.appendChild(actions);
+  panel.hidden = false;
+  summary.focus?.();
+}
+
+function showNoteExportMetadataWorkspace(
+  precheck,
+  groups,
+  continuation,
+  { autoOpenMetadata = false, onDirect = null } = {},
+) {
+  const panel = document.getElementById("notesExportPrecheck");
+  if (!panel) return;
+  panel.innerHTML = "";
+
+  const summary = document.createElement("p");
+  summary.className = "notes-export-precheck-text";
+  summary.tabIndex = -1;
+  summary.textContent = `${precheck.blockingVideos.length} 个视频需要补充页面资料。DigestDock 会逐个打开，只读取标题、频道、网址和完整简介；不会获取字幕、调用 Supadata 或 AI。`;
+  panel.appendChild(summary);
+
+  const groupByKey = new Map(
+    (groups || []).map((group) => [String(group.mediaKey || ""), group]),
+  );
+  const list = document.createElement("div");
+  list.className = "notes-export-supplement-list";
+  (precheck.blockingVideos || []).forEach((video) => {
+    const group = groupByKey.get(String(video.mediaKey || ""));
+    const representative = group?.representative || group?.notes?.[0];
+    const row = document.createElement("div");
+    row.className = "notes-export-supplement-row";
+    const copy = document.createElement("div");
+    copy.className = "notes-export-supplement-copy";
+    const title = document.createElement("strong");
+    title.textContent = video.title || "未命名视频";
+    const reasons = document.createElement("span");
+    reasons.textContent = (video.blockingReasons || []).join("、");
+    copy.append(title, reasons);
+    const state = document.createElement("span");
+    state.className = "notes-export-picker-option-status is-metadata";
+    state.textContent = "待补充";
+    row.append(copy, state);
+    list.appendChild(row);
+  });
+  panel.appendChild(list);
+
+  const actions = document.createElement("div");
+  actions.className = "notes-export-precheck-actions";
+  const firstVideo = precheck.blockingVideos[0] || null;
+  const firstGroup = firstVideo
+    ? groupByKey.get(String(firstVideo.mediaKey || ""))
+    : null;
+  const representative = firstGroup?.representative || firstGroup?.notes?.[0];
+  const openNext = document.createElement("button");
+  openNext.type = "button";
+  openNext.className = "enhance-btn active";
+  openNext.textContent =
+    precheck.blockingVideos.length > 1
+      ? `打开下一个（还剩 ${precheck.blockingVideos.length} 个）`
+      : "打开并补齐";
+  openNext.disabled = !representative || !noteCanonicalUrl(representative);
+  const runOpenNext = async () => {
+    if (openNext.disabled) return;
+    openNext.disabled = true;
+    openNext.textContent = "正在打开…";
+    setNoteExportStatus(`正在打开《${firstVideo?.title || "视频"}》补充资料…`);
+    try {
+      const opened = await playNote(representative, {
+        captureMetadata: true,
+        exportContinuation: continuation,
+      });
+      if (!opened) {
+        const statusElement = document.getElementById("notesExportStatus");
+        const existingMessage = String(
+          statusElement?.textContent || "",
+        ).trim();
+        throw new Error(
+          statusElement?.classList?.contains("is-error") && existingMessage
+            ? existingMessage
+            : "页面资料尚未就绪，请重试当前视频。",
+        );
+      }
+    } catch (error) {
+      openNext.disabled = false;
+      openNext.textContent = "重试当前视频";
+      setNoteExportStatus(error?.message || "无法打开视频，请重试。", true);
+    }
+  };
+  openNext.addEventListener("click", () => void runOpenNext());
+
+  const direct = document.createElement("button");
+  direct.type = "button";
+  direct.className = "enhance-btn";
+  direct.textContent = "直接导出";
+  direct.disabled = typeof onDirect !== "function";
+  direct.addEventListener("click", () => {
+    if (!direct.disabled) {
+      void clearNoteExportContinuation();
+      void onDirect();
+    }
+  });
+
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.className = "enhance-btn notes-export-cancel";
+  cancel.textContent = "取消";
+  cancel.addEventListener("click", () => {
+    panel.hidden = true;
+    abandonActiveExportTranslation();
+    void clearNoteExportContinuation();
+    setNoteExportStatus("已取消导出。");
+  });
+  actions.append(cancel, direct, openNext);
+  panel.appendChild(actions);
+  panel.hidden = false;
+  summary.focus?.();
+  if (autoOpenMetadata && !openNext.disabled) void runOpenNext();
+}
+
+async function exportCurrentVideoNotes() {
+  const selectedMediaKey = currentVideoId || currentMediaRef?.mediaKey || "";
+  if (!selectedMediaKey) {
+    setNoteExportStatus("请先打开一个视频。", true);
+    return;
+  }
+  await exportAllNotes([selectedMediaKey]);
+}
+
+async function exportAllNotes(mediaKeys = null, options = {}) {
+  const direct = options?.direct === true;
+  let authorized = options?.authorized === true;
+  const grantAuthorization = options?.grantAuthorization === true;
+  const autoOpenMetadata = options?.autoOpenMetadata === true;
+  hideNoteExportMenu();
+  if (direct) {
+    revokeNoteExportAuthorization();
+    abandonActiveExportTranslation();
+  }
+  const frozenMediaKeys = normalizeExportMediaKeys(mediaKeys);
+  if (frozenMediaKeys && !frozenMediaKeys.length) {
+    setNoteExportStatus("请至少选择一个视频。", true);
+    return;
+  }
+  const mode = ["original", "zh", "bilingual"].includes(options?.modeOverride)
+    ? options.modeOverride
+    : currentNotesMode;
+  const existingContinuation = normalizeNoteExportContinuation(
+    options?.continuation,
+  );
+  const continuation =
+    existingContinuation ||
+    createNoteExportContinuation(frozenMediaKeys);
+  closeNoteExportPicker();
+  setNoteExportStatus("");
+  try {
+    await persistCurrentVideoNoteSourceIfNoted();
+    const { groups, sourcesByKey } = await collectAllNotesExport(frozenMediaKeys);
+    if (!groups.length) {
+      setNoteExportStatus("还没有保存任何笔记。", true);
+      return;
+    }
+    const precheck = buildNotesExportPrecheck(groups, sourcesByKey, mode);
+    const translationPlan = buildNotesExportTranslationPlan(
+      groups,
+      sourcesByKey,
+      mode,
+    );
+    let requiresFreshConfirmation = options?.resumed === true && !authorized;
+    if (authorized) {
+      authorized = await validateNoteExportAuthorization(continuation, {
+        groups,
+        sourcesByKey,
+        precheck,
+      });
+      requiresFreshConfirmation = !authorized;
+    }
+    if (grantAuthorization) {
+      const granted = await grantNoteExportAuthorization(continuation, {
+        groups,
+        sourcesByKey,
+        precheck,
+      });
+      if (!granted) return;
+      authorized = true;
+      requiresFreshConfirmation = false;
+    }
+    const isSelectedScope = frozenMediaKeys !== null;
+    const downloadSources = (sources, exportMode) => {
+      if (isSelectedScope && sources.length === 1) {
+        const source = sources[0];
+        downloadTextFile(
+          YTD_NOTE_EXPORT.buildCurrentVideoText(source, exportMode),
+          YTD_NOTE_EXPORT.currentVideoNotesFilename(
+            source.titleOriginal || "video-notes",
+            exportMode,
+          ),
+          "text/plain;charset=utf-8",
+        );
+        return;
+      }
+      downloadTextFile(
+        YTD_NOTE_EXPORT.buildAllNotesText(sources, exportMode),
+        YTD_NOTE_EXPORT.allNotesFilename(exportMode),
+        "text/plain;charset=utf-8",
+      );
+    };
+    const exportWithMode = (exportMode) => {
+      const sources = groups.map((group) =>
+        exportSourceForGroup(group, sourcesByKey[group.mediaKey]),
+      );
+      downloadSources(sources, exportMode);
+      setNoteExportStatus(
+        `已导出${isSelectedScope ? "所选" : "全部"}${exportMode === "original" ? "原文" : ""}笔记（${groups.length} 个视频）。`,
+      );
+      const panel = document.getElementById("notesExportPrecheck");
+      if (panel) panel.hidden = true;
+      void clearNoteExportContinuation();
+    };
+    const doExport = () => exportWithMode(mode);
+    if (direct) {
+      doExport();
+      return;
+    }
+    if (
+      !requiresFreshConfirmation &&
+      !precheck.hasBlocking &&
+      !precheck.hasTranslationGaps
+    ) {
+      doExport();
+      return;
+    }
+
+    const showMetadataWorkspace = (
+      activeContinuation,
+      shouldAutoOpen = false,
+    ) => {
+      showNoteExportMetadataWorkspace(
+        precheck,
+        groups,
+        activeContinuation,
+        {
+          autoOpenMetadata: shouldAutoOpen,
+          onDirect: () =>
+            exportAllNotes(frozenMediaKeys, {
+              direct: true,
+              modeOverride: mode,
+            }),
+        },
+      );
+    };
+
+    const generateAndExport = async (activeContinuation) => {
+        try {
+          const noteAuthorization = activeNoteExportAuthorization;
+          if (
+            !noteAuthorization ||
+            !noteExportContinuationIsAuthorized(activeContinuation)
+          ) {
+            await exportAllNotes(frozenMediaKeys, {
+              authorized: false,
+              autoOpenMetadata: false,
+              resumed: true,
+              modeOverride: mode,
+              continuation: activeContinuation,
+            });
+            return;
+          }
+          const outcome = await runConfirmedExportTranslationRound({
+            plan: translationPlan,
+            sourcesByKey,
+            groups,
+            scope: frozenMediaKeys ? "notes-selected" : "notes-all",
+            mode,
+            format: "txt",
+            panelId: "notesExportPrecheck",
+            setStatus: setNoteExportStatus,
+            expectedProviderSnapshot: noteAuthorization.providerSnapshot,
+            noteAuthorization,
+          });
+          if (!exportRunIsCurrent(outcome.owner)) throw exportCancelledError();
+          if (!outcome.complete) {
+            revokeNoteExportAuthorization();
+            await exportAllNotes(frozenMediaKeys, {
+              authorized: false,
+              autoOpenMetadata: false,
+              resumed: true,
+              modeOverride: mode,
+              continuation: activeContinuation,
+            });
+            return;
+          }
+          const latest = await collectAllNotesExport(frozenMediaKeys);
+          assertFrozenExportOutcome(outcome, {
+            mediaKeys:
+              frozenMediaKeys || latest.groups.map((candidate) => candidate.mediaKey),
+            mode,
+            format: "txt",
+          });
+          assertFrozenExportMaterial(
+            outcome,
+            latest.groups,
+            latest.sourcesByKey,
+          );
+          const finalPrecheck = buildNotesExportPrecheck(
+            latest.groups,
+            latest.sourcesByKey,
+            mode,
+          );
+          const finalPlan = buildNotesExportTranslationPlan(
+            latest.groups,
+            latest.sourcesByKey,
+            mode,
+          );
+          if (finalPlan.unitCount || finalPrecheck.hasTranslationGaps) {
+            throw new Error("补译尚未完整写入，请再次点击导出继续。");
+          }
+          if (finalPrecheck.hasBlocking) {
+            showNoteExportMetadataWorkspace(
+              finalPrecheck,
+              latest.groups,
+              activeContinuation,
+              {
+                autoOpenMetadata: false,
+                onDirect: () =>
+                  exportAllNotes(frozenMediaKeys, {
+                    direct: true,
+                    modeOverride: mode,
+                  }),
+              },
+            );
+            return;
+          }
+          const finalSources = latest.groups.map((candidate) =>
+            exportSourceForGroup(
+              candidate,
+              latest.sourcesByKey[candidate.mediaKey],
+            ),
+          );
+          await finalizeExportJobDownload(outcome, () => {
+            assertExportRunCurrent(outcome.owner);
+            downloadSources(finalSources, mode);
+          });
+          setNoteExportStatus(
+            `已导出${isSelectedScope ? "所选" : "全部"}笔记（${latest.groups.length} 个视频）。`,
+          );
+          await clearNoteExportContinuation();
+        } catch (error) {
+          revokeNoteExportAuthorization();
+          if (error?.code === "EXPORT_JOB_PROVIDER_MISMATCH") {
+            await exportAllNotes(frozenMediaKeys, {
+              authorized: false,
+              autoOpenMetadata: false,
+              resumed: true,
+              modeOverride: mode,
+              continuation: activeContinuation,
+            });
+            return;
+          }
+          const cancelled = exportFlowWasCancelled(error);
+          setNoteExportStatus(
+            error?.message || "补译失败，请重试。",
+            !cancelled,
+          );
+        }
+      };
+
+    if (authorized) {
+      if (precheck.hasBlocking) {
+        showMetadataWorkspace(continuation, autoOpenMetadata);
+      } else {
+        await generateAndExport(continuation);
+      }
+      return;
+    }
+
+    const beginCompleteExport = async () => {
+      try {
+        const authorizedContinuation = await grantNoteExportAuthorization(
+          continuation,
+          { groups, sourcesByKey, precheck },
+        );
+        if (!authorizedContinuation) {
+          return;
+        }
+        if (precheck.hasBlocking) {
+          showMetadataWorkspace(authorizedContinuation, true);
+          return;
+        }
+        if (!precheck.hasTranslationGaps) {
+          doExport();
+          return;
+        }
+        return generateAndExport(authorizedContinuation);
+      } catch (error) {
+        revokeNoteExportAuthorization();
+        if (error?.code === "NOTE_EXPORT_AUTHORIZATION_CANCELLED") return;
+        setNoteExportStatus(error?.message || "无法开始完整导出。", true);
+      }
+    };
+
+      showNoteExportPrecheck(
+        precheck,
+        doExport,
+        beginCompleteExport,
+        translationPlan,
+        null,
+      );
+  } catch (error) {
+    if (error?.code === "NOTE_EXPORT_AUTHORIZATION_CANCELLED") return;
+    console.error("[DigestDock] Export all notes error:", error);
+    setNoteExportStatus("导出失败，请重试。", true);
+  }
+}
+
+function toggleNoteExportMenu() {
+  const menu = document.getElementById("notesExportMenu");
+  const btn = document.getElementById("notesExportBtn");
+  if (!menu || !btn) return;
+  updateNoteExportMenuContext();
+  const willShow = menu.hidden;
+  menu.hidden = !willShow;
+  btn.setAttribute("aria-expanded", willShow ? "true" : "false");
+}
+
+function updateNoteExportMenuContext(groupCount = null) {
+  const current = document.getElementById("exportCurrentNotes");
+  const select = document.getElementById("selectNotesForExport");
+  const all = document.getElementById("exportAllNotes");
+  if (current) current.hidden = notesFilterShowAll;
+  if (select) select.hidden = !notesFilterShowAll;
+  if (all) {
+    all.hidden = !notesFilterShowAll;
+    const count = Number.isInteger(groupCount)
+      ? groupCount
+      : sortNoteGroups(groupNotesBySource(currentNotes)).length;
+    all.textContent = count > 0 ? `导出全部视频（${count}）` : "导出全部视频";
+  }
+}
+
+function closeNoteExportPicker({ restoreFocus = false } = {}) {
+  const picker = document.getElementById("notesExportPicker");
+  if (picker) picker.hidden = true;
+  document
+    .getElementById("notesExportBtn")
+    ?.setAttribute("aria-expanded", "false");
+  selectedNoteExportMediaKeys = new Set();
+  noteExportPickerGroups = [];
+  noteExportPickerPrecheck = null;
+  noteExportPickerSourcesByKey = {};
+  if (restoreFocus) document.getElementById("notesExportBtn")?.focus();
+}
+
+function updateNoteExportPickerSelection() {
+  const total = noteExportPickerGroups.length;
+  const selected = selectedNoteExportMediaKeys.size;
+  const count = document.getElementById("notesExportSelectionCount");
+  const confirm = document.getElementById("confirmNotesExportSelection");
+  const direct = document.getElementById("directNotesExportSelection");
+  const disclosure = document.getElementById("notesExportPickerDisclosure");
+  const selectAll = document.getElementById("notesExportSelectAll");
+  if (count) count.textContent = `已选 ${selected}/${total}`;
+  if (confirm) {
+    confirm.disabled = selected === 0;
+    confirm.textContent = `完整导出（${selected}）`;
+  }
+  if (direct) {
+    direct.disabled = selected === 0;
+    direct.textContent = `直接导出（${selected}）`;
+  }
+  if (selectAll) {
+    selectAll.checked = total > 0 && selected === total;
+    selectAll.indeterminate = selected > 0 && selected < total;
+  }
+  if (disclosure) {
+    if (!selected) {
+      disclosure.textContent = "选择视频后将显示导出准备情况。";
+    } else {
+      const selectedVideos = (noteExportPickerPrecheck?.videos || []).filter(
+        (video) => selectedNoteExportMediaKeys.has(video.mediaKey),
+      );
+      const metadataCount = selectedVideos.filter((video) => video.blocking).length;
+      const translationCount = selectedVideos.reduce(
+        (sum, video) => sum + noteExportVideoTranslationGapCount(video),
+        0,
+      );
+      const providerName =
+        currentConfigStatus?.provider?.displayName || "当前 AI 服务";
+      const parts = [
+        `范围：${selected} 个视频；模式：${noteExportModeLabel()}。`,
+        `页面资料：${metadataCount ? `${metadataCount} 个需访问原视频补充` : "无需访问原视频"}。`,
+      ];
+      if (currentNotesMode === "original") {
+        parts.push("AI 补译：不使用。");
+      } else {
+        parts.push(
+          `AI 补译：当前可识别 ${translationCount} 项，服务为${providerName}；补充页面资料后数量可能增加，单轮最多 20 批，可取消。`,
+        );
+      }
+      if (!metadataCount && !translationCount) {
+        parts.push("当前资料齐全，可立即下载。");
+      }
+      parts.push("直接导出不会补资料或补译，缺失处会明确标记。");
+      disclosure.textContent = parts.join(" ");
+    }
+  }
+}
+
+function renderNoteExportPicker(
+  groups,
+  sourcesByKey = {},
+  preselectedKeys = [],
+) {
+  const list = document.getElementById("notesExportPickerList");
+  if (!list) return;
+  list.innerHTML = "";
+  noteExportPickerGroups = [...groups];
+  noteExportPickerSourcesByKey = { ...sourcesByKey };
+  noteExportPickerPrecheck = buildNotesExportPrecheck(
+    groups,
+    noteExportPickerSourcesByKey,
+  );
+  const preparationByKey = new Map(
+    (noteExportPickerPrecheck.videos || []).map((video) => [
+      video.mediaKey,
+      noteExportVideoPreparation(video),
+    ]),
+  );
+  const preselected = new Set(normalizeExportMediaKeys(preselectedKeys) || []);
+  selectedNoteExportMediaKeys = new Set(
+    groups
+      .map((group) => group.mediaKey)
+      .filter((mediaKey) => preselected.has(mediaKey)),
+  );
+  groups.forEach((group, index) => {
+    const representative = group.representative || group.notes?.[0] || {};
+    const label = document.createElement("label");
+    label.className = "notes-export-picker-option";
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.value = group.mediaKey;
+    input.id = `notes-export-source-${index}`;
+    input.checked = selectedNoteExportMediaKeys.has(group.mediaKey);
+    input.addEventListener("change", () => {
+      if (input.checked) selectedNoteExportMediaKeys.add(group.mediaKey);
+      else selectedNoteExportMediaKeys.delete(group.mediaKey);
+      updateNoteExportPickerSelection();
+    });
+    const copy = document.createElement("span");
+    copy.className = "notes-export-picker-option-copy";
+    const title = document.createElement("span");
+    title.className = "notes-export-picker-option-title";
+    title.textContent = noteVideoTitleForMode(representative).replace(/\n/g, " ");
+    title.title = title.textContent;
+    const meta = document.createElement("span");
+    meta.className = "notes-export-picker-option-meta";
+    meta.textContent = noteSourceMetaText(representative, group.notes.length);
+    copy.append(title, meta);
+    const preparation = preparationByKey.get(group.mediaKey) || {
+      label: "需补资料",
+      className: "is-metadata",
+    };
+    const status = document.createElement("span");
+    status.className = `notes-export-picker-option-status ${preparation.className}`;
+    status.textContent = preparation.label;
+    status.title = preparation.label;
+    label.append(input, copy, status);
+    list.appendChild(label);
+  });
+  updateNoteExportPickerSelection();
+}
+
+function handleNoteExportSelectAll(event) {
+  const shouldSelect = event.currentTarget.checked;
+  selectedNoteExportMediaKeys = shouldSelect
+    ? new Set(noteExportPickerGroups.map((group) => group.mediaKey))
+    : new Set();
+  document
+    .getElementById("notesExportPickerList")
+    ?.querySelectorAll('input[type="checkbox"]')
+    .forEach((input) => {
+      input.checked = shouldSelect;
+    });
+  updateNoteExportPickerSelection();
+}
+
+async function recoverNotesExportSelection() {
+  const navigationContinuation = normalizeNoteExportContinuation(
+    (activeNotesOnlyContext || pendingNoteNavigation)?.exportContinuation,
+  );
+  if (navigationContinuation?.mode === currentNotesMode) {
+    return navigationContinuation.mediaKeys;
+  }
+  try {
+    const result = await chrome.runtime.sendMessage({ action: "listExportJobs" });
+    const recoverableStates = new Set(["planned", "running", "paused", "failed"]);
+    const job = (result?.success && Array.isArray(result.jobs) ? result.jobs : []).find(
+      (candidate) =>
+        recoverableStates.has(candidate?.state) &&
+        String(candidate?.intent?.scope || "").startsWith("notes-") &&
+        candidate?.intent?.mode === currentNotesMode,
+    );
+    return normalizeExportMediaKeys(job?.intent?.mediaKeys) || [];
+  } catch (_error) {
+    return [];
+  }
+}
+
+async function openNoteExportPicker({ selectAll = false } = {}) {
+  hideNoteExportMenu();
+  setNoteExportStatus("");
+  try {
+    if (currentNotesMode !== "original") {
+      try {
+        currentConfigStatus = await chrome.runtime.sendMessage({
+          action: "checkConfig",
+        });
+      } catch (_error) {
+        // The picker still works in direct-export mode when settings are
+        // temporarily unavailable; the complete action rechecks before AI.
+      }
+    }
+    await persistCurrentVideoNoteSourceIfNoted();
+    const { groups, sourcesByKey } = await collectAllNotesExport();
+    if (!groups.length) {
+      setNoteExportStatus("还没有保存任何笔记。", true);
+      return;
+    }
+    const recoveredSelection = selectAll
+      ? groups.map((group) => group.mediaKey)
+      : await recoverNotesExportSelection();
+    renderNoteExportPicker(
+      groups,
+      sourcesByKey,
+      recoveredSelection,
+    );
+    const picker = document.getElementById("notesExportPicker");
+    if (picker) picker.hidden = false;
+    document
+      .getElementById("notesExportBtn")
+      ?.setAttribute("aria-expanded", "true");
+    document
+      .getElementById("notesExportPickerList")
+      ?.querySelector('input[type="checkbox"]')
+      ?.focus();
+  } catch (error) {
+    console.error("[DigestDock] Open export picker error:", error);
+    setNoteExportStatus("无法读取笔记，请重试。", true);
+  }
+}
+
+/** Exports a single source container's notes (the per-video shortcut). */
+async function exportSingleSourceGroup(group) {
+  const selectedMediaKey = String(group?.mediaKey || "");
+  if (!selectedMediaKey || !group?.notes?.length) return;
+  await exportAllNotes([selectedMediaKey]);
 }
 
 // ============================================================
@@ -1874,9 +5090,10 @@ function showError(title, message) {
     secondaryButton.disabled = false;
     secondaryButton.hidden = true;
   }
+  configureNotesReturnAction();
 }
 
-function showSupadataConsent(onConfirm) {
+function showSupadataConsent(onConfirm, onDecline = null) {
   showError(
     "是否使用 Supadata 获取字幕？",
     "此视频将通过 Supadata 获取 YouTube 原生字幕。点击后会把此视频的标准 YouTube 链接发送给 Supadata，并可能消耗你的 API 额度。",
@@ -1885,7 +5102,9 @@ function showSupadataConsent(onConfirm) {
   const secondaryButton = document.getElementById("errorSecondaryBtn");
   primaryButton.textContent = "本次使用 Supadata";
   if (secondaryButton) {
-    secondaryButton.textContent = "不使用第三方服务";
+    secondaryButton.textContent = onDecline
+      ? "返回笔记"
+      : "不使用第三方服务";
     secondaryButton.hidden = false;
   }
 
@@ -1907,6 +5126,7 @@ function showSupadataConsent(onConfirm) {
     }
   };
   errorSecondaryAction = () => {
+    if (onDecline) return onDecline();
     showSupadataDeclined();
   };
   primaryButton.focus();
@@ -2006,6 +5226,90 @@ function showRuntimeVersionError() {
 // TAB SWITCHING
 // ============================================================
 
+async function returnToNotesOnlyContext(context = activeNotesOnlyContext) {
+  if (
+    !context ||
+    activeNotesOnlyContext?.token !== context.token ||
+    !isActiveNotesOnlyContext()
+  ) {
+    return false;
+  }
+
+  try {
+    const tab = await chrome.tabs.get(context.tabId);
+    const locator = extractMediaLocator(tab?.pendingUrl || tab?.url || "");
+    if (!noteNavigationMatches(context, tab, locator)) {
+      await clearNoteNavigationState(context.token);
+      return false;
+    }
+  } catch (error) {
+    if (isTransientTabLookupError(error)) {
+      await clearNoteNavigationState(context.token);
+      return false;
+    }
+    throw error;
+  }
+
+  showState("results");
+  switchTab("notes");
+  await loadNotes(context.showAll ? null : context.mediaKey, {
+    translateMissing: false,
+  });
+  return true;
+}
+
+function configureNotesReturnAction(context = activeNotesOnlyContext) {
+  if (
+    !context ||
+    activeNotesOnlyContext?.token !== context.token ||
+    !isActiveNotesOnlyContext()
+  ) {
+    return false;
+  }
+  const secondaryButton = document.getElementById("errorSecondaryBtn");
+  if (!secondaryButton) return false;
+  secondaryButton.textContent = "返回笔记";
+  secondaryButton.disabled = false;
+  secondaryButton.hidden = false;
+  errorSecondaryAction = () => returnToNotesOnlyContext(context);
+  return true;
+}
+
+function resumeDigestFromNotesOnly(tabName) {
+  if (noteNavigationResumePromise) return noteNavigationResumePromise;
+  const context = activeNotesOnlyContext;
+  if (!context) return Promise.resolve();
+
+  showState("loading");
+  updateLoading(
+    tabName === "overview" ? "正在准备概览" : "正在获取字幕",
+    "",
+  );
+  noteNavigationResumePromise = checkCurrentTab({
+    resumeNoteNavigationToken: context.token,
+  })
+    .then(async () => {
+      if (
+        currentTranscript &&
+        activeNotesOnlyContext?.token === context.token &&
+        isActiveNotesOnlyContext()
+      ) {
+        await clearNoteNavigationState(context.token);
+      }
+    })
+    .catch((error) => {
+      console.error("[DigestDock Panel] Resume digest error:", error);
+      showError(
+        "无法打开摘要",
+        error?.message || "读取当前视频失败，请刷新页面后重试。",
+      );
+    })
+    .finally(() => {
+      noteNavigationResumePromise = null;
+    });
+  return noteNavigationResumePromise;
+}
+
 function switchTab(tabName) {
   document.querySelectorAll(".tab").forEach((tab) => {
     tab.classList.toggle("active", tab.dataset.tab === tabName);
@@ -2015,6 +5319,18 @@ function switchTab(tabName) {
     panel.classList.toggle("active", panel.dataset.panel === tabName);
   });
   updateHeaderLanguageControlsVisibility();
+
+  // A saved-note jump intentionally performs no transcript acquisition. The
+  // user's explicit switch to Transcript or Overview is the point at which we
+  // leave that local-only state and resume the ordinary digest/consent flow.
+  if (
+    (tabName === "transcript" || tabName === "overview") &&
+    isActiveNotesOnlyContext() &&
+    !currentTranscript
+  ) {
+    void resumeDigestFromNotesOnly(tabName);
+    return;
+  }
 
   // Start/stop playback tracking based on which tab is active
   if (tabName === "transcript") {
@@ -2166,13 +5482,103 @@ async function seekTo(seconds) {
  *   current player would jump to the wrong content, so we open that video in a
  *   new tab at the right timestamp instead.
  */
-function playNote(note) {
+async function playNote(
+  note,
+  { captureMetadata = false, exportContinuation = null } = {},
+) {
   const noteMediaKey = note?.mediaKey || note?.videoId;
   if (noteMediaKey && noteMediaKey === currentVideoId) {
-    seekTo(note.timestampSeconds);
-  } else {
-    // note.timestampedUrl already includes the &t=<seconds>s anchor
-    chrome.tabs.create({ url: note.timestampedUrl });
+    if (captureMetadata && activeNotesOnlyContext) {
+      const tab = await chrome.tabs.get(activeNotesOnlyContext.tabId);
+      const locator = extractMediaLocator(tab?.pendingUrl || tab?.url || "");
+      const context = normalizeNoteNavigationState({
+        ...activeNotesOnlyContext,
+        captureMetadata: true,
+        exportContinuation:
+          exportContinuation || activeNotesOnlyContext.exportContinuation,
+      });
+      if (context) {
+        await persistNoteNavigationState(context);
+        const captured = await captureNotesOnlyMetadata(context, tab, locator);
+        if (captured && context.exportContinuation) {
+          void resumeNoteExportContinuation(context.exportContinuation);
+        }
+        return !!captured;
+      }
+      return false;
+    }
+    if (captureMetadata) {
+      if (!Number.isInteger(videoTabId)) {
+        setNoteExportStatus("无法确认当前视频标签页，请刷新后重试。", true);
+        return false;
+      }
+      const tab = await chrome.tabs.get(videoTabId);
+      const locator = extractMediaLocator(tab?.pendingUrl || tab?.url || "");
+      const context = {
+        token: `metadata:${videoTabId}:${currentRouteKey}`,
+        tabId: videoTabId,
+        routeKey: currentRouteKey,
+        mediaKey: String(noteMediaKey),
+        platform:
+          currentMediaRef?.platform === "bilibili" ? "bilibili" : "youtube",
+        canonicalUrl:
+          currentMediaRef?.canonicalUrl || noteCanonicalUrl(note),
+        timestampedUrl: note?.timestampedUrl || note?.canonicalUrl || "",
+        videoTitle: noteOriginalVideoTitle(note),
+        channelName: note?.channelName || "",
+        sourceLanguage: note?.sourceLanguage || "",
+        duration: Number(note?.duration) || 0,
+        captureMetadata: true,
+        exportContinuation: normalizeNoteExportContinuation(exportContinuation),
+      };
+      const captured = await captureNotesOnlyMetadata(context, tab, locator, {
+        requireActiveContext: false,
+      });
+      if (captured && context.exportContinuation) {
+        void resumeNoteExportContinuation(context.exportContinuation);
+      }
+      return !!captured;
+    }
+    await seekTo(note.timestampSeconds);
+    return true;
+  }
+
+  const targetUrl = String(note?.timestampedUrl || noteCanonicalUrl(note) || "");
+  if (!extractMediaLocator(targetUrl)) {
+    setNoteExportStatus("该笔记缺少可打开的视频网址。", true);
+    return false;
+  }
+
+  let createdTab = null;
+  let intent = null;
+  try {
+    // Create the tab in the background first so the navigation intent can be
+    // bound to its exact tabId before Chrome emits onActivated. This removes a
+    // race where an unrelated active tab could otherwise consume the intent.
+    createdTab = await chrome.tabs.create({ url: targetUrl, active: false });
+    if (!Number.isInteger(createdTab?.id)) {
+      throw new Error("浏览器未返回新标签页，请重试。");
+    }
+    intent = buildNoteNavigationIntent(note, createdTab?.id, {
+      captureMetadata,
+      exportContinuation,
+    });
+    if (!intent) {
+      throw new Error("无法确认笔记对应的视频网址，请重试。");
+    }
+    await persistNoteNavigationState(intent);
+    if (typeof chrome.tabs.update !== "function") {
+      throw new Error("浏览器暂时无法激活视频标签页，请重试。");
+    }
+    await chrome.tabs.update(createdTab.id, { active: true });
+    return true;
+  } catch (error) {
+    if (intent) await clearNoteNavigationState(intent.token);
+    if (Number.isInteger(createdTab?.id) && typeof chrome.tabs.remove === "function") {
+      await chrome.tabs.remove(createdTab.id).catch(() => undefined);
+    }
+    debugLog("[DigestDock Panel] Open saved note failed:", error);
+    return false;
   }
 }
 
@@ -2239,8 +5645,8 @@ async function copyToClipboardWithFeedback(text, buttonId) {
   }
 }
 
-function downloadTextFile(text, filename) {
-  const blob = new Blob([text], { type: "text/plain" });
+function downloadTextFile(text, filename, mime = "text/plain;charset=utf-8") {
+  const blob = new Blob([text], { type: mime });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
@@ -2468,6 +5874,10 @@ async function saveToCache(videoId) {
 
     // Evict old entries if we have more than 20 videos cached
     await evictOldCacheEntries(20);
+
+    // Refresh this video's durable export material (idempotent; only when the
+    // video has a note). Captures newly translated transcript/title segments.
+    void persistCurrentVideoNoteSourceIfNoted();
   } catch (error) {
     console.error("Cache save error:", error);
   }
@@ -2662,37 +6072,188 @@ function noteChineseText(note) {
   return looksLikeLegacyChineseNote(translated) ? translated : "";
 }
 
-function renderNoteLanguageContent(note, mode = currentNotesMode) {
-  const original = noteOriginalText(note);
-  const chinese = noteChineseText(note);
-  const renderBlock = (language, text) => {
-    const contentLanguage =
-      language === "zh" ||
-      (language === "original" && noteHasChineseSource(note))
-        ? "zh-CN"
-        : "en";
-    return `<span class="note-language-block note-language-block--${language}" lang="${contentLanguage}">“${escapeHtml(text)}”</span>`;
-  };
+// ============================================================
+// NOTE VIDEO TITLE — original / Chinese / bilingual
+// ============================================================
+// The stored `videoTitle` is always the original title. `videoTitleZh` holds a
+// validated Chinese translation bound to the media identity (mediaKey), shared
+// by every note of the same video. Missing translations fall back to the
+// original title; a title that is already Chinese is reused as-is with no
+// provider call.
 
-  if (mode === "original") return renderBlock("original", original);
-  if (mode === "zh") {
-    return chinese
-      ? renderBlock("zh", chinese)
-      : renderBlock("original", original);
+function noteOriginalVideoTitle(note) {
+  const title = String(note?.videoTitle || "").trim();
+  return title || "Untitled Video";
+}
+
+/**
+ * True when the original title is already Chinese, so it can be reused directly
+ * for the Chinese view without a translation request. Mirrors the note-body
+ * legacy-Chinese heuristic: reject Japanese/Korean scripts, require CJK to
+ * dominate any Latin text.
+ */
+function videoTitleIsChinese(note) {
+  return looksLikeLegacyChineseNote(noteOriginalVideoTitle(note));
+}
+
+function noteChineseVideoTitle(note) {
+  if (videoTitleIsChinese(note)) return noteOriginalVideoTitle(note);
+  const translated = String(note?.videoTitleZh || "").trim();
+  if (!translated) return "";
+  const sourceHash = String(note?.videoTitleZhSourceHash || "").trim();
+  if (
+    sourceHash &&
+    sourceHash !== YTD_NOTE_SOURCES.hashSourceText(noteOriginalVideoTitle(note))
+  ) {
+    return "";
   }
-  if (chinese && chinese === original) return renderBlock("zh", chinese);
-  return chinese
-    ? renderBlock("original", original) + renderBlock("zh", chinese)
-    : renderBlock("original", original);
+  return note?.videoTitleZhValidated === true &&
+    note?.videoTitleZhValidationVersion ===
+      NOTE_TITLE_TRANSLATION_VALIDATION_VERSION
+    ? translated
+    : "";
+}
+
+/** Ordered {lang,text} title blocks for the current mode (shared assembly). */
+function noteVideoTitleSegments(note, mode = currentNotesMode) {
+  return YTD_NOTE_EXPORT.localizedSegments(
+    noteOriginalVideoTitle(note),
+    noteChineseVideoTitle(note),
+    mode,
+  );
+}
+
+/**
+ * Plain-text title for the given mode — used for the header `title` attribute
+ * and export. Bilingual returns both lines when they differ.
+ */
+function noteVideoTitleForMode(note, mode = currentNotesMode) {
+  return YTD_NOTE_EXPORT.localizedPlainText(
+    noteOriginalVideoTitle(note),
+    noteChineseVideoTitle(note),
+    mode,
+  );
+}
+
+/**
+ * Single visible title used to sort source groups under the current mode:
+ * the first visible line (Chinese in zh mode, otherwise the original).
+ */
+function noteVideoTitleSortKey(note, mode = currentNotesMode) {
+  return (
+    noteVideoTitleSegments(note, mode)[0]?.text || noteOriginalVideoTitle(note)
+  );
+}
+
+function renderNoteVideoTitle(note, mode = currentNotesMode) {
+  const originalIsChinese = videoTitleIsChinese(note);
+  return noteVideoTitleSegments(note, mode)
+    .map((block) => {
+      const lang =
+        block.lang === "zh" || originalIsChinese ? "zh-CN" : "en";
+      return `<span class="note-source-title-line note-source-title-line--${block.lang}" lang="${lang}">${escapeHtml(block.text)}</span>`;
+    })
+    .join("");
+}
+
+/**
+ * De-duplicated per-media title translation work: one entry per media identity
+ * whose original title is not already Chinese and has no validated translation.
+ * Titles that keep failing are dropped after a bounded number of attempts so
+ * mode toggles cannot loop on the same failure.
+ */
+function collectMissingNoteTitleWork(notes) {
+  const seen = new Set();
+  const work = [];
+  for (const note of notes) {
+    const mediaKey = String(note?.mediaKey || note?.videoId || "").trim();
+    if (!mediaKey || seen.has(mediaKey)) continue;
+    seen.add(mediaKey);
+    if (videoTitleIsChinese(note) || noteChineseVideoTitle(note)) continue;
+    const title = noteOriginalVideoTitle(note);
+    if (!title || title === "Untitled Video") continue;
+    if (
+      (noteTitleTranslationAttemptByKey.get(mediaKey) || 0) >=
+      NOTE_TITLE_TRANSLATION_MAX_ATTEMPTS
+    ) {
+      continue;
+    }
+    work.push({ mediaKey, title });
+    if (work.length >= 10) break;
+  }
+  return work;
+}
+
+/**
+ * Applies validated title translations to every in-memory note that shares the
+ * media identity. Returns true when at least one note changed.
+ */
+function applyNoteTitleTranslations(titles) {
+  if (!Array.isArray(titles) || !titles.length) return false;
+  const byKey = new Map(titles.map((entry) => [entry.mediaKey, entry.titleZh]));
+  byKey.forEach((_titleZh, key) => noteTitleTranslationAttemptByKey.delete(key));
+  let changed = false;
+  currentNotes = currentNotes.map((note) => {
+    const key = String(note?.mediaKey || note?.videoId || "").trim();
+    if (!key || !byKey.has(key)) return note;
+    changed = true;
+    return {
+      ...note,
+      videoTitleZh: byKey.get(key),
+      videoTitleZhValidated: true,
+      videoTitleZhValidationVersion: NOTE_TITLE_TRANSLATION_VALIDATION_VERSION,
+    };
+  });
+  return changed;
+}
+
+// ============================================================
+// NOTE SOURCE GROUPING — one container per media, timecode-ordered.
+// Grouping/sorting live in the shared note-export module so the UI and the
+// reading exports never diverge on how notes are grouped or ordered.
+// ============================================================
+
+const noteMediaGroupKey = YTD_NOTE_EXPORT.noteMediaGroupKey;
+const sortNotesByTimecode = YTD_NOTE_EXPORT.sortNotesByTimecode;
+const groupNotesBySource = YTD_NOTE_EXPORT.groupNotesBySource;
+
+/**
+ * Sorts source groups by their visible title under the current mode
+ * (localeCompare zh-CN), with `mediaKey` as the stable tie-breaker.
+ */
+function sortNoteGroups(groups, mode = currentNotesMode) {
+  return YTD_NOTE_EXPORT.sortNoteGroups(groups, (representative) =>
+    noteVideoTitleSortKey(representative, mode),
+  );
+}
+
+function notePlatformLabel(note) {
+  return note?.platform === "bilibili" ? "B 站" : "YouTube";
+}
+
+function renderNoteLanguageContent(note, mode = currentNotesMode) {
+  const originalIsChinese = noteHasChineseSource(note);
+  return YTD_NOTE_EXPORT.localizedSegments(
+    noteOriginalText(note),
+    noteChineseText(note),
+    mode,
+  )
+    .map((block) => {
+      const contentLanguage =
+        block.lang === "zh" || (block.lang === "original" && originalIsChinese)
+          ? "zh-CN"
+          : "en";
+      return `<span class="note-language-block note-language-block--${block.lang}" lang="${contentLanguage}">“${escapeHtml(block.text)}”</span>`;
+    })
+    .join("");
 }
 
 function noteCopyTextForMode(note, mode = currentNotesMode) {
-  const original = noteOriginalText(note);
-  const chinese = noteChineseText(note);
-  if (mode === "original") return original;
-  if (mode === "zh") return chinese || original;
-  if (chinese && chinese === original) return original;
-  return [original, chinese].filter(Boolean).join("\n");
+  return YTD_NOTE_EXPORT.localizedPlainText(
+    noteOriginalText(note),
+    noteChineseText(note),
+    mode,
+  );
 }
 
 function setNotesTranslationStatus(message = "", isError = false) {
@@ -2784,7 +6345,8 @@ async function ensureNotesChinese() {
         left.index - right.index,
     )
     .map(({ note }) => note);
-  if (!missingNotes.length) {
+  const titleWork = collectMissingNoteTitleWork(currentNotes);
+  if (!missingNotes.length && !titleWork.length) {
     setNotesTranslationStatus();
     return;
   }
@@ -2792,84 +6354,82 @@ async function ensureNotesChinese() {
   const generation = ++notesTranslationGeneration;
   const failureById = new Map();
   setNotesTranslationLoading(true);
-  setNotesTranslationStatus(`正在生成 ${missingNotes.length} 条中文笔记…`);
+  setNotesTranslationStatus(
+    missingNotes.length
+      ? `正在生成 ${missingNotes.length} 条中文笔记…`
+      : "正在翻译视频标题…",
+  );
   try {
-    for (let index = 0; index < missingNotes.length; index += 10) {
-      const batch = missingNotes.slice(index, index + 10);
-      const result = await sendTranslationMessage({
-        action: "translateNotes",
-        notes: batch.map((note) => ({
-          id: note.id,
-          text: noteOriginalText(note),
-          videoTitle: note.videoTitle || "",
-          rawText: note.rawText || "",
-          sourceLanguage: note.sourceLanguage || "",
-          platform: note.platform === "bilibili" ? "bilibili" : "youtube",
-          textLanguage: note.textLanguage || "",
-        })),
-      });
-      if (generation !== notesTranslationGeneration) return;
-      const translatedById = new Map(
-        (result.translations || []).map((note) => [note.id, note]),
-      );
-      translatedById.forEach((_translation, id) => {
-        noteTranslationAttemptCountById.delete(id);
-      });
-      (result.failures || []).forEach((failure) => {
-        if (typeof failure?.id === "string" && failure.id) {
-          failureById.set(failure.id, failure);
-          if (
-            [
-              "EMPTY_RESPONSE",
-              "INVALID_JSON",
-              "MISSING_ITEM",
-              "MULTIPLE_CANDIDATES",
-              "ID_MISMATCH",
-              "INVALID_TRANSLATION",
-            ].includes(failure.code)
-          ) {
-            noteTranslationAttemptCountById.set(
-              failure.id,
-              (noteTranslationAttemptCountById.get(failure.id) || 0) + 1,
-            );
-          }
-        }
-      });
-      currentNotes = currentNotes.map((note) =>
-        translatedById.has(note.id)
-          ? {
-              ...note,
-              translatedText: translatedById.get(note.id).textZh,
-              translatedUnchanged:
-                translatedById.get(note.id).unchanged === true,
-              translatedValidated: true,
-              translatedValidationVersion:
-                NOTE_TRANSLATION_VALIDATION_VERSION,
-            }
-          : note,
-      );
-      renderNotes(currentNotes, currentNotesFilterVideoId);
-      if (!result?.success) {
-        if (!result?.failures?.length) {
-          throw new Error(result?.error || "中文笔记生成失败");
-        }
-        break;
-      }
-      if (
-        (result.failures || []).some((failure) =>
+    // One user action owns one bounded backend job (up to ten notes, the
+    // de-duplicated title batch, and five provider calls total). Remaining
+    // notes continue only after an explicit retry, so a large library cannot
+    // multiply requests silently.
+    const batch = missingNotes.slice(0, 10);
+    const result = await sendTranslationMessage({
+      action: "translateNotes",
+      notes: batch.map((note) => ({
+        id: note.id,
+        text: noteOriginalText(note),
+        videoTitle: note.videoTitle || "",
+        rawText: note.rawText || "",
+        sourceLanguage: note.sourceLanguage || "",
+        platform: note.platform === "bilibili" ? "bilibili" : "youtube",
+        textLanguage: note.textLanguage || "",
+      })),
+      titles: titleWork,
+    });
+    if (generation !== notesTranslationGeneration) return;
+    const translatedById = new Map(
+      (result.translations || []).map((note) => [note.id, note]),
+    );
+    translatedById.forEach((_translation, id) => {
+      noteTranslationAttemptCountById.delete(id);
+    });
+    (result.failures || []).forEach((failure) => {
+      if (typeof failure?.id === "string" && failure.id) {
+        failureById.set(failure.id, failure);
+        if (
           [
-            "RATE_LIMITED",
-            "PROVIDER_TIMEOUT",
-            "RETRY_BUDGET_EXHAUSTED",
-          ].includes(failure?.code),
-        )
-      ) {
-        break;
+            "EMPTY_RESPONSE",
+            "INVALID_JSON",
+            "MISSING_ITEM",
+            "MULTIPLE_CANDIDATES",
+            "ID_MISMATCH",
+            "INVALID_TRANSLATION",
+          ].includes(failure.code)
+        ) {
+          noteTranslationAttemptCountById.set(
+            failure.id,
+            (noteTranslationAttemptCountById.get(failure.id) || 0) + 1,
+          );
+        }
       }
-      // One user action owns one bounded backend job (up to ten notes and five
-      // provider calls). Remaining notes continue only after an explicit
-      // retry, preventing large libraries from multiplying requests silently.
-      break;
+    });
+    // Titles are validated independently of note bodies: a failed title never
+    // blocks a translated body, and a failed body never blocks a title.
+    (result.titleFailures || []).forEach((failure) => {
+      if (typeof failure?.mediaKey === "string" && failure.mediaKey) {
+        noteTitleTranslationAttemptByKey.set(
+          failure.mediaKey,
+          (noteTitleTranslationAttemptByKey.get(failure.mediaKey) || 0) + 1,
+        );
+      }
+    });
+    currentNotes = currentNotes.map((note) =>
+      translatedById.has(note.id)
+        ? {
+            ...note,
+            translatedText: translatedById.get(note.id).textZh,
+            translatedUnchanged: translatedById.get(note.id).unchanged === true,
+            translatedValidated: true,
+            translatedValidationVersion: NOTE_TRANSLATION_VALIDATION_VERSION,
+          }
+        : note,
+    );
+    applyNoteTitleTranslations(result.titles);
+    renderNotes(currentNotes, currentNotesFilterVideoId);
+    if (!result?.success && !result?.failures?.length) {
+      throw new Error(result?.error || "中文笔记生成失败");
     }
     const remainingNotes = currentNotes.filter(
       (note) => noteOriginalText(note) && !noteChineseText(note),
@@ -2921,9 +6481,28 @@ function handleNotesModeChange(mode) {
     retryMissingNotesFromUser();
     return;
   }
+  revokeNoteExportAuthorization();
+  const navigationState = activeNotesOnlyContext || pendingNoteNavigation;
+  if (navigationState?.exportContinuation) {
+    void persistNoteNavigationState({
+      ...navigationState,
+      exportContinuation: {
+        mediaKeys: navigationState.exportContinuation.mediaKeys,
+        mode,
+      },
+    });
+  }
   currentNotesMode = mode;
   setNotesModeButtons(mode);
   renderNotes(currentNotes, currentNotesFilterVideoId);
+  const picker = document.getElementById("notesExportPicker");
+  if (picker && !picker.hidden && noteExportPickerGroups.length) {
+    renderNoteExportPicker(
+      noteExportPickerGroups,
+      noteExportPickerSourcesByKey,
+      [...selectedNoteExportMediaKeys],
+    );
+  }
   if (mode === "original") {
     notesTranslationGeneration += 1;
     setNotesTranslationLoading(false);
@@ -2981,7 +6560,9 @@ async function loadNotes(videoId, { translateMissing = true } = {}) {
 }
 
 /**
- * Renders the notes list in the Notes tab.
+ * Renders the notes list in the Notes tab. Notes are grouped into one source
+ * container per media identity; containers are ordered by visible title and
+ * notes inside each container by timecode ascending.
  */
 function renderNotes(notes, filteredVideoId) {
   const notesList = document.getElementById("notesList");
@@ -2994,6 +6575,7 @@ function renderNotes(notes, filteredVideoId) {
   setNotesModeButtons(currentNotesMode);
 
   if (!notes || notes.length === 0) {
+    updateNoteExportMenuContext(0);
     setNotesTranslationStatus();
     notesIntro.style.display = "block";
     notesIntro.textContent = filteredVideoId
@@ -3011,92 +6593,148 @@ function renderNotes(notes, filteredVideoId) {
     if (!missingCount) setNotesTranslationStatus();
   }
 
-  notes.forEach((note) => {
-    const noteEl = document.createElement("div");
-    noteEl.className = "note-item";
-    const noteCopyText = noteCopyTextForMode(note);
-    const noteTime = formatTimecode(note.timestampSeconds);
-    noteEl.innerHTML = `
-      <div class="note-header">
-        <span class="note-timestamp" role="button" tabindex="0" data-seconds="${Number(note.timestampSeconds) || 0}" title="从 ${escapeHtml(noteTime)} 播放" aria-label="从 ${escapeHtml(noteTime)} 播放">${escapeHtml(noteTime)}</span>
-        ${!filteredVideoId ? `<span class="note-video-title">${escapeHtml(note.videoTitle)}</span>` : ""}
-        <div class="note-more">
-          <button class="note-more-btn" type="button" aria-haspopup="true" aria-expanded="false" title="更多操作" aria-label="更多操作">${UI_ICONS.more}</button>
-          <div class="note-more-menu" role="menu" hidden>
-            <button class="note-menu-item danger note-delete" type="button" role="menuitem" data-id="${escapeHtml(note.id)}">删除笔记</button>
-          </div>
-        </div>
-      </div>
-      <div class="note-text">${renderNoteLanguageContent(note)}</div>
-      <div class="note-actions">
-        <button class="icon-btn primary note-play" type="button" title="从此处播放" aria-label="从此处播放">${UI_ICONS.play}</button>
-        <button class="icon-btn note-copy-text" type="button" title="复制文字" aria-label="复制文字">${UI_ICONS.copy}</button>
-        <button class="icon-btn note-copy-link" type="button" title="复制时间戳链接" aria-label="复制时间戳链接">${UI_ICONS.link}</button>
-      </div>
-    `;
-
-    // Timestamp click / keyboard - play from this point (in this tab or a new one)
-    const timestampEl = noteEl.querySelector(".note-timestamp");
-    timestampEl.addEventListener("click", () => playNote(note));
-    timestampEl.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" || e.key === " " || e.key === "Spacebar") {
-        e.preventDefault();
-        playNote(note);
-      }
-    });
-
-    // More menu — holds the destructive delete action
-    const moreBtn = noteEl.querySelector(".note-more-btn");
-    const moreMenu = noteEl.querySelector(".note-more-menu");
-    moreBtn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      const willOpen = moreMenu.hidden;
-      closeAllNoteMenus();
-      if (willOpen) {
-        moreMenu.hidden = false;
-        moreBtn.setAttribute("aria-expanded", "true");
-      }
-    });
-
-    // Delete lives inside the more menu
-    noteEl.querySelector(".note-delete").addEventListener("click", async (e) => {
-      e.stopPropagation();
-      closeAllNoteMenus();
-      await deleteNote(note.id);
-      loadNotes(filteredVideoId);
-    });
-
-    // Copy text button — copies just the note's text
-    const copyTextBtn = noteEl.querySelector(".note-copy-text");
-    copyTextBtn.addEventListener("click", async () => {
-      try {
-        await navigator.clipboard.writeText(noteCopyText);
-        flashIconDone(copyTextBtn, "已复制", "复制文字", 2000);
-      } catch (err) {
-        console.error("Copy failed:", err);
-      }
-    });
-
-    // Copy timestamp button — copies the timestamped link
-    const copyLinkBtn = noteEl.querySelector(".note-copy-link");
-    copyLinkBtn.addEventListener("click", async () => {
-      try {
-        await navigator.clipboard.writeText(note.timestampedUrl);
-        flashIconDone(copyLinkBtn, "已复制链接", "复制时间戳链接", 2000);
-      } catch (err) {
-        console.error("Copy failed:", err);
-      }
-    });
-
-    // Play button (in this tab if it's the current video, else a new tab)
-    noteEl.querySelector(".note-play").addEventListener("click", () =>
-      playNote(note),
-    );
-
-    notesList.appendChild(noteEl);
+  const groups = sortNoteGroups(groupNotesBySource(notes));
+  updateNoteExportMenuContext(groups.length);
+  groups.forEach((group) => {
+    notesList.appendChild(renderNoteSourceGroup(group, filteredVideoId));
   });
 
   ensureNoteMenuDismissHandler();
+}
+
+/**
+ * Builds one source container: a header with the mode-aware video title,
+ * channel / platform / count metadata and an "open video" action, followed by
+ * the timecode-sorted note items.
+ */
+function noteSourceMetaText(representative, noteCount) {
+  const channel = String(representative?.channelName || "").trim();
+  return [channel, notePlatformLabel(representative), `${noteCount} 条笔记`]
+    .filter(Boolean)
+    .join(" · ");
+}
+
+function renderNoteSourceGroup(group, filteredVideoId) {
+  const representative = group.representative || group.notes[0];
+  const container = document.createElement("div");
+  container.className = "note-source-group";
+  container.dataset.mediaKey = group.mediaKey;
+
+  const header = document.createElement("div");
+  header.className = "note-source-header";
+  const metaText = noteSourceMetaText(representative, group.notes.length);
+  const titlePlain = noteVideoTitleForMode(representative).replace(/\n/g, " · ");
+  header.innerHTML = `
+    <div class="note-source-title" title="${escapeHtml(titlePlain)}">${renderNoteVideoTitle(representative)}</div>
+    <div class="note-source-meta">${escapeHtml(metaText)}</div>
+    <div class="note-source-actions">
+      <button class="note-source-open" type="button" title="打开视频" aria-label="打开视频">打开视频</button>
+      <button class="note-source-export" type="button" title="导出此视频笔记" aria-label="导出此视频笔记">导出此视频</button>
+    </div>
+  `;
+  header
+    .querySelector(".note-source-open")
+    ?.addEventListener("click", () => playNote(group.notes[0]));
+  header
+    .querySelector(".note-source-export")
+    ?.addEventListener("click", () => exportSingleSourceGroup(group));
+  container.appendChild(header);
+
+  const list = document.createElement("div");
+  list.className = "note-source-list";
+  group.notes.forEach((note) => {
+    list.appendChild(buildNoteItemElement(note, filteredVideoId));
+  });
+  container.appendChild(list);
+  return container;
+}
+
+/**
+ * Builds a single note row (timecode, mode-aware body, per-note actions). The
+ * video title now lives on the enclosing source container, not the row.
+ */
+function buildNoteItemElement(note, filteredVideoId) {
+  const noteEl = document.createElement("div");
+  noteEl.className = "note-item";
+  const noteCopyText = noteCopyTextForMode(note);
+  const noteTime = formatTimecode(note.timestampSeconds);
+  noteEl.innerHTML = `
+    <div class="note-header">
+      <span class="note-timestamp" role="button" tabindex="0" data-seconds="${Number(note.timestampSeconds) || 0}" title="从 ${escapeHtml(noteTime)} 播放" aria-label="从 ${escapeHtml(noteTime)} 播放">${escapeHtml(noteTime)}</span>
+      <div class="note-more">
+        <button class="note-more-btn" type="button" aria-haspopup="true" aria-expanded="false" title="更多操作" aria-label="更多操作">${UI_ICONS.more}</button>
+        <div class="note-more-menu" role="menu" hidden>
+          <button class="note-menu-item danger note-delete" type="button" role="menuitem" data-id="${escapeHtml(note.id)}">删除笔记</button>
+        </div>
+      </div>
+    </div>
+    <div class="note-text">${renderNoteLanguageContent(note)}</div>
+    <div class="note-actions">
+      <button class="icon-btn primary note-play" type="button" title="从此处播放" aria-label="从此处播放">${UI_ICONS.play}</button>
+      <button class="icon-btn note-copy-text" type="button" title="复制文字" aria-label="复制文字">${UI_ICONS.copy}</button>
+      <button class="icon-btn note-copy-link" type="button" title="复制时间戳链接" aria-label="复制时间戳链接">${UI_ICONS.link}</button>
+    </div>
+  `;
+
+  // Timestamp click / keyboard - play from this point (in this tab or a new one)
+  const timestampEl = noteEl.querySelector(".note-timestamp");
+  timestampEl.addEventListener("click", () => playNote(note));
+  timestampEl.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " " || e.key === "Spacebar") {
+      e.preventDefault();
+      playNote(note);
+    }
+  });
+
+  // More menu — holds the destructive delete action
+  const moreBtn = noteEl.querySelector(".note-more-btn");
+  const moreMenu = noteEl.querySelector(".note-more-menu");
+  moreBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const willOpen = moreMenu.hidden;
+    closeAllNoteMenus();
+    if (willOpen) {
+      moreMenu.hidden = false;
+      moreBtn.setAttribute("aria-expanded", "true");
+    }
+  });
+
+  // Delete lives inside the more menu
+  noteEl.querySelector(".note-delete").addEventListener("click", async (e) => {
+    e.stopPropagation();
+    closeAllNoteMenus();
+    await deleteNote(note.id);
+    loadNotes(filteredVideoId);
+  });
+
+  // Copy text button — copies just the note's text
+  const copyTextBtn = noteEl.querySelector(".note-copy-text");
+  copyTextBtn.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(noteCopyText);
+      flashIconDone(copyTextBtn, "已复制", "复制文字", 2000);
+    } catch (err) {
+      console.error("Copy failed:", err);
+    }
+  });
+
+  // Copy timestamp button — copies the timestamped link
+  const copyLinkBtn = noteEl.querySelector(".note-copy-link");
+  copyLinkBtn.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(note.timestampedUrl);
+      flashIconDone(copyLinkBtn, "已复制链接", "复制时间戳链接", 2000);
+    } catch (err) {
+      console.error("Copy failed:", err);
+    }
+  });
+
+  // Play button (in this tab if it's the current video, else a new tab)
+  noteEl
+    .querySelector(".note-play")
+    .addEventListener("click", () => playNote(note));
+
+  return noteEl;
 }
 
 /**
@@ -3770,12 +7408,26 @@ globalThis.__YTD_TRANSCRIPT_TESTING__ = {
   normalizeLanguageCode,
   isChineseLanguage,
   isConfirmedSimplifiedChineseSource,
+  currentPlatformIsBilibili,
+  transcriptOriginalBadgeText,
   isTransientTabLookupError,
   noteHasChineseSource,
   noteHasPolishedChineseText,
   noteOriginalText,
   noteChineseText,
   noteCopyTextForMode,
+  noteOriginalVideoTitle,
+  noteChineseVideoTitle,
+  videoTitleIsChinese,
+  noteVideoTitleForMode,
+  noteVideoTitleSortKey,
+  renderNoteVideoTitle,
+  noteMediaGroupKey,
+  groupNotesBySource,
+  sortNotesByTimecode,
+  sortNoteGroups,
+  notePlatformLabel,
+  noteSourceMetaText,
   summarizeNoteTranslationFailures,
   renderNoteLanguageContent,
   renderChapterLanguageContent,
@@ -3785,5 +7437,40 @@ globalThis.__YTD_TRANSCRIPT_TESTING__ = {
   renderTranscriptSegmentContent,
   extractMediaLocator,
   transcriptTranslationCacheKey,
+  transcriptExportMode,
+  buildTranscriptExportSource,
+  describeExportPrecheck,
+  runConfirmedExportTranslation: runConfirmedExportTranslationRound,
+  runConfirmedExportTranslationRound,
+  finalizeExportJobDownload,
+  showNoteExportPrecheck,
+  showNoteExportMetadataWorkspace,
+  renderNoteExportPicker,
+  recoverNotesExportSelection,
+  createNoteExportContinuation,
+  grantNoteExportAuthorization,
+  validateNoteExportAuthorization,
+  noteExportContinuationIsAuthorized,
+  revokeNoteExportAuthorization,
+  resumeNoteExportContinuation,
+  persistNoteNavigationState,
+  hydrateNoteNavigationState,
+  noteExportVideoPreparation,
+  handleNotesModeChange,
+  buildNotesExportPrecheck,
+  buildNotesExportTranslationPlan,
+  exportAllNotes,
+  captureNotesOnlyMetadata,
+  playNote,
+  noteCanonicalUrl,
+  normalizeExportMediaKeys,
+  filterNoteGroupsByMediaKeys,
+  buildFrozenExportIntent,
+  renderExportTranslationProgress,
+  exportRunIsCurrent,
+  sourceBatchMessage,
+  collectMissingNoteTitleWork,
+  applyNoteTitleTranslations,
+  groupTranscriptEntries,
   formatTimecode,
 };

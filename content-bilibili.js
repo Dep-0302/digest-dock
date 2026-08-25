@@ -142,6 +142,11 @@ function biliExtractVideoInfo() {
     title: title?.textContent?.trim() || "",
     channelName: creator?.textContent?.trim() || "",
     description: description?.textContent?.trim() || "",
+    descriptionStatus: description
+      ? description.textContent?.trim()
+        ? "present"
+        : "confirmed-empty"
+      : "unknown",
     duration: Number.isFinite(Number(video?.duration))
       ? Number(video.duration)
       : 0,

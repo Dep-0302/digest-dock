@@ -102,9 +102,34 @@ function setNoteButtonContent(button, iconSvg, label) {
 }
 
 function isExtensionContextInvalidatedError(error) {
-  return String(error?.message || error || "").includes(
-    "Extension context invalidated",
+  const message = String(error?.message || error || "");
+  return (
+    error?.code === "EXTENSION_CONTEXT_INVALIDATED" ||
+    message.includes("Extension context invalidated") ||
+    /Cannot read properties of (?:undefined|null).*sendMessage/i.test(message)
   );
+}
+
+function activeExtensionRuntime() {
+  try {
+    return typeof chrome === "object" &&
+      chrome?.runtime &&
+      typeof chrome.runtime.sendMessage === "function"
+      ? chrome.runtime
+      : null;
+  } catch (_error) {
+    return null;
+  }
+}
+
+async function sendExtensionMessage(message) {
+  const runtime = activeExtensionRuntime();
+  if (!runtime) {
+    const error = new Error("Extension context invalidated.");
+    error.code = "EXTENSION_CONTEXT_INVALIDATED";
+    throw error;
+  }
+  return runtime.sendMessage(message);
 }
 
 function showExtensionRefreshNotice() {
@@ -115,7 +140,7 @@ function showExtensionRefreshNotice() {
   const notice = document.createElement("div");
   notice.id = DIGESTDOCK_YOUTUBE_DOM_IDS.refreshNotice;
   notice.textContent =
-    "DigestDock 已更新。请刷新当前 YouTube 页面后再生成摘要。";
+    "DigestDock 已更新。请刷新当前 YouTube 页面后再继续使用。";
   notice.style.cssText = `
     position: fixed;
     top: 18px;
@@ -399,7 +424,7 @@ function createDigestButton() {
 
     // Send message to background script to open side panel
     try {
-      const result = await chrome.runtime.sendMessage({
+      const result = await sendExtensionMessage({
         action: "openSidePanel",
       });
       debugLog("[DigestDock] openSidePanel response:", result);
@@ -772,7 +797,7 @@ async function saveCurrentNote() {
   }
 
   try {
-    const result = await chrome.runtime.sendMessage({
+    const result = await sendExtensionMessage({
       action: "saveNote",
       videoId: videoId,
       timestamp: currentTime,
@@ -798,6 +823,14 @@ async function saveCurrentNote() {
       console.error("[DigestDock] Save note error:", result.error);
     }
   } catch (err) {
+    if (isExtensionContextInvalidatedError(err)) {
+      if (noteButton) {
+        noteButton.disabled = true;
+        setNoteButtonState("请刷新页面");
+      }
+      showExtensionRefreshNotice();
+      return;
+    }
     setNoteButtonState("出错了");
     console.error("[DigestDock] Save note exception:", err);
   }
@@ -885,11 +918,64 @@ function showNoteSavedToast(note) {
 // VIDEO INFO EXTRACTION
 // ============================================================
 
+function decodeEmbeddedJsonString(match) {
+  if (!match?.[1]) return "";
+  try {
+    return JSON.parse(match[1]);
+  } catch {
+    return "";
+  }
+}
+
+function extractEmbeddedVideoDescription(videoId) {
+  const scripts = Array.from(document.scripts || []);
+  for (const script of scripts) {
+    const text = String(script?.textContent || "");
+    const detailsIndex = text.indexOf('"videoDetails":');
+    if (detailsIndex < 0) continue;
+    // `shortDescription` is an early flat field in videoDetails. Bound the
+    // scan so an unrelated large player script can never become an unbounded
+    // parse or allocation in the content script.
+    const details = text.slice(detailsIndex, detailsIndex + 250_000);
+    const embeddedVideoId = decodeEmbeddedJsonString(
+      details.match(/"videoId":("(?:\\.|[^"\\])*")/),
+    );
+    if (!embeddedVideoId || embeddedVideoId !== videoId) continue;
+    const descriptionMatch = details.match(
+      /"shortDescription":("(?:\\.|[^"\\])*")/,
+    );
+    if (!descriptionMatch) continue;
+    return {
+      found: true,
+      text: decodeEmbeddedJsonString(descriptionMatch).trim(),
+    };
+  }
+  return { found: false, text: "" };
+}
+
+function extractVisibleVideoDescription() {
+  const candidates = [
+    document.querySelector("#attributed-snippet-text"),
+    document.querySelector("meta[name='description']"),
+    document.querySelector("meta[property='og:description']"),
+    document.querySelector("meta[itemprop='description']"),
+    document.querySelector("#description-inner"),
+  ];
+  for (const candidate of candidates) {
+    const text = String(
+      candidate?.getAttribute?.("content") || candidate?.textContent || "",
+    ).trim();
+    if (text) return text;
+  }
+  return "";
+}
+
 /**
  * Reads the video title, channel name, and description directly from YouTube's page.
  * These are just sitting in the HTML — we grab them from the DOM elements.
  */
 function extractVideoInfo() {
+  const videoId = new URLSearchParams(window.location.search).get("v") || "";
   // The video title is in an h1 element inside the #title container
   const titleElement = document.querySelector(
     "h1.ytd-watch-metadata yt-formatted-string, #title h1 yt-formatted-string",
@@ -903,19 +989,29 @@ function extractVideoInfo() {
   // Video duration from the video element
   const videoElement = document.querySelector("video.html5-main-video");
 
-  // Video description — YouTube has this in a few possible places
-  const descriptionElement = document.querySelector(
-    "#description-inner, " +
-      "ytd-watch-metadata #description yt-attributed-string, " +
-      "#description yt-formatted-string, " +
-      "ytd-expander#description yt-attributed-string",
-  );
+  const embeddedDescription = extractEmbeddedVideoDescription(videoId);
+  const visibleDescription = embeddedDescription.found
+    ? ""
+    : extractVisibleVideoDescription();
+  const description = embeddedDescription.found
+    ? embeddedDescription.text
+    : visibleDescription;
 
   return {
+    videoId,
     title: titleElement?.textContent?.trim() || "",
     channelName: channelElement?.textContent?.trim() || "",
     duration: videoElement?.duration || 0,
-    description: descriptionElement?.textContent?.trim() || "",
+    description,
+    // Only exact videoDetails data can prove completeness or a genuinely empty
+    // description. DOM/meta fallbacks are often truncated or temporarily empty
+    // during YouTube SPA hydration, so they remain incomplete evidence.
+    descriptionStatus: embeddedDescription.found
+      ? description
+        ? "present"
+        : "confirmed-empty"
+      : "unknown",
+    descriptionTruncated: !embeddedDescription.found && !!description,
   };
 }
 
@@ -1035,6 +1131,8 @@ document.addEventListener("yt-navigate-finish", () => {
 // cannot redeclare top-level const/let bindings. These selected helpers stay
 // visible only for the repository's Node regression tests.
 Object.assign(globalThis, {
+  extractEmbeddedVideoDescription,
+  extractVideoInfo,
   findDigestButtonHost,
   injectDigestButton,
   isExtensionContextInvalidatedError,

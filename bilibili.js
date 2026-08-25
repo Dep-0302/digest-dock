@@ -140,12 +140,18 @@ var BILIBILI_ADAPTER = (() => {
     const title = String(viewData.title || "").trim();
     const channelName = String(viewData.owner?.name || "").trim();
     const description = String(viewData.desc || "").trim();
+    const descriptionStatus = Object.hasOwn(viewData, "desc")
+      ? description
+        ? "present"
+        : "confirmed-empty"
+      : "unknown";
     const canonicalUrl = canonicalVideoUrl(parsedUrl.bvid, part.page);
     const metadata = {
       title,
       channelName,
       creator: channelName,
       description,
+      descriptionStatus,
       duration: part.duration,
       partTitle: part.partTitle,
     };

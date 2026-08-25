@@ -962,8 +962,8 @@ test("side panel and background stay wired to the API-primary contract", () => {
   const background = read("background.js");
 
   // Protocol and cache-policy versions moved forward together.
-  assert.match(panel, /const REQUIRED_RUNTIME_PROTOCOL_VERSION = 9/);
-  assert.match(background, /const RUNTIME_PROTOCOL_VERSION = 9/);
+  assert.match(panel, /const REQUIRED_RUNTIME_PROTOCOL_VERSION = 11/);
+  assert.match(background, /const RUNTIME_PROTOCOL_VERSION = 11/);
   assert.match(panel, /const TRANSCRIPT_SOURCE_POLICY_VERSION = 4/);
   assert.match(background, /const TRANSCRIPT_SOURCE_POLICY_VERSION = 4/);
 

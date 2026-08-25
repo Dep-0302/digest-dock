@@ -1,6 +1,6 @@
 # Privacy
 
-Effective: August 21, 2026
+Effective: August 23, 2026
 
 DigestDock is a GitHub-only, bring-your-own-key Chrome extension. It has no DigestDock account, developer-operated backend, analytics, advertising, or telemetry.
 
@@ -15,9 +15,15 @@ Depending on the feature you use, DigestDock handles:
 - transcript context around a timestamped note;
 - content you ask to translate;
 - notes you save;
+- per-video reading-export source records containing the title, channel, canonical
+  URL, description, complete transcript, source fingerprints, and any verified
+  Chinese translations already produced for those fields;
+- lightweight reading-export job metadata such as export scope, language mode,
+  stable unit identifiers, completed-unit identifiers, source revisions, round
+  position, and the selected provider/model snapshot;
 - note backup JSON files you select for import and backup files the extension
   prepares for download;
-- Supadata and DeepSeek configuration, including API keys; and
+- Supadata and AI provider configuration, including API keys; and
 - cached transcript, digest, and translation results.
 
 ## Where data goes
@@ -34,33 +40,47 @@ For a new or expired YouTube transcript cache entry, Supadata is the mainline tr
 
 For a standard Bilibili BV video, the extension requests public video metadata and the current part's existing subtitle track directly from Bilibili domains. Bilibili API requests use the browser's current Bilibili session through normal credentialed fetch behavior, but the extension does not request the Chrome `cookies` permission, read cookie values, export them, or store them. Signed subtitle URLs are used only in memory for the immediate subtitle response and are not written to cache or logs.
 
-### DeepSeek
+### AI provider
 
-The published version sends AI feature content to DeepSeek V4 Flash at `https://api.deepseek.com`:
+DigestDock sends AI feature content to the AI provider you select in Settings. DeepSeek is the default (DeepSeek V4 Flash at `https://api.deepseek.com`):
 
 - transcript plus relevant title, channel, description, or duration for an overview;
 - selected text plus nearby transcript context for an explanation;
 - small semantic transcript batches currently needed for progressive Chinese
   translation, or requested source-language overview or explanation content;
-- nearby transcript context and video metadata when polishing a saved note; and
-- the polished English note and its video title when generating the separately stored Simplified Chinese note; and
+- nearby transcript context and video metadata when polishing a saved note;
+- the polished English note and its video title when generating the separately stored Simplified Chinese note;
+- only the still-missing title, note, description-chunk, or transcript-segment
+  units after you explicitly start or continue a Chinese/bilingual reading
+  export round; and
 - for a Bilibili Chinese source, the timestamped Chinese transcript context used to generate one Chinese overview or one polished Chinese note directly.
 
-The endpoint and `deepseek-v4-flash` model are fixed in the published Settings page. You provide one DeepSeek API key. To use another provider or model, you must adapt your own local source copy and its permissions. The Settings page provides a coding-agent prompt for that purpose and warns you never to include an API key in the prompt or chat.
+You select one provider from a preset list and provide that provider's API key; the endpoint, model, request format, and capability limits are fixed per provider, and there is no Base URL or model field. The selectable providers and their fixed endpoints are DeepSeek (`https://api.deepseek.com`), Zhipu GLM (`https://open.bigmodel.cn`), Alibaba Bailian Qwen (`https://dashscope.aliyuncs.com`), SiliconFlow (`https://api.siliconflow.cn`), and Fireworks (`https://api.fireworks.ai`). Each provider's key is stored separately, and DigestDock never sends your content to a provider other than the one you selected, nor does it silently fall back to another provider.
 
-Requests go directly from the extension to Bilibili, Supadata, or DeepSeek. Supadata and DeepSeek are authenticated with the keys you supply, while Bilibili uses the browser's current Bilibili session. YouTube receives the normal page activity and read-only extension page interaction, but DigestDock does not make a direct YouTube transcript-body request on the mainline. DigestDock's developer does not proxy or receive these requests.
+The picker also shows a disabled Tencent Hunyuan Translation entry with its bundled official icon. It has no host permission and cannot receive or use a key because the official documentation does not yet verify `hunyuan-translation-lite` on the extension's single-key OpenAI-compatible route. DigestDock does not guess that configuration.
 
-YouTube, Bilibili, Supadata, and DeepSeek process data under their own terms, privacy policies, retention practices, and account settings. Do not send confidential, personal, or regulated content unless their terms and your obligations permit it.
+Requests go directly from the extension to Bilibili, Supadata, or your selected AI provider. Supadata and the AI provider are authenticated with the keys you supply, while Bilibili uses the browser's current Bilibili session. YouTube receives the normal page activity and read-only extension page interaction, but DigestDock does not make a direct YouTube transcript-body request on the mainline. DigestDock's developer does not proxy or receive these requests.
+
+YouTube, Bilibili, Supadata, and your selected AI provider process data under their own terms, privacy policies, retention practices, and account settings. Do not send confidential, personal, or regulated content unless their terms and your obligations permit it.
 
 ## Local storage and retention
 
 DigestDock uses Chrome's local extension storage, not a DigestDock cloud service.
 
-- The Supadata key and DeepSeek settings and key remain on the device in Chrome's extension storage.
+- The Supadata key and each AI provider's settings and key remain on the device in Chrome's extension storage.
 - Saved notes remain until you delete them or remove/clear the extension's data. The extension keeps up to 100 notes.
 - Recent transcript, digest, and per-segment translation cache entries are stored
   locally. The cache is limited to 20 videos, and entries older than 30 days are
   removed when the side panel opens.
+- Reading-export source records are stored separately in
+  `ytd_note_sources_v2`. They may include the complete local transcript,
+  description, source fingerprints, and verified Chinese translations needed
+  to resume an export without translating unchanged material again. The older
+  `ytd_note_sources` format is read only when needed and lazily migrated; it is
+  not treated as a second writable source of truth.
+- Resumable export progress is stored in `ytd_note_export_jobs_v1`. Job records
+  contain frozen intent and progress metadata only. They do not contain an API
+  key, transcript or note bodies, description text, or translated text.
 - The Settings page can export saved notes to a versioned JSON recovery file and
   import that file later. The file contains backup-format metadata and saved
   note records only, including their stored original/English and Simplified
@@ -79,6 +99,29 @@ DigestDock uses Chrome's local extension storage, not a DigestDock cloud service
 - Imported timestamp URLs are rebuilt from validated YouTube or Bilibili media
   fields. A URL supplied by the backup file is not trusted as the source of
   media identity.
+- Separately from JSON recovery backup, the side panel can export one video's
+  notes, a selected set of source videos, all notes, or one source group as TXT,
+  and can download the current transcript as TXT. Note TXT contains saved notes plus title, channel,
+  canonical URL, and description; it does not append the full transcript. The
+  separate transcript TXT contains the complete transcript.
+- Original-language reading exports never call a network service. If Chinese or
+  bilingual content is incomplete, note export shows missing metadata, titles, description
+  chunks, and saved notes, while transcript export separately shows missing
+  transcript segments. DigestDock does not substitute original text as Chinese.
+  "Export now" stays local and writes explicit missing markers. Only an explicit
+  "Complete and export" or "Continue" click may send still-missing translation units to the currently selected
+  AI provider. Each user-started round runs at most 20 task batches and a
+  conservative maximum of 100 provider calls, saves every valid completed batch
+  locally before continuing, and stops for another click instead of automatically
+  starting a new round. Cancelling stops later batches.
+  A response already in flight may still be cached if it matches the frozen video
+  and source revision, but it cannot start another batch, update a different
+  video, or trigger an automatic download. This path never calls Supadata and
+  never silently switches provider. Metadata completion reads only a video page
+  the user explicitly opens; it does not open pages in the background or call Supadata.
+- Reading exports are plain, unencrypted TXT outside extension
+  storage. Clearing or removing DigestDock does not delete files already
+  downloaded by Chrome.
 
 Chrome extension storage is not a password vault. Anyone with sufficient access to your browser profile or device may be able to recover locally stored keys or content. Use scoped keys where providers support them, set spending limits, and rotate or revoke a key if the device or browser profile is compromised.
 
@@ -87,12 +130,12 @@ Downloaded note backups are plain, unencrypted JSON files outside the extension'
 To remove data:
 
 - delete individual saved notes in DigestDock;
-- use the Options page to clear cached digests, delete all notes, or reset all extension data;
+- use the Options page to clear cached digests, delete all notes, or reset all extension data; deleting all notes and resetting extension data also remove the reading-export source library and resumable export jobs;
 - remove the extension or clear its stored data from Chrome to delete all local settings, keys, notes, and cache entries;
 - manually delete any downloaded note backup files from the device and other locations where you copied them; and
-- revoke keys in the Supadata or DeepSeek dashboard to stop their future use.
+- revoke keys in the Supadata or your AI provider's dashboard to stop their future use.
 
-Clearing local data does not delete information already processed or retained by YouTube, Bilibili, Supadata, or DeepSeek. Use each service's controls for service-side requests.
+Clearing local data does not delete information already processed or retained by YouTube, Bilibili, Supadata, or your selected AI provider. Use each service's controls for service-side requests.
 
 ## Permissions
 
@@ -105,7 +148,7 @@ DigestDock uses Chrome permissions for these purposes:
 - YouTube host access: read the active video's URL, limited metadata, source language, and access status; operate page controls; and provide timestamp controls. It is not used for a direct transcript-body request on the mainline.
 - Bilibili and Bilibili subtitle-CDN host access: resolve the current part, read an existing subtitle track, and provide timestamp controls without requesting cookie values.
 - Supadata host access: retrieve a native YouTube transcript only after the user explicitly confirms that video attempt; clear access restrictions and unavailable videos stop before the request.
-- DeepSeek host access: provide AI overviews, explanations, translation, and note polishing through DeepSeek V4 Flash.
+- AI provider host access: provide AI overviews, explanations, translation, and note polishing through the provider you select. One fixed origin is granted per selectable provider: DeepSeek (`api.deepseek.com`), Zhipu GLM (`open.bigmodel.cn`), Alibaba Bailian Qwen (`dashscope.aliyuncs.com`), SiliconFlow (`api.siliconflow.cn`), and Fireworks (`api.fireworks.ai`).
 
 DigestDock does not use these permissions to monitor general browsing activity.
 
