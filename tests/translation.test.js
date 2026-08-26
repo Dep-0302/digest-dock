@@ -5763,6 +5763,292 @@ test("cached overview content is accepted only for the same video", async () => 
   assert.doesNotMatch(fixture.events(), /analysis:video-b/);
 });
 
+test("compact overview cache survives side-panel recreation with zero repeat provider calls", async () => {
+  const storageLocal = createMemoryStorageArea();
+  const videoId = "persisted-overview-video";
+  const transcript = "[0:00] A stable transcript for the cached overview.";
+  const analysis = {
+    schemaVersion: 3,
+    baseLanguage: "zh-Hans",
+    sourceLanguage: "en-US",
+    chapters: [
+      {
+        timestamp: "0:00",
+        timestampSeconds: 0,
+        titleZh: "缓存章节",
+        summaryZh: "这是一段可以复用的中文概览。",
+      },
+    ],
+    keyQuotes: [
+      {
+        timestamp: "0:00",
+        timestampSeconds: 0,
+        quoteOriginal: "Stable quote.",
+        quoteZh: "稳定引用。",
+      },
+    ],
+    keyMoments: [0],
+  };
+
+  const firstRuntime = loadSidepanelRuntime({ storageLocal });
+  assert.equal(
+    await firstRuntime.helpers.saveOverviewToCache(
+      videoId,
+      analysis,
+      transcript,
+      "en-US",
+    ),
+    true,
+  );
+
+  const persisted = storageLocal.snapshot();
+  const cacheKey = firstRuntime.helpers.overviewCacheKey(videoId);
+  assert.equal(Object.hasOwn(persisted, cacheKey), true);
+  assert.doesNotMatch(JSON.stringify(persisted[cacheKey]), /stable transcript/i);
+  assert.doesNotMatch(JSON.stringify(persisted[cacheKey]), /api.?key/i);
+
+  let providerCalls = 0;
+  const reopenedRuntime = loadSidepanelRuntime({
+    storageLocal,
+    sendMessage: async (message) => {
+      if (message.action === "analyzeTranscript") providerCalls += 1;
+      return { success: false, error: "UNEXPECTED_PROVIDER_CALL" };
+    },
+  });
+  const restored = await reopenedRuntime.helpers.loadOverviewFromCache(
+    videoId,
+    transcript,
+    "en",
+  );
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(restored)),
+    analysis,
+    "primary-language variants should reuse the same transcript-bound overview",
+  );
+  reopenedRuntime.sandbox.__restoredOverview = restored;
+  reopenedRuntime.evaluate(`
+    currentVideoId = ${JSON.stringify(videoId)};
+    currentRouteKey = "youtube:${videoId}";
+    currentMediaRef = { platform: "youtube", mediaKey: ${JSON.stringify(videoId)} };
+    currentTranscriptTimestamped = ${JSON.stringify(transcript)};
+    currentAnalysis = globalThis.__restoredOverview;
+  `);
+  await reopenedRuntime.evaluate("triggerAnalysis()");
+  assert.equal(providerCalls, 0);
+});
+
+test("digest loading restores the compact overview before an active tab can analyze again", async () => {
+  const storageLocal = createMemoryStorageArea();
+  const videoId = "overview-load-video";
+  const routeKey = `youtube:${videoId}`;
+  const transcript = "[0:00] Persisted transcript.";
+  const analysis = {
+    marker: "restored-overview",
+    schemaVersion: 3,
+    baseLanguage: "zh-Hans",
+    sourceLanguage: "en",
+    chapters: [
+      {
+        timestamp: "0:00",
+        timestampSeconds: 0,
+        titleZh: "恢复章节",
+        summaryZh: "侧栏重建后应直接恢复概览。",
+      },
+    ],
+    keyQuotes: [
+      {
+        timestamp: "0:00",
+        timestampSeconds: 0,
+        quoteOriginal: "Persisted quote.",
+        quoteZh: "持久化引用。",
+      },
+    ],
+    keyMoments: [0],
+  };
+  const seedRuntime = loadSidepanelRuntime({ storageLocal });
+  assert.equal(
+    await seedRuntime.helpers.saveOverviewToCache(
+      videoId,
+      analysis,
+      transcript,
+      "en",
+    ),
+    true,
+  );
+  await storageLocal.set({
+    [`digest_${videoId}`]: {
+      analysis: { ...analysis, marker: "legacy-digest-overview" },
+      analysisVideoId: videoId,
+      transcript: [{ start: 0, duration: 2, text: "Persisted transcript." }],
+      transcriptText: "Persisted transcript.",
+      transcriptTimestamped: transcript,
+      transcriptLanguage: "en",
+      transcriptSource: "supadata",
+      mediaRef: {
+        platform: "youtube",
+        mediaKey: videoId,
+        videoId,
+      },
+      routeKey,
+      transcriptSourcePolicyVersion: 4,
+      timestamp: Date.now(),
+    },
+  });
+
+  let providerCalls = 0;
+  const runtime = loadSidepanelRuntime({
+    storageLocal,
+    sendMessage: async (message) => {
+      if (message.action === "analyzeTranscript") providerCalls += 1;
+      return { success: false, error: "UNEXPECTED_PROVIDER_CALL" };
+    },
+  });
+  runtime.evaluate(`
+    (() => {
+      const elements = new Map();
+      const element = (id) => {
+        if (!elements.has(id)) {
+          elements.set(id, {
+            id,
+            style: {},
+            hidden: false,
+            innerHTML: "",
+            textContent: "",
+            classList: { toggle() {}, contains() { return false; } },
+            setAttribute() {},
+          });
+        }
+        return elements.get(id);
+      };
+      document.getElementById = element;
+      document.querySelectorAll = () => [];
+      document.querySelector = (selector) =>
+        selector === ".tab.active" ? { dataset: { tab: "overview" } } : null;
+      setOverviewModeButtons = () => {};
+      clearOverviewResults = () => {};
+      applyMediaLanguageDefaults = () => {};
+      hydrateCurrentVideoNoteSource = async () => {};
+      updateVideoMetaLine = () => {};
+      renderTranscript = () => {};
+      renderAnalysisResults = (value) => {
+        globalThis.__restoredMarker = value?.marker || "";
+      };
+      highlightMomentsOnPage = () => {};
+      showState = () => {};
+      loadNotes = () => {};
+      setupExplainFeature = () => {};
+      translateTranscript = () => {};
+    })()
+  `);
+  await runtime.evaluate(`startDigest(
+    ${JSON.stringify(videoId)},
+    "https://www.youtube.com/watch?v=${videoId}",
+    { platform: "youtube", mediaKey: ${JSON.stringify(videoId)}, videoId: ${JSON.stringify(videoId)} },
+    ${JSON.stringify(routeKey)}
+  )`);
+
+  assert.equal(runtime.sandbox.__restoredMarker, "restored-overview");
+  assert.equal(providerCalls, 0);
+});
+
+test("overview cache invalidates a changed transcript fingerprint", async () => {
+  const storageLocal = createMemoryStorageArea();
+  const runtime = loadSidepanelRuntime({ storageLocal });
+  const videoId = "overview-source-change";
+  const analysis = {
+    schemaVersion: 3,
+    baseLanguage: "zh-Hans",
+    sourceLanguage: "en",
+    chapters: [
+      {
+        timestamp: "0:00",
+        timestampSeconds: 0,
+        titleZh: "原始章节",
+        summaryZh: "原始字幕对应的中文概览。",
+      },
+    ],
+    keyQuotes: [
+      {
+        timestamp: "0:00",
+        timestampSeconds: 0,
+        quoteOriginal: "Original quote.",
+        quoteZh: "原始引用。",
+      },
+    ],
+  };
+  assert.equal(
+    await runtime.helpers.saveOverviewToCache(
+      videoId,
+      analysis,
+      "[0:00] Original transcript.",
+      "en",
+    ),
+    true,
+  );
+  assert.equal(
+    await runtime.helpers.loadOverviewFromCache(
+      videoId,
+      "[0:00] Changed transcript.",
+      "en-US",
+    ),
+    null,
+  );
+  assert.equal(
+    Object.hasOwn(
+      storageLocal.snapshot(),
+      runtime.helpers.overviewCacheKey(videoId),
+    ),
+    false,
+  );
+});
+
+test("overview cache persistence failure is observable to the caller", async () => {
+  const runtime = loadSidepanelRuntime({
+    storageLocal: {
+      get: async () => ({}),
+      set: async () => {
+        throw new Error("QUOTA_BYTES quota exceeded");
+      },
+      remove: async () => {},
+      clear: async () => {},
+    },
+  });
+  const analysis = {
+    schemaVersion: 3,
+    baseLanguage: "zh-Hans",
+    sourceLanguage: "en",
+    chapters: [
+      {
+        timestamp: "0:00",
+        timestampSeconds: 0,
+        titleZh: "容量章节",
+        summaryZh: "本地保存失败必须被调用方看到。",
+      },
+    ],
+    keyQuotes: [
+      {
+        timestamp: "0:00",
+        timestampSeconds: 0,
+        quoteOriginal: "Quota failure.",
+        quoteZh: "容量失败。",
+      },
+    ],
+  };
+  assert.equal(
+    await runtime.helpers.saveOverviewToCache(
+      "quota-video",
+      analysis,
+      "[0:00] Quota failure.",
+      "en",
+    ),
+    false,
+  );
+  assert.match(
+    read("sidepanel.js"),
+    /概览已生成，但本地保存失败；再次打开可能会重新生成并消耗 AI 额度。/,
+  );
+});
+
 test("a newly confirmed player language invalidates mismatched transcript state", async () => {
   const runtime = loadSidepanelRuntime();
   const fixture = installSidepanelDigestFixture(runtime);

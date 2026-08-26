@@ -96,5 +96,10 @@ Examples include:
   metadata-only and must not duplicate keys or content. Deleting all notes or
   resetting extension data must also clear source records and export jobs so
   they do not become unmanaged residual data.
+- `unlimitedStorage` removes Chrome's default local-extension quota but grants no
+  file or network access. Runtime caches must remain bounded, keep compact
+  overviews separate from transcript payloads, validate media identity and source
+  fingerprints before reuse, and surface persistence failure instead of silently
+  spending another provider request.
 
 The release tooling uses an explicit file allowlist and scans public files for common credential patterns, but automated checks cannot detect every secret.

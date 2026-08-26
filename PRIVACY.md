@@ -72,6 +72,10 @@ DigestDock uses Chrome's local extension storage, not a DigestDock cloud service
 - Recent transcript, digest, and per-segment translation cache entries are stored
   locally. The cache is limited to 20 videos, and entries older than 30 days are
   removed when the side panel opens.
+- Compact overview records are stored separately from the much larger transcript
+  cache and are limited to 100 videos. Each record contains the media identity,
+  transcript fingerprint, language, generated overview, and local timestamp; it
+  does not contain an API key.
 - Reading-export source records are stored separately in
   `ytd_note_sources_v2`. They may include the complete local transcript,
   description, source fingerprints, and verified Chinese translations needed
@@ -143,6 +147,11 @@ DigestDock uses Chrome permissions for these purposes:
 
 - `sidePanel`: display the DigestDock interface beside a supported video page.
 - `storage`: store settings, keys, notes, and cached results locally.
+- `unlimitedStorage`: let long-video transcripts, reusable translations, and
+  already-paid-for overview results remain in Chrome's local extension storage
+  without the default 10 MB ceiling. It does not grant access to local files,
+  browsing history, or additional network origins; DigestDock still applies its
+  own entry and record-size limits.
 - `tabs`: identify and interact with the active supported video tab.
 - `scripting`: coordinate the extension's YouTube and Bilibili page controls.
 - YouTube host access: read the active video's URL, limited metadata, source language, and access status; operate page controls; and provide timestamp controls. It is not used for a direct transcript-body request on the mainline.

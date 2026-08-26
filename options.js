@@ -1065,9 +1065,14 @@ const YTD_OPTIONS = (() => {
 
     async function clearCachedDigests() {
       const all = await storage.get(null);
-      const keys = Object.keys(all).filter((key) => key.startsWith("digest_"));
+      const keys = Object.keys(all).filter(
+        (key) => key.startsWith("digest_") || key.startsWith("overview_"),
+      );
+      const mediaKeys = new Set(
+        keys.map((key) => key.replace(/^(?:digest_|overview_)/, "")),
+      );
       if (keys.length) await storage.remove(keys);
-      setStatus(dataStatus, "clearedDigests", { count: keys.length });
+      setStatus(dataStatus, "clearedDigests", { count: mediaKeys.size });
     }
 
     async function clearNotes() {
