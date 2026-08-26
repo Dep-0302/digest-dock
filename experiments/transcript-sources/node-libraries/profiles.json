@@ -1,0 +1,34 @@
+{
+  "youtube-caption-extractor": {
+    "package": "youtube-caption-extractor",
+    "source": "https://github.com/devhims/youtube-caption-extractor",
+    "adapter": "getSubtitles({ videoID, lang, fetch })",
+    "languageBehavior": "Defaults to en; prefers manual exact match, then ASR exact match, then falls back to the first track.",
+    "requestStrategy": "Tries IOS, ANDROID_VR, then MWEB player clients until caption tracks are found; downloads json3 timedtext.",
+    "browserFit": "Published entry is CommonJS and upstream recommends server-side use because browser calls face CORS; a bundler/bridge would still be required for the current MV3 extension."
+  },
+  "youtube-transcript": {
+    "package": "youtube-transcript",
+    "source": "https://github.com/Kakulukian/youtube-transcript",
+    "adapter": "fetchTranscript(videoId, { lang, fetch })",
+    "languageBehavior": "Exact language is strict; with no language it takes the first advertised track.",
+    "requestStrategy": "ANDROID InnerTube first, then watch-page fallback; downloads XML timedtext.",
+    "browserFit": "Small ESM/CJS package with a custom fetch hook, but direct MV3 use still needs browser host/CORS validation."
+  },
+  "youtube-transcript-plus": {
+    "package": "youtube-transcript-plus",
+    "source": "https://github.com/ericmmartin/youtube-transcript-plus",
+    "adapter": "fetchTranscript(videoId, { lang, videoFetch, playerFetch, transcriptFetch })",
+    "languageBehavior": "Exact language is strict; with no language it takes the first advertised track; listLanguages exposes track kind.",
+    "requestStrategy": "Watch page for API key, ANDROID player request, then XML timedtext; optional retry/cache hooks are disabled in this benchmark.",
+    "browserFit": "Node >=20 package; no browser export or ready-to-load MV3 bundle is declared."
+  },
+  "youtubei.js": {
+    "package": "youtubei.js",
+    "source": "https://github.com/LuanRT/YouTube.js",
+    "adapter": "Innertube.create() -> getInfo(videoId) -> getTranscript()",
+    "languageBehavior": "Transcript language selection uses human-readable menu labels rather than BCP-47 codes.",
+    "requestStrategy": "Creates an Innertube session, requests video info/next data, then calls get_transcript.",
+    "browserFit": "Ships a browser bundle, but upstream documentation requires requests to go through a server proxy. This is not equivalent to dropping the bundle into the current MV3 extension."
+  }
+}

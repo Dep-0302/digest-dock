@@ -1,0 +1,106 @@
+{
+  "schemaVersion": 1,
+  "sourceCorpus": "../corpus/corpus.json",
+  "notes": [
+    "The default matrix is intentionally small to reduce YouTube rate-limit bias.",
+    "All calls are signed-out and use no API key, cookie, proxy, or stored transcript body.",
+    "Expected outcomes come from the signed-out browser corpus verified on 2026-08-18."
+  ],
+  "cases": [
+    {
+      "id": "many-tracks-authored-en",
+      "videoId": "iG9CE55wbtY",
+      "title": "Do schools kill creativity? | Sir Ken Robinson | TED",
+      "language": "en",
+      "expectedOutcome": "transcript",
+      "expectedLanguage": "en",
+      "corpusFacts": {
+        "captionTrackCount": 65,
+        "duplicateEnglishKinds": ["authored", "asr"]
+      },
+      "purpose": "Track selection when authored and ASR English coexist among many languages."
+    },
+    {
+      "id": "asr-long-retrieval-divergence",
+      "videoId": "KLDVxx4TqcE",
+      "title": "The Future of Human Intelligence: Education, AI, & Creativity | Sir Ken Robinson (Full Keynote)",
+      "language": "en",
+      "expectedOutcome": "transcript",
+      "expectedLanguage": "en",
+      "corpusFacts": {
+        "durationSeconds": 4345,
+        "captionTrackCount": 1,
+        "trackKind": "asr",
+        "browserPanelResult": "no-transcript",
+        "directTimedtextResult": "empty-body"
+      },
+      "purpose": "Distinguish advertised track discovery from successful transcript-body retrieval."
+    },
+    {
+      "id": "traditional-chinese-explicit",
+      "videoId": "6i7RcP39NB0",
+      "title": "留十八分鐘給自己：蔣勳 (Chiang Hsun) at TEDxTaipei 2012",
+      "language": "zh-TW",
+      "expectedOutcome": "transcript",
+      "expectedLanguage": "zh-TW",
+      "corpusFacts": {
+        "captionTrackCount": 2,
+        "advertisedOrder": ["en", "zh-TW"]
+      },
+      "purpose": "Exact non-English selection when English is advertised first."
+    },
+    {
+      "id": "spoken-no-caption",
+      "videoId": "4OEG33NfEK0",
+      "title": "停止內耗，從相信自己開始 To End Inner Conflict, Start by Believing in Yourself",
+      "language": null,
+      "expectedOutcome": "no-caption",
+      "expectedLanguage": null,
+      "corpusFacts": {
+        "captionTrackCount": 0,
+        "hasSpokenAudio": true
+      },
+      "purpose": "Clean negative classification for a spoken public video with no advertised tracks."
+    },
+    {
+      "id": "nonverbal-no-caption-control",
+      "videoId": "aqz-KE-bpKQ",
+      "title": "Big Buck Bunny 60fps 4K - Official Blender Foundation Short Film",
+      "language": null,
+      "expectedOutcome": "no-caption",
+      "expectedLanguage": null,
+      "corpusFacts": {
+        "captionTrackCount": 0,
+        "hasSpokenAudio": false
+      },
+      "purpose": "Stable negative control for a non-verbal video."
+    },
+    {
+      "id": "language-policy-control-en",
+      "videoId": "dQw4w9WgXcQ",
+      "title": "Rick Astley - Never Gonna Give You Up (Official Video) (4K Remaster)",
+      "language": "en",
+      "expectedOutcome": "transcript",
+      "expectedLanguage": "en",
+      "corpusFacts": {
+        "durationSeconds": 213,
+        "pairedWith": "language-policy-missing-fr"
+      },
+      "purpose": "Control transcript hash for the paired missing-language probe."
+    },
+    {
+      "id": "language-policy-missing-fr",
+      "videoId": "dQw4w9WgXcQ",
+      "title": "Rick Astley - Never Gonna Give You Up (Official Video) (4K Remaster)",
+      "language": "fr",
+      "expectedOutcome": "language-unavailable",
+      "expectedLanguage": null,
+      "corpusFacts": {
+        "durationSeconds": 213,
+        "pairedWith": "language-policy-control-en",
+        "driftWarning": "Available caption languages can change; each run is authoritative only for its timestamp."
+      },
+      "purpose": "Expose strict errors versus silent fallback when a requested language is absent."
+    }
+  ]
+}

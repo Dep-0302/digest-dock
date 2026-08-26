@@ -1,0 +1,76 @@
+{
+  "schemaVersion": 1,
+  "singleProviderPerRun": true,
+  "providers": [
+    {
+      "id": "youtube-passive",
+      "label": "YouTube passive timedtext observer",
+      "surface": "browser-extension",
+      "networkPolicy": "observe-only",
+      "entrypoint": "passive-capture/extension/manifest.json",
+      "adapter": "passive-capture/provider-adapter.js",
+      "defaultVariant": null,
+      "implementation": "experiment"
+    },
+    {
+      "id": "youtube-active",
+      "label": "YouTube active caption adapter",
+      "surface": "digestdock-worktree",
+      "networkPolicy": "bounded-youtube-only",
+      "entrypoint": "youtube-active/adapter.js",
+      "adapter": "youtube-active/adapter.js",
+      "defaultVariant": null,
+      "implementation": "experiment-wrapper"
+    },
+    {
+      "id": "youtube-panel",
+      "label": "YouTube Transcript panel",
+      "surface": "browser-runner",
+      "networkPolicy": "page-ui-only",
+      "entrypoint": "browser-panel/manual-probe/manifest.json",
+      "adapter": "browser-panel/provider-adapter.js",
+      "defaultVariant": "manual-rendered-panel",
+      "implementation": "existing-experiment"
+    },
+    {
+      "id": "supadata-native",
+      "label": "Supadata native transcript",
+      "surface": "digestdock-worktree",
+      "networkPolicy": "explicit-consent-third-party",
+      "entrypoint": "supadata-native/manual-probe/manifest.json",
+      "adapter": "supadata-native/adapter.js",
+      "defaultVariant": "mode-native",
+      "implementation": "experiment-wrapper"
+    },
+    {
+      "id": "node-libraries",
+      "label": "Node transcript libraries",
+      "surface": "local-cli",
+      "networkPolicy": "credential-free-public-youtube",
+      "entrypoint": "node-libraries/src/run-comparison.mjs",
+      "adapter": "node-libraries/src/contract-adapter.mjs",
+      "defaultVariant": "youtube-transcript-plus",
+      "implementation": "existing-experiment"
+    },
+    {
+      "id": "local-helper",
+      "label": "Local Python transcript helper",
+      "surface": "loopback-helper",
+      "networkPolicy": "token-paired-loopback",
+      "entrypoint": "local-helper/extension/manifest.json",
+      "adapter": "local-helper/client.js",
+      "defaultVariant": "youtube-transcript-api",
+      "implementation": "experiment"
+    },
+    {
+      "id": "hosted-api-slot",
+      "label": "Unselected hosted transcript API slot",
+      "surface": "fixture-only",
+      "networkPolicy": "disabled-until-provider-selection",
+      "entrypoint": "hosted-api-slot/adapter.js",
+      "adapter": "hosted-api-slot/adapter.js",
+      "defaultVariant": null,
+      "implementation": "contract-only"
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "name": "DigestDock Transcript Panel Probe",
+  "version": "0.1.0",
+  "minimum_chrome_version": "116",
+  "description": "Experiment-only reader for a YouTube Transcript panel opened by the user.",
+  "permissions": ["tabs", "scripting"],
+  "host_permissions": ["https://www.youtube.com/*"],
+  "action": {
+    "default_title": "Transcript panel probe",
+    "default_popup": "popup.html"
+  }
+}

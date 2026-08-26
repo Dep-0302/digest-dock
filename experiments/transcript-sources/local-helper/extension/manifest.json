@@ -1,0 +1,16 @@
+{
+  "manifest_version": 3,
+  "name": "DigestDock Local Transcript Helper Probe",
+  "version": "0.1.0",
+  "minimum_chrome_version": "116",
+  "description": "Experiment-only client for the token-paired 127.0.0.1 transcript helper.",
+  "permissions": ["tabs", "scripting"],
+  "host_permissions": [
+    "http://127.0.0.1/*",
+    "https://www.youtube.com/*"
+  ],
+  "action": {
+    "default_title": "Local transcript helper probe",
+    "default_popup": "popup.html"
+  }
+}

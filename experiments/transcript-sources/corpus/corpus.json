@@ -1,0 +1,260 @@
+{
+  "schemaVersion": 1,
+  "verifiedAt": "2026-08-18T01:23:05-07:00",
+  "verificationEnvironment": {
+    "surface": "YouTube desktop watch page",
+    "authentication": "signed-out",
+    "locale": "zh-CN",
+    "browser": "Codex in-app browser",
+    "evidenceMethod": "Read the inline ytInitialPlayerResponse object from each rendered watch page; record playabilityStatus and captionTracks. Browser transcript export was additionally checked only where explicitly recorded."
+  },
+  "selectionPolicy": {
+    "count": 7,
+    "requirements": [
+      "authored English captions",
+      "automatic English captions",
+      "Chinese or Japanese source-language captions",
+      "many simultaneous language tracks",
+      "long-form video",
+      "spoken video with no caption tracks",
+      "non-verbal video with no caption tracks"
+    ],
+    "exclusions": [
+      "age-gated or sign-in-only pages",
+      "private or intentionally removed videos",
+      "region-locked samples",
+      "downloaded media or stored transcript bodies"
+    ]
+  },
+  "samples": [
+    {
+      "id": "manual-english-short",
+      "videoId": "jNQXAC9IVRw",
+      "url": "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+      "title": "Me at the zoo",
+      "author": "jawed",
+      "durationSeconds": 19,
+      "expectedCategories": [
+        "authored-english",
+        "short-video"
+      ],
+      "selectionReason": "Very short, old and widely referenced public video. It provides a cheap happy-path check without ASR or a large transcript.",
+      "verification": {
+        "pagePlayability": "OK",
+        "captionTrackCount": 2,
+        "tracks": [
+          {
+            "languageCode": "de",
+            "kind": null,
+            "vssId": ".de",
+            "baseUrlPresent": true
+          },
+          {
+            "languageCode": "en",
+            "kind": null,
+            "vssId": ".en",
+            "baseUrlPresent": true
+          }
+        ],
+        "browserTranscriptExport": "not-checked"
+      },
+      "testExpectation": "A source should deterministically select and return the authored English track; it should not label this track as ASR."
+    },
+    {
+      "id": "multilingual-manual-and-asr",
+      "videoId": "iG9CE55wbtY",
+      "url": "https://www.youtube.com/watch?v=iG9CE55wbtY",
+      "title": "Do schools kill creativity? | Sir Ken Robinson | TED",
+      "author": "TED",
+      "durationSeconds": 1203,
+      "expectedCategories": [
+        "authored-english",
+        "automatic-english",
+        "many-language-tracks",
+        "duplicate-language-kinds"
+      ],
+      "selectionReason": "Old official TED upload with an unusually rich caption set. English exists twice, once authored and once ASR, which exposes track-selection bugs.",
+      "verification": {
+        "pagePlayability": "OK",
+        "captionTrackCount": 65,
+        "authoredTrackCount": 64,
+        "automaticTrackCount": 1,
+        "distinctLanguageCodeCount": 64,
+        "representativeLanguageCodes": [
+          "en",
+          "zh-CN",
+          "zh-TW",
+          "ja",
+          "de",
+          "fr",
+          "es"
+        ],
+        "englishTracks": [
+          {
+            "languageCode": "en",
+            "kind": null,
+            "vssId": ".en",
+            "baseUrlPresent": true
+          },
+          {
+            "languageCode": "en",
+            "kind": "asr",
+            "vssId": "a.en",
+            "baseUrlPresent": true
+          }
+        ],
+        "browserTranscriptExport": {
+          "status": "success",
+          "selectedLanguage": "zh-CN",
+          "captionKind": "authored-or-unspecified",
+          "exportedBytes": 20419
+        }
+      },
+      "testExpectation": "Methods must expose or consistently apply a language/track policy. In the signed-out zh-CN browser, the panel exporter selected authored zh-CN rather than English."
+    },
+    {
+      "id": "automatic-english-long-panel-divergence",
+      "videoId": "KLDVxx4TqcE",
+      "url": "https://www.youtube.com/watch?v=KLDVxx4TqcE",
+      "title": "The Future of Human Intelligence: Education, AI, & Creativity | Sir Ken Robinson (Full Keynote)",
+      "author": "Sir Ken Robinson",
+      "durationSeconds": 4345,
+      "expectedCategories": [
+        "automatic-english",
+        "long-video",
+        "source-divergence"
+      ],
+      "selectionReason": "Long-form ASR-only video. It separates track discovery from transcript retrieval and exercises payload size and timeout behavior.",
+      "verification": {
+        "pagePlayability": "OK",
+        "captionTrackCount": 1,
+        "tracks": [
+          {
+            "languageCode": "en",
+            "kind": "asr",
+            "vssId": "a.en",
+            "baseUrlPresent": true
+          }
+        ],
+        "browserTranscriptExport": {
+          "status": "no-transcript",
+          "message": "No transcript is available for this YouTube video"
+        },
+        "directTimedtextNavigation": {
+          "format": "json3",
+          "result": "empty-body",
+          "caveat": "This is one signed-out browser attempt using the baseUrl advertised by the same page; it does not prove that every token-aware extractor will fail."
+        }
+      },
+      "testExpectation": "A passing track-list check is insufficient. Record track discovery and text retrieval separately, with a bounded timeout and an explicit failure reason."
+    },
+    {
+      "id": "authored-traditional-chinese",
+      "videoId": "6i7RcP39NB0",
+      "url": "https://www.youtube.com/watch?v=6i7RcP39NB0",
+      "title": "留十八分鐘給自己：蔣勳 (Chiang Hsun) at TEDxTaipei 2012",
+      "author": "TEDxTaipei",
+      "durationSeconds": 1482,
+      "expectedCategories": [
+        "non-english-source-audio",
+        "authored-traditional-chinese",
+        "authored-english-translation"
+      ],
+      "selectionReason": "Stable older Chinese-language talk with a small, unambiguous pair of authored tracks. It tests language ordering without a huge multilingual set.",
+      "verification": {
+        "pagePlayability": "OK",
+        "captionTrackCount": 2,
+        "tracks": [
+          {
+            "languageCode": "en",
+            "kind": null,
+            "vssId": ".en",
+            "baseUrlPresent": true
+          },
+          {
+            "languageCode": "zh-TW",
+            "kind": null,
+            "vssId": ".zh-TW",
+            "baseUrlPresent": true
+          }
+        ],
+        "browserTranscriptExport": "not-checked"
+      },
+      "testExpectation": "A source-language policy should select zh-TW rather than blindly taking the first advertised track, which is English in the observed response."
+    },
+    {
+      "id": "authored-japanese-multilingual",
+      "videoId": "gBumdOWWMhY",
+      "url": "https://www.youtube.com/watch?v=gBumdOWWMhY",
+      "title": "Hope invites | Tsutomu Uematsu | TEDxSapporo",
+      "author": "TEDx Talks",
+      "durationSeconds": 1242,
+      "expectedCategories": [
+        "non-english-source-audio",
+        "authored-japanese",
+        "multilingual"
+      ],
+      "selectionReason": "Popular older Japanese-language TEDx talk with several human-authored translations. It tests source-language inference when Japanese is not the first track.",
+      "verification": {
+        "pagePlayability": "OK",
+        "captionTrackCount": 8,
+        "authoredTrackCount": 8,
+        "languageCodesInObservedOrder": [
+          "fr",
+          "ko",
+          "my",
+          "pt-BR",
+          "ja",
+          "tr",
+          "hu",
+          "en"
+        ],
+        "browserTranscriptExport": "not-checked"
+      },
+      "testExpectation": "The extractor should not treat the first track, French, as the source language. Language selection must be explicit or observable in the result."
+    },
+    {
+      "id": "spoken-video-no-caption-tracks",
+      "videoId": "4OEG33NfEK0",
+      "url": "https://www.youtube.com/watch?v=4OEG33NfEK0",
+      "title": "停止內耗，從相信自己開始 To End Inner Conflict, Start by Believing in Yourself｜周慕姿 | Mu-Tzu Chou | TEDxTaipei",
+      "author": "TEDx Talks",
+      "durationSeconds": 1091,
+      "expectedCategories": [
+        "spoken-video",
+        "no-caption-tracks",
+        "unavailable-boundary"
+      ],
+      "selectionReason": "Public spoken talk where the rendered player response currently advertises no caption tracks. This is a stronger negative case than a silent film.",
+      "verification": {
+        "pagePlayability": "OK",
+        "captionTrackCount": 0,
+        "tracks": [],
+        "browserTranscriptExport": "not-checked",
+        "driftWarning": "Captions may be added later; re-read captionTracks before each comparison run."
+      },
+      "testExpectation": "Return a clean no-caption result without fabricating text, retry storms, or silently changing to a third-party paid service."
+    },
+    {
+      "id": "nonverbal-video-no-caption-tracks",
+      "videoId": "aqz-KE-bpKQ",
+      "url": "https://www.youtube.com/watch?v=aqz-KE-bpKQ",
+      "title": "Big Buck Bunny 60fps 4K - Official Blender Foundation Short Film",
+      "author": "Blender",
+      "durationSeconds": 635,
+      "expectedCategories": [
+        "non-verbal-video",
+        "no-caption-tracks",
+        "expected-negative"
+      ],
+      "selectionReason": "Official Blender upload with no spoken dialogue and no caption tracks. It is a stable expected-negative control.",
+      "verification": {
+        "pagePlayability": "OK",
+        "captionTrackCount": 0,
+        "tracks": [],
+        "browserTranscriptExport": "not-checked"
+      },
+      "testExpectation": "Return a clean no-caption result quickly. This control distinguishes a normal negative from a parser or network failure."
+    }
+  ]
+}

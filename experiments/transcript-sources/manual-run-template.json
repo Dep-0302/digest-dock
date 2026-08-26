@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 2,
+  "runId": "replace-with-bounded-run-id",
+  "requestId": "replace-with-bounded-request-id",
+  "startedAt": "YYYY-MM-DDTHH:mm:ssZ",
+  "providerId": "youtube-passive",
+  "providerVariant": null,
+  "videoId": "replace-id",
+  "category": "replace-category",
+  "status": "not-run",
+  "elapsedMs": null,
+  "language": null,
+  "languageEvidence": "unknown",
+  "segmentCount": 0,
+  "characterCount": 0,
+  "firstStart": null,
+  "lastStart": null,
+  "errorCode": null,
+  "diagnostics": {
+    "providerInitiated": {
+      "youtubePlayer": null,
+      "youtubeTimedtext": null,
+      "thirdParty": null,
+      "loopback": null
+    },
+    "pageObserved": {
+      "youtubeTimedtext": null
+    }
+  },
+  "manualChecks": {
+    "firstTimestampCompared": false,
+    "lastTimestampCompared": false,
+    "sampleTextComparedWithoutSavingText": false,
+    "spaSecondVideoRejectedOldResult": false
+  },
+  "notes": [
+    "manual-review-needed"
+  ]
+}

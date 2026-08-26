@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Passive transcript probe</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main>
+      <p class="eyebrow">EXPERIMENT · YOUTUBE-PASSIVE</p>
+      <h1>字幕响应旁路</h1>
+      <p class="help">
+        本探针只观察 YouTube 页面已经返回的字幕响应，不会主动打开字幕、刷新页面或创建字幕请求。
+      </p>
+      <div class="filters">
+        <label>
+          语言（可留空）
+          <input id="language" type="text" placeholder="en / zh-CN" autocomplete="off" />
+        </label>
+        <label>
+          字幕轨
+          <select id="trackKind">
+            <option value="any">任意</option>
+            <option value="manual">人工</option>
+            <option value="asr">自动字幕</option>
+          </select>
+        </label>
+      </div>
+      <div class="actions">
+        <button id="refreshBtn" type="button">读取当前结果</button>
+        <button id="toggleBtn" type="button" class="secondary">暂停观察</button>
+        <button id="clearBtn" type="button" class="secondary">清除本页结果</button>
+      </div>
+      <pre id="status" role="status">等待读取…</pre>
+      <p class="footnote">
+        第一次加载或重新启用后，请刷新 YouTube 视频页，再由你手动开启 CC。若没有新字幕响应，本探针应保持空结果。
+      </p>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>

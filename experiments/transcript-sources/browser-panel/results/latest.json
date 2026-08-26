@@ -1,0 +1,1765 @@
+{
+  "generatedAt": "2026-08-18T08:44:39.029Z",
+  "environment": {
+    "playwright": "1.62.1",
+    "chromePath": "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "headless": true,
+    "timeoutMs": 20000
+  },
+  "previousRunGeneratedAt": "2026-08-18T08:42:29.237Z",
+  "cases": [
+    {
+      "id": "jNQXAC9IVRw",
+      "label": "short_manual",
+      "expected": "short video with manual captions",
+      "startedAt": "2026-08-18T08:44:39.426Z",
+      "status": "panel_opened_with_segments",
+      "block": null,
+      "open": {
+        "clicked": "after-expand:description-structural",
+        "attempts": [
+          "description-structural",
+          "aria-label-en",
+          "role-en",
+          "after-expand:description-structural"
+        ]
+      },
+      "panel": {
+        "segmentCountBeforeScroll": 3,
+        "segmentCountAfterScroll": 3,
+        "segmentSignatureBefore": "25f4097d114bdc186674395a8183005fa1e769faed3328fe5eaa1e41f50d31b4",
+        "segmentSignatureAfter": "25f4097d114bdc186674395a8183005fa1e769faed3328fe5eaa1e41f50d31b4",
+        "countAndOrderStableAfterScroll": true,
+        "firstSegment": {
+          "timestamp": "0:01",
+          "textCharacters": 126,
+          "textSha256": "d675d2ab56cb476d2f3b4fe5f188c128c12f310e86494dbd2b4a7b7b4a6ac00f"
+        },
+        "lastSegment": {
+          "timestamp": "0:16",
+          "textCharacters": 58,
+          "textSha256": "6bd106efc8a07f0a4c827bc7238d9ec1153f7efb5433a7f3feb81e462bdbbdc6"
+        },
+        "totalTextCharacters": 260,
+        "controls": [
+          {
+            "tag": "button",
+            "text": "",
+            "ariaLabel": "Close",
+            "ariaHaspopup": null,
+            "textCharacters": 0,
+            "textSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          {
+            "tag": "button",
+            "text": "Chapters",
+            "ariaLabel": "Chapters",
+            "ariaHaspopup": null,
+            "textCharacters": 8,
+            "textSha256": "9831375bc65196d8c923455ec07c27aefa5761edfe4162dde1c7b36eec25a3ad"
+          },
+          {
+            "tag": "button",
+            "text": "Transcript",
+            "ariaLabel": "Transcript",
+            "ariaHaspopup": null,
+            "textCharacters": 10,
+            "textSha256": "721164f0dc7096a8c09be2069c5c689a56df933fc5798822e8134bd3e76771eb"
+          },
+          {
+            "tag": "macro-markers-panel-item-view-model",
+            "text": null,
+            "ariaLabel": null,
+            "ariaHaspopup": null,
+            "textCharacters": 16,
+            "textSha256": "71915c658045d3dd64239d2bf3d43f1ddc97cbfb9a24bb93cf2a9d2be3facd9a"
+          },
+          {
+            "tag": "macro-markers-panel-item-view-model",
+            "text": null,
+            "ariaLabel": null,
+            "ariaHaspopup": null,
+            "textCharacters": 124,
+            "textSha256": "235f97394e7e8bf48dc04f550b3a9b53af8f592fd842e27b03f7ad500de5facf"
+          },
+          {
+            "tag": "macro-markers-panel-item-view-model",
+            "text": null,
+            "ariaLabel": null,
+            "ariaHaspopup": null,
+            "textCharacters": 25,
+            "textSha256": "8ab2f520e8dd48df7f4973f1128c08a3f03d5ea002b5fd179b8200fcb3f78149"
+          },
+          {
+            "tag": "macro-markers-panel-item-view-model",
+            "text": null,
+            "ariaLabel": null,
+            "ariaHaspopup": null,
+            "textCharacters": 74,
+            "textSha256": "2a53940aeaa085a383bf2e302bf39de263c87b9129ef9dd4f19d873ef5eef0d8"
+          },
+          {
+            "tag": "macro-markers-panel-item-view-model",
+            "text": null,
+            "ariaLabel": null,
+            "ariaHaspopup": null,
+            "textCharacters": 56,
+            "textSha256": "952d5467bd0a48c1335b03aa90fb50efef41a821efb8c94405d5055ffaa24218"
+          },
+          {
+            "tag": "macro-markers-panel-item-view-model",
+            "text": null,
+            "ariaLabel": null,
+            "ariaHaspopup": null,
+            "textCharacters": 14,
+            "textSha256": "ebae76751549e7f040d0edc12ef320c7e458e4555d5cc71c00ecb20ad9e248fa"
+          },
+          {
+            "tag": "button",
+            "text": "Sync to video time",
+            "ariaLabel": "Sync to video time",
+            "ariaHaspopup": null,
+            "textCharacters": 18,
+            "textSha256": "1e8d76f6b4758c9a8988e27206c2ddbeff35c853c61cf62457131fc7fa4d3bcb"
+          }
+        ],
+        "accessibility": {
+          "snapshotCharacters": 661,
+          "snapshotSha256": "eea7e9541e6b22613a9d2905be3613b0de292fc542e92ec907a5d41a2168648a",
+          "containsFirstSegmentText": true,
+          "containsLastSegmentText": true
+        },
+        "scroll": {
+          "found": false,
+          "selectorHint": null,
+          "clientHeight": 0,
+          "scrollHeight": 0,
+          "samples": []
+        },
+        "languageMenu": {
+          "attempted": false,
+          "opened": false,
+          "optionTexts": []
+        },
+        "domDiagnostics": {
+          "transcriptLikeTags": [
+            "transcript-segment-view-model"
+          ],
+          "transcriptLikeClassNames": [],
+          "visibleTextCharacters": 372,
+          "visibleTextSha256": "a1928625fa27b2413eefc03f198592722f0883838de76419aa03c5690e3737d1"
+        }
+      },
+      "error": null,
+      "actualUrl": "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+      "player": {
+        "videoId": "jNQXAC9IVRw",
+        "durationSeconds": 19,
+        "captionTrackCount": 2,
+        "tracks": [
+          {
+            "languageCode": "en",
+            "name": "English",
+            "kind": "manual",
+            "isTranslatable": true
+          },
+          {
+            "languageCode": "de",
+            "name": "German",
+            "kind": "manual",
+            "isTranslatable": true
+          }
+        ]
+      },
+      "before": {
+        "url": "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+        "title": "Me at the zoo - YouTube",
+        "scrollY": 0,
+        "paused": true,
+        "currentTime": 0.36,
+        "visibleEngagementPanels": [],
+        "descriptionExpanded": false
+      },
+      "after": {
+        "url": "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+        "title": "Me at the zoo - YouTube",
+        "scrollY": 180,
+        "paused": true,
+        "currentTime": 0.36,
+        "visibleEngagementPanels": [
+          "unknown"
+        ],
+        "descriptionExpanded": true
+      },
+      "transcriptResponses": [],
+      "anonymousContext": {
+        "initialStorageStateSupplied": false,
+        "cookieCountAtEnd": 7,
+        "cookieDomainsAtEnd": [
+          ".youtube.com"
+        ]
+      },
+      "finishedAt": "2026-08-18T08:44:43.894Z",
+      "repeatComparison": {
+        "previousStatus": "panel_opened_with_segments",
+        "statusStable": true,
+        "previousPlayerTrackCount": 2,
+        "playerTrackCountStable": true,
+        "previousSegmentCount": 3,
+        "currentSegmentCount": 3,
+        "transcriptResponseStatusesStable": true
+      }
+    },
+    {
+      "id": "iG9CE55wbtY",
+      "label": "manual_multilingual",
+      "expected": "long TED talk with manual, ASR, and many languages",
+      "startedAt": "2026-08-18T08:44:44.320Z",
+      "status": "panel_opened_empty",
+      "block": null,
+      "open": {
+        "clicked": "after-expand:description-structural",
+        "attempts": [
+          "description-structural",
+          "aria-label-en",
+          "role-en",
+          "after-expand:description-structural"
+        ]
+      },
+      "panel": {
+        "segmentCountBeforeScroll": 0,
+        "segmentCountAfterScroll": 0,
+        "segmentSignatureBefore": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "segmentSignatureAfter": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "countAndOrderStableAfterScroll": true,
+        "firstSegment": null,
+        "lastSegment": null,
+        "totalTextCharacters": 0,
+        "controls": [
+          {
+            "tag": "button",
+            "text": "",
+            "ariaLabel": "More actions",
+            "ariaHaspopup": null,
+            "textCharacters": 0,
+            "textSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          {
+            "tag": "button",
+            "text": "",
+            "ariaLabel": "Close",
+            "ariaHaspopup": null,
+            "textCharacters": 0,
+            "textSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          {
+            "tag": "button",
+            "text": "Chapters",
+            "ariaLabel": "Chapters",
+            "ariaHaspopup": null,
+            "textCharacters": 8,
+            "textSha256": "9831375bc65196d8c923455ec07c27aefa5761edfe4162dde1c7b36eec25a3ad"
+          },
+          {
+            "tag": "button",
+            "text": "Transcript",
+            "ariaLabel": "Transcript",
+            "ariaHaspopup": null,
+            "textCharacters": 10,
+            "textSha256": "721164f0dc7096a8c09be2069c5c689a56df933fc5798822e8134bd3e76771eb"
+          }
+        ],
+        "accessibility": {
+          "snapshotCharacters": 138,
+          "snapshotSha256": "aac04c61415b4f57b21251af06a7152aad89f562f9a30333ef0fe0057faa1f5d",
+          "containsFirstSegmentText": false,
+          "containsLastSegmentText": false
+        },
+        "scroll": {
+          "found": false,
+          "selectorHint": null,
+          "clientHeight": 0,
+          "scrollHeight": 0,
+          "samples": []
+        },
+        "languageMenu": {
+          "attempted": false,
+          "opened": false,
+          "optionTexts": []
+        },
+        "domDiagnostics": {
+          "transcriptLikeTags": [],
+          "transcriptLikeClassNames": [],
+          "visibleTextCharacters": 33,
+          "visibleTextSha256": "08a94b31c0d1b6b3fe1607e232cb42c477b5a46fb5bfcc09bd88cb1e6413e156"
+        }
+      },
+      "error": null,
+      "actualUrl": "https://www.youtube.com/watch?v=iG9CE55wbtY",
+      "player": {
+        "videoId": "iG9CE55wbtY",
+        "durationSeconds": 1203,
+        "captionTrackCount": 65,
+        "tracks": [
+          {
+            "languageCode": "af",
+            "name": "Afrikaans",
+            "kind": "manual",
+            "isTranslatable": true
+          },
+          {
+            "languageCode": "sq",
+            "name": "Albanian",
+            "kind": "manual",
+            "isTranslatable": true
+          },
+          {
+            "languageCode": "ar",
+            "name": "Arabic",
+            "kind": "manual",
+            "isTranslatable": true
+          },
+          {
+            "languageCode": "hy",
+            "name": "Armenian",
+            "kind": "manual",
+            "isTranslatable": true
+          },
+          {
+            "languageCode": "az",
+            "name": "Azerbaijani",
+            "kind": "manual",
+            "isTranslatable": true
+          },
+          {
+            "languageCode": "bn",
+            "name": "Bangla",
+            "kind": "manual",
+            "isTranslatable": true
+          },
+          {
+            "languageCode": "eu",
+            "name": "Basque",
+            "kind": "manual",
+            "isTranslatable": true
+          },
+          {
+            "languageCode": "be",
+            "name": "Belarusian",
+            "kind": "manual",
+            "isTranslatable": true
+          },
+          {
+            "languageCode": "bg",
+            "name": "Bulgarian",
+            "kind": "manual",
+            "isTranslatable": true
+          },
+          {
+            "languageCode": "ca",
+            "name": "Catalan",
+            "kind": "manual",
+            "isTranslatable": true
+          },
+          {
+            "languageCode": "ckb",
+            "name": "Central Kurdish",
+            "kind": "manual",
+            "isTranslatable": true
+          },
+          {
+            "languageCode": "zh-CN",
+            "name": "Chinese (China)",
+            "kind": "manual",
+            "isTranslatable": true
+          },
+          {
+            "languageCode": "zh-TW",
+            "name": "Chinese (Taiwan)",
+            "kind": "manual",
+            "isTranslatable": true
+          },
+          {
+            "languageCode": "hr",
+            "name": "Croatian",
+            "kind": "manual",
+            "isTranslatable": true
+          },
+          {
+            "languageCode": "cs",
+            "name": "Czech",
+            "kind": "manual",
+            "isTranslatable": true
+          },
+          {
+            "languageCode": "da",
+            "name": "Danish",
+            "kind": "manual",
+            "isTranslatable": true
+          },
+          {
+            "languageCode": "nl",
+            "name": "Dutch",
+            "kind": "manual",
+            "isTranslatable": true
+          },
+          {
+            "languageCode": "en",
+            "name": "English",
+            "kind": "manual",
+            "isTranslatable": true
+          },
+          {
+            "languageCode": "en",
+            "name": "English (auto-generated)",
+            "kind": "asr",
+            "isTranslatable": true
+          },
+          {
+            "languageCode": "eo",
+            "name": "Esperanto",
+            "kind": "manual",
+            "isTranslatable": true
+          },
+          {
+            "languageCode": "et",
+            "name": "Estonian",
+            "kind": "manual",
+            "isTranslatable": true
+          },
+          {
+            "languageCode": "fil",
+            "name": "Filipino",
+            "kind": "manual",
+            "isTranslatable": true
+          },
+          {
+            "languageCode": "fi",
+            "name": "Finnish",
+            "kind": "manual",
+            "isTranslatable": true
+          },
+          {
+            "languageCode": "fr",
+            "name": "French",
+            "kind": "manual",
+            "isTranslatable": true
+          },
+          {
+            "languageCode": "fr-CA",
+            "name": "French (Canada)",
+            "kind": "manual",
+            "isTranslatable": true
+          },
+          {
+            "languageCode": "gl",
+            "name": "Galician",
+            "kind": "manual",
+            "isTranslatable": true
+          },
+          {
+            "languageCode": "ka",
+            "name": "Georgian",
+            "kind": "manual",
+            "isTranslatable": true
+          },
+          {
+            "languageCode": "de",
+            "name": "German",
+            "kind": "manual",
+            "isTranslatable": true
+          },
+          {
+            "languageCode": "el",
+            "name": "Greek",
+            "kind": "manual",
+            "isTranslatable": true
+          },
+          {
+            "languageCode": "iw",
+            "name": "Hebrew",
+            "kind": "manual",
+            "isTranslatable": true
+          },
+          {
+            "languageCode": "hu",
+            "name": "Hungarian",
+            "kind": "manual",
+            "isTranslatable": true
+          },
+          {
+            "languageCode": "id",
+            "name": "Indonesian",
+            "kind": "manual",
+            "isTranslatable": true
+          },
+          {
+            "languageCode": "inh",
+            "name": "Ingush",
+            "kind": "manual",
+            "isTranslatable": true
+          },
+          {
+            "languageCode": "it",
+            "name": "Italian",
+            "kind": "manual",
+            "isTranslatable": true
+          },
+          {
+            "languageCode": "ja",
+            "name": "Japanese",
+            "kind": "manual",
+            "isTranslatable": true
+          },
+          {
+            "languageCode": "kn",
+            "name": "Kannada",
+            "kind": "manual",
+            "isTranslatable": true
+          },
+          {
+            "languageCode": "ko",
+            "name": "Korean",
+            "kind": "manual",
+            "isTranslatable": true
+          },
+          {
+            "languageCode": "ku",
+            "name": "Kurdish",
+            "kind": "manual",
+            "isTranslatable": true
+          },
+          {
+            "languageCode": "lo",
+            "name": "Lao",
+            "kind": "manual",
+            "isTranslatable": true
+          },
+          {
+            "languageCode": "lv",
+            "name": "Latvian",
+            "kind": "manual",
+            "isTranslatable": true
+          },
+          {
+            "languageCode": "lt",
+            "name": "Lithuanian",
+            "kind": "manual",
+            "isTranslatable": true
+          },
+          {
+            "languageCode": "mk",
+            "name": "Macedonian",
+            "kind": "manual",
+            "isTranslatable": true
+          },
+          {
+            "languageCode": "mr",
+            "name": "Marathi",
+            "kind": "manual",
+            "isTranslatable": true
+          },
+          {
+            "languageCode": "mn",
+            "name": "Mongolian",
+            "kind": "manual",
+            "isTranslatable": true
+          },
+          {
+            "languageCode": "mfe",
+            "name": "Morisyen",
+            "kind": "manual",
+            "isTranslatable": true
+          },
+          {
+            "languageCode": "ne",
+            "name": "Nepali",
+            "kind": "manual",
+            "isTranslatable": true
+          },
+          {
+            "languageCode": "no",
+            "name": "Norwegian",
+            "kind": "manual",
+            "isTranslatable": true
+          },
+          {
+            "languageCode": "fa",
+            "name": "Persian",
+            "kind": "manual",
+            "isTranslatable": true
+          },
+          {
+            "languageCode": "pl",
+            "name": "Polish",
+            "kind": "manual",
+            "isTranslatable": true
+          },
+          {
+            "languageCode": "pt-BR",
+            "name": "Portuguese (Brazil)",
+            "kind": "manual",
+            "isTranslatable": true
+          },
+          {
+            "languageCode": "pt-PT",
+            "name": "Portuguese (Portugal)",
+            "kind": "manual",
+            "isTranslatable": true
+          },
+          {
+            "languageCode": "ro",
+            "name": "Romanian",
+            "kind": "manual",
+            "isTranslatable": true
+          },
+          {
+            "languageCode": "ru",
+            "name": "Russian",
+            "kind": "manual",
+            "isTranslatable": true
+          },
+          {
+            "languageCode": "sr",
+            "name": "Serbian",
+            "kind": "manual",
+            "isTranslatable": true
+          },
+          {
+            "languageCode": "si",
+            "name": "Sinhala",
+            "kind": "manual",
+            "isTranslatable": true
+          },
+          {
+            "languageCode": "sk",
+            "name": "Slovak",
+            "kind": "manual",
+            "isTranslatable": true
+          },
+          {
+            "languageCode": "sl",
+            "name": "Slovenian",
+            "kind": "manual",
+            "isTranslatable": true
+          },
+          {
+            "languageCode": "es",
+            "name": "Spanish",
+            "kind": "manual",
+            "isTranslatable": true
+          },
+          {
+            "languageCode": "sv",
+            "name": "Swedish",
+            "kind": "manual",
+            "isTranslatable": true
+          },
+          {
+            "languageCode": "th",
+            "name": "Thai",
+            "kind": "manual",
+            "isTranslatable": true
+          },
+          {
+            "languageCode": "tr",
+            "name": "Turkish",
+            "kind": "manual",
+            "isTranslatable": true
+          },
+          {
+            "languageCode": "uk",
+            "name": "Ukrainian",
+            "kind": "manual",
+            "isTranslatable": true
+          },
+          {
+            "languageCode": "ur",
+            "name": "Urdu",
+            "kind": "manual",
+            "isTranslatable": true
+          },
+          {
+            "languageCode": "uz",
+            "name": "Uzbek",
+            "kind": "manual",
+            "isTranslatable": true
+          },
+          {
+            "languageCode": "vi",
+            "name": "Vietnamese",
+            "kind": "manual",
+            "isTranslatable": true
+          }
+        ]
+      },
+      "before": {
+        "url": "https://www.youtube.com/watch?v=iG9CE55wbtY",
+        "title": "Do schools kill creativity? | Sir Ken Robinson | TED - YouTube",
+        "scrollY": 0,
+        "paused": true,
+        "currentTime": 0.37,
+        "visibleEngagementPanels": [],
+        "descriptionExpanded": false
+      },
+      "after": {
+        "url": "https://www.youtube.com/watch?v=iG9CE55wbtY",
+        "title": "Do schools kill creativity? | Sir Ken Robinson | TED - YouTube",
+        "scrollY": 0,
+        "paused": true,
+        "currentTime": 0.37,
+        "visibleEngagementPanels": [
+          "engagement-panel-searchable-transcript"
+        ],
+        "descriptionExpanded": true
+      },
+      "transcriptResponses": [
+        {
+          "urlPath": "/youtubei/v1/get_transcript",
+          "status": 400,
+          "contentType": "application/json; charset=UTF-8",
+          "bytes": 274,
+          "bodySha256": "a2d9ced6deea06cd05d19d5a5092707ea009c52dd4f97409fae4899d3454d7a1",
+          "summary": {
+            "parsedSegmentObjects": 0,
+            "first": null,
+            "last": null,
+            "errors": [
+              {
+                "code": 400,
+                "status": "FAILED_PRECONDITION",
+                "message": "Precondition check failed."
+              }
+            ]
+          }
+        }
+      ],
+      "anonymousContext": {
+        "initialStorageStateSupplied": false,
+        "cookieCountAtEnd": 8,
+        "cookieDomainsAtEnd": [
+          ".doubleclick.net",
+          ".youtube.com"
+        ]
+      },
+      "finishedAt": "2026-08-18T08:44:56.494Z",
+      "repeatComparison": {
+        "previousStatus": "panel_opened_empty",
+        "statusStable": true,
+        "previousPlayerTrackCount": 65,
+        "playerTrackCountStable": true,
+        "previousSegmentCount": 0,
+        "currentSegmentCount": 0,
+        "transcriptResponseStatusesStable": true
+      }
+    },
+    {
+      "id": "KLDVxx4TqcE",
+      "label": "long_auto_only",
+      "expected": "72-minute talk with one en/asr track",
+      "startedAt": "2026-08-18T08:44:56.801Z",
+      "status": "panel_opened_empty",
+      "block": null,
+      "open": {
+        "clicked": "after-expand:description-structural",
+        "attempts": [
+          "description-structural",
+          "aria-label-en",
+          "role-en",
+          "after-expand:description-structural"
+        ]
+      },
+      "panel": {
+        "segmentCountBeforeScroll": 0,
+        "segmentCountAfterScroll": 0,
+        "segmentSignatureBefore": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "segmentSignatureAfter": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "countAndOrderStableAfterScroll": true,
+        "firstSegment": null,
+        "lastSegment": null,
+        "totalTextCharacters": 0,
+        "controls": [
+          {
+            "tag": "button",
+            "text": "",
+            "ariaLabel": "More actions",
+            "ariaHaspopup": null,
+            "textCharacters": 0,
+            "textSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          {
+            "tag": "button",
+            "text": "",
+            "ariaLabel": "Close",
+            "ariaHaspopup": null,
+            "textCharacters": 0,
+            "textSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          {
+            "tag": "button",
+            "text": "Chapters",
+            "ariaLabel": "Chapters",
+            "ariaHaspopup": null,
+            "textCharacters": 8,
+            "textSha256": "9831375bc65196d8c923455ec07c27aefa5761edfe4162dde1c7b36eec25a3ad"
+          },
+          {
+            "tag": "button",
+            "text": "Transcript",
+            "ariaLabel": "Transcript",
+            "ariaHaspopup": null,
+            "textCharacters": 10,
+            "textSha256": "721164f0dc7096a8c09be2069c5c689a56df933fc5798822e8134bd3e76771eb"
+          }
+        ],
+        "accessibility": {
+          "snapshotCharacters": 138,
+          "snapshotSha256": "aac04c61415b4f57b21251af06a7152aad89f562f9a30333ef0fe0057faa1f5d",
+          "containsFirstSegmentText": false,
+          "containsLastSegmentText": false
+        },
+        "scroll": {
+          "found": false,
+          "selectorHint": null,
+          "clientHeight": 0,
+          "scrollHeight": 0,
+          "samples": []
+        },
+        "languageMenu": {
+          "attempted": false,
+          "opened": false,
+          "optionTexts": []
+        },
+        "domDiagnostics": {
+          "transcriptLikeTags": [],
+          "transcriptLikeClassNames": [],
+          "visibleTextCharacters": 33,
+          "visibleTextSha256": "08a94b31c0d1b6b3fe1607e232cb42c477b5a46fb5bfcc09bd88cb1e6413e156"
+        }
+      },
+      "error": null,
+      "actualUrl": "https://www.youtube.com/watch?v=KLDVxx4TqcE",
+      "player": {
+        "videoId": "KLDVxx4TqcE",
+        "durationSeconds": 4345,
+        "captionTrackCount": 1,
+        "tracks": [
+          {
+            "languageCode": "en",
+            "name": "English (auto-generated)",
+            "kind": "asr",
+            "isTranslatable": true
+          }
+        ]
+      },
+      "before": {
+        "url": "https://www.youtube.com/watch?v=KLDVxx4TqcE",
+        "title": "The Future of Human Intelligence: Education, AI, & Creativity | Sir Ken Robinson (Full Keynote) - YouTube",
+        "scrollY": 0,
+        "paused": true,
+        "currentTime": 0.32,
+        "visibleEngagementPanels": [],
+        "descriptionExpanded": false
+      },
+      "after": {
+        "url": "https://www.youtube.com/watch?v=KLDVxx4TqcE",
+        "title": "The Future of Human Intelligence: Education, AI, & Creativity | Sir Ken Robinson (Full Keynote) - YouTube",
+        "scrollY": 0,
+        "paused": true,
+        "currentTime": 0.32,
+        "visibleEngagementPanels": [
+          "engagement-panel-searchable-transcript"
+        ],
+        "descriptionExpanded": true
+      },
+      "transcriptResponses": [
+        {
+          "urlPath": "/youtubei/v1/get_transcript",
+          "status": 400,
+          "contentType": "application/json; charset=UTF-8",
+          "bytes": 274,
+          "bodySha256": "a2d9ced6deea06cd05d19d5a5092707ea009c52dd4f97409fae4899d3454d7a1",
+          "summary": {
+            "parsedSegmentObjects": 0,
+            "first": null,
+            "last": null,
+            "errors": [
+              {
+                "code": 400,
+                "status": "FAILED_PRECONDITION",
+                "message": "Precondition check failed."
+              }
+            ]
+          }
+        }
+      ],
+      "anonymousContext": {
+        "initialStorageStateSupplied": false,
+        "cookieCountAtEnd": 7,
+        "cookieDomainsAtEnd": [
+          ".youtube.com"
+        ]
+      },
+      "finishedAt": "2026-08-18T08:45:08.980Z",
+      "repeatComparison": {
+        "previousStatus": "panel_opened_empty",
+        "statusStable": true,
+        "previousPlayerTrackCount": 1,
+        "playerTrackCountStable": true,
+        "previousSegmentCount": 0,
+        "currentSegmentCount": 0,
+        "transcriptResponseStatusesStable": true
+      }
+    },
+    {
+      "id": "4OEG33NfEK0",
+      "label": "spoken_no_captions",
+      "expected": "spoken video with zero caption tracks",
+      "startedAt": "2026-08-18T08:45:09.279Z",
+      "status": "expected_no_panel",
+      "block": null,
+      "open": {
+        "clicked": null,
+        "attempts": [
+          "description-structural",
+          "aria-label-en",
+          "role-en",
+          "after-expand:description-structural",
+          "after-expand:aria-label-en",
+          "after-expand:role-en",
+          "overflow:6",
+          "overflow:3",
+          "overflow:2",
+          "overflow:1",
+          "overflow:0"
+        ]
+      },
+      "panel": null,
+      "error": null,
+      "actualUrl": "https://www.youtube.com/watch?v=4OEG33NfEK0",
+      "player": {
+        "videoId": "4OEG33NfEK0",
+        "durationSeconds": 1091,
+        "captionTrackCount": 0,
+        "tracks": []
+      },
+      "before": {
+        "url": "https://www.youtube.com/watch?v=4OEG33NfEK0",
+        "title": "停止內耗，從相信自己開始 To End Inner Conflict, Start by Believing in Yourself｜周慕姿 | Mu-Tzu Chou | TEDxTaipei - YouTube",
+        "scrollY": 0,
+        "paused": true,
+        "currentTime": 0.27,
+        "visibleEngagementPanels": [],
+        "descriptionExpanded": false
+      },
+      "transcriptResponses": [],
+      "anonymousContext": {
+        "initialStorageStateSupplied": false,
+        "cookieCountAtEnd": 7,
+        "cookieDomainsAtEnd": [
+          ".youtube.com"
+        ]
+      },
+      "finishedAt": "2026-08-18T08:45:13.689Z",
+      "repeatComparison": {
+        "previousStatus": "expected_no_panel",
+        "statusStable": true,
+        "previousPlayerTrackCount": 0,
+        "playerTrackCountStable": true,
+        "previousSegmentCount": null,
+        "currentSegmentCount": null,
+        "transcriptResponseStatusesStable": true
+      }
+    }
+  ],
+  "spaScenario": {
+    "sourceId": "jNQXAC9IVRw",
+    "targetId": "iG9CE55wbtY",
+    "route": "YouTube search results click",
+    "status": "spa_transient_stale_panel_then_settled",
+    "error": null,
+    "sourceOpen": {
+      "clicked": "after-expand:description-structural",
+      "attempts": [
+        "description-structural",
+        "aria-label-en",
+        "role-en",
+        "after-expand:description-structural"
+      ]
+    },
+    "sourcePanel": {
+      "segmentCountBeforeScroll": 3,
+      "segmentCountAfterScroll": 3,
+      "segmentSignatureBefore": "25f4097d114bdc186674395a8183005fa1e769faed3328fe5eaa1e41f50d31b4",
+      "segmentSignatureAfter": "25f4097d114bdc186674395a8183005fa1e769faed3328fe5eaa1e41f50d31b4",
+      "countAndOrderStableAfterScroll": true,
+      "firstSegment": {
+        "timestamp": "0:01",
+        "textCharacters": 126,
+        "textSha256": "d675d2ab56cb476d2f3b4fe5f188c128c12f310e86494dbd2b4a7b7b4a6ac00f"
+      },
+      "lastSegment": {
+        "timestamp": "0:16",
+        "textCharacters": 58,
+        "textSha256": "6bd106efc8a07f0a4c827bc7238d9ec1153f7efb5433a7f3feb81e462bdbbdc6"
+      },
+      "totalTextCharacters": 260,
+      "controls": [
+        {
+          "tag": "button",
+          "text": "",
+          "ariaLabel": "Close",
+          "ariaHaspopup": null,
+          "textCharacters": 0,
+          "textSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "tag": "button",
+          "text": "Chapters",
+          "ariaLabel": "Chapters",
+          "ariaHaspopup": null,
+          "textCharacters": 8,
+          "textSha256": "9831375bc65196d8c923455ec07c27aefa5761edfe4162dde1c7b36eec25a3ad"
+        },
+        {
+          "tag": "button",
+          "text": "Transcript",
+          "ariaLabel": "Transcript",
+          "ariaHaspopup": null,
+          "textCharacters": 10,
+          "textSha256": "721164f0dc7096a8c09be2069c5c689a56df933fc5798822e8134bd3e76771eb"
+        },
+        {
+          "tag": "macro-markers-panel-item-view-model",
+          "text": null,
+          "ariaLabel": null,
+          "ariaHaspopup": null,
+          "textCharacters": 16,
+          "textSha256": "71915c658045d3dd64239d2bf3d43f1ddc97cbfb9a24bb93cf2a9d2be3facd9a"
+        },
+        {
+          "tag": "macro-markers-panel-item-view-model",
+          "text": null,
+          "ariaLabel": null,
+          "ariaHaspopup": null,
+          "textCharacters": 124,
+          "textSha256": "235f97394e7e8bf48dc04f550b3a9b53af8f592fd842e27b03f7ad500de5facf"
+        },
+        {
+          "tag": "macro-markers-panel-item-view-model",
+          "text": null,
+          "ariaLabel": null,
+          "ariaHaspopup": null,
+          "textCharacters": 25,
+          "textSha256": "8ab2f520e8dd48df7f4973f1128c08a3f03d5ea002b5fd179b8200fcb3f78149"
+        },
+        {
+          "tag": "macro-markers-panel-item-view-model",
+          "text": null,
+          "ariaLabel": null,
+          "ariaHaspopup": null,
+          "textCharacters": 74,
+          "textSha256": "2a53940aeaa085a383bf2e302bf39de263c87b9129ef9dd4f19d873ef5eef0d8"
+        },
+        {
+          "tag": "macro-markers-panel-item-view-model",
+          "text": null,
+          "ariaLabel": null,
+          "ariaHaspopup": null,
+          "textCharacters": 56,
+          "textSha256": "952d5467bd0a48c1335b03aa90fb50efef41a821efb8c94405d5055ffaa24218"
+        },
+        {
+          "tag": "macro-markers-panel-item-view-model",
+          "text": null,
+          "ariaLabel": null,
+          "ariaHaspopup": null,
+          "textCharacters": 14,
+          "textSha256": "ebae76751549e7f040d0edc12ef320c7e458e4555d5cc71c00ecb20ad9e248fa"
+        },
+        {
+          "tag": "button",
+          "text": "Sync to video time",
+          "ariaLabel": "Sync to video time",
+          "ariaHaspopup": null,
+          "textCharacters": 18,
+          "textSha256": "1e8d76f6b4758c9a8988e27206c2ddbeff35c853c61cf62457131fc7fa4d3bcb"
+        }
+      ],
+      "accessibility": {
+        "snapshotCharacters": 661,
+        "snapshotSha256": "eea7e9541e6b22613a9d2905be3613b0de292fc542e92ec907a5d41a2168648a",
+        "containsFirstSegmentText": true,
+        "containsLastSegmentText": true
+      },
+      "scroll": {
+        "found": false,
+        "selectorHint": null,
+        "clientHeight": 0,
+        "scrollHeight": 0,
+        "samples": []
+      },
+      "languageMenu": {
+        "attempted": false,
+        "opened": false,
+        "optionTexts": []
+      },
+      "domDiagnostics": {
+        "transcriptLikeTags": [
+          "transcript-segment-view-model"
+        ],
+        "transcriptLikeClassNames": [],
+        "visibleTextCharacters": 372,
+        "visibleTextSha256": "a1928625fa27b2413eefc03f198592722f0883838de76419aa03c5690e3737d1"
+      }
+    },
+    "documentMarkerSurvived": true,
+    "targetPlayer": {
+      "videoId": "iG9CE55wbtY",
+      "durationSeconds": 1203,
+      "captionTrackCount": 65,
+      "tracks": [
+        {
+          "languageCode": "af",
+          "name": "Afrikaans",
+          "kind": "manual",
+          "isTranslatable": true
+        },
+        {
+          "languageCode": "sq",
+          "name": "Albanian",
+          "kind": "manual",
+          "isTranslatable": true
+        },
+        {
+          "languageCode": "ar",
+          "name": "Arabic",
+          "kind": "manual",
+          "isTranslatable": true
+        },
+        {
+          "languageCode": "hy",
+          "name": "Armenian",
+          "kind": "manual",
+          "isTranslatable": true
+        },
+        {
+          "languageCode": "az",
+          "name": "Azerbaijani",
+          "kind": "manual",
+          "isTranslatable": true
+        },
+        {
+          "languageCode": "bn",
+          "name": "Bangla",
+          "kind": "manual",
+          "isTranslatable": true
+        },
+        {
+          "languageCode": "eu",
+          "name": "Basque",
+          "kind": "manual",
+          "isTranslatable": true
+        },
+        {
+          "languageCode": "be",
+          "name": "Belarusian",
+          "kind": "manual",
+          "isTranslatable": true
+        },
+        {
+          "languageCode": "bg",
+          "name": "Bulgarian",
+          "kind": "manual",
+          "isTranslatable": true
+        },
+        {
+          "languageCode": "ca",
+          "name": "Catalan",
+          "kind": "manual",
+          "isTranslatable": true
+        },
+        {
+          "languageCode": "ckb",
+          "name": "Central Kurdish",
+          "kind": "manual",
+          "isTranslatable": true
+        },
+        {
+          "languageCode": "zh-CN",
+          "name": "Chinese (China)",
+          "kind": "manual",
+          "isTranslatable": true
+        },
+        {
+          "languageCode": "zh-TW",
+          "name": "Chinese (Taiwan)",
+          "kind": "manual",
+          "isTranslatable": true
+        },
+        {
+          "languageCode": "hr",
+          "name": "Croatian",
+          "kind": "manual",
+          "isTranslatable": true
+        },
+        {
+          "languageCode": "cs",
+          "name": "Czech",
+          "kind": "manual",
+          "isTranslatable": true
+        },
+        {
+          "languageCode": "da",
+          "name": "Danish",
+          "kind": "manual",
+          "isTranslatable": true
+        },
+        {
+          "languageCode": "nl",
+          "name": "Dutch",
+          "kind": "manual",
+          "isTranslatable": true
+        },
+        {
+          "languageCode": "en",
+          "name": "English",
+          "kind": "manual",
+          "isTranslatable": true
+        },
+        {
+          "languageCode": "en",
+          "name": "English (auto-generated)",
+          "kind": "asr",
+          "isTranslatable": true
+        },
+        {
+          "languageCode": "eo",
+          "name": "Esperanto",
+          "kind": "manual",
+          "isTranslatable": true
+        },
+        {
+          "languageCode": "et",
+          "name": "Estonian",
+          "kind": "manual",
+          "isTranslatable": true
+        },
+        {
+          "languageCode": "fil",
+          "name": "Filipino",
+          "kind": "manual",
+          "isTranslatable": true
+        },
+        {
+          "languageCode": "fi",
+          "name": "Finnish",
+          "kind": "manual",
+          "isTranslatable": true
+        },
+        {
+          "languageCode": "fr",
+          "name": "French",
+          "kind": "manual",
+          "isTranslatable": true
+        },
+        {
+          "languageCode": "fr-CA",
+          "name": "French (Canada)",
+          "kind": "manual",
+          "isTranslatable": true
+        },
+        {
+          "languageCode": "gl",
+          "name": "Galician",
+          "kind": "manual",
+          "isTranslatable": true
+        },
+        {
+          "languageCode": "ka",
+          "name": "Georgian",
+          "kind": "manual",
+          "isTranslatable": true
+        },
+        {
+          "languageCode": "de",
+          "name": "German",
+          "kind": "manual",
+          "isTranslatable": true
+        },
+        {
+          "languageCode": "el",
+          "name": "Greek",
+          "kind": "manual",
+          "isTranslatable": true
+        },
+        {
+          "languageCode": "iw",
+          "name": "Hebrew",
+          "kind": "manual",
+          "isTranslatable": true
+        },
+        {
+          "languageCode": "hu",
+          "name": "Hungarian",
+          "kind": "manual",
+          "isTranslatable": true
+        },
+        {
+          "languageCode": "id",
+          "name": "Indonesian",
+          "kind": "manual",
+          "isTranslatable": true
+        },
+        {
+          "languageCode": "inh",
+          "name": "Ingush",
+          "kind": "manual",
+          "isTranslatable": true
+        },
+        {
+          "languageCode": "it",
+          "name": "Italian",
+          "kind": "manual",
+          "isTranslatable": true
+        },
+        {
+          "languageCode": "ja",
+          "name": "Japanese",
+          "kind": "manual",
+          "isTranslatable": true
+        },
+        {
+          "languageCode": "kn",
+          "name": "Kannada",
+          "kind": "manual",
+          "isTranslatable": true
+        },
+        {
+          "languageCode": "ko",
+          "name": "Korean",
+          "kind": "manual",
+          "isTranslatable": true
+        },
+        {
+          "languageCode": "ku",
+          "name": "Kurdish",
+          "kind": "manual",
+          "isTranslatable": true
+        },
+        {
+          "languageCode": "lo",
+          "name": "Lao",
+          "kind": "manual",
+          "isTranslatable": true
+        },
+        {
+          "languageCode": "lv",
+          "name": "Latvian",
+          "kind": "manual",
+          "isTranslatable": true
+        },
+        {
+          "languageCode": "lt",
+          "name": "Lithuanian",
+          "kind": "manual",
+          "isTranslatable": true
+        },
+        {
+          "languageCode": "mk",
+          "name": "Macedonian",
+          "kind": "manual",
+          "isTranslatable": true
+        },
+        {
+          "languageCode": "mr",
+          "name": "Marathi",
+          "kind": "manual",
+          "isTranslatable": true
+        },
+        {
+          "languageCode": "mn",
+          "name": "Mongolian",
+          "kind": "manual",
+          "isTranslatable": true
+        },
+        {
+          "languageCode": "mfe",
+          "name": "Morisyen",
+          "kind": "manual",
+          "isTranslatable": true
+        },
+        {
+          "languageCode": "ne",
+          "name": "Nepali",
+          "kind": "manual",
+          "isTranslatable": true
+        },
+        {
+          "languageCode": "no",
+          "name": "Norwegian",
+          "kind": "manual",
+          "isTranslatable": true
+        },
+        {
+          "languageCode": "fa",
+          "name": "Persian",
+          "kind": "manual",
+          "isTranslatable": true
+        },
+        {
+          "languageCode": "pl",
+          "name": "Polish",
+          "kind": "manual",
+          "isTranslatable": true
+        },
+        {
+          "languageCode": "pt-BR",
+          "name": "Portuguese (Brazil)",
+          "kind": "manual",
+          "isTranslatable": true
+        },
+        {
+          "languageCode": "pt-PT",
+          "name": "Portuguese (Portugal)",
+          "kind": "manual",
+          "isTranslatable": true
+        },
+        {
+          "languageCode": "ro",
+          "name": "Romanian",
+          "kind": "manual",
+          "isTranslatable": true
+        },
+        {
+          "languageCode": "ru",
+          "name": "Russian",
+          "kind": "manual",
+          "isTranslatable": true
+        },
+        {
+          "languageCode": "sr",
+          "name": "Serbian",
+          "kind": "manual",
+          "isTranslatable": true
+        },
+        {
+          "languageCode": "si",
+          "name": "Sinhala",
+          "kind": "manual",
+          "isTranslatable": true
+        },
+        {
+          "languageCode": "sk",
+          "name": "Slovak",
+          "kind": "manual",
+          "isTranslatable": true
+        },
+        {
+          "languageCode": "sl",
+          "name": "Slovenian",
+          "kind": "manual",
+          "isTranslatable": true
+        },
+        {
+          "languageCode": "es",
+          "name": "Spanish",
+          "kind": "manual",
+          "isTranslatable": true
+        },
+        {
+          "languageCode": "sv",
+          "name": "Swedish",
+          "kind": "manual",
+          "isTranslatable": true
+        },
+        {
+          "languageCode": "th",
+          "name": "Thai",
+          "kind": "manual",
+          "isTranslatable": true
+        },
+        {
+          "languageCode": "tr",
+          "name": "Turkish",
+          "kind": "manual",
+          "isTranslatable": true
+        },
+        {
+          "languageCode": "uk",
+          "name": "Ukrainian",
+          "kind": "manual",
+          "isTranslatable": true
+        },
+        {
+          "languageCode": "ur",
+          "name": "Urdu",
+          "kind": "manual",
+          "isTranslatable": true
+        },
+        {
+          "languageCode": "uz",
+          "name": "Uzbek",
+          "kind": "manual",
+          "isTranslatable": true
+        },
+        {
+          "languageCode": "vi",
+          "name": "Vietnamese",
+          "kind": "manual",
+          "isTranslatable": true
+        }
+      ]
+    },
+    "targetStateAtPlayerSwitch": {
+      "url": "https://www.youtube.com/watch?v=iG9CE55wbtY",
+      "title": "Me at the zoo - YouTube",
+      "scrollY": 0,
+      "paused": false,
+      "currentTime": 0,
+      "visibleEngagementPanels": [
+        "unknown"
+      ],
+      "descriptionExpanded": true
+    },
+    "panelAtPlayerSwitch": {
+      "segmentCountBeforeScroll": 3,
+      "segmentCountAfterScroll": 3,
+      "segmentSignatureBefore": "25f4097d114bdc186674395a8183005fa1e769faed3328fe5eaa1e41f50d31b4",
+      "segmentSignatureAfter": "25f4097d114bdc186674395a8183005fa1e769faed3328fe5eaa1e41f50d31b4",
+      "countAndOrderStableAfterScroll": true,
+      "firstSegment": {
+        "timestamp": "0:01",
+        "textCharacters": 126,
+        "textSha256": "d675d2ab56cb476d2f3b4fe5f188c128c12f310e86494dbd2b4a7b7b4a6ac00f"
+      },
+      "lastSegment": {
+        "timestamp": "0:16",
+        "textCharacters": 58,
+        "textSha256": "6bd106efc8a07f0a4c827bc7238d9ec1153f7efb5433a7f3feb81e462bdbbdc6"
+      },
+      "totalTextCharacters": 260,
+      "controls": [
+        {
+          "tag": "button",
+          "text": "",
+          "ariaLabel": "Close",
+          "ariaHaspopup": null,
+          "textCharacters": 0,
+          "textSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "tag": "button",
+          "text": "Chapters",
+          "ariaLabel": "Chapters",
+          "ariaHaspopup": null,
+          "textCharacters": 8,
+          "textSha256": "9831375bc65196d8c923455ec07c27aefa5761edfe4162dde1c7b36eec25a3ad"
+        },
+        {
+          "tag": "button",
+          "text": "Transcript",
+          "ariaLabel": "Transcript",
+          "ariaHaspopup": null,
+          "textCharacters": 10,
+          "textSha256": "721164f0dc7096a8c09be2069c5c689a56df933fc5798822e8134bd3e76771eb"
+        },
+        {
+          "tag": "macro-markers-panel-item-view-model",
+          "text": null,
+          "ariaLabel": null,
+          "ariaHaspopup": null,
+          "textCharacters": 16,
+          "textSha256": "71915c658045d3dd64239d2bf3d43f1ddc97cbfb9a24bb93cf2a9d2be3facd9a"
+        },
+        {
+          "tag": "macro-markers-panel-item-view-model",
+          "text": null,
+          "ariaLabel": null,
+          "ariaHaspopup": null,
+          "textCharacters": 124,
+          "textSha256": "235f97394e7e8bf48dc04f550b3a9b53af8f592fd842e27b03f7ad500de5facf"
+        },
+        {
+          "tag": "macro-markers-panel-item-view-model",
+          "text": null,
+          "ariaLabel": null,
+          "ariaHaspopup": null,
+          "textCharacters": 25,
+          "textSha256": "8ab2f520e8dd48df7f4973f1128c08a3f03d5ea002b5fd179b8200fcb3f78149"
+        },
+        {
+          "tag": "macro-markers-panel-item-view-model",
+          "text": null,
+          "ariaLabel": null,
+          "ariaHaspopup": null,
+          "textCharacters": 74,
+          "textSha256": "2a53940aeaa085a383bf2e302bf39de263c87b9129ef9dd4f19d873ef5eef0d8"
+        },
+        {
+          "tag": "macro-markers-panel-item-view-model",
+          "text": null,
+          "ariaLabel": null,
+          "ariaHaspopup": null,
+          "textCharacters": 56,
+          "textSha256": "952d5467bd0a48c1335b03aa90fb50efef41a821efb8c94405d5055ffaa24218"
+        },
+        {
+          "tag": "macro-markers-panel-item-view-model",
+          "text": null,
+          "ariaLabel": null,
+          "ariaHaspopup": null,
+          "textCharacters": 14,
+          "textSha256": "ebae76751549e7f040d0edc12ef320c7e458e4555d5cc71c00ecb20ad9e248fa"
+        },
+        {
+          "tag": "button",
+          "text": "Sync to video time",
+          "ariaLabel": "Sync to video time",
+          "ariaHaspopup": null,
+          "textCharacters": 18,
+          "textSha256": "1e8d76f6b4758c9a8988e27206c2ddbeff35c853c61cf62457131fc7fa4d3bcb"
+        }
+      ],
+      "accessibility": {
+        "snapshotCharacters": 661,
+        "snapshotSha256": "eea7e9541e6b22613a9d2905be3613b0de292fc542e92ec907a5d41a2168648a",
+        "containsFirstSegmentText": true,
+        "containsLastSegmentText": true
+      },
+      "scroll": {
+        "found": false,
+        "selectorHint": null,
+        "clientHeight": 0,
+        "scrollHeight": 0,
+        "samples": []
+      },
+      "languageMenu": {
+        "attempted": false,
+        "opened": false,
+        "optionTexts": []
+      },
+      "domDiagnostics": {
+        "transcriptLikeTags": [
+          "transcript-segment-view-model"
+        ],
+        "transcriptLikeClassNames": [],
+        "visibleTextCharacters": 372,
+        "visibleTextSha256": "a1928625fa27b2413eefc03f198592722f0883838de76419aa03c5690e3737d1"
+      }
+    },
+    "stalePanelAtPlayerSwitch": true,
+    "settleWaitMs": 884,
+    "targetStateSettled": {
+      "url": "https://www.youtube.com/watch?v=iG9CE55wbtY",
+      "title": "Do schools kill creativity? | Sir Ken Robinson | TED - YouTube",
+      "scrollY": 0,
+      "paused": false,
+      "currentTime": 0.21,
+      "visibleEngagementPanels": [],
+      "descriptionExpanded": false
+    },
+    "panelAtSettledState": null,
+    "stalePanelAtSettledState": false,
+    "targetStateBeforeOpen": {
+      "url": "https://www.youtube.com/watch?v=iG9CE55wbtY",
+      "title": "Do schools kill creativity? | Sir Ken Robinson | TED - YouTube",
+      "scrollY": 0,
+      "paused": false,
+      "currentTime": 10.23,
+      "visibleEngagementPanels": [],
+      "descriptionExpanded": false
+    },
+    "targetOpen": {
+      "clicked": "after-expand:description-structural",
+      "attempts": [
+        "description-structural",
+        "aria-label-en",
+        "role-en",
+        "after-expand:description-structural"
+      ]
+    },
+    "targetPanel": {
+      "segmentCountBeforeScroll": 0,
+      "segmentCountAfterScroll": 0,
+      "segmentSignatureBefore": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "segmentSignatureAfter": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "countAndOrderStableAfterScroll": true,
+      "firstSegment": null,
+      "lastSegment": null,
+      "totalTextCharacters": 0,
+      "controls": [
+        {
+          "tag": "button",
+          "text": "",
+          "ariaLabel": "More actions",
+          "ariaHaspopup": null,
+          "textCharacters": 0,
+          "textSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "tag": "button",
+          "text": "",
+          "ariaLabel": "Close",
+          "ariaHaspopup": null,
+          "textCharacters": 0,
+          "textSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "tag": "button",
+          "text": "Chapters",
+          "ariaLabel": "Chapters",
+          "ariaHaspopup": null,
+          "textCharacters": 8,
+          "textSha256": "9831375bc65196d8c923455ec07c27aefa5761edfe4162dde1c7b36eec25a3ad"
+        },
+        {
+          "tag": "button",
+          "text": "Transcript",
+          "ariaLabel": "Transcript",
+          "ariaHaspopup": null,
+          "textCharacters": 10,
+          "textSha256": "721164f0dc7096a8c09be2069c5c689a56df933fc5798822e8134bd3e76771eb"
+        }
+      ],
+      "accessibility": {
+        "snapshotCharacters": 138,
+        "snapshotSha256": "aac04c61415b4f57b21251af06a7152aad89f562f9a30333ef0fe0057faa1f5d",
+        "containsFirstSegmentText": false,
+        "containsLastSegmentText": false
+      },
+      "scroll": {
+        "found": false,
+        "selectorHint": null,
+        "clientHeight": 0,
+        "scrollHeight": 0,
+        "samples": []
+      },
+      "languageMenu": {
+        "attempted": false,
+        "opened": false,
+        "optionTexts": []
+      },
+      "domDiagnostics": {
+        "transcriptLikeTags": [],
+        "transcriptLikeClassNames": [],
+        "visibleTextCharacters": 33,
+        "visibleTextSha256": "08a94b31c0d1b6b3fe1607e232cb42c477b5a46fb5bfcc09bd88cb1e6413e156"
+      }
+    },
+    "targetStateAfterOpen": {
+      "url": "https://www.youtube.com/watch?v=iG9CE55wbtY",
+      "title": "Do schools kill creativity? | Sir Ken Robinson | TED - YouTube",
+      "scrollY": 0,
+      "paused": false,
+      "currentTime": 18.84,
+      "visibleEngagementPanels": [
+        "engagement-panel-searchable-transcript"
+      ],
+      "descriptionExpanded": true
+    },
+    "getTranscriptResponseStatuses": [
+      400
+    ]
+  }
+}

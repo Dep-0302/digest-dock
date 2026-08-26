@@ -1,0 +1,21 @@
+{
+  "capturedAt": "2026-08-18T08:36:24.700153+00:00",
+  "system": {
+    "pythonExecutable": "/Library/Developer/CommandLineTools/usr/bin/python3",
+    "pythonVersion": "Python 3.9.6",
+    "ytDlpOnPath": null,
+    "youtubeTranscriptApiImportable": false
+  },
+  "isolatedPython312Venv": {
+    "pythonVersion": "Python 3.12.13",
+    "ytDlpVersion": "2026.07.04",
+    "ytDlpRequiresPython": ">=3.10",
+    "youtubeTranscriptApiVersion": "1.2.4",
+    "youtubeTranscriptApiRequiresPython": ">=3.8,<3.15"
+  },
+  "python39CompatibilityObservation": {
+    "pythonVersion": "Python 3.9.6",
+    "ytDlpVersionResolvedOn2026-08-18": "2025.10.14",
+    "note": "The same unconstrained install on system Python 3.9 resolved an older yt-dlp than Python 3.12."
+  }
+}

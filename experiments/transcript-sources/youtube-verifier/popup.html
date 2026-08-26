@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>YouTube Subtitle Verifier</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <p class="eyebrow">ISOLATED MV3 PROBE</p>
+        <h1>YouTube 字幕验证器</h1>
+        <p class="intro">无 API Key、无 Cookie，依次测试四个非 WEB client。</p>
+      </header>
+
+      <section class="controls" aria-label="验证参数">
+        <label>
+          语言代码
+          <input id="languageInput" value="en" maxlength="20" spellcheck="false" />
+        </label>
+        <label>
+          轨道策略
+          <select id="modeSelect">
+            <option value="manual-first">人工优先，再 ASR</option>
+            <option value="manual">只要人工字幕</option>
+            <option value="asr">只要自动字幕</option>
+            <option value="any">该语言任意轨道</option>
+          </select>
+        </label>
+        <button id="runButton" type="button">验证当前视频</button>
+      </section>
+
+      <p id="status" class="status" role="status" aria-live="polite">等待验证…</p>
+
+      <section id="successCard" class="card" hidden>
+        <h2>取得非空字幕正文</h2>
+        <dl>
+          <div><dt>Video ID</dt><dd id="videoIdValue"></dd></div>
+          <div><dt>Client</dt><dd id="clientValue"></dd></div>
+          <div><dt>轨道</dt><dd id="trackValue"></dd></div>
+          <div><dt>片段数</dt><dd id="segmentCountValue"></dd></div>
+        </dl>
+        <h3>前 5 段（仅当前弹窗内存）</h3>
+        <pre id="sampleOutput" class="sample"></pre>
+      </section>
+
+      <section class="card">
+        <div class="card-heading">
+          <h2>Client 尝试</h2>
+          <span>非空正文才算成功</span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Client</th><th>轨</th><th>结果</th><th>正文尝试</th></tr>
+            </thead>
+            <tbody id="attemptRows">
+              <tr><td colspan="4" class="muted">尚未运行</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-heading">
+          <h2>脱敏诊断</h2>
+          <button id="copyButton" class="secondary" type="button" disabled>复制</button>
+        </div>
+        <textarea id="diagnosticOutput" rows="9" readonly></textarea>
+        <p class="privacy">不包含字幕正文、字幕 URL、查询串、签名、Token 或 Cookie。</p>
+      </section>
+    </main>
+
+    <script src="verifier.js"></script>
+    <script src="popup.js"></script>
+  </body>
+</html>

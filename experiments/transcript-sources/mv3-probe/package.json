@@ -1,0 +1,12 @@
+{
+  "name": "youtube-digest-mv3-transcript-probe",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "probe": "node ./run.mjs"
+  },
+  "dependencies": {
+    "playwright-core": "1.62.1"
+  }
+}

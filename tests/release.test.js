@@ -15,6 +15,10 @@ test("manifest uses minimized install-time permissions", () => {
   assert.equal(manifest.minimum_chrome_version, "116");
   assert.equal(packageJson.version, manifest.version);
   assert.equal(manifest.options_ui.page, "options.html");
+  assert.deepEqual(
+    [...manifest.permissions].sort(),
+    ["sidePanel", "storage", "tabs", "scripting"].sort(),
+  );
   assert.ok(!manifest.permissions.includes("activeTab"));
   assert.ok(!manifest.permissions.includes("cookies"));
   assert.ok(!manifest.permissions.includes("downloads"));
@@ -76,7 +80,12 @@ test("cross-platform runtime dependencies are included in the release surface", 
     /public_allowlist=\(([\s\S]*?)\n\)/,
   )?.[1];
   assert.ok(publicAllowlist, "public release allowlist must be present");
-  assert.doesNotMatch(publicAllowlist, /"(?:poc|tests)\//);
+  assert.doesNotMatch(publicAllowlist, /"(?:poc|tests|experiments)\//);
+  assert.doesNotMatch(
+    publicAllowlist,
+    /(?:local-helper|hosted-api-slot|passive-capture|node-libraries)/,
+  );
+  assert.match(releaseCheck, /mjs\|cjs\|py/);
   assert.doesNotMatch(
     [background, read("options.js")].join("\n"),
     /chrome\.downloads\b/,

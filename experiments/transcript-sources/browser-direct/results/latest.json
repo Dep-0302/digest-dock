@@ -1,0 +1,1495 @@
+{
+  "schemaVersion": 1,
+  "runAt": "2026-08-18T08:41:05.339Z",
+  "environment": {
+    "browser": "system Google Chrome via Playwright, headless",
+    "browserProfile": "Playwright-created temporary profile",
+    "authentication": "signed out; empty initial storageState; auth cookie names recorded per case",
+    "locale": "en-US",
+    "timezone": "America/Los_Angeles",
+    "fetchCredentials": "omit",
+    "productionExtensionLoaded": false
+  },
+  "cases": [
+    {
+      "id": "manual-english-short",
+      "purpose": "Short authored-English happy path",
+      "videoId": "jNQXAC9IVRw",
+      "elapsedMs": 8245,
+      "page": {
+        "title": "Me at the zoo",
+        "playabilityStatus": "OK",
+        "playabilityReason": null,
+        "playerPresent": true
+      },
+      "authentication": {
+        "initialStorageStateWasEmpty": true,
+        "authCookieNames": [],
+        "anonymousCookieNames": [
+          "GPS",
+          "PREF",
+          "VISITOR_INFO1_LIVE",
+          "VISITOR_PRIVACY_METADATA",
+          "YSC",
+          "__Secure-ROLLOUT_TOKEN",
+          "__Secure-YNID"
+        ]
+      },
+      "trackDiscovery": {
+        "captionTrackCount": 2,
+        "desiredTrack": {
+          "languageCode": "en",
+          "kind": "manual"
+        },
+        "desiredTrackFound": true,
+        "selectedTrack": {
+          "languageCode": "en",
+          "kind": "manual",
+          "vssId": ".en",
+          "name": "English",
+          "baseUrlPresent": true
+        },
+        "tracks": [
+          {
+            "languageCode": "en",
+            "kind": "manual",
+            "vssId": ".en",
+            "name": "English",
+            "baseUrlPresent": true
+          },
+          {
+            "languageCode": "de",
+            "kind": "manual",
+            "vssId": ".de",
+            "name": "German",
+            "baseUrlPresent": true
+          }
+        ],
+        "baseUrlSummary": {
+          "origin": "https://www.youtube.com",
+          "pathname": "/api/timedtext",
+          "videoId": "jNQXAC9IVRw",
+          "languageCode": "en",
+          "kind": "manual",
+          "format": "default",
+          "client": null,
+          "hasPot": false,
+          "potLength": 0,
+          "hasPotc": false,
+          "hasSignature": true,
+          "paramNames": [
+            "ei",
+            "exp",
+            "expire",
+            "hl",
+            "ip",
+            "ipbits",
+            "key",
+            "lang",
+            "opi",
+            "signature",
+            "sparams",
+            "v",
+            "xoaf",
+            "xowf"
+          ]
+        }
+      },
+      "captionActivation": {
+        "matchingNativeRequestPresentBeforeAction": true,
+        "actions": [],
+        "ccBefore": {
+          "buttonPresent": true,
+          "ariaPressed": "true",
+          "title": "Subtitles/closed captions unavailable",
+          "subtitlesOn": true,
+          "visibleCaptionContainerCount": 1
+        },
+        "ccAfter": {
+          "buttonPresent": true,
+          "ariaPressed": "true",
+          "title": "Subtitles/closed captions unavailable",
+          "subtitlesOn": true,
+          "visibleCaptionContainerCount": 1
+        },
+        "visibleSideEffect": false
+      },
+      "nativeTimedtextBeforeProbes": [
+        {
+          "origin": "https://www.youtube.com",
+          "pathname": "/api/timedtext",
+          "videoId": "jNQXAC9IVRw",
+          "languageCode": "en",
+          "kind": "manual",
+          "format": "json3",
+          "client": "WEB",
+          "hasPot": true,
+          "potLength": 124,
+          "hasPotc": true,
+          "hasSignature": true,
+          "paramNames": [
+            "c",
+            "cbr",
+            "cbrand",
+            "cbrver",
+            "cos",
+            "cosver",
+            "cplatform",
+            "cplayer",
+            "cver",
+            "ei",
+            "exp",
+            "expire",
+            "fmt",
+            "hl",
+            "ip",
+            "ipbits",
+            "key",
+            "lang",
+            "opi",
+            "pot",
+            "potc",
+            "signature",
+            "sparams",
+            "v",
+            "xoaf",
+            "xobt",
+            "xorb",
+            "xovt",
+            "xowf"
+          ],
+          "status": 200,
+          "contentType": "text/html; charset=UTF-8",
+          "bodyBytes": 0,
+          "bodyReadError": null
+        }
+      ],
+      "nativeMatchingTimedtext": {
+        "origin": "https://www.youtube.com",
+        "pathname": "/api/timedtext",
+        "videoId": "jNQXAC9IVRw",
+        "languageCode": "en",
+        "kind": "manual",
+        "format": "json3",
+        "client": "WEB",
+        "hasPot": true,
+        "potLength": 124,
+        "hasPotc": true,
+        "hasSignature": true,
+        "paramNames": [
+          "c",
+          "cbr",
+          "cbrand",
+          "cbrver",
+          "cos",
+          "cosver",
+          "cplatform",
+          "cplayer",
+          "cver",
+          "ei",
+          "exp",
+          "expire",
+          "fmt",
+          "hl",
+          "ip",
+          "ipbits",
+          "key",
+          "lang",
+          "opi",
+          "pot",
+          "potc",
+          "signature",
+          "sparams",
+          "v",
+          "xoaf",
+          "xobt",
+          "xorb",
+          "xovt",
+          "xowf"
+        ],
+        "status": 200,
+        "contentType": "text/html; charset=UTF-8",
+        "bodyBytes": 0,
+        "bodyReadError": null
+      },
+      "resourceTimingBeforeProbes": [],
+      "probes": [
+        {
+          "name": "raw-baseUrl-default",
+          "ok": true,
+          "status": 200,
+          "redirected": false,
+          "contentType": "text/html; charset=UTF-8",
+          "contentLengthHeader": "0",
+          "bodyBytes": 0,
+          "elapsedMs": 299,
+          "shape": {
+            "type": "empty",
+            "usable": false
+          }
+        },
+        {
+          "name": "raw-baseUrl-json3",
+          "ok": true,
+          "status": 200,
+          "redirected": false,
+          "contentType": "text/html; charset=UTF-8",
+          "contentLengthHeader": "0",
+          "bodyBytes": 0,
+          "elapsedMs": 298,
+          "shape": {
+            "type": "empty",
+            "usable": false
+          }
+        },
+        {
+          "name": "raw-baseUrl-srv3",
+          "ok": true,
+          "status": 200,
+          "redirected": false,
+          "contentType": "text/html; charset=UTF-8",
+          "contentLengthHeader": "0",
+          "bodyBytes": 0,
+          "elapsedMs": 298,
+          "shape": {
+            "type": "empty",
+            "usable": false
+          }
+        },
+        {
+          "name": "captured-exact-pot-and-client",
+          "ok": true,
+          "status": 200,
+          "redirected": false,
+          "contentType": "text/html; charset=UTF-8",
+          "contentLengthHeader": "0",
+          "bodyBytes": 0,
+          "elapsedMs": 307,
+          "shape": {
+            "type": "empty",
+            "usable": false
+          }
+        },
+        {
+          "name": "captured-minus-pot",
+          "ok": true,
+          "status": 200,
+          "redirected": false,
+          "contentType": "text/html; charset=UTF-8",
+          "contentLengthHeader": "0",
+          "bodyBytes": 0,
+          "elapsedMs": 298,
+          "shape": {
+            "type": "empty",
+            "usable": false
+          }
+        },
+        {
+          "name": "raw-plus-pot-only-json3",
+          "ok": true,
+          "status": 200,
+          "redirected": false,
+          "contentType": "text/html; charset=UTF-8",
+          "contentLengthHeader": "0",
+          "bodyBytes": 0,
+          "elapsedMs": 302,
+          "shape": {
+            "type": "empty",
+            "usable": false
+          }
+        },
+        {
+          "name": "raw-plus-pot-and-client-json3",
+          "ok": true,
+          "status": 200,
+          "redirected": false,
+          "contentType": "text/html; charset=UTF-8",
+          "contentLengthHeader": "0",
+          "bodyBytes": 0,
+          "elapsedMs": 298,
+          "shape": {
+            "type": "empty",
+            "usable": false
+          }
+        },
+        {
+          "name": "captured-minus-client-keep-pot",
+          "ok": true,
+          "status": 200,
+          "redirected": false,
+          "contentType": "text/html; charset=UTF-8",
+          "contentLengthHeader": "0",
+          "bodyBytes": 0,
+          "elapsedMs": 298,
+          "shape": {
+            "type": "empty",
+            "usable": false
+          }
+        }
+      ],
+      "potAssessment": {
+        "baseUrlAdvertisesPot": false,
+        "baseUrlAdvertisesClient": false,
+        "playerRequestInjectedPot": true,
+        "playerRequestInjectedClient": true,
+        "rawJson3Usable": false,
+        "rawPlusPotOnlyUsable": false,
+        "rawPlusPotAndClientUsable": false,
+        "capturedExactUsable": false,
+        "capturedMinusPotUsable": false,
+        "observedEffect": "tokenized-request-did-not-recover-body"
+      }
+    },
+    {
+      "id": "duplicate-language-select-asr",
+      "purpose": "Explicitly select ASR when authored English also exists",
+      "videoId": "iG9CE55wbtY",
+      "elapsedMs": 12361,
+      "page": {
+        "title": "Do schools kill creativity? | Sir Ken Robinson | TED",
+        "playabilityStatus": "OK",
+        "playabilityReason": null,
+        "playerPresent": true
+      },
+      "authentication": {
+        "initialStorageStateWasEmpty": true,
+        "authCookieNames": [],
+        "anonymousCookieNames": [
+          "GPS",
+          "PREF",
+          "VISITOR_INFO1_LIVE",
+          "VISITOR_PRIVACY_METADATA",
+          "YSC",
+          "__Secure-ROLLOUT_TOKEN",
+          "__Secure-YNID"
+        ]
+      },
+      "trackDiscovery": {
+        "captionTrackCount": 65,
+        "desiredTrack": {
+          "languageCode": "en",
+          "kind": "asr"
+        },
+        "desiredTrackFound": true,
+        "selectedTrack": {
+          "languageCode": "en",
+          "kind": "asr",
+          "vssId": "a.en",
+          "name": "English (auto-generated)",
+          "baseUrlPresent": true
+        },
+        "tracks": [
+          {
+            "languageCode": "af",
+            "kind": "manual",
+            "vssId": ".af",
+            "name": "Afrikaans",
+            "baseUrlPresent": true
+          },
+          {
+            "languageCode": "sq",
+            "kind": "manual",
+            "vssId": ".sq",
+            "name": "Albanian",
+            "baseUrlPresent": true
+          },
+          {
+            "languageCode": "ar",
+            "kind": "manual",
+            "vssId": ".ar",
+            "name": "Arabic",
+            "baseUrlPresent": true
+          },
+          {
+            "languageCode": "hy",
+            "kind": "manual",
+            "vssId": ".hy",
+            "name": "Armenian",
+            "baseUrlPresent": true
+          },
+          {
+            "languageCode": "az",
+            "kind": "manual",
+            "vssId": ".az",
+            "name": "Azerbaijani",
+            "baseUrlPresent": true
+          },
+          {
+            "languageCode": "bn",
+            "kind": "manual",
+            "vssId": ".bn",
+            "name": "Bangla",
+            "baseUrlPresent": true
+          },
+          {
+            "languageCode": "eu",
+            "kind": "manual",
+            "vssId": ".eu",
+            "name": "Basque",
+            "baseUrlPresent": true
+          },
+          {
+            "languageCode": "be",
+            "kind": "manual",
+            "vssId": ".be",
+            "name": "Belarusian",
+            "baseUrlPresent": true
+          },
+          {
+            "languageCode": "bg",
+            "kind": "manual",
+            "vssId": ".bg",
+            "name": "Bulgarian",
+            "baseUrlPresent": true
+          },
+          {
+            "languageCode": "ca",
+            "kind": "manual",
+            "vssId": ".ca",
+            "name": "Catalan",
+            "baseUrlPresent": true
+          },
+          {
+            "languageCode": "ckb",
+            "kind": "manual",
+            "vssId": ".ckb",
+            "name": "Central Kurdish",
+            "baseUrlPresent": true
+          },
+          {
+            "languageCode": "zh-CN",
+            "kind": "manual",
+            "vssId": ".zh-CN",
+            "name": "Chinese (China)",
+            "baseUrlPresent": true
+          },
+          {
+            "languageCode": "zh-TW",
+            "kind": "manual",
+            "vssId": ".zh-TW",
+            "name": "Chinese (Taiwan)",
+            "baseUrlPresent": true
+          },
+          {
+            "languageCode": "hr",
+            "kind": "manual",
+            "vssId": ".hr",
+            "name": "Croatian",
+            "baseUrlPresent": true
+          },
+          {
+            "languageCode": "cs",
+            "kind": "manual",
+            "vssId": ".cs",
+            "name": "Czech",
+            "baseUrlPresent": true
+          },
+          {
+            "languageCode": "da",
+            "kind": "manual",
+            "vssId": ".da",
+            "name": "Danish",
+            "baseUrlPresent": true
+          },
+          {
+            "languageCode": "nl",
+            "kind": "manual",
+            "vssId": ".nl",
+            "name": "Dutch",
+            "baseUrlPresent": true
+          },
+          {
+            "languageCode": "en",
+            "kind": "manual",
+            "vssId": ".en",
+            "name": "English",
+            "baseUrlPresent": true
+          },
+          {
+            "languageCode": "en",
+            "kind": "asr",
+            "vssId": "a.en",
+            "name": "English (auto-generated)",
+            "baseUrlPresent": true
+          },
+          {
+            "languageCode": "eo",
+            "kind": "manual",
+            "vssId": ".eo",
+            "name": "Esperanto",
+            "baseUrlPresent": true
+          },
+          {
+            "languageCode": "et",
+            "kind": "manual",
+            "vssId": ".et",
+            "name": "Estonian",
+            "baseUrlPresent": true
+          },
+          {
+            "languageCode": "fil",
+            "kind": "manual",
+            "vssId": ".fil",
+            "name": "Filipino",
+            "baseUrlPresent": true
+          },
+          {
+            "languageCode": "fi",
+            "kind": "manual",
+            "vssId": ".fi",
+            "name": "Finnish",
+            "baseUrlPresent": true
+          },
+          {
+            "languageCode": "fr",
+            "kind": "manual",
+            "vssId": ".fr",
+            "name": "French",
+            "baseUrlPresent": true
+          },
+          {
+            "languageCode": "fr-CA",
+            "kind": "manual",
+            "vssId": ".fr-CA",
+            "name": "French (Canada)",
+            "baseUrlPresent": true
+          },
+          {
+            "languageCode": "gl",
+            "kind": "manual",
+            "vssId": ".gl",
+            "name": "Galician",
+            "baseUrlPresent": true
+          },
+          {
+            "languageCode": "ka",
+            "kind": "manual",
+            "vssId": ".ka",
+            "name": "Georgian",
+            "baseUrlPresent": true
+          },
+          {
+            "languageCode": "de",
+            "kind": "manual",
+            "vssId": ".de",
+            "name": "German",
+            "baseUrlPresent": true
+          },
+          {
+            "languageCode": "el",
+            "kind": "manual",
+            "vssId": ".el",
+            "name": "Greek",
+            "baseUrlPresent": true
+          },
+          {
+            "languageCode": "iw",
+            "kind": "manual",
+            "vssId": ".iw",
+            "name": "Hebrew",
+            "baseUrlPresent": true
+          },
+          {
+            "languageCode": "hu",
+            "kind": "manual",
+            "vssId": ".hu",
+            "name": "Hungarian",
+            "baseUrlPresent": true
+          },
+          {
+            "languageCode": "id",
+            "kind": "manual",
+            "vssId": ".id",
+            "name": "Indonesian",
+            "baseUrlPresent": true
+          },
+          {
+            "languageCode": "inh",
+            "kind": "manual",
+            "vssId": ".inh",
+            "name": "Ingush",
+            "baseUrlPresent": true
+          },
+          {
+            "languageCode": "it",
+            "kind": "manual",
+            "vssId": ".it",
+            "name": "Italian",
+            "baseUrlPresent": true
+          },
+          {
+            "languageCode": "ja",
+            "kind": "manual",
+            "vssId": ".ja",
+            "name": "Japanese",
+            "baseUrlPresent": true
+          },
+          {
+            "languageCode": "kn",
+            "kind": "manual",
+            "vssId": ".kn",
+            "name": "Kannada",
+            "baseUrlPresent": true
+          },
+          {
+            "languageCode": "ko",
+            "kind": "manual",
+            "vssId": ".ko",
+            "name": "Korean",
+            "baseUrlPresent": true
+          },
+          {
+            "languageCode": "ku",
+            "kind": "manual",
+            "vssId": ".ku",
+            "name": "Kurdish",
+            "baseUrlPresent": true
+          },
+          {
+            "languageCode": "lo",
+            "kind": "manual",
+            "vssId": ".lo",
+            "name": "Lao",
+            "baseUrlPresent": true
+          },
+          {
+            "languageCode": "lv",
+            "kind": "manual",
+            "vssId": ".lv",
+            "name": "Latvian",
+            "baseUrlPresent": true
+          },
+          {
+            "languageCode": "lt",
+            "kind": "manual",
+            "vssId": ".lt",
+            "name": "Lithuanian",
+            "baseUrlPresent": true
+          },
+          {
+            "languageCode": "mk",
+            "kind": "manual",
+            "vssId": ".mk",
+            "name": "Macedonian",
+            "baseUrlPresent": true
+          },
+          {
+            "languageCode": "mr",
+            "kind": "manual",
+            "vssId": ".mr",
+            "name": "Marathi",
+            "baseUrlPresent": true
+          },
+          {
+            "languageCode": "mn",
+            "kind": "manual",
+            "vssId": ".mn",
+            "name": "Mongolian",
+            "baseUrlPresent": true
+          },
+          {
+            "languageCode": "mfe",
+            "kind": "manual",
+            "vssId": ".mfe",
+            "name": "Morisyen",
+            "baseUrlPresent": true
+          },
+          {
+            "languageCode": "ne",
+            "kind": "manual",
+            "vssId": ".ne",
+            "name": "Nepali",
+            "baseUrlPresent": true
+          },
+          {
+            "languageCode": "no",
+            "kind": "manual",
+            "vssId": ".no",
+            "name": "Norwegian",
+            "baseUrlPresent": true
+          },
+          {
+            "languageCode": "fa",
+            "kind": "manual",
+            "vssId": ".fa",
+            "name": "Persian",
+            "baseUrlPresent": true
+          },
+          {
+            "languageCode": "pl",
+            "kind": "manual",
+            "vssId": ".pl",
+            "name": "Polish",
+            "baseUrlPresent": true
+          },
+          {
+            "languageCode": "pt-BR",
+            "kind": "manual",
+            "vssId": ".pt-BR",
+            "name": "Portuguese (Brazil)",
+            "baseUrlPresent": true
+          },
+          {
+            "languageCode": "pt-PT",
+            "kind": "manual",
+            "vssId": ".pt-PT",
+            "name": "Portuguese (Portugal)",
+            "baseUrlPresent": true
+          },
+          {
+            "languageCode": "ro",
+            "kind": "manual",
+            "vssId": ".ro",
+            "name": "Romanian",
+            "baseUrlPresent": true
+          },
+          {
+            "languageCode": "ru",
+            "kind": "manual",
+            "vssId": ".ru",
+            "name": "Russian",
+            "baseUrlPresent": true
+          },
+          {
+            "languageCode": "sr",
+            "kind": "manual",
+            "vssId": ".sr",
+            "name": "Serbian",
+            "baseUrlPresent": true
+          },
+          {
+            "languageCode": "si",
+            "kind": "manual",
+            "vssId": ".si",
+            "name": "Sinhala",
+            "baseUrlPresent": true
+          },
+          {
+            "languageCode": "sk",
+            "kind": "manual",
+            "vssId": ".sk",
+            "name": "Slovak",
+            "baseUrlPresent": true
+          },
+          {
+            "languageCode": "sl",
+            "kind": "manual",
+            "vssId": ".sl",
+            "name": "Slovenian",
+            "baseUrlPresent": true
+          },
+          {
+            "languageCode": "es",
+            "kind": "manual",
+            "vssId": ".es",
+            "name": "Spanish",
+            "baseUrlPresent": true
+          },
+          {
+            "languageCode": "sv",
+            "kind": "manual",
+            "vssId": ".sv",
+            "name": "Swedish",
+            "baseUrlPresent": true
+          },
+          {
+            "languageCode": "th",
+            "kind": "manual",
+            "vssId": ".th",
+            "name": "Thai",
+            "baseUrlPresent": true
+          },
+          {
+            "languageCode": "tr",
+            "kind": "manual",
+            "vssId": ".tr",
+            "name": "Turkish",
+            "baseUrlPresent": true
+          },
+          {
+            "languageCode": "uk",
+            "kind": "manual",
+            "vssId": ".uk",
+            "name": "Ukrainian",
+            "baseUrlPresent": true
+          },
+          {
+            "languageCode": "ur",
+            "kind": "manual",
+            "vssId": ".ur",
+            "name": "Urdu",
+            "baseUrlPresent": true
+          },
+          {
+            "languageCode": "uz",
+            "kind": "manual",
+            "vssId": ".uz",
+            "name": "Uzbek",
+            "baseUrlPresent": true
+          },
+          {
+            "languageCode": "vi",
+            "kind": "manual",
+            "vssId": ".vi",
+            "name": "Vietnamese",
+            "baseUrlPresent": true
+          }
+        ],
+        "baseUrlSummary": {
+          "origin": "https://www.youtube.com",
+          "pathname": "/api/timedtext",
+          "videoId": "iG9CE55wbtY",
+          "languageCode": "en",
+          "kind": "asr",
+          "format": "default",
+          "client": null,
+          "hasPot": false,
+          "potLength": 0,
+          "hasPotc": false,
+          "hasSignature": true,
+          "paramNames": [
+            "caps",
+            "ei",
+            "exp",
+            "expire",
+            "hl",
+            "ip",
+            "ipbits",
+            "key",
+            "kind",
+            "lang",
+            "opi",
+            "signature",
+            "sparams",
+            "v",
+            "xoaf",
+            "xowf"
+          ]
+        }
+      },
+      "captionActivation": {
+        "matchingNativeRequestPresentBeforeAction": false,
+        "actions": [
+          {
+            "type": "player-setOption-track",
+            "attempted": true,
+            "reason": null,
+            "before": {
+              "languageCode": "en",
+              "kind": "manual",
+              "vssId": ".en",
+              "isServable": false
+            },
+            "after": {
+              "languageCode": "en",
+              "kind": "manual",
+              "vssId": ".en",
+              "isServable": false
+            },
+            "accepted": false
+          },
+          {
+            "type": "cc-button-click-skipped",
+            "attempted": false,
+            "clicked": false,
+            "reason": "subtitles-already-on-click-would-disable"
+          }
+        ],
+        "ccBefore": {
+          "buttonPresent": true,
+          "ariaPressed": "true",
+          "title": "Subtitles/closed captions unavailable",
+          "subtitlesOn": true,
+          "visibleCaptionContainerCount": 1
+        },
+        "ccAfter": {
+          "buttonPresent": true,
+          "ariaPressed": "true",
+          "title": "Subtitles/closed captions unavailable",
+          "subtitlesOn": true,
+          "visibleCaptionContainerCount": 1
+        },
+        "visibleSideEffect": false
+      },
+      "nativeTimedtextBeforeProbes": [
+        {
+          "origin": "https://www.youtube.com",
+          "pathname": "/api/timedtext",
+          "videoId": "iG9CE55wbtY",
+          "languageCode": "en",
+          "kind": "manual",
+          "format": "json3",
+          "client": "WEB",
+          "hasPot": true,
+          "potLength": 124,
+          "hasPotc": true,
+          "hasSignature": true,
+          "paramNames": [
+            "c",
+            "caps",
+            "cbr",
+            "cbrand",
+            "cbrver",
+            "cos",
+            "cosver",
+            "cplatform",
+            "cplayer",
+            "cver",
+            "ei",
+            "exp",
+            "expire",
+            "fmt",
+            "hl",
+            "ip",
+            "ipbits",
+            "key",
+            "lang",
+            "opi",
+            "pot",
+            "potc",
+            "signature",
+            "sparams",
+            "v",
+            "xoaf",
+            "xobt",
+            "xorb",
+            "xovt",
+            "xowf"
+          ],
+          "status": 200,
+          "contentType": "text/html; charset=UTF-8",
+          "bodyBytes": 0,
+          "bodyReadError": null
+        }
+      ],
+      "nativeMatchingTimedtext": null,
+      "resourceTimingBeforeProbes": [],
+      "probes": [
+        {
+          "name": "raw-baseUrl-default",
+          "ok": true,
+          "status": 200,
+          "redirected": false,
+          "contentType": "text/html; charset=UTF-8",
+          "contentLengthHeader": "0",
+          "bodyBytes": 0,
+          "elapsedMs": 290,
+          "shape": {
+            "type": "empty",
+            "usable": false
+          }
+        },
+        {
+          "name": "raw-baseUrl-json3",
+          "ok": true,
+          "status": 200,
+          "redirected": false,
+          "contentType": "text/html; charset=UTF-8",
+          "contentLengthHeader": "0",
+          "bodyBytes": 0,
+          "elapsedMs": 280,
+          "shape": {
+            "type": "empty",
+            "usable": false
+          }
+        },
+        {
+          "name": "raw-baseUrl-srv3",
+          "ok": true,
+          "status": 200,
+          "redirected": false,
+          "contentType": "text/html; charset=UTF-8",
+          "contentLengthHeader": "0",
+          "bodyBytes": 0,
+          "elapsedMs": 361,
+          "shape": {
+            "type": "empty",
+            "usable": false
+          }
+        }
+      ],
+      "potAssessment": {
+        "baseUrlAdvertisesPot": false,
+        "baseUrlAdvertisesClient": false,
+        "playerRequestInjectedPot": false,
+        "playerRequestInjectedClient": false,
+        "rawJson3Usable": false,
+        "rawPlusPotOnlyUsable": false,
+        "rawPlusPotAndClientUsable": false,
+        "capturedExactUsable": false,
+        "capturedMinusPotUsable": false,
+        "observedEffect": "not-testable"
+      }
+    },
+    {
+      "id": "asr-only-long",
+      "purpose": "Separate track discovery from long ASR transcript retrieval",
+      "videoId": "KLDVxx4TqcE",
+      "elapsedMs": 8236,
+      "page": {
+        "title": "The Future of Human Intelligence: Education, AI, & Creativity | Sir Ken Robinson (Full Keynote)",
+        "playabilityStatus": "OK",
+        "playabilityReason": null,
+        "playerPresent": true
+      },
+      "authentication": {
+        "initialStorageStateWasEmpty": true,
+        "authCookieNames": [],
+        "anonymousCookieNames": [
+          "GPS",
+          "PREF",
+          "VISITOR_INFO1_LIVE",
+          "VISITOR_PRIVACY_METADATA",
+          "YSC",
+          "__Secure-ROLLOUT_TOKEN",
+          "__Secure-YNID"
+        ]
+      },
+      "trackDiscovery": {
+        "captionTrackCount": 1,
+        "desiredTrack": {
+          "languageCode": "en",
+          "kind": "asr"
+        },
+        "desiredTrackFound": true,
+        "selectedTrack": {
+          "languageCode": "en",
+          "kind": "asr",
+          "vssId": "a.en",
+          "name": "English (auto-generated)",
+          "baseUrlPresent": true
+        },
+        "tracks": [
+          {
+            "languageCode": "en",
+            "kind": "asr",
+            "vssId": "a.en",
+            "name": "English (auto-generated)",
+            "baseUrlPresent": true
+          }
+        ],
+        "baseUrlSummary": {
+          "origin": "https://www.youtube.com",
+          "pathname": "/api/timedtext",
+          "videoId": "KLDVxx4TqcE",
+          "languageCode": "en",
+          "kind": "asr",
+          "format": "default",
+          "client": null,
+          "hasPot": false,
+          "potLength": 0,
+          "hasPotc": false,
+          "hasSignature": true,
+          "paramNames": [
+            "caps",
+            "ei",
+            "exp",
+            "expire",
+            "hl",
+            "ip",
+            "ipbits",
+            "key",
+            "kind",
+            "lang",
+            "opi",
+            "signature",
+            "sparams",
+            "v",
+            "xoaf",
+            "xospf",
+            "xowf"
+          ]
+        }
+      },
+      "captionActivation": {
+        "matchingNativeRequestPresentBeforeAction": true,
+        "actions": [],
+        "ccBefore": {
+          "buttonPresent": true,
+          "ariaPressed": "true",
+          "title": "Subtitles/closed captions unavailable",
+          "subtitlesOn": true,
+          "visibleCaptionContainerCount": 1
+        },
+        "ccAfter": {
+          "buttonPresent": true,
+          "ariaPressed": "true",
+          "title": "Subtitles/closed captions unavailable",
+          "subtitlesOn": true,
+          "visibleCaptionContainerCount": 1
+        },
+        "visibleSideEffect": false
+      },
+      "nativeTimedtextBeforeProbes": [
+        {
+          "origin": "https://www.youtube.com",
+          "pathname": "/api/timedtext",
+          "videoId": "KLDVxx4TqcE",
+          "languageCode": "en",
+          "kind": "asr",
+          "format": "json3",
+          "client": "WEB",
+          "hasPot": true,
+          "potLength": 124,
+          "hasPotc": true,
+          "hasSignature": true,
+          "paramNames": [
+            "c",
+            "caps",
+            "cbr",
+            "cbrand",
+            "cbrver",
+            "cos",
+            "cosver",
+            "cplatform",
+            "cplayer",
+            "cver",
+            "ei",
+            "exp",
+            "expire",
+            "fmt",
+            "hl",
+            "ip",
+            "ipbits",
+            "key",
+            "kind",
+            "lang",
+            "opi",
+            "pot",
+            "potc",
+            "signature",
+            "sparams",
+            "v",
+            "xoaf",
+            "xobt",
+            "xorb",
+            "xospf",
+            "xovt",
+            "xowf"
+          ],
+          "status": 200,
+          "contentType": "text/html; charset=UTF-8",
+          "bodyBytes": 0,
+          "bodyReadError": null
+        }
+      ],
+      "nativeMatchingTimedtext": {
+        "origin": "https://www.youtube.com",
+        "pathname": "/api/timedtext",
+        "videoId": "KLDVxx4TqcE",
+        "languageCode": "en",
+        "kind": "asr",
+        "format": "json3",
+        "client": "WEB",
+        "hasPot": true,
+        "potLength": 124,
+        "hasPotc": true,
+        "hasSignature": true,
+        "paramNames": [
+          "c",
+          "caps",
+          "cbr",
+          "cbrand",
+          "cbrver",
+          "cos",
+          "cosver",
+          "cplatform",
+          "cplayer",
+          "cver",
+          "ei",
+          "exp",
+          "expire",
+          "fmt",
+          "hl",
+          "ip",
+          "ipbits",
+          "key",
+          "kind",
+          "lang",
+          "opi",
+          "pot",
+          "potc",
+          "signature",
+          "sparams",
+          "v",
+          "xoaf",
+          "xobt",
+          "xorb",
+          "xospf",
+          "xovt",
+          "xowf"
+        ],
+        "status": 200,
+        "contentType": "text/html; charset=UTF-8",
+        "bodyBytes": 0,
+        "bodyReadError": null
+      },
+      "resourceTimingBeforeProbes": [],
+      "probes": [
+        {
+          "name": "raw-baseUrl-default",
+          "ok": true,
+          "status": 200,
+          "redirected": false,
+          "contentType": "text/html; charset=UTF-8",
+          "contentLengthHeader": "0",
+          "bodyBytes": 0,
+          "elapsedMs": 330,
+          "shape": {
+            "type": "empty",
+            "usable": false
+          }
+        },
+        {
+          "name": "raw-baseUrl-json3",
+          "ok": true,
+          "status": 200,
+          "redirected": false,
+          "contentType": "text/html; charset=UTF-8",
+          "contentLengthHeader": "0",
+          "bodyBytes": 0,
+          "elapsedMs": 329,
+          "shape": {
+            "type": "empty",
+            "usable": false
+          }
+        },
+        {
+          "name": "raw-baseUrl-srv3",
+          "ok": true,
+          "status": 200,
+          "redirected": false,
+          "contentType": "text/html; charset=UTF-8",
+          "contentLengthHeader": "0",
+          "bodyBytes": 0,
+          "elapsedMs": 330,
+          "shape": {
+            "type": "empty",
+            "usable": false
+          }
+        },
+        {
+          "name": "captured-exact-pot-and-client",
+          "ok": true,
+          "status": 200,
+          "redirected": false,
+          "contentType": "text/html; charset=UTF-8",
+          "contentLengthHeader": "0",
+          "bodyBytes": 0,
+          "elapsedMs": 329,
+          "shape": {
+            "type": "empty",
+            "usable": false
+          }
+        },
+        {
+          "name": "captured-minus-pot",
+          "ok": true,
+          "status": 200,
+          "redirected": false,
+          "contentType": "text/html; charset=UTF-8",
+          "contentLengthHeader": "0",
+          "bodyBytes": 0,
+          "elapsedMs": 329,
+          "shape": {
+            "type": "empty",
+            "usable": false
+          }
+        },
+        {
+          "name": "raw-plus-pot-only-json3",
+          "ok": true,
+          "status": 200,
+          "redirected": false,
+          "contentType": "text/html; charset=UTF-8",
+          "contentLengthHeader": "0",
+          "bodyBytes": 0,
+          "elapsedMs": 329,
+          "shape": {
+            "type": "empty",
+            "usable": false
+          }
+        },
+        {
+          "name": "raw-plus-pot-and-client-json3",
+          "ok": true,
+          "status": 200,
+          "redirected": false,
+          "contentType": "text/html; charset=UTF-8",
+          "contentLengthHeader": "0",
+          "bodyBytes": 0,
+          "elapsedMs": 329,
+          "shape": {
+            "type": "empty",
+            "usable": false
+          }
+        },
+        {
+          "name": "captured-minus-client-keep-pot",
+          "ok": true,
+          "status": 200,
+          "redirected": false,
+          "contentType": "text/html; charset=UTF-8",
+          "contentLengthHeader": "0",
+          "bodyBytes": 0,
+          "elapsedMs": 329,
+          "shape": {
+            "type": "empty",
+            "usable": false
+          }
+        }
+      ],
+      "potAssessment": {
+        "baseUrlAdvertisesPot": false,
+        "baseUrlAdvertisesClient": false,
+        "playerRequestInjectedPot": true,
+        "playerRequestInjectedClient": true,
+        "rawJson3Usable": false,
+        "rawPlusPotOnlyUsable": false,
+        "rawPlusPotAndClientUsable": false,
+        "capturedExactUsable": false,
+        "capturedMinusPotUsable": false,
+        "observedEffect": "tokenized-request-did-not-recover-body"
+      }
+    },
+    {
+      "id": "spoken-no-caption-track",
+      "purpose": "Spoken-video negative boundary",
+      "videoId": "4OEG33NfEK0",
+      "elapsedMs": 7760,
+      "page": {
+        "title": "停止內耗，從相信自己開始 To End Inner Conflict, Start by Believing in Yourself｜周慕姿 | Mu-Tzu Chou | TEDxTaipei",
+        "playabilityStatus": "OK",
+        "playabilityReason": null,
+        "playerPresent": true
+      },
+      "authentication": {
+        "initialStorageStateWasEmpty": true,
+        "authCookieNames": [],
+        "anonymousCookieNames": [
+          "GPS",
+          "PREF",
+          "VISITOR_INFO1_LIVE",
+          "VISITOR_PRIVACY_METADATA",
+          "YSC",
+          "__Secure-ROLLOUT_TOKEN",
+          "__Secure-YNID"
+        ]
+      },
+      "trackDiscovery": {
+        "captionTrackCount": 0,
+        "desiredTrack": null,
+        "desiredTrackFound": false,
+        "selectedTrack": null,
+        "tracks": [],
+        "baseUrlSummary": null
+      },
+      "captionActivation": {
+        "matchingNativeRequestPresentBeforeAction": false,
+        "actions": [],
+        "ccBefore": {
+          "buttonPresent": true,
+          "ariaPressed": "false",
+          "title": "Subtitles/closed captions unavailable",
+          "subtitlesOn": false,
+          "visibleCaptionContainerCount": 0
+        },
+        "ccAfter": {
+          "buttonPresent": true,
+          "ariaPressed": "false",
+          "title": "Subtitles/closed captions unavailable",
+          "subtitlesOn": false,
+          "visibleCaptionContainerCount": 0
+        },
+        "visibleSideEffect": false
+      },
+      "nativeTimedtextBeforeProbes": [],
+      "nativeMatchingTimedtext": null,
+      "resourceTimingBeforeProbes": [],
+      "probes": [],
+      "potAssessment": {
+        "baseUrlAdvertisesPot": false,
+        "baseUrlAdvertisesClient": false,
+        "playerRequestInjectedPot": false,
+        "playerRequestInjectedClient": false,
+        "rawJson3Usable": false,
+        "rawPlusPotOnlyUsable": false,
+        "rawPlusPotAndClientUsable": false,
+        "capturedExactUsable": false,
+        "capturedMinusPotUsable": false,
+        "observedEffect": "not-testable"
+      }
+    },
+    {
+      "id": "nonverbal-no-caption-track",
+      "purpose": "Stable no-dialogue negative control",
+      "videoId": "aqz-KE-bpKQ",
+      "elapsedMs": 8223,
+      "page": {
+        "title": "Big Buck Bunny 60fps 4K - Official Blender Foundation Short Film",
+        "playabilityStatus": "OK",
+        "playabilityReason": null,
+        "playerPresent": true
+      },
+      "authentication": {
+        "initialStorageStateWasEmpty": true,
+        "authCookieNames": [],
+        "anonymousCookieNames": [
+          "GPS",
+          "PREF",
+          "VISITOR_INFO1_LIVE",
+          "VISITOR_PRIVACY_METADATA",
+          "YSC",
+          "__Secure-ROLLOUT_TOKEN",
+          "__Secure-YNID"
+        ]
+      },
+      "trackDiscovery": {
+        "captionTrackCount": 0,
+        "desiredTrack": null,
+        "desiredTrackFound": false,
+        "selectedTrack": null,
+        "tracks": [],
+        "baseUrlSummary": null
+      },
+      "captionActivation": {
+        "matchingNativeRequestPresentBeforeAction": false,
+        "actions": [],
+        "ccBefore": {
+          "buttonPresent": true,
+          "ariaPressed": "false",
+          "title": "Subtitles/closed captions unavailable",
+          "subtitlesOn": false,
+          "visibleCaptionContainerCount": 0
+        },
+        "ccAfter": {
+          "buttonPresent": true,
+          "ariaPressed": "false",
+          "title": "Subtitles/closed captions unavailable",
+          "subtitlesOn": false,
+          "visibleCaptionContainerCount": 0
+        },
+        "visibleSideEffect": false
+      },
+      "nativeTimedtextBeforeProbes": [],
+      "nativeMatchingTimedtext": null,
+      "resourceTimingBeforeProbes": [],
+      "probes": [],
+      "potAssessment": {
+        "baseUrlAdvertisesPot": false,
+        "baseUrlAdvertisesClient": false,
+        "playerRequestInjectedPot": false,
+        "playerRequestInjectedClient": false,
+        "rawJson3Usable": false,
+        "rawPlusPotOnlyUsable": false,
+        "rawPlusPotAndClientUsable": false,
+        "capturedExactUsable": false,
+        "capturedMinusPotUsable": false,
+        "observedEffect": "not-testable"
+      }
+    }
+  ],
+  "spa": {
+    "infrastructureError": "locator.click: Timeout 10000ms exceeded.\nCall log:\n\u001b[2m  - waiting for locator('a[data-yd-experiment-spa-target=\"true\"]').first()\u001b[22m\n\u001b[2m    - locator resolved to <a target=\"\" tabindex=\"0\" force-new-state=\"true\" href=\"/watch?v=0PT5c1z3LL8\" data-yd-experiment-spa-target=\"true\" class=\"ytAttributedStringLink ytAttributedStringLinkCallToActionColor\" aria-label=\"YouTube Channel Link: Microplastics are accumulating in human brains at an alarming rate\">…</a>\u001b[22m\n\u001b[2m  - attempting click action\u001b[22m\n\u001b[2m    - waiting for element to be visible, enabled and stable\u001b[22m\n\u001b[2m    - element is visible, enabled and stable\u001b[22m\n\u001b[2m    - scrolling into view if needed\u001b[22m\n\u001b[2m    - done scrolling\u001b[22m\n\u001b[2m    - performing click action\u001b[22m\n\u001b[2m    - <html lang=\"en\" typography=\"\" system-icons=\"\" darker-dark-theme=\"\" color-version=\"v2_0\" typography-spacing=\"\" darker-dark-theme-deprecate=\"\">…</html> intercepts pointer events\u001b[22m\n\u001b[2m  - retrying click action\u001b[22m\n\u001b[2m    - waiting for element to be visible, enabled and stable\u001b[22m\n\u001b[2m  - element was detached from the DOM, retrying\u001b[22m\n\n    at runSpaCase (/Users/wangchao/Documents/youtube-digest/.playwright-mcp/worktrees/transcript-source-comparison/experiments/transcript-sources/browser-direct/run.cjs:775:16)\n    at async main (/Users/wangchao/Documents/youtube-digest/.playwright-mcp/worktrees/transcript-source-comparison/experiments/transcript-sources/browser-direct/run.cjs:940:17)"
+  }
+}

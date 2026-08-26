@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "requiredRunFields": [
+    "candidate",
+    "videoId",
+    "category",
+    "status",
+    "elapsedMs",
+    "segmentCount",
+    "language",
+    "errorCode",
+    "notes"
+  ],
+  "statusValues": [
+    "success",
+    "no_transcript",
+    "blocked",
+    "empty_response",
+    "unsupported",
+    "timeout",
+    "error"
+  ]
+}

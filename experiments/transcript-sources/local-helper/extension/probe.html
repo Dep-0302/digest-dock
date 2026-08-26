@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Local helper probe</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main>
+      <p class="eyebrow">EXPERIMENT · LOCAL-HELPER</p>
+      <h1>本地字幕助手</h1>
+      <p>先用下方精确扩展 Origin 启动 127.0.0.1 助手，再粘贴同一终端生成的一次性配对 Token。Token 不会保存。</p>
+      <label>
+        精确扩展 Origin
+        <output id="origin">读取中…</output>
+      </label>
+      <label>
+        一次性配对 Token
+        <input id="token" type="password" autocomplete="off" spellcheck="false" />
+      </label>
+      <label>
+        期望语言（可留空）
+        <input id="language" type="text" placeholder="en / zh-CN" autocomplete="off" />
+      </label>
+      <div class="actions">
+        <button id="healthBtn" class="secondary" type="button">只检查连接（0 次 YouTube 请求）</button>
+        <button id="runBtn" type="button">调用一次本地助手</button>
+      </div>
+      <pre id="status" role="status">尚未连接。</pre>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>

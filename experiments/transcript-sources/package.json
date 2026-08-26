@@ -1,0 +1,15 @@
+{
+  "name": "digestdock-seven-provider-transcript-experiment",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Dependency-free contract tests for the isolated seven-provider transcript experiment.",
+  "scripts": {
+    "test": "npm run test:offline",
+    "test:offline": "NODE_OPTIONS=--require=./shared/no-network-preload.cjs node --test shared/test/*.test.js passive-capture/tests/*.test.js youtube-active/test/*.test.js browser-panel/test/*.test.js supadata-native/test/*.test.js hosted-api-slot/test/*.test.js local-helper/test/*.test.js node-libraries/test/contract-adapter.test.mjs",
+    "check": "node ./shared/check-experiment.js",
+    "report:manual": "node ./shared/build-manual-report.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

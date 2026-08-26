@@ -269,7 +269,7 @@ const patterns = [
 
 let found = false;
 for (const file of process.argv.slice(2)) {
-  if (!/\.(?:js|json|html|css|md|txt|yml|yaml|sh)$/i.test(file) && file !== "LICENSE") {
+  if (!/\.(?:js|mjs|cjs|py|json|jsonl|ndjson|html|css|md|txt|toml|yml|yaml|sh)$/i.test(file) && file !== "LICENSE") {
     continue;
   }
   const text = fs.readFileSync(file, "utf8");

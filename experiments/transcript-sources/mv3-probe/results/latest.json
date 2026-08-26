@@ -1,0 +1,57 @@
+{
+  "schemaVersion": 1,
+  "startedAt": "2026-08-18T08:49:30.698Z",
+  "finishedAt": "2026-08-18T08:49:30.753Z",
+  "environment": {
+    "chrome": "Google Chrome 151.0.7922.138",
+    "chromeExecutable": "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "playwrightCore": "1.62.1",
+    "mode": "headless",
+    "profile": "fresh-temporary-profile-removed-after-run",
+    "proxy": "disabled-with---no-proxy-server",
+    "cookieInput": "none; extension fetch uses credentials=omit",
+    "apiKeyInput": "none",
+    "extensionSource": "unpacked-local-directory"
+  },
+  "cases": [
+    {
+      "id": "manual-english-short",
+      "videoId": "jNQXAC9IVRw",
+      "language": "en",
+      "expectation": "transcript"
+    },
+    {
+      "id": "automatic-english-long",
+      "videoId": "KLDVxx4TqcE",
+      "language": "en",
+      "expectation": "transcript"
+    },
+    {
+      "id": "spoken-no-caption",
+      "videoId": "4OEG33NfEK0",
+      "language": "en",
+      "expectation": "no-caption"
+    }
+  ],
+  "profiles": [
+    "IOS",
+    "ANDROID_VR",
+    "MWEB"
+  ],
+  "probe": {
+    "status": "blocked",
+    "blocker": "system-chrome-launch-policy-blocker",
+    "stage": "browser-launch-before-cdp",
+    "attempts": [],
+    "observations": [
+      "Sandboxed Google Chrome 151 headless process exited with SIGABRT before Playwright could attach over CDP.",
+      "A narrowly scoped elevated retry was rejected because the active global boundary forbids script-launching system Chrome.",
+      "No service worker, InnerTube request, or timedtext request was observed; extension side-loading itself was not reached or verified."
+    ],
+    "error": {
+      "name": "Error",
+      "message": "Playwright target closed during browser launch; debug output recorded process exit signal SIGABRT before CDP attachment."
+    },
+    "conclusion": "Inconclusive for MV3 transport. The test environment blocked system-Chrome automation before extension loading."
+  }
+}

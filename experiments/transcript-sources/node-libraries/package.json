@@ -1,0 +1,21 @@
+{
+  "name": "youtube-digest-transcript-node-library-comparison",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Isolated, credential-free comparison of Node.js YouTube transcript libraries.",
+  "scripts": {
+    "probe": "node ./src/run-comparison.mjs",
+    "report": "node ./src/build-report.mjs",
+    "test": "node --test ./test/*.test.mjs"
+  },
+  "dependencies": {
+    "youtube-caption-extractor": "1.10.2",
+    "youtube-transcript": "1.3.1",
+    "youtube-transcript-plus": "2.0.1",
+    "youtubei.js": "17.2.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

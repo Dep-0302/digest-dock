@@ -1,0 +1,30 @@
+{
+  "manifest_version": 3,
+  "name": "DigestDock Transcript Passive Probe",
+  "version": "0.1.0",
+  "minimum_chrome_version": "116",
+  "description": "Experiment-only observer for YouTube timedtext responses already requested by the page.",
+  "permissions": ["storage", "tabs"],
+  "host_permissions": ["https://www.youtube.com/*"],
+  "background": {
+    "service_worker": "service-worker.js"
+  },
+  "action": {
+    "default_title": "Passive transcript probe",
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://www.youtube.com/*"],
+      "js": ["main-hook.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["https://www.youtube.com/*"],
+      "js": ["bridge.js"],
+      "run_at": "document_start",
+      "world": "ISOLATED"
+    }
+  ]
+}

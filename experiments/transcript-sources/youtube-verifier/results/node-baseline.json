@@ -1,0 +1,239 @@
+{
+  "schemaVersion": 1,
+  "runAt": "2026-08-18T09:31:37.909Z",
+  "environment": {
+    "runtime": "v22.23.1",
+    "surface": "Node baseline only; not an MV3/browser result",
+    "apiKey": false,
+    "cookies": false,
+    "proxyConfiguredByHarness": false
+  },
+  "cases": [
+    {
+      "id": "manual-english-short",
+      "expected": "transcript",
+      "elapsedMs": 740,
+      "observed": "transcript",
+      "expectationMet": true,
+      "diagnostics": {
+        "videoId": "jNQXAC9IVRw",
+        "sourceAttempt": "IOS",
+        "selectedTrack": {
+          "index": 0,
+          "language": "en",
+          "kind": "manual",
+          "isGenerated": false,
+          "label": "English",
+          "vssId": ".en"
+        },
+        "segmentCount": 6,
+        "canonicalCharacterCount": 217,
+        "canonicalSha256": "083a5f4a06797b6eca382a74707c681a5094f25129bc8447dd0c3557f24ac0cf",
+        "attempts": [
+          {
+            "client": "IOS",
+            "requestedLanguage": "en",
+            "requestedMode": "manual",
+            "credentials": "omit",
+            "userAgentOrOriginSpoofed": false,
+            "trackCount": 2,
+            "formats": [
+              {
+                "format": "json3",
+                "trackKind": "manual",
+                "status": 200,
+                "bytes": 918,
+                "elapsedMs": 365,
+                "segmentCount": 6
+              }
+            ],
+            "player": {
+              "status": 200,
+              "bytes": 132682,
+              "elapsedMs": 373
+            },
+            "playability": "OK",
+            "tracks": [
+              {
+                "index": 0,
+                "language": "en",
+                "kind": "manual",
+                "isGenerated": false,
+                "label": "English",
+                "vssId": ".en"
+              },
+              {
+                "index": 1,
+                "language": "de",
+                "kind": "manual",
+                "isGenerated": false,
+                "label": "German",
+                "vssId": ".de"
+              }
+            ],
+            "selectedTrack": {
+              "index": 0,
+              "language": "en",
+              "kind": "manual",
+              "isGenerated": false,
+              "label": "English",
+              "vssId": ".en"
+            },
+            "outcome": "transcript"
+          }
+        ]
+      }
+    },
+    {
+      "id": "automatic-english-long",
+      "expected": "transcript",
+      "elapsedMs": 611,
+      "observed": "transcript",
+      "expectationMet": true,
+      "diagnostics": {
+        "videoId": "KLDVxx4TqcE",
+        "sourceAttempt": "IOS",
+        "selectedTrack": {
+          "index": 0,
+          "language": "en",
+          "kind": "asr",
+          "isGenerated": true,
+          "label": "English (auto-generated)",
+          "vssId": "a.en"
+        },
+        "segmentCount": 1828,
+        "canonicalCharacterCount": 63109,
+        "canonicalSha256": "f3ee14455aa55fd66d60cafa780dbbc932d5d9bd5aa7091236d64c7b850e4339",
+        "attempts": [
+          {
+            "client": "IOS",
+            "requestedLanguage": "en",
+            "requestedMode": "asr",
+            "credentials": "omit",
+            "userAgentOrOriginSpoofed": false,
+            "trackCount": 1,
+            "formats": [
+              {
+                "format": "json3",
+                "trackKind": "asr",
+                "status": 200,
+                "bytes": 1262679,
+                "elapsedMs": 392,
+                "segmentCount": 1828
+              }
+            ],
+            "player": {
+              "status": 200,
+              "bytes": 328673,
+              "elapsedMs": 206
+            },
+            "playability": "OK",
+            "tracks": [
+              {
+                "index": 0,
+                "language": "en",
+                "kind": "asr",
+                "isGenerated": true,
+                "label": "English (auto-generated)",
+                "vssId": "a.en"
+              }
+            ],
+            "selectedTrack": {
+              "index": 0,
+              "language": "en",
+              "kind": "asr",
+              "isGenerated": true,
+              "label": "English (auto-generated)",
+              "vssId": "a.en"
+            },
+            "outcome": "transcript"
+          }
+        ]
+      }
+    },
+    {
+      "id": "spoken-no-caption",
+      "expected": "NO_TRANSCRIPT",
+      "elapsedMs": 787,
+      "observed": "NO_TRANSCRIPT",
+      "expectationMet": true,
+      "diagnostics": {
+        "success": false,
+        "error": {
+          "code": "NO_TRANSCRIPT",
+          "message": "所有 client 都没有返回字幕轨。"
+        },
+        "attempts": [
+          {
+            "client": "IOS",
+            "requestedLanguage": "en",
+            "requestedMode": "manual-first",
+            "credentials": "omit",
+            "userAgentOrOriginSpoofed": false,
+            "trackCount": 0,
+            "formats": [],
+            "player": {
+              "status": 200,
+              "bytes": 146415,
+              "elapsedMs": 181
+            },
+            "playability": "OK",
+            "tracks": [],
+            "outcome": "no-caption"
+          },
+          {
+            "client": "ANDROID_VR",
+            "requestedLanguage": "en",
+            "requestedMode": "manual-first",
+            "credentials": "omit",
+            "userAgentOrOriginSpoofed": false,
+            "trackCount": 0,
+            "formats": [],
+            "player": {
+              "status": 200,
+              "bytes": 1093,
+              "elapsedMs": 242
+            },
+            "playability": "LOGIN_REQUIRED",
+            "tracks": [],
+            "outcome": "player-login_required"
+          },
+          {
+            "client": "MWEB",
+            "requestedLanguage": "en",
+            "requestedMode": "manual-first",
+            "credentials": "omit",
+            "userAgentOrOriginSpoofed": false,
+            "trackCount": 0,
+            "formats": [],
+            "player": {
+              "status": 200,
+              "bytes": 10730,
+              "elapsedMs": 151
+            },
+            "playability": "UNPLAYABLE",
+            "tracks": [],
+            "outcome": "player-unplayable"
+          },
+          {
+            "client": "ANDROID",
+            "requestedLanguage": "en",
+            "requestedMode": "manual-first",
+            "credentials": "omit",
+            "userAgentOrOriginSpoofed": false,
+            "trackCount": 0,
+            "formats": [],
+            "player": {
+              "status": 200,
+              "bytes": 171421,
+              "elapsedMs": 212
+            },
+            "playability": "OK",
+            "tracks": [],
+            "outcome": "no-caption"
+          }
+        ]
+      }
+    }
+  ]
+}

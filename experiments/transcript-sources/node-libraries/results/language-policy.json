@@ -1,0 +1,727 @@
+{
+  "schemaVersion": 1,
+  "startedAt": "2026-08-18T08:41:45.874Z",
+  "completedAt": "2026-08-18T08:41:54.328Z",
+  "environment": {
+    "node": "v22.23.1",
+    "platform": "darwin",
+    "architecture": "arm64",
+    "authentication": "signed-out",
+    "apiKeys": false,
+    "cookies": false,
+    "proxy": false,
+    "timeoutMs": 20000,
+    "delayMs": 250,
+    "rounds": 1,
+    "candidateOrderPolicy": "rotated per case and round"
+  },
+  "caseSource": "../corpus/corpus.json",
+  "cases": [
+    {
+      "id": "language-policy-control-en",
+      "videoId": "dQw4w9WgXcQ",
+      "title": "Rick Astley - Never Gonna Give You Up (Official Video) (4K Remaster)",
+      "language": "en",
+      "expectedOutcome": "transcript",
+      "expectedLanguage": "en",
+      "corpusFacts": {
+        "durationSeconds": 213,
+        "pairedWith": "language-policy-missing-fr"
+      },
+      "purpose": "Control transcript hash for the paired missing-language probe."
+    },
+    {
+      "id": "language-policy-missing-fr",
+      "videoId": "dQw4w9WgXcQ",
+      "title": "Rick Astley - Never Gonna Give You Up (Official Video) (4K Remaster)",
+      "language": "fr",
+      "expectedOutcome": "language-unavailable",
+      "expectedLanguage": null,
+      "corpusFacts": {
+        "durationSeconds": 213,
+        "pairedWith": "language-policy-control-en",
+        "driftWarning": "Available caption languages can change; each run is authoritative only for its timestamp."
+      },
+      "purpose": "Expose strict errors versus silent fallback when a requested language is absent."
+    }
+  ],
+  "profiles": {
+    "youtube-caption-extractor": {
+      "package": "youtube-caption-extractor",
+      "source": "https://github.com/devhims/youtube-caption-extractor",
+      "adapter": "getSubtitles({ videoID, lang, fetch })",
+      "languageBehavior": "Defaults to en; prefers manual exact match, then ASR exact match, then falls back to the first track.",
+      "requestStrategy": "Tries IOS, ANDROID_VR, then MWEB player clients until caption tracks are found; downloads json3 timedtext.",
+      "browserFit": "Published entry is CommonJS and upstream recommends server-side use because browser calls face CORS; a bundler/bridge would still be required for the current MV3 extension."
+    },
+    "youtube-transcript": {
+      "package": "youtube-transcript",
+      "source": "https://github.com/Kakulukian/youtube-transcript",
+      "adapter": "fetchTranscript(videoId, { lang, fetch })",
+      "languageBehavior": "Exact language is strict; with no language it takes the first advertised track.",
+      "requestStrategy": "ANDROID InnerTube first, then watch-page fallback; downloads XML timedtext.",
+      "browserFit": "Small ESM/CJS package with a custom fetch hook, but direct MV3 use still needs browser host/CORS validation."
+    },
+    "youtube-transcript-plus": {
+      "package": "youtube-transcript-plus",
+      "source": "https://github.com/ericmmartin/youtube-transcript-plus",
+      "adapter": "fetchTranscript(videoId, { lang, videoFetch, playerFetch, transcriptFetch })",
+      "languageBehavior": "Exact language is strict; with no language it takes the first advertised track; listLanguages exposes track kind.",
+      "requestStrategy": "Watch page for API key, ANDROID player request, then XML timedtext; optional retry/cache hooks are disabled in this benchmark.",
+      "browserFit": "Node >=20 package; no browser export or ready-to-load MV3 bundle is declared."
+    },
+    "youtubei.js": {
+      "package": "youtubei.js",
+      "source": "https://github.com/LuanRT/YouTube.js",
+      "adapter": "Innertube.create() -> getInfo(videoId) -> getTranscript()",
+      "languageBehavior": "Transcript language selection uses human-readable menu labels rather than BCP-47 codes.",
+      "requestStrategy": "Creates an Innertube session, requests video info/next data, then calls get_transcript.",
+      "browserFit": "Ships a browser bundle, but upstream documentation requires requests to go through a server proxy. This is not equivalent to dropping the bundle into the current MV3 extension."
+    }
+  },
+  "packageMetadata": {
+    "youtube-caption-extractor": {
+      "version": "1.10.2",
+      "license": "MIT",
+      "nodeEngine": ">=18.0.0",
+      "directRuntimeDependencies": [
+        "he",
+        "striptags"
+      ],
+      "transitivePackageCountIncludingSelf": 3,
+      "packageBytes": 31103,
+      "installedFootprintBytes": 173101
+    },
+    "youtube-transcript": {
+      "version": "1.3.1",
+      "license": "MIT",
+      "nodeEngine": ">=18.0.0",
+      "directRuntimeDependencies": [],
+      "transitivePackageCountIncludingSelf": 1,
+      "packageBytes": 43825,
+      "installedFootprintBytes": 43825
+    },
+    "youtube-transcript-plus": {
+      "version": "2.0.1",
+      "license": "MIT",
+      "nodeEngine": ">=20.0.0",
+      "directRuntimeDependencies": [],
+      "transitivePackageCountIncludingSelf": 1,
+      "packageBytes": 102957,
+      "installedFootprintBytes": 102957
+    },
+    "youtubei.js": {
+      "version": "17.2.0",
+      "license": "MIT",
+      "nodeEngine": null,
+      "directRuntimeDependencies": [
+        "@bufbuild/protobuf",
+        "fflate",
+        "meriyah"
+      ],
+      "transitivePackageCountIncludingSelf": 4,
+      "packageBytes": 15651706,
+      "installedFootprintBytes": 19777959,
+      "browserBundleBytes": 1544481,
+      "browserBundleGzipBytes": 256849
+    }
+  },
+  "summary": {
+    "youtube-caption-extractor": {
+      "attemptCount": 2,
+      "expectedTranscriptCount": 1,
+      "transcriptSuccessCount": 1,
+      "transcriptSuccessRate": 1,
+      "expectedNoCaptionCount": 0,
+      "correctNoCaptionCount": 0,
+      "noCaptionAccuracy": null,
+      "expectedLanguageUnavailableCount": 1,
+      "correctLanguageUnavailableCount": 0,
+      "languageUnavailableAccuracy": 0,
+      "expectationMetCount": 1,
+      "errorCount": 0,
+      "medianDurationMs": 619,
+      "medianSuccessfulDurationMs": 746,
+      "totalRequestCount": 4,
+      "errorCategories": {}
+    },
+    "youtube-transcript": {
+      "attemptCount": 2,
+      "expectedTranscriptCount": 1,
+      "transcriptSuccessCount": 1,
+      "transcriptSuccessRate": 1,
+      "expectedNoCaptionCount": 0,
+      "correctNoCaptionCount": 0,
+      "noCaptionAccuracy": null,
+      "expectedLanguageUnavailableCount": 1,
+      "correctLanguageUnavailableCount": 1,
+      "languageUnavailableAccuracy": 1,
+      "expectationMetCount": 2,
+      "errorCount": 0,
+      "medianDurationMs": 353,
+      "medianSuccessfulDurationMs": 459,
+      "totalRequestCount": 3,
+      "errorCategories": {
+        "language-unavailable": 1
+      }
+    },
+    "youtube-transcript-plus": {
+      "attemptCount": 2,
+      "expectedTranscriptCount": 1,
+      "transcriptSuccessCount": 1,
+      "transcriptSuccessRate": 1,
+      "expectedNoCaptionCount": 0,
+      "correctNoCaptionCount": 0,
+      "noCaptionAccuracy": null,
+      "expectedLanguageUnavailableCount": 1,
+      "correctLanguageUnavailableCount": 1,
+      "languageUnavailableAccuracy": 1,
+      "expectationMetCount": 2,
+      "errorCount": 0,
+      "medianDurationMs": 1260,
+      "medianSuccessfulDurationMs": 1542,
+      "totalRequestCount": 5,
+      "errorCategories": {
+        "language-unavailable": 1
+      }
+    },
+    "youtubei.js": {
+      "attemptCount": 2,
+      "expectedTranscriptCount": 1,
+      "transcriptSuccessCount": 0,
+      "transcriptSuccessRate": 0,
+      "expectedNoCaptionCount": 0,
+      "correctNoCaptionCount": 0,
+      "noCaptionAccuracy": null,
+      "expectedLanguageUnavailableCount": 1,
+      "correctLanguageUnavailableCount": 0,
+      "languageUnavailableAccuracy": 0,
+      "expectationMetCount": 0,
+      "errorCount": 2,
+      "medianDurationMs": 987,
+      "medianSuccessfulDurationMs": null,
+      "totalRequestCount": 8,
+      "errorCategories": {
+        "upstream-api-error": 2
+      }
+    }
+  },
+  "attempts": [
+    {
+      "round": 1,
+      "caseId": "language-policy-control-en",
+      "videoId": "dQw4w9WgXcQ",
+      "language": "en",
+      "expectedOutcome": "transcript",
+      "candidate": "youtube-caption-extractor",
+      "durationMs": 746,
+      "segmentSummary": {
+        "segmentCount": 61,
+        "textCharacterCount": 2089,
+        "contentSha256": "71bac573d8823ebe022749370e3035e5e8e4f699ec4d8ec0f4144d8a8e705894",
+        "canonicalTextCharacterCount": 2089,
+        "canonicalContentSha256": "a229ed9bcfe246d9dd0a5bc30b460f6eeffcb1d1d484833adae943055a00b129",
+        "firstRawItemKeys": [
+          "dur",
+          "start",
+          "text"
+        ],
+        "normalizedFieldTypes": {
+          "text": "string",
+          "offsetSeconds": "number",
+          "durationSeconds": "number"
+        },
+        "firstOffsetSeconds": 1.36,
+        "maxEndSeconds": 211.32,
+        "maxDurationSeconds": 4.68,
+        "nonMonotonicOffsets": 0
+      },
+      "outcome": "transcript",
+      "selectedLanguage": null,
+      "selectionEvidence": "not-exposed-by-result; requested=en; library-can-fallback",
+      "expectationMet": true,
+      "requests": [
+        {
+          "method": "POST",
+          "endpoint": "player",
+          "url": "https://youtubei.googleapis.com/youtubei/v1/player",
+          "status": 200,
+          "ok": true,
+          "durationMs": 394.2,
+          "contentType": "application/json; charset=UTF-8",
+          "contentLength": 42109
+        },
+        {
+          "method": "GET",
+          "endpoint": "timedtext",
+          "url": "https://www.youtube.com/api/timedtext",
+          "status": 200,
+          "ok": true,
+          "durationMs": 317.23,
+          "contentType": "application/json; charset=UTF-8",
+          "contentLength": 0
+        }
+      ],
+      "requestSummary": {
+        "requestCount": 2,
+        "endpointCounts": {
+          "player": 1,
+          "timedtext": 1
+        },
+        "statusCounts": {
+          "200": 2
+        },
+        "failedRequestCount": 0
+      }
+    },
+    {
+      "round": 1,
+      "caseId": "language-policy-control-en",
+      "videoId": "dQw4w9WgXcQ",
+      "language": "en",
+      "expectedOutcome": "transcript",
+      "candidate": "youtube-transcript",
+      "durationMs": 459,
+      "segmentSummary": {
+        "segmentCount": 61,
+        "textCharacterCount": 2089,
+        "contentSha256": "71bac573d8823ebe022749370e3035e5e8e4f699ec4d8ec0f4144d8a8e705894",
+        "canonicalTextCharacterCount": 2089,
+        "canonicalContentSha256": "a229ed9bcfe246d9dd0a5bc30b460f6eeffcb1d1d484833adae943055a00b129",
+        "firstRawItemKeys": [
+          "duration",
+          "lang",
+          "offset",
+          "text"
+        ],
+        "normalizedFieldTypes": {
+          "text": "string",
+          "offsetSeconds": "number",
+          "durationSeconds": "number"
+        },
+        "firstOffsetSeconds": 1360,
+        "maxEndSeconds": 211320,
+        "maxDurationSeconds": 4680,
+        "nonMonotonicOffsets": 0
+      },
+      "outcome": "transcript",
+      "selectedLanguage": "en",
+      "selectionEvidence": "result-lang-field",
+      "expectationMet": true,
+      "requests": [
+        {
+          "method": "POST",
+          "endpoint": "player",
+          "url": "https://www.youtube.com/youtubei/v1/player",
+          "status": 200,
+          "ok": true,
+          "durationMs": 205.62,
+          "contentType": "application/json; charset=UTF-8",
+          "contentLength": 42782
+        },
+        {
+          "method": "GET",
+          "endpoint": "timedtext",
+          "url": "https://www.youtube.com/api/timedtext",
+          "status": 200,
+          "ok": true,
+          "durationMs": 232.62,
+          "contentType": "text/xml; charset=UTF-8",
+          "contentLength": 0
+        }
+      ],
+      "requestSummary": {
+        "requestCount": 2,
+        "endpointCounts": {
+          "player": 1,
+          "timedtext": 1
+        },
+        "statusCounts": {
+          "200": 2
+        },
+        "failedRequestCount": 0
+      }
+    },
+    {
+      "round": 1,
+      "caseId": "language-policy-control-en",
+      "videoId": "dQw4w9WgXcQ",
+      "language": "en",
+      "expectedOutcome": "transcript",
+      "candidate": "youtube-transcript-plus",
+      "durationMs": 1542,
+      "segmentSummary": {
+        "segmentCount": 61,
+        "textCharacterCount": 2165,
+        "contentSha256": "61025ee63dbc3035c0bba1912f5a5e06336bfb0c798494160a6dd05963b72416",
+        "canonicalTextCharacterCount": 2089,
+        "canonicalContentSha256": "a229ed9bcfe246d9dd0a5bc30b460f6eeffcb1d1d484833adae943055a00b129",
+        "firstRawItemKeys": [
+          "duration",
+          "lang",
+          "offset",
+          "text"
+        ],
+        "normalizedFieldTypes": {
+          "text": "string",
+          "offsetSeconds": "number",
+          "durationSeconds": "number"
+        },
+        "firstOffsetSeconds": 1.36,
+        "maxEndSeconds": 211.32,
+        "maxDurationSeconds": 4.68,
+        "nonMonotonicOffsets": 0
+      },
+      "outcome": "transcript",
+      "selectedLanguage": "en",
+      "selectionEvidence": "result-lang-field",
+      "expectationMet": true,
+      "requests": [
+        {
+          "method": "GET",
+          "endpoint": "watch_page",
+          "url": "https://www.youtube.com/watch",
+          "status": 200,
+          "ok": true,
+          "durationMs": 159.54,
+          "contentType": "text/html; charset=utf-8",
+          "contentLength": 0
+        },
+        {
+          "method": "POST",
+          "endpoint": "player",
+          "url": "https://www.youtube.com/youtubei/v1/player",
+          "status": 200,
+          "ok": true,
+          "durationMs": 180.29,
+          "contentType": "application/json; charset=UTF-8",
+          "contentLength": 0
+        },
+        {
+          "method": "GET",
+          "endpoint": "timedtext",
+          "url": "https://www.youtube.com/api/timedtext",
+          "status": 200,
+          "ok": true,
+          "durationMs": 307.28,
+          "contentType": "text/xml; charset=UTF-8",
+          "contentLength": 0
+        }
+      ],
+      "requestSummary": {
+        "requestCount": 3,
+        "endpointCounts": {
+          "watch_page": 1,
+          "player": 1,
+          "timedtext": 1
+        },
+        "statusCounts": {
+          "200": 3
+        },
+        "failedRequestCount": 0
+      }
+    },
+    {
+      "round": 1,
+      "caseId": "language-policy-control-en",
+      "videoId": "dQw4w9WgXcQ",
+      "language": "en",
+      "expectedOutcome": "transcript",
+      "candidate": "youtubei.js",
+      "durationMs": 1034,
+      "error": {
+        "name": "Error",
+        "message": "Request to https://www.youtube.com/youtubei/v1/get_transcript failed with status code 400",
+        "category": "upstream-api-error"
+      },
+      "outcome": "error",
+      "segmentSummary": null,
+      "expectationMet": false,
+      "requests": [
+        {
+          "method": "POST",
+          "endpoint": "other",
+          "url": "https://www.youtube.com/youtubei/v1/config",
+          "status": 200,
+          "ok": true,
+          "durationMs": 127.18,
+          "contentType": "application/json; charset=UTF-8",
+          "contentLength": 3638
+        },
+        {
+          "method": "POST",
+          "endpoint": "player",
+          "url": "https://www.youtube.com/youtubei/v1/player",
+          "status": 200,
+          "ok": true,
+          "durationMs": 166.97,
+          "contentType": "application/json; charset=UTF-8",
+          "contentLength": 3561
+        },
+        {
+          "method": "POST",
+          "endpoint": "next",
+          "url": "https://www.youtube.com/youtubei/v1/next",
+          "status": 200,
+          "ok": true,
+          "durationMs": 708.58,
+          "contentType": "application/json; charset=UTF-8",
+          "contentLength": 51488
+        },
+        {
+          "method": "POST",
+          "endpoint": "get_transcript",
+          "url": "https://www.youtube.com/youtubei/v1/get_transcript",
+          "status": 400,
+          "ok": false,
+          "durationMs": 133.01,
+          "contentType": "application/json; charset=UTF-8",
+          "contentLength": 133
+        }
+      ],
+      "requestSummary": {
+        "requestCount": 4,
+        "endpointCounts": {
+          "other": 1,
+          "player": 1,
+          "next": 1,
+          "get_transcript": 1
+        },
+        "statusCounts": {
+          "200": 3,
+          "400": 1
+        },
+        "failedRequestCount": 1
+      }
+    },
+    {
+      "round": 1,
+      "caseId": "language-policy-missing-fr",
+      "videoId": "dQw4w9WgXcQ",
+      "language": "fr",
+      "expectedOutcome": "language-unavailable",
+      "candidate": "youtube-transcript",
+      "durationMs": 246,
+      "error": {
+        "name": "Error",
+        "message": "[YoutubeTranscript] 🚨 No transcripts are available in fr this video (dQw4w9WgXcQ). Available languages: en, en, de-DE, ja, pt-BR, es-419",
+        "category": "language-unavailable"
+      },
+      "outcome": "language-unavailable",
+      "segmentSummary": null,
+      "expectationMet": true,
+      "requests": [
+        {
+          "method": "POST",
+          "endpoint": "player",
+          "url": "https://www.youtube.com/youtubei/v1/player",
+          "status": 200,
+          "ok": true,
+          "durationMs": 242.89,
+          "contentType": "application/json; charset=UTF-8",
+          "contentLength": 43114
+        }
+      ],
+      "requestSummary": {
+        "requestCount": 1,
+        "endpointCounts": {
+          "player": 1
+        },
+        "statusCounts": {
+          "200": 1
+        },
+        "failedRequestCount": 0
+      }
+    },
+    {
+      "round": 1,
+      "caseId": "language-policy-missing-fr",
+      "videoId": "dQw4w9WgXcQ",
+      "language": "fr",
+      "expectedOutcome": "language-unavailable",
+      "candidate": "youtube-transcript-plus",
+      "durationMs": 977,
+      "error": {
+        "name": "YoutubeTranscriptNotAvailableLanguageError",
+        "message": "No transcripts are available in \"fr\" for the video with ID \"dQw4w9WgXcQ\". Available languages: en, en, de-DE, ja, pt-BR, es-419. Please try a different language.",
+        "category": "language-unavailable"
+      },
+      "outcome": "language-unavailable",
+      "segmentSummary": null,
+      "expectationMet": true,
+      "requests": [
+        {
+          "method": "GET",
+          "endpoint": "watch_page",
+          "url": "https://www.youtube.com/watch",
+          "status": 200,
+          "ok": true,
+          "durationMs": 234.84,
+          "contentType": "text/html; charset=utf-8",
+          "contentLength": 0
+        },
+        {
+          "method": "POST",
+          "endpoint": "player",
+          "url": "https://www.youtube.com/youtubei/v1/player",
+          "status": 200,
+          "ok": true,
+          "durationMs": 207.54,
+          "contentType": "application/json; charset=UTF-8",
+          "contentLength": 0
+        }
+      ],
+      "requestSummary": {
+        "requestCount": 2,
+        "endpointCounts": {
+          "watch_page": 1,
+          "player": 1
+        },
+        "statusCounts": {
+          "200": 2
+        },
+        "failedRequestCount": 0
+      }
+    },
+    {
+      "round": 1,
+      "caseId": "language-policy-missing-fr",
+      "videoId": "dQw4w9WgXcQ",
+      "language": "fr",
+      "expectedOutcome": "language-unavailable",
+      "candidate": "youtubei.js",
+      "durationMs": 940,
+      "error": {
+        "name": "Error",
+        "message": "Request to https://www.youtube.com/youtubei/v1/get_transcript failed with status code 400",
+        "category": "upstream-api-error"
+      },
+      "outcome": "error",
+      "segmentSummary": null,
+      "expectationMet": false,
+      "requests": [
+        {
+          "method": "POST",
+          "endpoint": "other",
+          "url": "https://www.youtube.com/youtubei/v1/config",
+          "status": 200,
+          "ok": true,
+          "durationMs": 162.04,
+          "contentType": "application/json; charset=UTF-8",
+          "contentLength": 3318
+        },
+        {
+          "method": "POST",
+          "endpoint": "player",
+          "url": "https://www.youtube.com/youtubei/v1/player",
+          "status": 200,
+          "ok": true,
+          "durationMs": 238.36,
+          "contentType": "application/json; charset=UTF-8",
+          "contentLength": 3559
+        },
+        {
+          "method": "POST",
+          "endpoint": "next",
+          "url": "https://www.youtube.com/youtubei/v1/next",
+          "status": 200,
+          "ok": true,
+          "durationMs": 615.56,
+          "contentType": "application/json; charset=UTF-8",
+          "contentLength": 51215
+        },
+        {
+          "method": "POST",
+          "endpoint": "get_transcript",
+          "url": "https://www.youtube.com/youtubei/v1/get_transcript",
+          "status": 400,
+          "ok": false,
+          "durationMs": 127.38,
+          "contentType": "application/json; charset=UTF-8",
+          "contentLength": 133
+        }
+      ],
+      "requestSummary": {
+        "requestCount": 4,
+        "endpointCounts": {
+          "other": 1,
+          "player": 1,
+          "next": 1,
+          "get_transcript": 1
+        },
+        "statusCounts": {
+          "200": 3,
+          "400": 1
+        },
+        "failedRequestCount": 1
+      }
+    },
+    {
+      "round": 1,
+      "caseId": "language-policy-missing-fr",
+      "videoId": "dQw4w9WgXcQ",
+      "language": "fr",
+      "expectedOutcome": "language-unavailable",
+      "candidate": "youtube-caption-extractor",
+      "durationMs": 491,
+      "segmentSummary": {
+        "segmentCount": 61,
+        "textCharacterCount": 2089,
+        "contentSha256": "71bac573d8823ebe022749370e3035e5e8e4f699ec4d8ec0f4144d8a8e705894",
+        "canonicalTextCharacterCount": 2089,
+        "canonicalContentSha256": "a229ed9bcfe246d9dd0a5bc30b460f6eeffcb1d1d484833adae943055a00b129",
+        "firstRawItemKeys": [
+          "dur",
+          "start",
+          "text"
+        ],
+        "normalizedFieldTypes": {
+          "text": "string",
+          "offsetSeconds": "number",
+          "durationSeconds": "number"
+        },
+        "firstOffsetSeconds": 1.36,
+        "maxEndSeconds": 211.32,
+        "maxDurationSeconds": 4.68,
+        "nonMonotonicOffsets": 0
+      },
+      "outcome": "transcript",
+      "selectedLanguage": null,
+      "selectionEvidence": "not-exposed-by-result; requested=fr; library-can-fallback",
+      "expectationMet": false,
+      "requests": [
+        {
+          "method": "POST",
+          "endpoint": "player",
+          "url": "https://youtubei.googleapis.com/youtubei/v1/player",
+          "status": 200,
+          "ok": true,
+          "durationMs": 257.6,
+          "contentType": "application/json; charset=UTF-8",
+          "contentLength": 41939
+        },
+        {
+          "method": "GET",
+          "endpoint": "timedtext",
+          "url": "https://www.youtube.com/api/timedtext",
+          "status": 200,
+          "ok": true,
+          "durationMs": 227.72,
+          "contentType": "application/json; charset=UTF-8",
+          "contentLength": 0
+        }
+      ],
+      "requestSummary": {
+        "requestCount": 2,
+        "endpointCounts": {
+          "player": 1,
+          "timedtext": 1
+        },
+        "statusCounts": {
+          "200": 2
+        },
+        "failedRequestCount": 0
+      }
+    }
+  ]
+}

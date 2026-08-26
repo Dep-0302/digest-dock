@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Supadata native probe</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main>
+      <p class="eyebrow">EXPERIMENT · SUPADATA-NATIVE</p>
+      <h1>Supadata 独立对照</h1>
+      <p>
+        密钥只保留在当前测试页内，不会保存。点击按钮会把当前视频的标准 YouTube 链接发送给 Supadata，并可能消耗额度。
+      </p>
+      <label>
+        Supadata API Key
+        <input id="apiKey" type="password" autocomplete="off" spellcheck="false" />
+      </label>
+      <label>
+        期望语言（可留空）
+        <input id="language" type="text" placeholder="en / zh-CN" autocomplete="off" />
+      </label>
+      <button id="runBtn" type="button">本次使用 Supadata（会消耗额度）</button>
+      <pre id="status" role="status">尚未发送请求。</pre>
+    </main>
+    <script src="core.js"></script>
+    <script src="popup.js"></script>
+  </body>
+</html>

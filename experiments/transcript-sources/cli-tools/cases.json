@@ -1,0 +1,66 @@
+{
+  "schemaVersion": 1,
+  "sourceCorpus": "../corpus/corpus.json",
+  "cases": [
+    {
+      "id": "multilingual-authored-en",
+      "videoId": "iG9CE55wbtY",
+      "title": "Do schools kill creativity? | Sir Ken Robinson | TED",
+      "category": "authored-english-many-tracks",
+      "language": "en",
+      "trackKind": "manual",
+      "expectTranscript": true,
+      "reason": "65 advertised tracks, including both authored and ASR English; the test explicitly asks for authored English."
+    },
+    {
+      "id": "multilingual-automatic-en",
+      "videoId": "iG9CE55wbtY",
+      "title": "Do schools kill creativity? | Sir Ken Robinson | TED",
+      "category": "automatic-english-duplicate-language",
+      "language": "en",
+      "trackKind": "auto",
+      "expectTranscript": true,
+      "reason": "The same language code exists as both authored and ASR, exposing tools that do not make track kind explicit."
+    },
+    {
+      "id": "automatic-long-en",
+      "videoId": "KLDVxx4TqcE",
+      "title": "The Future of Human Intelligence: Education, AI, & Creativity | Sir Ken Robinson (Full Keynote)",
+      "category": "automatic-english-long-form",
+      "language": "en",
+      "trackKind": "auto",
+      "expectTranscript": true,
+      "reason": "72-minute ASR-only source where browser track discovery and transcript retrieval previously diverged."
+    },
+    {
+      "id": "authored-traditional-chinese",
+      "videoId": "6i7RcP39NB0",
+      "title": "留十八分鐘給自己：蔣勳 (Chiang Hsun) at TEDxTaipei 2012",
+      "category": "authored-non-english-source",
+      "language": "zh-TW",
+      "trackKind": "manual",
+      "expectTranscript": true,
+      "reason": "The page advertises English first and zh-TW second; source-language selection must be explicit."
+    },
+    {
+      "id": "spoken-no-caption-tracks",
+      "videoId": "4OEG33NfEK0",
+      "title": "停止內耗，從相信自己開始 To End Inner Conflict, Start by Believing in Yourself",
+      "category": "spoken-no-captions",
+      "language": null,
+      "trackKind": "none",
+      "expectTranscript": false,
+      "reason": "Public spoken video with no advertised caption tracks; should be a clean negative, not a retry storm."
+    },
+    {
+      "id": "nonverbal-no-caption-tracks",
+      "videoId": "aqz-KE-bpKQ",
+      "title": "Big Buck Bunny 60fps 4K - Official Blender Foundation Short Film",
+      "category": "nonverbal-no-captions",
+      "language": null,
+      "trackKind": "none",
+      "expectTranscript": false,
+      "reason": "Stable non-verbal negative control with no advertised caption tracks."
+    }
+  ]
+}

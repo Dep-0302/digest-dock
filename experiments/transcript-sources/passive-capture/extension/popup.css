@@ -1,0 +1,99 @@
+:root {
+  color-scheme: light;
+  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: #f4f2ec;
+  color: #1f2933;
+}
+
+body {
+  width: 360px;
+  margin: 0;
+}
+
+main {
+  padding: 18px;
+}
+
+.eyebrow {
+  margin: 0 0 6px;
+  color: #b34f3e;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+}
+
+h1 {
+  margin: 0;
+  font-size: 24px;
+}
+
+.help,
+.footnote {
+  color: #53606b;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin: 14px 0;
+}
+
+.filters {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin: 12px 0;
+}
+
+.filters label {
+  display: grid;
+  gap: 4px;
+  color: #53606b;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.filters input,
+.filters select {
+  min-width: 0;
+  min-height: 34px;
+  border: 1px solid #c8c3b7;
+  border-radius: 8px;
+  background: #fffdf8;
+  padding: 0 8px;
+}
+
+button {
+  min-height: 38px;
+  border: 0;
+  border-radius: 9px;
+  background: #1f2933;
+  color: white;
+  cursor: pointer;
+  font-weight: 700;
+}
+
+button:first-child {
+  grid-column: 1 / -1;
+}
+
+button.secondary {
+  border: 1px solid #c8c3b7;
+  background: #fffdf8;
+  color: #1f2933;
+}
+
+pre {
+  max-height: 260px;
+  overflow: auto;
+  margin: 0;
+  padding: 12px;
+  border-radius: 10px;
+  background: #202a33;
+  color: #f7f2e8;
+  font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: pre-wrap;
+}

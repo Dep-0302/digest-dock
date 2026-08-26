@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "name": "YouTube Digest MV3 Transcript Probe",
+  "version": "0.1.0",
+  "description": "Isolated credential-free transcript transport probe.",
+  "background": {
+    "service_worker": "service-worker.js"
+  },
+  "host_permissions": [
+    "https://youtubei.googleapis.com/*",
+    "https://*.youtube.com/*"
+  ]
+}

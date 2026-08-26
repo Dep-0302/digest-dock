@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Transcript panel probe</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main>
+      <p class="eyebrow">EXPERIMENT · YOUTUBE-PANEL</p>
+      <h1>文字稿面板采集</h1>
+      <ol>
+        <li>手动打开当前视频的文字稿面板。</li>
+        <li>在顶部点击采集，再逐屏滚动并重复采集。</li>
+        <li>到达底部后点击完成；未覆盖顶部和底部时会失败关闭。</li>
+      </ol>
+      <div class="actions">
+        <button id="collectBtn" type="button">采集当前可见段</button>
+        <button id="finishBtn" type="button">完成并核对</button>
+        <button id="resetBtn" class="secondary" type="button">关闭面板后重置采集</button>
+      </div>
+      <pre id="status" role="status">等待操作…</pre>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>
