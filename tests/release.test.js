@@ -18,6 +18,10 @@ test("manifest uses minimized install-time permissions", () => {
   assert.ok(!manifest.permissions.includes("activeTab"));
   assert.ok(!manifest.permissions.includes("cookies"));
   assert.ok(!manifest.permissions.includes("downloads"));
+  assert.deepEqual(
+    [...manifest.permissions].sort(),
+    ["sidePanel", "storage", "unlimitedStorage", "tabs", "scripting"].sort(),
+  );
   // Install-time host access is the fixed platform surface plus exactly one
   // origin per selectable AI provider, derived from the registry so the two can
   // never silently drift. The fail-closed Tencent provider ships no
@@ -54,7 +58,28 @@ test("manifest uses minimized install-time permissions", () => {
     "https://www.bilibili.com/video/BV*",
   ]);
   assert.equal(Object.hasOwn(manifest, "optional_host_permissions"), false);
-  assert.equal(manifest.version, "1.4.3");
+  assert.equal(manifest.version, "1.4.4");
+});
+
+test("large local caches use explicit permission and remain user-clearable", () => {
+  const manifest = JSON.parse(read("manifest.json"));
+  const optionsSource = read("options.js");
+  const sidepanelSource = read("sidepanel.js");
+  const privacy = read("PRIVACY.md");
+  const readme = read("README.md");
+  const chineseReadme = read("README.zh-CN.md");
+
+  assert.ok(manifest.permissions.includes("unlimitedStorage"));
+  assert.match(
+    optionsSource,
+    /key\.startsWith\("digest_"\) \|\| key\.startsWith\("overview_"\)/,
+  );
+  assert.match(sidepanelSource, /const OVERVIEW_CACHE_MAX_ENTRIES = 100/);
+  assert.match(sidepanelSource, /transcriptFingerprint/);
+  assert.match(sidepanelSource, /await saveOverviewToCache\(/);
+  assert.match(privacy, /`unlimitedStorage`/);
+  assert.match(readme, /`unlimitedStorage`/);
+  assert.match(chineseReadme, /`unlimitedStorage`/);
 });
 
 test("cross-platform runtime dependencies match the API-primary release surface", () => {
@@ -132,7 +157,7 @@ test("cross-platform runtime dependencies match the API-primary release surface"
     3,
     "only the icon-adjacent DigestDock brand word must emphasize D, D, and K",
   );
-  assert.match(optionsPage, /<p class="settings-version">DigestDock 1\.4\.3<\/p>/);
+  assert.match(optionsPage, /<p class="settings-version">DigestDock 1\.4\.4<\/p>/);
   assert.match(optionsPage, /<p class="eyebrow">DIGESTDOCK<\/p>/);
   assert.match(optionsStyles, /\.brand-letter\s*\{[^}]*font-weight:\s*750/);
   assert.doesNotMatch(optionsPage, /#1F2933|#F26A4F/);

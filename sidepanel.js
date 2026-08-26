@@ -8,6 +8,9 @@
 const DEBUG = false;
 const REQUIRED_RUNTIME_PROTOCOL_VERSION = 11;
 const EXPORT_CONTENT_CONTRACT_VERSION = 4;
+const OVERVIEW_CACHE_SCHEMA_VERSION = 1;
+const OVERVIEW_CACHE_PREFIX = "overview_";
+const OVERVIEW_CACHE_MAX_ENTRIES = 100;
 const debugLog = (...args) => {
   if (DEBUG) console.log(...args);
 };
@@ -1842,6 +1845,25 @@ async function runDigestLoad(
     currentTranscriptSourceAttempt = String(
       cached.transcriptSourceAttempt || "",
     ).slice(0, 40);
+    const compactOverview = await loadOverviewFromCache(
+      videoId,
+      currentTranscriptTimestamped,
+      currentTranscriptLanguage,
+    );
+    if (!isCurrentDigest(videoId, generation, routeKey)) return;
+    if (compactOverview) {
+      currentAnalysis = compactOverview;
+    } else if (currentAnalysis) {
+      // One-time no-network migration for overviews created before the compact
+      // cache existed. Failure is harmless because the legacy digest remains.
+      await saveOverviewToCache(
+        videoId,
+        currentAnalysis,
+        currentTranscriptTimestamped,
+        currentTranscriptLanguage,
+      );
+      if (!isCurrentDigest(videoId, generation, routeKey)) return;
+    }
     applyMediaLanguageDefaults();
     isAnalysisLoading = false;
 
@@ -2028,8 +2050,19 @@ async function runDigestLoad(
   await hydrateCurrentVideoNoteSource();
   if (!isCurrentDigest(videoId, generation, routeKey)) return;
 
+  currentAnalysis = await loadOverviewFromCache(
+    videoId,
+    currentTranscriptTimestamped,
+    currentTranscriptLanguage,
+  );
+  if (!isCurrentDigest(videoId, generation, routeKey)) return;
+
   // Render transcript immediately (no LLM needed)
   renderTranscript();
+  if (currentAnalysis) {
+    renderAnalysisResults(currentAnalysis);
+    highlightMomentsOnPage(currentAnalysis.keyMoments);
+  }
   showState("results");
   document.getElementById("tabsNav").style.display = "flex";
 
@@ -2273,7 +2306,19 @@ async function ensureOverviewOriginal() {
     currentAnalysis = merged;
     setOverviewTranslationStatus();
     renderAnalysisResults(currentAnalysis);
-    await saveToCache(videoId);
+    const overviewSaved = await saveOverviewToCache(
+      videoId,
+      currentAnalysis,
+      currentTranscriptTimestamped,
+      currentTranscriptLanguage,
+    );
+    const digestSaved = await saveToCache(videoId);
+    if (!overviewSaved && !digestSaved) {
+      setOverviewTranslationStatus(
+        "概览已生成，但本地保存失败；再次打开可能会重新生成并消耗 AI 额度。",
+        true,
+      );
+    }
   } catch (error) {
     if (!ownsRequest()) return;
     setOverviewTranslationStatus(
@@ -5414,8 +5459,22 @@ async function triggerAnalysis() {
     renderAnalysisResults(currentAnalysis);
     highlightMomentsOnPage(currentAnalysis.keyMoments);
 
-    // Save to cache now that we have analysis
-    await saveToCache(videoId);
+    // Persist a compact overview record before the much larger digest payload.
+    // Even when a transcript cache write fails, reopening the same video can
+    // still reuse the already-paid-for overview without another provider call.
+    const overviewSaved = await saveOverviewToCache(
+      videoId,
+      currentAnalysis,
+      transcriptTimestamped,
+      sourceLanguage,
+    );
+    const digestSaved = await saveToCache(videoId);
+    if (!overviewSaved && !digestSaved) {
+      setOverviewTranslationStatus(
+        "概览已生成，但本地保存失败；再次打开可能会重新生成并消耗 AI 额度。",
+        true,
+      );
+    }
     if (!ownsRequest()) return;
     if (currentOverviewMode !== "zh") void ensureOverviewOriginal();
   } catch (error) {
@@ -5824,6 +5883,145 @@ function getTranscriptContext(selectedText) {
 // CACHING
 // ============================================================
 
+function overviewCacheKey(videoId) {
+  const mediaKey = String(videoId || "").trim().slice(0, 220);
+  return mediaKey ? `${OVERVIEW_CACHE_PREFIX}${mediaKey}` : "";
+}
+
+function overviewTranscriptFingerprint(transcriptTimestamped) {
+  const text = String(transcriptTimestamped || "").trim();
+  return text ? YTD_NOTE_SOURCES.hashSourceText(text) : "";
+}
+
+function buildOverviewCacheRecord(
+  videoId,
+  analysis,
+  transcriptTimestamped,
+  sourceLanguage,
+) {
+  const mediaKey = String(videoId || "").trim().slice(0, 220);
+  const transcriptFingerprint = overviewTranscriptFingerprint(
+    transcriptTimestamped,
+  );
+  if (!mediaKey || !transcriptFingerprint || !hasUsableChineseAnalysis(analysis)) {
+    return null;
+  }
+  return {
+    schemaVersion: OVERVIEW_CACHE_SCHEMA_VERSION,
+    mediaKey,
+    transcriptFingerprint,
+    sourceLanguage: normalizeLanguageCode(
+      sourceLanguage || analysis?.sourceLanguage,
+    ),
+    analysis,
+    timestamp: Date.now(),
+  };
+}
+
+function validateOverviewCacheRecord(
+  record,
+  videoId,
+  transcriptTimestamped = "",
+  sourceLanguage = "",
+) {
+  const mediaKey = String(videoId || "").trim().slice(0, 220);
+  if (
+    !record ||
+    record.schemaVersion !== OVERVIEW_CACHE_SCHEMA_VERSION ||
+    record.mediaKey !== mediaKey ||
+    !hasUsableChineseAnalysis(record.analysis)
+  ) {
+    return null;
+  }
+  const expectedFingerprint = overviewTranscriptFingerprint(
+    transcriptTimestamped,
+  );
+  if (
+    expectedFingerprint &&
+    record.transcriptFingerprint !== expectedFingerprint
+  ) {
+    return null;
+  }
+  const expectedLanguage = normalizeLanguageCode(sourceLanguage);
+  const cachedLanguage = normalizeLanguageCode(
+    record.sourceLanguage || record.analysis?.sourceLanguage,
+  );
+  if (
+    expectedLanguage &&
+    cachedLanguage &&
+    !languagesSharePrimary(expectedLanguage, cachedLanguage)
+  ) {
+    return null;
+  }
+  return record.analysis;
+}
+
+async function saveOverviewToCache(
+  videoId,
+  analysis,
+  transcriptTimestamped = currentTranscriptTimestamped,
+  sourceLanguage = currentTranscriptLanguage,
+) {
+  const key = overviewCacheKey(videoId);
+  const record = buildOverviewCacheRecord(
+    videoId,
+    analysis,
+    transcriptTimestamped,
+    sourceLanguage,
+  );
+  if (!key || !record) return false;
+  try {
+    await chrome.storage.local.set({ [key]: record });
+    await evictOldOverviewCacheEntries(OVERVIEW_CACHE_MAX_ENTRIES);
+    return true;
+  } catch (error) {
+    console.error("Overview cache save error:", error);
+    return false;
+  }
+}
+
+async function loadOverviewFromCache(
+  videoId,
+  transcriptTimestamped = currentTranscriptTimestamped,
+  sourceLanguage = currentTranscriptLanguage,
+) {
+  const key = overviewCacheKey(videoId);
+  if (!key) return null;
+  try {
+    const result = await chrome.storage.local.get(key);
+    const record = result[key];
+    const analysis = validateOverviewCacheRecord(
+      record,
+      videoId,
+      transcriptTimestamped,
+      sourceLanguage,
+    );
+    if (!analysis && record) await chrome.storage.local.remove(key);
+    return analysis;
+  } catch (error) {
+    console.error("Overview cache load error:", error);
+    return null;
+  }
+}
+
+async function evictOldOverviewCacheEntries(maxEntries) {
+  try {
+    const allData = await chrome.storage.local.get(null);
+    const overviewKeys = Object.keys(allData).filter((key) =>
+      key.startsWith(OVERVIEW_CACHE_PREFIX),
+    );
+    if (overviewKeys.length <= maxEntries) return;
+    const sorted = overviewKeys
+      .map((key) => ({ key, timestamp: Number(allData[key]?.timestamp) || 0 }))
+      .sort((left, right) => left.timestamp - right.timestamp);
+    await chrome.storage.local.remove(
+      sorted.slice(0, overviewKeys.length - maxEntries).map((entry) => entry.key),
+    );
+  } catch (error) {
+    console.error("Overview cache eviction error:", error);
+  }
+}
+
 /**
  * Saves the current digest results to persistent local storage.
  * Results survive browser restarts — reopening the same video loads from cache
@@ -5831,7 +6029,7 @@ function getTranscriptContext(selectedText) {
  * Cache expires after 30 days. Oldest entries evicted when > 20 videos cached.
  */
 async function saveToCache(videoId) {
-  if (!videoId || videoId !== currentVideoId || !currentTranscript) return;
+  if (!videoId || videoId !== currentVideoId || !currentTranscript) return false;
 
   try {
     // Persist semantic-segment translations for this video.
@@ -5878,8 +6076,10 @@ async function saveToCache(videoId) {
     // Refresh this video's durable export material (idempotent; only when the
     // video has a note). Captures newly translated transcript/title segments.
     void persistCurrentVideoNoteSourceIfNoted();
+    return true;
   } catch (error) {
     console.error("Cache save error:", error);
+    return false;
   }
 }
 
@@ -7405,6 +7605,12 @@ globalThis.__YTD_TRANSCRIPT_TESTING__ = {
   loadNotes,
   hasUsableChineseAnalysis,
   hasCompleteOriginalAnalysis,
+  overviewCacheKey,
+  overviewTranscriptFingerprint,
+  buildOverviewCacheRecord,
+  validateOverviewCacheRecord,
+  saveOverviewToCache,
+  loadOverviewFromCache,
   normalizeLanguageCode,
   isChineseLanguage,
   isConfirmedSimplifiedChineseSource,
