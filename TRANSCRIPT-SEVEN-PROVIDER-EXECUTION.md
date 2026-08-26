@@ -1,6 +1,6 @@
 # Seven-provider YouTube transcript experiment
 
-Status date: 2026-08-23 (America/Los_Angeles)
+Status date: 2026-08-25 (America/Los_Angeles)
 
 ## Goal
 
@@ -13,12 +13,16 @@ changes to `main`, a merge, a push, or a release.
 ## Frozen baseline
 
 - Branch: `codex/transcript-source-comparison-v2`
-- Baseline commit: `7e15275` (`Snapshot UI and transcript work before provider split`)
-- Production files already contain the active local YouTube adapter and the
-  consented Supadata fallback.
-- Historical comparison evidence lives in the older untracked
-  `experiments/transcript-sources` workspace and may be migrated here without
-  its generated dependency folders.
+- Historical experiment baseline: `7e15275` (`Snapshot UI and transcript work
+  before provider split`).
+- Seven-provider checkpoint commits: `f491210` and `bd65972`.
+- Mainline synchronized from local `main` commit `b45b42a` (DigestDock 1.4.4)
+  on 2026-08-25. The repository root now follows API-primary `main`.
+- The active local extractor is preserved only at
+  `experiments/transcript-sources/youtube-active/youtube-transcript.js`; it is
+  not restored to the public/root extension.
+- Historical comparison evidence has been migrated under
+  `experiments/transcript-sources` without generated dependency folders in Git.
 
 ## Fixed provider IDs
 
@@ -180,8 +184,10 @@ three discriminate the routes.
    The probe also requires continuous scroll coverage. A non-scrollable/unknown
    panel shape returns `PANEL_SCROLL_CONTAINER_UNKNOWN`; this is a valid failure,
    not permission to label visible rows as a complete transcript.
-3. `youtube-active` — load DigestDock from this exact worktree root. Do not
-   click the Supadata action. Treat a local failure as that provider's result.
+3. `youtube-active` — load unpacked from
+   `experiments/transcript-sources/youtube-verifier`. The worktree root follows
+   API-primary main and is not the active-local test surface. Treat a verifier
+   failure as that provider's result; do not fall through to Supadata.
 4. Stop all same-IP YouTube probes immediately after the first 429. Do not use
    repeated retries to manufacture another result.
 5. `node-libraries` — from `experiments/transcript-sources/node-libraries`, run
@@ -237,7 +243,12 @@ provider. Never enable passive and active routes together for evidence capture.
 - All three generated dependency directories are ignored and are not release
   files.
 
-### Verification completed on 2026-08-23
+### Pre-sync verification completed on 2026-08-23
+
+The following evidence predates the 2026-08-25 mainline merge. It proves the
+seven-provider checkpoint before synchronization, not the merged 1.4.4 state.
+Per user instruction, post-merge tests are deliberately deferred to the next
+testing stage.
 
 - Root `npm test`: 236/236 passed.
 - Root `npm run check`: passed; 29 public allowlisted files.
@@ -302,6 +313,9 @@ this implementation stage. No browser-side acceptance has been performed.
 - [x] Project, experiment, dependency, release, package, and diff checks passed.
 - [x] Text-free manual-result validator and comparison-report generator added.
 - [x] Tomorrow's exact runbook and recovery entry written.
+- [x] Local main `b45b42a` synchronized into this experimental branch without
+      changing, pushing, or releasing main.
+- [ ] Post-sync root/experiment automated checks rerun.
 - [ ] Real Chrome/YouTube/Supadata/manual acceptance performed by the user.
 
 ## Recovery entry

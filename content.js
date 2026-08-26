@@ -40,23 +40,34 @@ const LEGACY_YOUTUBE_DIGEST_BUTTON_ID = "ytd-digest-button";
 const LEGACY_YOUTUBE_NOTE_BUTTON_ID = "ytd-note-button";
 
 // Self-contained inline brand icon for the page opener. Geometry and colors
-// match icons/digestdock-icon-solid.svg (graphite rounded square, three white
-// chapter lines, one coral time marker). It renders icon-only; the button
+// match icons/digestdock-icon-solid.svg (blue-cyan gradient, three white
+// chapter lines, one luminous time marker). It renders icon-only; the button
 // carries the accessible name via aria-label/title, so the SVG stays decorative
 // (aria-hidden) to avoid a duplicated announcement.
 const DIGESTDOCK_BRAND_ICON_SVG = `
-  <svg class="digestdock-brand-icon" width="22" height="22" viewBox="0 0 128 128" fill="none" aria-hidden="true" focusable="false">
-    <rect width="128" height="128" rx="32" fill="#1F2933"></rect>
+  <svg class="digestdock-brand-icon" width="26" height="26" viewBox="0 0 128 128" fill="none" aria-hidden="true" focusable="false">
+    <defs>
+      <linearGradient id="${DIGESTDOCK_YOUTUBE_DOM_PREFIX}-brand-base" x1="12" y1="8" x2="116" y2="120" gradientUnits="userSpaceOnUse">
+        <stop offset="0" stop-color="#0A5FE9"></stop>
+        <stop offset="0.46" stop-color="#087FE8"></stop>
+        <stop offset="1" stop-color="#04B7D2"></stop>
+      </linearGradient>
+      <radialGradient id="${DIGESTDOCK_YOUTUBE_DOM_PREFIX}-brand-glow" cx="0" cy="0" r="1" gradientTransform="translate(86 88) rotate(-132) scale(72 68)" gradientUnits="userSpaceOnUse">
+        <stop stop-color="#30CFE5" stop-opacity="0.72"></stop>
+        <stop offset="1" stop-color="#0B80E8" stop-opacity="0"></stop>
+      </radialGradient>
+    </defs>
+    <rect width="128" height="128" rx="32" fill="url(#${DIGESTDOCK_YOUTUBE_DOM_PREFIX}-brand-base)"></rect>
+    <rect width="128" height="128" rx="32" fill="url(#${DIGESTDOCK_YOUTUBE_DOM_PREFIX}-brand-glow)"></rect>
     <rect x="24" y="32" width="80" height="16" rx="8" fill="#FFFFFF"></rect>
-    <circle cx="32" cy="64" r="8" fill="#F26A4F"></circle>
+    <circle cx="32" cy="64" r="8" fill="#D8F7FF"></circle>
     <rect x="48" y="56" width="56" height="16" rx="8" fill="#FFFFFF"></rect>
     <rect x="40" y="80" width="56" height="16" rx="8" fill="#FFFFFF"></rect>
   </svg>
 `;
 
 // Linear bookmark-plus icon for the "save current moment" control. Stroke uses
-// currentColor and matches the sidebar UI_ICONS.bookmarkPlus. No emoji, no long
-// text; the button provides the accessible name.
+// currentColor and matches the sidebar UI_ICONS.bookmarkPlus.
 const DIGESTDOCK_BOOKMARK_ICON_SVG = `
   <svg class="digestdock-note-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
     <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h6"></path>
@@ -72,21 +83,53 @@ const DIGESTDOCK_CHECK_ICON_SVG = `
   </svg>
 `;
 
-// Neutral graphite styling for the player note control, matching
-// docs/design/final-icons-and-entry.jpg: a deep graphite surface, white
-// bookmark icon, ~10px radius (not a full pill/circle), and a restrained
-// neutral shadow. Hover/pressed feedback stays subtle; the transient "saved"
-// success color reuses the shared success green before restoring graphite.
-const DIGESTDOCK_NOTE_BG = "#1f2933";
-const DIGESTDOCK_NOTE_BG_HOVER = "#2b3947";
+const DIGESTDOCK_NOTE_BUTTON_LABEL = "金句速记 (N)";
+const DIGESTDOCK_NOTE_BG =
+  "linear-gradient(135deg, rgba(10, 95, 233, 0.2) 0%, rgba(8, 127, 232, 0.2) 52%, rgba(4, 183, 210, 0.2) 100%)";
+const DIGESTDOCK_NOTE_BG_HOVER =
+  "linear-gradient(135deg, #0a5fe9 0%, #087fe8 52%, #04b7d2 100%)";
 const DIGESTDOCK_NOTE_SUCCESS_BG = "#2c8a65";
-const DIGESTDOCK_NOTE_SHADOW = "0 4px 12px rgba(23, 33, 42, 0.24)";
-const DIGESTDOCK_NOTE_SHADOW_HOVER = "0 8px 18px rgba(23, 33, 42, 0.30)";
+const DIGESTDOCK_NOTE_SHADOW = "0 8px 18px rgba(4, 73, 139, 0.24)";
+const DIGESTDOCK_NOTE_SHADOW_HOVER = "0 10px 22px rgba(4, 73, 139, 0.3)";
+
+function setNoteButtonContent(button, iconSvg, label) {
+  if (!button) return;
+  button.innerHTML = iconSvg;
+  const labelEl = document.createElement("span");
+  labelEl.className = "digestdock-note-label";
+  labelEl.textContent = label;
+  button.appendChild(labelEl);
+}
 
 function isExtensionContextInvalidatedError(error) {
-  return String(error?.message || error || "").includes(
-    "Extension context invalidated",
+  const message = String(error?.message || error || "");
+  return (
+    error?.code === "EXTENSION_CONTEXT_INVALIDATED" ||
+    message.includes("Extension context invalidated") ||
+    /Cannot read properties of (?:undefined|null).*sendMessage/i.test(message)
   );
+}
+
+function activeExtensionRuntime() {
+  try {
+    return typeof chrome === "object" &&
+      chrome?.runtime &&
+      typeof chrome.runtime.sendMessage === "function"
+      ? chrome.runtime
+      : null;
+  } catch (_error) {
+    return null;
+  }
+}
+
+async function sendExtensionMessage(message) {
+  const runtime = activeExtensionRuntime();
+  if (!runtime) {
+    const error = new Error("Extension context invalidated.");
+    error.code = "EXTENSION_CONTEXT_INVALIDATED";
+    throw error;
+  }
+  return runtime.sendMessage(message);
 }
 
 function showExtensionRefreshNotice() {
@@ -97,7 +140,7 @@ function showExtensionRefreshNotice() {
   const notice = document.createElement("div");
   notice.id = DIGESTDOCK_YOUTUBE_DOM_IDS.refreshNotice;
   notice.textContent =
-    "DigestDock 已更新。请刷新当前 YouTube 页面后再生成摘要。";
+    "DigestDock 已更新。请刷新当前 YouTube 页面后再继续使用。";
   notice.style.cssText = `
     position: fixed;
     top: 18px;
@@ -327,24 +370,31 @@ function createDigestButton() {
   digestButton.type = "button";
   digestButton.setAttribute("aria-label", "打开 DigestDock");
   digestButton.setAttribute("title", "DigestDock");
-  // Compact brand-icon button — no long text. The accessible name lives on the
-  // aria-label/title; the SVG <title> keeps "DigestDock" available to AT too.
+  // Compact brand icon + DDK label. The full product name stays in the
+  // accessible name/title while the short label improves visual recognition.
   digestButton.innerHTML = DIGESTDOCK_BRAND_ICON_SVG;
+  const digestLabel = document.createElement("span");
+  digestLabel.className = "digestdock-short-label";
+  digestLabel.textContent = "DDK";
+  digestButton.appendChild(digestLabel);
 
-  // A compact icon button sized to sit among YouTube's native action controls.
+  // A compact icon + text button sized to sit among YouTube's native controls.
   // width:max-content + flex:0 0 auto keep it from stretching into a full-width
   // second row when YouTube switches #actions-inner to a vertical column.
   digestButton.style.cssText = `
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    gap: 0;
-    padding: 6px;
+    box-sizing: border-box;
+    gap: 6px;
+    padding: 5px 12px 5px 7px;
     height: 36px;
     border: none;
     border-radius: 10px;
     background: transparent;
     color: #1f2933;
+    font: 700 12.5px/1 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    letter-spacing: 0.01em;
     cursor: pointer;
     margin-right: 8px;
     transition: background 0.18s, transform 0.1s;
@@ -374,7 +424,7 @@ function createDigestButton() {
 
     // Send message to background script to open side panel
     try {
-      const result = await chrome.runtime.sendMessage({
+      const result = await sendExtensionMessage({
         action: "openSidePanel",
       });
       debugLog("[DigestDock] openSidePanel response:", result);
@@ -551,21 +601,24 @@ function injectNoteButton() {
 
   debugLog("[DigestDock Content] Injecting note button");
 
-  // Create the note button — a compact icon-only bookmark-plus control that
-  // floats over the player. No long text, no emoji; the accessible name and
-  // tooltip live on aria-label/title and the N shortcut hint is preserved.
+  // Create the note button — a compact bookmark-plus + text action that floats
+  // over the player. The visible label keeps the N shortcut discoverable.
   const noteButton = document.createElement("button");
   noteButton.id = DIGESTDOCK_YOUTUBE_DOM_IDS.noteButton;
   noteButton.type = "button";
   noteButton.setAttribute(
     "aria-label",
-    "用 DigestDock 保存当前时刻的笔记（快捷键 N）",
+    DIGESTDOCK_NOTE_BUTTON_LABEL,
   );
-  noteButton.setAttribute("title", "保存当前时刻（N）");
-  noteButton.innerHTML = DIGESTDOCK_BOOKMARK_ICON_SVG;
+  noteButton.setAttribute("title", DIGESTDOCK_NOTE_BUTTON_LABEL);
+  setNoteButtonContent(
+    noteButton,
+    DIGESTDOCK_BOOKMARK_ICON_SVG,
+    DIGESTDOCK_NOTE_BUTTON_LABEL,
+  );
 
-  // Compact rounded icon button in the neutral graphite surface, with a
-  // restrained shadow. Start hidden; visibility is controlled by mouse activity.
+  // Compact blue-cyan action with a restrained shadow. Start hidden; visibility
+  // is controlled by mouse activity.
   noteButton.style.cssText = `
     position: absolute;
     top: 16px;
@@ -574,18 +627,24 @@ function injectNoteButton() {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 36px;
-    height: 36px;
-    padding: 0;
+    gap: 7px;
+    width: auto;
+    min-width: 128px;
+    height: 38px;
+    padding: 0 14px;
     background: ${DIGESTDOCK_NOTE_BG};
-    color: #ffffff;
-    border: none;
+    color: rgba(255, 255, 255, 0.5);
+    border: 1px solid rgba(255, 255, 255, 0.24);
     border-radius: 10px;
+    font: 600 13px/1 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    white-space: nowrap;
     cursor: pointer;
     transition: opacity 0.18s ease, transform 0.18s ease, background 0.18s ease, box-shadow 0.18s ease;
     opacity: 0;
     pointer-events: none;
     box-shadow: ${DIGESTDOCK_NOTE_SHADOW};
+    -webkit-backdrop-filter: blur(6px) saturate(1.08);
+    backdrop-filter: blur(6px) saturate(1.08);
   `;
 
   ytdNoteButton = noteButton;
@@ -609,15 +668,17 @@ function injectNoteButton() {
     hideNoteButton();
   });
 
-  // Hover effect — subtle neutral lift, no color shift away from graphite.
+  // Hover effect — subtle lift with a darker blue-cyan gradient.
   noteButton.addEventListener("mouseenter", () => {
     noteButton.style.background = DIGESTDOCK_NOTE_BG_HOVER;
+    noteButton.style.color = "#ffffff";
     noteButton.style.boxShadow = DIGESTDOCK_NOTE_SHADOW_HOVER;
     noteButton.style.transform = "translateY(-1px)";
   });
 
   noteButton.addEventListener("mouseleave", () => {
     noteButton.style.background = DIGESTDOCK_NOTE_BG;
+    noteButton.style.color = "rgba(255, 255, 255, 0.5)";
     noteButton.style.boxShadow = DIGESTDOCK_NOTE_SHADOW;
     noteButton.style.transform = "translateY(0)";
   });
@@ -717,15 +778,17 @@ async function saveCurrentNote() {
   const videoId = new URLSearchParams(window.location.search).get("v");
 
   const noteButton = ytdNoteButton;
-  // Icon-only feedback: swap the icon and update the accessible name/tooltip
-  // instead of restoring long text. The success toast still carries the detail.
-  const restoreLabel = "用 DigestDock 保存当前时刻的笔记（快捷键 N）";
-  const restoreTitle = "保存当前时刻（N）";
+  const restoreLabel = DIGESTDOCK_NOTE_BUTTON_LABEL;
+  const restoreTitle = DIGESTDOCK_NOTE_BUTTON_LABEL;
 
-  const setNoteButtonState = (message) => {
+  const setNoteButtonState = (
+    message,
+    iconSvg = DIGESTDOCK_BOOKMARK_ICON_SVG,
+  ) => {
     if (!noteButton) return;
     noteButton.setAttribute("title", message);
     noteButton.setAttribute("aria-label", message);
+    setNoteButtonContent(noteButton, iconSvg, message);
   };
 
   if (noteButton) {
@@ -734,7 +797,7 @@ async function saveCurrentNote() {
   }
 
   try {
-    const result = await chrome.runtime.sendMessage({
+    const result = await sendExtensionMessage({
       action: "saveNote",
       videoId: videoId,
       timestamp: currentTime,
@@ -744,30 +807,39 @@ async function saveCurrentNote() {
 
     if (result.success) {
       if (noteButton) {
-        noteButton.innerHTML = DIGESTDOCK_CHECK_ICON_SVG;
+        setNoteButtonState("已保存", DIGESTDOCK_CHECK_ICON_SVG);
         noteButton.style.background = DIGESTDOCK_NOTE_SUCCESS_BG;
-        setNoteButtonState("已保存");
+        noteButton.style.color = "#ffffff";
       }
       showNoteSavedToast(result.note);
     } else {
       const label =
         result.error === "SUPADATA_CONSENT_REQUIRED"
-          ? "请在侧栏确认"
+          ? "请在侧栏授权"
           : result.error === "SUPADATA_NOT_CONFIGURED"
-            ? "可在设置中配置回退"
+            ? "需在设置配置 Supadata"
             : "出错了";
       setNoteButtonState(label);
       console.error("[DigestDock] Save note error:", result.error);
     }
   } catch (err) {
+    if (isExtensionContextInvalidatedError(err)) {
+      if (noteButton) {
+        noteButton.disabled = true;
+        setNoteButtonState("请刷新页面");
+      }
+      showExtensionRefreshNotice();
+      return;
+    }
     setNoteButtonState("出错了");
     console.error("[DigestDock] Save note exception:", err);
   }
 
   setTimeout(() => {
     if (noteButton) {
-      noteButton.innerHTML = DIGESTDOCK_BOOKMARK_ICON_SVG;
+      setNoteButtonState(restoreLabel, DIGESTDOCK_BOOKMARK_ICON_SVG);
       noteButton.style.background = DIGESTDOCK_NOTE_BG;
+      noteButton.style.color = "rgba(255, 255, 255, 0.5)";
       noteButton.style.pointerEvents = "auto";
       noteButton.setAttribute("title", restoreTitle);
       noteButton.setAttribute("aria-label", restoreLabel);
@@ -846,11 +918,64 @@ function showNoteSavedToast(note) {
 // VIDEO INFO EXTRACTION
 // ============================================================
 
+function decodeEmbeddedJsonString(match) {
+  if (!match?.[1]) return "";
+  try {
+    return JSON.parse(match[1]);
+  } catch {
+    return "";
+  }
+}
+
+function extractEmbeddedVideoDescription(videoId) {
+  const scripts = Array.from(document.scripts || []);
+  for (const script of scripts) {
+    const text = String(script?.textContent || "");
+    const detailsIndex = text.indexOf('"videoDetails":');
+    if (detailsIndex < 0) continue;
+    // `shortDescription` is an early flat field in videoDetails. Bound the
+    // scan so an unrelated large player script can never become an unbounded
+    // parse or allocation in the content script.
+    const details = text.slice(detailsIndex, detailsIndex + 250_000);
+    const embeddedVideoId = decodeEmbeddedJsonString(
+      details.match(/"videoId":("(?:\\.|[^"\\])*")/),
+    );
+    if (!embeddedVideoId || embeddedVideoId !== videoId) continue;
+    const descriptionMatch = details.match(
+      /"shortDescription":("(?:\\.|[^"\\])*")/,
+    );
+    if (!descriptionMatch) continue;
+    return {
+      found: true,
+      text: decodeEmbeddedJsonString(descriptionMatch).trim(),
+    };
+  }
+  return { found: false, text: "" };
+}
+
+function extractVisibleVideoDescription() {
+  const candidates = [
+    document.querySelector("#attributed-snippet-text"),
+    document.querySelector("meta[name='description']"),
+    document.querySelector("meta[property='og:description']"),
+    document.querySelector("meta[itemprop='description']"),
+    document.querySelector("#description-inner"),
+  ];
+  for (const candidate of candidates) {
+    const text = String(
+      candidate?.getAttribute?.("content") || candidate?.textContent || "",
+    ).trim();
+    if (text) return text;
+  }
+  return "";
+}
+
 /**
  * Reads the video title, channel name, and description directly from YouTube's page.
  * These are just sitting in the HTML — we grab them from the DOM elements.
  */
 function extractVideoInfo() {
+  const videoId = new URLSearchParams(window.location.search).get("v") || "";
   // The video title is in an h1 element inside the #title container
   const titleElement = document.querySelector(
     "h1.ytd-watch-metadata yt-formatted-string, #title h1 yt-formatted-string",
@@ -864,19 +989,29 @@ function extractVideoInfo() {
   // Video duration from the video element
   const videoElement = document.querySelector("video.html5-main-video");
 
-  // Video description — YouTube has this in a few possible places
-  const descriptionElement = document.querySelector(
-    "#description-inner, " +
-      "ytd-watch-metadata #description yt-attributed-string, " +
-      "#description yt-formatted-string, " +
-      "ytd-expander#description yt-attributed-string",
-  );
+  const embeddedDescription = extractEmbeddedVideoDescription(videoId);
+  const visibleDescription = embeddedDescription.found
+    ? ""
+    : extractVisibleVideoDescription();
+  const description = embeddedDescription.found
+    ? embeddedDescription.text
+    : visibleDescription;
 
   return {
+    videoId,
     title: titleElement?.textContent?.trim() || "",
     channelName: channelElement?.textContent?.trim() || "",
     duration: videoElement?.duration || 0,
-    description: descriptionElement?.textContent?.trim() || "",
+    description,
+    // Only exact videoDetails data can prove completeness or a genuinely empty
+    // description. DOM/meta fallbacks are often truncated or temporarily empty
+    // during YouTube SPA hydration, so they remain incomplete evidence.
+    descriptionStatus: embeddedDescription.found
+      ? description
+        ? "present"
+        : "confirmed-empty"
+      : "unknown",
+    descriptionTruncated: !embeddedDescription.found && !!description,
   };
 }
 
@@ -996,6 +1131,8 @@ document.addEventListener("yt-navigate-finish", () => {
 // cannot redeclare top-level const/let bindings. These selected helpers stay
 // visible only for the repository's Node regression tests.
 Object.assign(globalThis, {
+  extractEmbeddedVideoDescription,
+  extractVideoInfo,
   findDigestButtonHost,
   injectDigestButton,
   isExtensionContextInvalidatedError,

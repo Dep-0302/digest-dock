@@ -9,8 +9,12 @@ var YTD_NOTES_BACKUP = (() => {
   // Stable compatibility identifier. Existing YouTube Digest backups must
   // remain importable after the product rename to DigestDock.
   const FORMAT = "youtube-digest-notes-backup";
-  const SCHEMA_VERSION = 2;
+  // Schema 3 adds the validated Chinese video-title fields. Schema 1 and 2
+  // remain importable; their notes simply default the new fields to empty.
+  const SCHEMA_VERSION = 3;
   const LEGACY_SCHEMA_VERSION = 1;
+  const STRICT_MEDIA_IDENTITY_MIN_VERSION = 2;
+  const SUPPORTED_SCHEMA_VERSIONS = new Set([1, 2, 3]);
   const MAX_NOTES = 100;
   const MAX_BACKUP_BYTES = 5 * 1024 * 1024;
   const MAX_TIMESTAMP_SECONDS = 31_536_000;
@@ -283,6 +287,26 @@ var YTD_NOTES_BACKUP = (() => {
       fail("INVALID_NOTES_BACKUP", { field: "translatedValidation" });
     }
 
+    // Schema 3 validated Chinese title. Absent in schema 1/2 (defaults empty).
+    const videoTitleZh = normalizeString(note.videoTitleZh, "videoTitleZh", {
+      max: 500,
+    });
+    const videoTitleZhValidated = normalizeBoolean(
+      note.videoTitleZhValidated,
+      "videoTitleZhValidated",
+    );
+    const videoTitleZhValidationVersion = normalizeValidationVersion(
+      note.videoTitleZhValidationVersion,
+    );
+    if (
+      (!videoTitleZh &&
+        (videoTitleZhValidated || videoTitleZhValidationVersion !== 0)) ||
+      (videoTitleZhValidated && videoTitleZhValidationVersion < 1) ||
+      (!videoTitleZhValidated && videoTitleZhValidationVersion !== 0)
+    ) {
+      fail("INVALID_NOTES_BACKUP", { field: "videoTitleZhValidation" });
+    }
+
     return {
       id,
       platform: identity.platform,
@@ -295,6 +319,9 @@ var YTD_NOTES_BACKUP = (() => {
       videoTitle: normalizeString(note.videoTitle, "videoTitle", {
         max: 500,
       }),
+      videoTitleZh,
+      videoTitleZhValidated,
+      videoTitleZhValidationVersion,
       channelName: normalizeString(note.channelName, "channelName", { max: 300 }),
       timestamp: `${minutes}:${String(seconds).padStart(2, "0")}`,
       timestampSeconds,
@@ -340,6 +367,9 @@ var YTD_NOTES_BACKUP = (() => {
       id: normalized.id,
       ...mediaIdentity,
       videoTitle: normalized.videoTitle,
+      videoTitleZh: normalized.videoTitleZh,
+      videoTitleZhValidated: normalized.videoTitleZhValidated,
+      videoTitleZhValidationVersion: normalized.videoTitleZhValidationVersion,
       channelName: normalized.channelName,
       timestampSeconds: normalized.timestampSeconds,
       text: normalized.text,
@@ -433,10 +463,7 @@ var YTD_NOTES_BACKUP = (() => {
     if (!isPlainObject(parsed) || parsed.format !== FORMAT) {
       fail("INVALID_NOTES_BACKUP", { field: "format" });
     }
-    if (
-      parsed.schemaVersion !== LEGACY_SCHEMA_VERSION &&
-      parsed.schemaVersion !== SCHEMA_VERSION
-    ) {
+    if (!SUPPORTED_SCHEMA_VERSIONS.has(parsed.schemaVersion)) {
       fail("UNSUPPORTED_NOTES_BACKUP_VERSION", {
         schemaVersion: parsed.schemaVersion,
       });
@@ -450,7 +477,8 @@ var YTD_NOTES_BACKUP = (() => {
     const notes = parsed.notes.map((note, index) =>
       normalizeNote(note, index, {
         schemaVersion: parsed.schemaVersion,
-        strictBackupImport: parsed.schemaVersion === SCHEMA_VERSION,
+        strictBackupImport:
+          parsed.schemaVersion >= STRICT_MEDIA_IDENTITY_MIN_VERSION,
       }),
     );
     assertUniqueNoteIds(notes);
@@ -505,6 +533,25 @@ var YTD_NOTES_BACKUP = (() => {
       merged.translatedValidationVersion =
         importedNote.translatedValidationVersion;
       merged.translatedUnchanged = importedNote.translatedUnchanged;
+      changed = true;
+    }
+    // A validated Chinese title can fill an empty local value or upgrade an
+    // unvalidated one, but never overwrites a different non-empty validated
+    // title already present locally.
+    if (!merged.videoTitleZh && importedNote.videoTitleZh) {
+      merged.videoTitleZh = importedNote.videoTitleZh;
+      merged.videoTitleZhValidated = importedNote.videoTitleZhValidated;
+      merged.videoTitleZhValidationVersion =
+        importedNote.videoTitleZhValidationVersion;
+      changed = true;
+    } else if (
+      merged.videoTitleZh === importedNote.videoTitleZh &&
+      merged.videoTitleZhValidated !== true &&
+      importedNote.videoTitleZhValidated === true
+    ) {
+      merged.videoTitleZhValidated = true;
+      merged.videoTitleZhValidationVersion =
+        importedNote.videoTitleZhValidationVersion;
       changed = true;
     }
     return { note: merged, changed };

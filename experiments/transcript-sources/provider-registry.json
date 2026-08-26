@@ -17,7 +17,7 @@
       "label": "YouTube active caption adapter",
       "surface": "digestdock-worktree",
       "networkPolicy": "bounded-youtube-only",
-      "entrypoint": "youtube-active/adapter.js",
+      "entrypoint": "youtube-verifier/manifest.json",
       "adapter": "youtube-active/adapter.js",
       "source": "youtube-active/youtube-transcript.js",
       "defaultVariant": null,

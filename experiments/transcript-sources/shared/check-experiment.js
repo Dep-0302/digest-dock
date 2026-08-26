@@ -87,7 +87,13 @@ const manifest = JSON.parse(
   fs.readFileSync(path.join(repositoryRoot, "manifest.json"), "utf8"),
 );
 const permissions = [...(manifest.permissions || [])].sort();
-const expectedPermissions = ["sidePanel", "storage", "tabs", "scripting"].sort();
+const expectedPermissions = [
+  "sidePanel",
+  "storage",
+  "unlimitedStorage",
+  "tabs",
+  "scripting",
+].sort();
 if (JSON.stringify(permissions) !== JSON.stringify(expectedPermissions)) {
   throw new Error("Public extension permissions drifted during the experiment.");
 }

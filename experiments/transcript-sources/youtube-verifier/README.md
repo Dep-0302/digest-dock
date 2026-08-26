@@ -28,7 +28,7 @@
 3. 选择本目录：
 
    ```text
-   /Users/wangchao/Documents/youtube-digest/.playwright-mcp/worktrees/transcript-source-comparison/experiments/transcript-sources/youtube-verifier
+   /Users/wangchao/Documents/youtube-digest-transcript-source-comparison-v2/experiments/transcript-sources/youtube-verifier
    ```
 
 4. 打开一个标准 YouTube watch 页面。
