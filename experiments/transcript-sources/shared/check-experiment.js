@@ -32,6 +32,12 @@ for (const provider of registry.providers) {
   if (!fs.existsSync(adapter)) {
     throw new Error(`Missing adapter for ${provider.id}: ${provider.adapter}`);
   }
+  if (provider.source) {
+    const source = path.resolve(root, provider.source);
+    if (!fs.existsSync(source)) {
+      throw new Error(`Missing source for ${provider.id}: ${provider.source}`);
+    }
+  }
   contract.normalizeProviderVariant(provider.defaultVariant);
 }
 

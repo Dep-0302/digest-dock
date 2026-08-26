@@ -9,7 +9,7 @@ var YOUTUBE_ACTIVE_PROVIDER = (() => {
     typeof YOUTUBE_TRANSCRIPT_ADAPTER !== "undefined"
       ? YOUTUBE_TRANSCRIPT_ADAPTER
       : typeof require === "function"
-        ? require("../../../youtube-transcript.js")
+        ? require("./youtube-transcript.js")
         : null;
 
   function createAdapter({ youtubeAdapter = ROOT_ADAPTER, fetchImpl } = {}) {
