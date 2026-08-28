@@ -55,7 +55,7 @@
           >
         </nav>
 
-        <p class="settings-version">DigestDock 1.4.4</p>
+        <p class="settings-version">DigestDock 1.4.5</p>
       </aside>
 
       <main class="settings-content">
@@ -91,8 +91,7 @@
 
         <div class="settings-scroll">
           <p class="lede" data-i18n="lede">
-            密钥仅保存在当前 Chrome 个人资料中。你选择一个 AI 服务商并填写它的 API 密钥用于 AI 功能，Supadata
-            是可选服务，用于为新的 YouTube 视频获取原生字幕。本开源扩展没有开发者服务器，也不使用分析服务。
+            密钥仅保存在当前 Chrome 个人资料中。选择一个 AI 服务商并填写 API 密钥即可使用 AI 功能。本开源扩展没有开发者服务器，也不使用分析服务。
           </p>
 
           <form id="settingsForm">
@@ -211,7 +210,12 @@
                   </div>
                 </section>
 
-                <section class="card service-card" id="section-transcript" aria-labelledby="supadataName">
+                <section
+                  class="card service-card"
+                  id="section-transcript"
+                  aria-labelledby="supadataName"
+                  hidden
+                >
                   <div class="service-head">
                     <span class="service-avatar service-avatar--transcript" aria-hidden="true">S</span>
                     <div class="service-headings">
@@ -261,7 +265,7 @@
                     </div>
                     <p class="help supadata-note">
                       <span data-i18n="supadataHelp"
-                        >新的 YouTube 字幕由 Supadata 获取。它对整个扩展仍是可选配置，但只有你在侧边栏确认本次使用第三方 Supadata 时才会调用，且逐视频授权；B 站不会使用。</span
+                        >仅当免费的 YouTube 字幕路线全部失败时，侧边栏才会提供 Supadata。即使保存了密钥，也只有你在侧边栏确认本次使用第三方 Supadata 时才会调用，且逐视频授权。你可以在此替换密钥，或清空后保存以删除密钥；B 站不会使用它。</span
                       >
                       <a
                         href="https://dash.supadata.ai/auth/sign-up"

@@ -25,11 +25,11 @@ There is no guaranteed response time or bug-bounty program. Please allow a reaso
 Examples include:
 
 - API keys or private content included in source, logs, screenshots, or release ZIPs;
-- requests to network origins outside the documented Bilibili, Bilibili subtitle-CDN, Supadata, and selectable AI provider hosts (DeepSeek, Zhipu GLM, Alibaba Bailian Qwen, SiliconFlow, and Fireworks);
+- requests to network origins outside the documented YouTube, Bilibili, Bilibili subtitle-CDN, Supadata, and selectable AI provider hosts (DeepSeek, Zhipu GLM, Alibaba Bailian Qwen, SiliconFlow, and Fireworks);
 - script or HTML injection through transcript, metadata, service errors, or model output;
 - access to browsing data outside the documented supported YouTube and Bilibili video-page scope;
 - unintended transmission of notes, transcripts, or credentials;
-- any direct mainline YouTube transcript-body request, or temporary signed Bilibili subtitle URLs written to storage or logs;
+- any unbounded, credential-bearing, off-task, or unauthorized YouTube transcript-body request, or temporary signed YouTube/Bilibili subtitle URLs written to storage or logs;
 - a note backup that unexpectedly includes API keys, settings, complete
   transcripts, or cached overview and summary data;
 - a resumable export-job record that includes an API key, transcript or note
@@ -52,9 +52,11 @@ Examples include:
 
 ## Transcript retrieval safety
 
-- The mainline must not construct a direct YouTube transcript-body request. A minimal MAIN-world page check may return only the current video identity, limited metadata, source language, and playability evidence; it must never return a signed caption request URL.
+- YouTube transcript retrieval is user-task-scoped: reuse a validated positive cache or bounded Passive capture first. A miss asks the user to enable YouTube CC and explicitly retry. Ordinary browsing and the first miss must not start Active, Panel, or Supadata.
+- The Passive MAIN-world observer may forward only a bounded body from a successful page-issued `/api/timedtext` response plus sanitized video/language/track metadata. It must never construct a request, forward or persist the signed caption URL, alter the response, or accept a different SPA video. Every payload remains untrusted and is revalidated in the isolated bridge and background.
+- Active and Panel remain evidence-only experiments. They must not be called by the product background or enter the candidate release allowlist unless a later explicit decision restores and revalidates them.
 - Temporary signed Bilibili subtitle URLs are request-scoped data. Use them only in memory for the immediate subtitle response; never write them to storage, caches, logs, diagnostics, screenshots, or test fixtures.
-- Supadata is the mainline provider for new YouTube transcript bodies. It may receive only the canonical watch URL after the user has saved a key and explicitly confirms that video attempt. Consent must not be persisted or inferred from the saved key. Clear login, age, membership, region, or unavailable states must stop before the request. Requests and polling must remain bounded by timeout, response-size, single-flight, navigation, and rate-limit cooldown controls. Saving Settings and using Bilibili must not require a Supadata key.
+- Supadata is a hidden, optional third-party fallback shown only after the user enables YouTube CC and the explicit free retry still ends unknown. It may receive only the canonical watch URL after the user has saved a key and explicitly confirms that video attempt. Consent must not be persisted or inferred from the saved key. Clear no-caption, login, age, membership, region, unavailable, or changed-page states must stop before the request. Requests and polling remain bounded by timeout, response-size, single-flight, navigation, and rate-limit cooldown controls. Saving Settings and using Bilibili must not require a Supadata key.
 - Transcript retrieval may read an existing platform-generated automatic caption track, but it must not download audio, perform ASR or other audio transcription, request generated transcription, or use OCR.
 - Bilibili keeps its existing session-aware path: it may use normal credentialed fetch behavior for Bilibili requests, but it must not request Chrome's `cookies` permission, read cookie values, export them, or store them.
 

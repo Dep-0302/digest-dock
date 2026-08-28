@@ -3571,7 +3571,23 @@ function installSidepanelDigestFixture(runtime) {
         withOriginal = false,
         mediaRef = null,
         routeKey = null,
-      ) => ({
+      ) => {
+        const resolvedMediaRef = mediaRef || {
+          platform: "youtube",
+          videoId,
+          mediaKey: videoId,
+          routeKey: routeKey || "youtube:" + videoId,
+        };
+        const resolvedRouteKey = routeKey;
+        const transcriptText = "transcript-" + videoId;
+        const transcriptTimestamped = "timestamped-" + videoId;
+        const transcriptSource =
+          resolvedMediaRef.platform === "bilibili" ? "bilibili" : "supadata";
+        const transcriptFingerprint = transcriptContentFingerprint(
+          transcriptTimestamped,
+          transcriptText,
+        );
+        return {
         analysis: {
           marker: videoId,
           schemaVersion: 3,
@@ -3600,13 +3616,29 @@ function installSidepanelDigestFixture(runtime) {
         },
         analysisVideoId: withProvenance ? videoId : undefined,
         transcript: [{ start: 0, text: "Transcript " + videoId }],
-        transcriptText: "transcript-" + videoId,
-        transcriptTimestamped: "timestamped-" + videoId,
+        transcriptText,
+        transcriptTimestamped,
         transcriptLanguage: sourceLanguage,
-        ...(mediaRef ? { mediaRef } : {}),
-        ...(routeKey ? { routeKey } : {}),
+        transcriptSource,
+        transcriptSourceAttempt: transcriptSource === "bilibili" ? "BILIBILI" : "SUPADATA",
+        transcriptSelectedTrack: null,
+        transcriptSelectedTrackIdentity: "none",
+        transcriptRequestedLanguage: sourceLanguage,
+        transcriptRequestedTrackKind: YOUTUBE_TRANSCRIPT_TRACK_KIND,
+        transcriptFingerprint,
+        transcriptArtifactIdentity: transcriptArtifactIdentity({
+          source: transcriptSource,
+          language: sourceLanguage,
+          requestedLanguage: sourceLanguage,
+          selectedTrack: null,
+          fingerprint: transcriptFingerprint,
+        }),
+        transcriptSourcePolicyVersion: TRANSCRIPT_SOURCE_POLICY_VERSION,
+        mediaRef: resolvedMediaRef,
+        routeKey: resolvedRouteKey,
         timestamp: Date.now(),
-      });
+        };
+      };
 
       return {
         start: (videoId, options = {}) => {
@@ -3709,6 +3741,7 @@ function installNoteNavigationFixture(runtime, options = {}) {
     targetMediaKey,
     targetUrl,
     hasAiKey: options.hasAiKey !== false,
+    hasSupadataKey: options.hasSupadataKey !== false,
     authorizedTranscriptSuccess: options.authorizedTranscriptSuccess === true,
     cachedTranscript: options.cachedTranscript === true,
     authorizedError: String(options.authorizedError || ""),
@@ -3984,6 +4017,9 @@ function installNoteNavigationFixture(runtime, options = {}) {
           ) {
             return {
               success: true,
+              routeOutcome: "HAVE_TRANSCRIPT",
+              runId: message.runId,
+              routeKey: message.routeKey,
               source: "supadata",
               sourceAttempt: "SUPADATA",
               selectedTrack: null,
@@ -4005,12 +4041,32 @@ function installNoteNavigationFixture(runtime, options = {}) {
               success: false,
               error: fixtureOptions.authorizedError,
               message: "Authorized provider failed.",
+              routeOutcome: "UNKNOWN",
+              runId: message.runId,
+              routeKey: message.routeKey,
+            };
+          }
+          if (message.captionRetry !== true) {
+            return {
+              success: false,
+              error: "YOUTUBE_CAPTIONS_REQUIRED",
+              message: "Enable YouTube captions and retry.",
+              routeOutcome: "UNKNOWN",
+              requiresCaptionEnable: true,
+              supadataEligible: false,
+              hasSupadataKey: fixtureOptions.hasSupadataKey,
+              runId: message.runId,
+              routeKey: message.routeKey,
             };
           }
           return {
             success: false,
-            error: "SUPADATA_CONSENT_REQUIRED",
-            message: "Choose whether to use Supadata.",
+            error: "NATIVE_TRANSCRIPT_UNKNOWN",
+            message: "The free transcript routes did not produce a transcript.",
+            routeOutcome: "UNKNOWN",
+            hasSupadataKey: fixtureOptions.hasSupadataKey,
+            runId: message.runId,
+            routeKey: message.routeKey,
           };
         }
         if (message.action === "cancelExportTranslationJob") {
@@ -4019,7 +4075,10 @@ function installNoteNavigationFixture(runtime, options = {}) {
         return { success: true };
       };
 
-      currentConfigStatus = { hasAiKey: fixtureOptions.hasAiKey };
+      currentConfigStatus = {
+        hasAiKey: fixtureOptions.hasAiKey,
+        hasSupadataKey: fixtureOptions.hasSupadataKey,
+      };
       currentVideoId = sourceVideoId;
       currentVideoUrl =
         "https://www.youtube.com/watch?v=" + sourceVideoId;
@@ -4163,6 +4222,9 @@ function installNoteNavigationFixture(runtime, options = {}) {
           supadataConsents: messages
             .filter((message) => message.action === "fetchTranscript")
             .map((message) => message.supadataConsent),
+          captionRetries: messages
+            .filter((message) => message.action === "fetchTranscript")
+            .map((message) => message.captionRetry),
           currentTranscriptText,
           noteLoadCount: noteLoadMessages().length,
           noteLoadVideoIds: noteLoadMessages().map((message) =>
@@ -4289,14 +4351,14 @@ test("Header exposes tab-specific transcript, overview, and notes language modes
     js,
     /function ensureNotesChinese\(\)[\s\S]*?await sendTranslationMessage\(\{[\s\S]*?action: "translateNotes"/,
   );
-  assert.match(js, /const REQUIRED_RUNTIME_PROTOCOL_VERSION = 11/);
+  assert.match(js, /const REQUIRED_RUNTIME_PROTOCOL_VERSION = 12/);
   assert.match(
     js,
     /runtimeProtocolVersion\s*!==\s*REQUIRED_RUNTIME_PROTOCOL_VERSION[\s\S]*?showRuntimeVersionError\(\)/,
   );
   assert.match(js, /扩展后台未响应原文翻译请求，请重新加载扩展/);
   const backgroundSource = read("background.js");
-  assert.match(backgroundSource, /const RUNTIME_PROTOCOL_VERSION = 11/);
+  assert.match(backgroundSource, /const RUNTIME_PROTOCOL_VERSION = 12/);
   assert.match(
     backgroundSource,
     /runtimeProtocolVersion: RUNTIME_PROTOCOL_VERSION/,
@@ -4319,7 +4381,7 @@ test("Header exposes tab-specific transcript, overview, and notes language modes
   assert.match(js, /cached\.analysisVideoId === videoId/);
   assert.match(js, /videoId !== currentVideoId \|\| !currentTranscript/);
   assert.match(js, /preferredLanguage: currentVideoSourceLanguage/);
-  assert.match(js, /const TRANSCRIPT_SOURCE_POLICY_VERSION = 4/);
+  assert.match(js, /const TRANSCRIPT_SOURCE_POLICY_VERSION = 5/);
   assert.match(
     js,
     /cached\.transcriptSourcePolicyVersion !== TRANSCRIPT_SOURCE_POLICY_VERSION/,
@@ -4672,15 +4734,25 @@ test("duplicate navigation events stay note-only until transcript is requested e
   await fixture.openTranscript();
   await nextTurn();
   await nextTurn();
+  const afterCcPrompt = JSON.parse(fixture.snapshot());
+  assert.equal(afterCcPrompt.fetchCount, 1);
+  assert.equal(afterCcPrompt.activeTab, "transcript");
+  assert.equal(afterCcPrompt.errorTitle, "请先打开 YouTube 字幕");
+  assert.equal(afterCcPrompt.errorSecondaryText, "返回笔记");
+  assert.deepEqual(afterCcPrompt.supadataConsents, [false]);
+  assert.deepEqual(afterCcPrompt.captionRetries, [false]);
+
+  await fixture.clickConsentPrimary();
+  await nextTurn();
   const afterExplicitTranscript = JSON.parse(fixture.snapshot());
-  assert.equal(afterExplicitTranscript.fetchCount, 1);
-  assert.equal(afterExplicitTranscript.activeTab, "transcript");
+  assert.equal(afterExplicitTranscript.fetchCount, 2);
   assert.equal(
     afterExplicitTranscript.errorTitle,
     "是否使用 Supadata 获取字幕？",
   );
   assert.equal(afterExplicitTranscript.errorSecondaryText, "返回笔记");
-  assert.deepEqual(afterExplicitTranscript.supadataConsents, [false]);
+  assert.deepEqual(afterExplicitTranscript.supadataConsents, [false, false]);
+  assert.deepEqual(afterExplicitTranscript.captionRetries, [false, true]);
 });
 
 test("declining consent after a saved-note jump returns to All Notes without a third-party request", async () => {
@@ -4693,11 +4765,21 @@ test("declining consent after a saved-note jump returns to All Notes without a t
   await nextTurn();
   await nextTurn();
 
+  const ccPrompt = JSON.parse(fixture.snapshot());
+  assert.equal(ccPrompt.errorTitle, "请先打开 YouTube 字幕");
+  assert.equal(ccPrompt.errorSecondaryText, "返回笔记");
+  assert.deepEqual(ccPrompt.supadataConsents, [false]);
+  assert.deepEqual(ccPrompt.captionRetries, [false]);
+
+  await fixture.clickConsentPrimary();
+  await nextTurn();
+
   const consent = JSON.parse(fixture.snapshot());
   assert.equal(consent.errorTitle, "是否使用 Supadata 获取字幕？");
   assert.equal(consent.errorSecondaryText, "返回笔记");
   assert.equal(consent.errorSecondaryHidden, false);
-  assert.deepEqual(consent.supadataConsents, [false]);
+  assert.deepEqual(consent.supadataConsents, [false, false]);
+  assert.deepEqual(consent.captionRetries, [false, true]);
   assert.equal(consent.sessionPhase, "active");
 
   await fixture.clickConsentSecondary();
@@ -4710,7 +4792,7 @@ test("declining consent after a saved-note jump returns to All Notes without a t
   assert.equal(returned.notesFilterShowAll, true);
   assert.equal(returned.currentNotesFilterVideoId, null);
   assert.equal(returned.sessionPhase, "active");
-  assert.deepEqual(returned.supadataConsents, [false]);
+  assert.deepEqual(returned.supadataConsents, [false, false]);
   assert.deepEqual(returned.noteLoadVideoIds, [null, null]);
 
   // An ordinary automatic inspection must continue to honor the restored
@@ -4719,16 +4801,23 @@ test("declining consent after a saved-note jump returns to All Notes without a t
   await nextTurn();
   const afterAutomaticCheck = JSON.parse(fixture.snapshot());
   assert.equal(afterAutomaticCheck.activeTab, "notes");
-  assert.deepEqual(afterAutomaticCheck.supadataConsents, [false]);
+  assert.deepEqual(afterAutomaticCheck.supadataConsents, [false, false]);
 
   // A later explicit Transcript click starts a fresh unconsented probe. It
   // still cannot authorize Supadata without another primary-button click.
   await fixture.openTranscript();
   await nextTurn();
   await nextTurn();
+  assert.equal(
+    JSON.parse(fixture.snapshot()).errorTitle,
+    "请先打开 YouTube 字幕",
+  );
+  await fixture.clickConsentPrimary();
+  await nextTurn();
   const secondConsent = JSON.parse(fixture.snapshot());
   assert.equal(secondConsent.errorTitle, "是否使用 Supadata 获取字幕？");
-  assert.deepEqual(secondConsent.supadataConsents, [false, false]);
+  assert.deepEqual(secondConsent.supadataConsents, [false, false, false, false]);
+  assert.deepEqual(secondConsent.captionRetries, [false, true, false, true]);
 });
 
 test("confirming consent after a saved-note jump is exactly false then true and clears the context on success", async () => {
@@ -4742,13 +4831,24 @@ test("confirming consent after a saved-note jump is exactly false then true and 
   await fixture.openTranscript();
   await nextTurn();
   await nextTurn();
-  assert.deepEqual(JSON.parse(fixture.snapshot()).supadataConsents, [false]);
+  assert.equal(
+    JSON.parse(fixture.snapshot()).errorTitle,
+    "请先打开 YouTube 字幕",
+  );
+
+  await fixture.clickConsentPrimary();
+  await nextTurn();
+  const consent = JSON.parse(fixture.snapshot());
+  assert.equal(consent.errorTitle, "是否使用 Supadata 获取字幕？");
+  assert.deepEqual(consent.supadataConsents, [false, false]);
+  assert.deepEqual(consent.captionRetries, [false, true]);
 
   await fixture.clickConsentPrimary();
   await nextTurn();
 
   const completed = JSON.parse(fixture.snapshot());
-  assert.deepEqual(completed.supadataConsents, [false, true]);
+  assert.deepEqual(completed.supadataConsents, [false, false, true]);
+  assert.deepEqual(completed.captionRetries, [false, true, false]);
   assert.equal(completed.currentTranscriptText, "Authorized target transcript");
   assert.equal(completed.activeTab, "transcript");
   assert.equal(completed.resultsVisible, true);
@@ -4786,11 +4886,22 @@ test("a provider failure after saved-note consent keeps a safe return to All Not
   await fixture.openTranscript();
   await nextTurn();
   await nextTurn();
+  assert.equal(
+    JSON.parse(fixture.snapshot()).errorTitle,
+    "请先打开 YouTube 字幕",
+  );
+  await fixture.clickConsentPrimary();
+  await nextTurn();
+  assert.equal(
+    JSON.parse(fixture.snapshot()).errorTitle,
+    "是否使用 Supadata 获取字幕？",
+  );
   await fixture.clickConsentPrimary();
   await nextTurn();
 
   const failed = JSON.parse(fixture.snapshot());
-  assert.deepEqual(failed.supadataConsents, [false, true]);
+  assert.deepEqual(failed.supadataConsents, [false, false, true]);
+  assert.deepEqual(failed.captionRetries, [false, true, false]);
   assert.equal(failed.errorTitle, "Supadata 暂时限流");
   assert.equal(failed.errorSecondaryText, "返回笔记");
   assert.equal(failed.errorSecondaryHidden, false);
@@ -4801,7 +4912,7 @@ test("a provider failure after saved-note consent keeps a safe return to All Not
   const returned = JSON.parse(fixture.snapshot());
   assert.equal(returned.activeTab, "notes");
   assert.equal(returned.resultsVisible, true);
-  assert.deepEqual(returned.supadataConsents, [false, true]);
+  assert.deepEqual(returned.supadataConsents, [false, false, true]);
 });
 
 test("a stale consent return cannot resurrect notes-only state on another route", async () => {
@@ -4813,7 +4924,14 @@ test("a stale consent return cannot resurrect notes-only state on another route"
   await fixture.openTranscript();
   await nextTurn();
   await nextTurn();
+  assert.equal(
+    JSON.parse(fixture.snapshot()).errorTitle,
+    "请先打开 YouTube 字幕",
+  );
+  await fixture.clickConsentPrimary();
+  await nextTurn();
   const consent = JSON.parse(fixture.snapshot());
+  assert.equal(consent.errorTitle, "是否使用 Supadata 获取字幕？");
   const targetTabId = consent.createdTabs[0].id;
 
   fixture.setActiveTab(
@@ -4828,7 +4946,8 @@ test("a stale consent return cannot resurrect notes-only state on another route"
   assert.equal(stale.resultsVisible, false);
   assert.equal(stale.errorVisible, true);
   assert.deepEqual(stale.sessionKeys, []);
-  assert.deepEqual(stale.supadataConsents, [false]);
+  assert.deepEqual(stale.supadataConsents, [false, false]);
+  assert.deepEqual(stale.captionRetries, [false, true]);
 });
 
 test("saved-note navigation suppression is bound to one target route and is not reused", async () => {
@@ -5028,6 +5147,258 @@ test("activating the same video in another tab clears note-only state and rebind
   assert.equal(afterPlay.openedUrls.length, 1);
 });
 
+test("a YouTube miss asks for CC before a free retry can reveal Supadata", async () => {
+  const messages = [];
+  const videoId = "abc123DEF45";
+  const runtime = loadSidepanelRuntime({
+    sendMessage: async (message) => {
+      messages.push({ ...message });
+      if (message.action !== "fetchTranscript") {
+        throw new Error(`Unexpected action: ${message.action}`);
+      }
+      if (message.supadataConsent === true) {
+        return {
+          success: true,
+          routeOutcome: "HAVE_TRANSCRIPT",
+          runId: message.runId,
+          routeKey: message.routeKey,
+          source: "supadata",
+          sourceAttempt: "SUPADATA",
+          selectedTrack: null,
+          transcript: [
+            { text: "Approved fallback", start: 0, duration: 2, language: "en" },
+          ],
+          transcriptText: "Approved fallback",
+          transcriptTextTimestamped: "[0:00] Approved fallback",
+          language: "en",
+        };
+      }
+      if (message.captionRetry === true) {
+        return {
+          success: false,
+          error: "SUPADATA_CONSENT_REQUIRED",
+          message: "YouTube captions were still unavailable after retry.",
+          routeOutcome: "UNKNOWN",
+          supadataEligible: true,
+          hasSupadataKey: true,
+          runId: message.runId,
+          routeKey: message.routeKey,
+        };
+      }
+      return {
+        success: false,
+        error: "YOUTUBE_CAPTIONS_REQUIRED",
+        message: "Enable YouTube captions and retry.",
+        routeOutcome: "UNKNOWN",
+        requiresCaptionEnable: true,
+        supadataEligible: false,
+        runId: message.runId,
+        routeKey: message.routeKey,
+      };
+    },
+  });
+  const fixture = installSidepanelDigestFixture(runtime);
+  fixture.setupEvents();
+
+  const initialLoad = fixture.start(videoId, {
+    videoUrl: `https://www.youtube.com/watch?v=${videoId}`,
+  });
+  await nextTurn();
+  fixture.resolveCache(videoId, null);
+  await initialLoad;
+
+  assert.deepEqual(
+    messages.map(({ supadataConsent, captionRetry }) => ({
+      supadataConsent,
+      captionRetry,
+    })),
+    [{ supadataConsent: false, captionRetry: false }],
+  );
+  assert.deepEqual(JSON.parse(fixture.errorSnapshot()), {
+    title: "请先打开 YouTube 字幕",
+    message:
+      "请点击视频播放器右下角的“字幕 / CC”按钮，等待字幕显示后再重新读取。",
+    primaryText: "已打开字幕，重新读取",
+    primaryDisabled: false,
+    secondaryText: "不使用",
+    secondaryHidden: true,
+  });
+
+  const freeRetry = fixture.clickError();
+  await nextTurn();
+  fixture.resolveCache(videoId, null);
+  await freeRetry;
+  assert.deepEqual(
+    messages.map(({ supadataConsent, captionRetry }) => ({
+      supadataConsent,
+      captionRetry,
+    })),
+    [
+      { supadataConsent: false, captionRetry: false },
+      { supadataConsent: false, captionRetry: true },
+    ],
+  );
+  assert.equal(
+    JSON.parse(fixture.errorSnapshot()).title,
+    "是否使用 Supadata 获取字幕？",
+  );
+
+  const approvedLoad = fixture.clickError();
+  await nextTurn();
+  fixture.resolveCache(videoId, null);
+  await approvedLoad;
+  assert.deepEqual(
+    messages.map(({ supadataConsent, captionRetry }) => ({
+      supadataConsent,
+      captionRetry,
+    })),
+    [
+      { supadataConsent: false, captionRetry: false },
+      { supadataConsent: false, captionRetry: true },
+      { supadataConsent: true, captionRetry: false },
+    ],
+  );
+  assert.equal(JSON.parse(fixture.saved()).at(-1).transcriptText, "Approved fallback");
+});
+
+test("a first CC prompt never exposes an unconfigured Supadata fallback", async () => {
+  const messages = [];
+  const videoId = "abc123DEF45";
+  const runtime = loadSidepanelRuntime({
+    sendMessage: async (message) => {
+      messages.push({ ...message });
+      return message.captionRetry === true
+        ? {
+            success: false,
+            error: "SUPADATA_NOT_CONFIGURED",
+            routeOutcome: "UNKNOWN",
+            supadataEligible: true,
+            hasSupadataKey: false,
+            runId: message.runId,
+            routeKey: message.routeKey,
+          }
+        : {
+            success: false,
+            error: "YOUTUBE_CAPTIONS_REQUIRED",
+            routeOutcome: "UNKNOWN",
+            requiresCaptionEnable: true,
+            supadataEligible: false,
+            runId: message.runId,
+            routeKey: message.routeKey,
+          };
+    },
+  });
+  const fixture = installSidepanelDigestFixture(runtime);
+  fixture.setupEvents();
+
+  const initialLoad = fixture.start(videoId);
+  await nextTurn();
+  fixture.resolveCache(videoId, null);
+  await initialLoad;
+  assert.equal(JSON.parse(fixture.errorSnapshot()).title, "请先打开 YouTube 字幕");
+
+  const freeRetry = fixture.clickError();
+  await nextTurn();
+  fixture.resolveCache(videoId, null);
+  await freeRetry;
+  assert.equal(JSON.parse(fixture.errorSnapshot()).title, "免费字幕未能取得");
+  assert.equal(messages.length, 2);
+  assert.equal(messages.some((message) => message.supadataConsent === true), false);
+});
+
+test("a CC retry waits for an older automatic refresh and runs exactly once", async () => {
+  const messages = [];
+  const videoId = "abc123DEF45";
+  const runtime = loadSidepanelRuntime({
+    sendMessage: async (message) => {
+      messages.push({ ...message });
+      if (message.captionRetry === true) {
+        return {
+          success: true,
+          routeOutcome: "HAVE_TRANSCRIPT",
+          runId: message.runId,
+          routeKey: message.routeKey,
+          source: "youtube-passive",
+          sourceAttempt: "YOUTUBE_PASSIVE_RETRY",
+          selectedTrack: { language: "en", kind: "manual" },
+          transcript: [
+            { text: "Caption retry", start: 0, duration: 2, language: "en" },
+          ],
+          transcriptText: "Caption retry",
+          transcriptTextTimestamped: "[0:00] Caption retry",
+          language: "en",
+        };
+      }
+      return {
+        success: false,
+        error: "YOUTUBE_CAPTIONS_REQUIRED",
+        routeOutcome: "UNKNOWN",
+        requiresCaptionEnable: true,
+        supadataEligible: false,
+        runId: message.runId,
+        routeKey: message.routeKey,
+      };
+    },
+  });
+  const fixture = installSidepanelDigestFixture(runtime);
+  fixture.setupEvents();
+
+  const initialLoad = fixture.start(videoId);
+  await nextTurn();
+  fixture.resolveCache(videoId, null);
+  await initialLoad;
+
+  const olderRefresh = fixture.start(videoId);
+  await nextTurn();
+  const retry = fixture.clickError();
+  fixture.resolveCache(videoId, null);
+  await olderRefresh;
+
+  await nextTurn();
+  fixture.resolveLatestCache(videoId, null);
+  await retry;
+
+  assert.deepEqual(
+    messages.map((message) => message.captionRetry),
+    [false, false, true],
+  );
+  assert.equal(
+    messages.filter((message) => message.captionRetry === true).length,
+    1,
+  );
+  assert.equal(JSON.parse(fixture.saved()).at(-1).transcriptText, "Caption retry");
+});
+
+test("confirmed no-caption skips both the CC prompt and Supadata", async () => {
+  const messages = [];
+  const videoId = "abc123DEF45";
+  const runtime = loadSidepanelRuntime({
+    sendMessage: async (message) => {
+      messages.push({ ...message });
+      return {
+        success: false,
+        error: "NO_TRANSCRIPT",
+        message: "The page confirmed zero caption tracks.",
+        routeOutcome: "CONFIRMED_UNAVAILABLE",
+        supadataEligible: false,
+        runId: message.runId,
+        routeKey: message.routeKey,
+      };
+    },
+  });
+  const fixture = installSidepanelDigestFixture(runtime);
+  fixture.setupEvents();
+
+  const load = fixture.start(videoId);
+  await nextTurn();
+  fixture.resolveCache(videoId, null);
+  await load;
+  const error = JSON.parse(fixture.errorSnapshot());
+  assert.equal(error.title, "当前视频没有可用字幕");
+  assert.equal(error.primaryText, "重试");
+  assert.equal(messages.length, 1);
+});
+
 test("Supadata is requested only after the user confirms the third-party action", async () => {
   const messages = [];
   const videoId = "abc123DEF45";
@@ -5040,12 +5411,19 @@ test("Supadata is requested only after the user confirms the third-party action"
       if (message.supadataConsent !== true) {
         return {
           success: false,
-          error: "SUPADATA_CONSENT_REQUIRED",
-          message: "Choose whether to use Supadata.",
+          error: "NATIVE_TRANSCRIPT_UNKNOWN",
+          message: "The free transcript routes did not produce a transcript.",
+          routeOutcome: "UNKNOWN",
+          hasSupadataKey: true,
+          runId: message.runId,
+          routeKey: message.routeKey,
         };
       }
       return {
         success: true,
+        routeOutcome: "HAVE_TRANSCRIPT",
+        runId: message.runId,
+        routeKey: message.routeKey,
         source: "supadata",
         sourceAttempt: "SUPADATA",
         selectedTrack: null,
@@ -5072,6 +5450,15 @@ test("Supadata is requested only after the user confirms the third-party action"
     messages.map((message) => message.supadataConsent),
     [false],
   );
+  assert.equal(
+    JSON.parse(fixture.errorSnapshot()).title,
+    "请先打开 YouTube 字幕",
+  );
+
+  const freeRetry = fixture.clickError();
+  await nextTurn();
+  fixture.resolveCache(videoId, null);
+  await freeRetry;
   assert.deepEqual(JSON.parse(fixture.errorSnapshot()), {
     title: "是否使用 Supadata 获取字幕？",
     message:
@@ -5092,7 +5479,11 @@ test("Supadata is requested only after the user confirms the third-party action"
   assert.equal(blockedDoubleClick, undefined);
   assert.deepEqual(
     messages.map((message) => message.supadataConsent),
-    [false, true],
+    [false, false, true],
+  );
+  assert.deepEqual(
+    messages.map((message) => message.captionRetry),
+    [false, true, false],
   );
   assert.equal(JSON.parse(fixture.saved()).at(-1).transcriptText, "Approved fallback");
 });
@@ -5104,7 +5495,7 @@ test("the API-primary side panel exposes no local transcript diagnostics", () =>
   assert.doesNotMatch(panel, /本地诊断|formatLocalTranscriptDiagnostics/);
 });
 
-test("declining Supadata sends no third-party request and retry only reopens consent", async () => {
+test("declining Supadata sends no third-party request and retry restarts at the CC prompt", async () => {
   const messages = [];
   const videoId = "abc123DEF45";
   const runtime = loadSidepanelRuntime({
@@ -5112,8 +5503,12 @@ test("declining Supadata sends no third-party request and retry only reopens con
       messages.push({ ...message });
       return {
         success: false,
-        error: "SUPADATA_CONSENT_REQUIRED",
-        message: "Choose whether to use Supadata.",
+        error: "NATIVE_TRANSCRIPT_UNKNOWN",
+        message: "The free transcript routes did not produce a transcript.",
+        routeOutcome: "UNKNOWN",
+        hasSupadataKey: true,
+        runId: message.runId,
+        routeKey: message.routeKey,
       };
     },
   });
@@ -5124,18 +5519,23 @@ test("declining Supadata sends no third-party request and retry only reopens con
   await nextTurn();
   fixture.resolveCache(videoId, null);
   await initialLoad;
+
+  const freeRetry = fixture.clickError();
+  await nextTurn();
+  fixture.resolveCache(videoId, null);
+  await freeRetry;
   fixture.clickErrorSecondary();
 
   assert.deepEqual(
     messages.map((message) => message.supadataConsent),
-    [false],
+    [false, false],
   );
   const errorState = JSON.parse(fixture.errorSnapshot());
   assert.equal(errorState.title, "已跳过 Supadata 字幕");
   assert.match(errorState.message, /没有向 Supadata 发送视频链接/);
   assert.match(errorState.message, /重新在侧栏本次授权 Supadata/);
   assert.equal(errorState.primaryText, "重试");
-  assert.equal(errorState.secondaryText, "打开设置");
+  assert.equal(errorState.secondaryText, "管理 Supadata");
   assert.equal(errorState.secondaryHidden, false);
 
   const consentRetry = fixture.clickError();
@@ -5145,11 +5545,11 @@ test("declining Supadata sends no third-party request and retry only reopens con
 
   assert.deepEqual(
     messages.map((message) => message.supadataConsent),
-    [false, false],
+    [false, false, false],
   );
   assert.equal(
     JSON.parse(fixture.errorSnapshot()).title,
-    "是否使用 Supadata 获取字幕？",
+    "请先打开 YouTube 字幕",
   );
 });
 
@@ -5162,12 +5562,19 @@ test("a consent click waits for an older unconsented refresh and still runs", as
       if (message.supadataConsent !== true) {
         return {
           success: false,
-          error: "SUPADATA_CONSENT_REQUIRED",
-          message: "Choose whether to use Supadata.",
+          error: "NATIVE_TRANSCRIPT_UNKNOWN",
+          message: "The free transcript routes did not produce a transcript.",
+          routeOutcome: "UNKNOWN",
+          hasSupadataKey: true,
+          runId: message.runId,
+          routeKey: message.routeKey,
         };
       }
       return {
         success: true,
+        routeOutcome: "HAVE_TRANSCRIPT",
+        runId: message.runId,
+        routeKey: message.routeKey,
         source: "supadata",
         sourceAttempt: "SUPADATA",
         selectedTrack: null,
@@ -5188,6 +5595,15 @@ test("a consent click waits for an older unconsented refresh and still runs", as
   fixture.resolveCache(videoId, null);
   await initialLoad;
 
+  const freeRetry = fixture.clickError();
+  await nextTurn();
+  fixture.resolveCache(videoId, null);
+  await freeRetry;
+  assert.equal(
+    JSON.parse(fixture.errorSnapshot()).title,
+    "是否使用 Supadata 获取字幕？",
+  );
+
   const olderLocalRefresh = fixture.start(videoId);
   await nextTurn();
   const approvedLoad = fixture.clickError();
@@ -5200,7 +5616,7 @@ test("a consent click waits for an older unconsented refresh and still runs", as
 
   assert.deepEqual(
     messages.map((message) => message.supadataConsent),
-    [false, false, true],
+    [false, false, false, true],
   );
   assert.equal(JSON.parse(fixture.saved()).at(-1).transcriptText, "Approved fallback");
 });
@@ -5872,9 +6288,16 @@ test("digest loading restores the compact overview before an active tab can anal
       analysis,
       transcript,
       "en",
+      "supadata",
+      null,
     ),
     true,
   );
+  const transcriptFingerprint =
+    seedRuntime.helpers.transcriptContentFingerprint(
+      transcript,
+      "Persisted transcript.",
+    );
   await storageLocal.set({
     [`digest_${videoId}`]: {
       analysis: { ...analysis, marker: "legacy-digest-overview" },
@@ -5884,13 +6307,26 @@ test("digest loading restores the compact overview before an active tab can anal
       transcriptTimestamped: transcript,
       transcriptLanguage: "en",
       transcriptSource: "supadata",
+      transcriptSelectedTrack: null,
+      transcriptSelectedTrackIdentity: "none",
+      transcriptRequestedLanguage: "en",
+      transcriptRequestedTrackKind: "manual-first",
+      transcriptFingerprint,
+      transcriptArtifactIdentity:
+        seedRuntime.helpers.transcriptArtifactIdentity({
+          source: "supadata",
+          language: "en",
+          requestedLanguage: "en",
+          selectedTrack: null,
+          fingerprint: transcriptFingerprint,
+        }),
       mediaRef: {
         platform: "youtube",
         mediaKey: videoId,
         videoId,
       },
       routeKey,
-      transcriptSourcePolicyVersion: 4,
+      transcriptSourcePolicyVersion: 5,
       timestamp: Date.now(),
     },
   });
@@ -7021,6 +7457,61 @@ test("overview analysis validation builds the v3 Chinese-base schema", () => {
   assert.equal(detected.sourceLanguage, "ja");
 });
 
+test("overview repairs raw control characters inside model JSON strings", async () => {
+  const malformedContent = `{
+    "detectedSourceLanguage": "en",
+    "chapters": [{
+      "titleZh": "开场",
+      "summaryZh": "第一行,}
+第二行\t补充",
+      "timestampSeconds": 0
+    }],
+    "keyQuotes": [{
+      "quoteOriginal": "He said \\"hello\\".\\nEscaped line.\\tTabbed.
+Raw line.",
+      "quoteZh": "你好，\r
+世界。",
+      "timestampSeconds": 0
+    }],
+    "keyMoments": [0],
+  }`;
+  let providerCalls = 0;
+  const background = loadBackgroundHelpers({
+    fetchImpl: async (url) => {
+      if (url.startsWith("chrome-extension://")) {
+        return { ok: true, text: async () => read("prompts/analysis.md") };
+      }
+      providerCalls += 1;
+      return streamingResponse([
+        encode(JSON.stringify({
+          choices: [{ message: { content: malformedContent } }],
+        })),
+      ]);
+    },
+  });
+
+  const result = await background.handleAnalyzeTranscript(
+    "[0:00] Hello world.",
+    "Example video",
+    "Example channel",
+    "Example description",
+    60,
+    "en",
+  );
+
+  assert.equal(result.success, true);
+  assert.equal(providerCalls, 1, "local repair does not spend a retry");
+  assert.equal(
+    result.analysis.chapters[0].summaryZh,
+    "第一行,}\n第二行\t补充",
+  );
+  assert.equal(
+    result.analysis.keyQuotes[0].quoteOriginal,
+    'He said "hello".\nEscaped line.\tTabbed.\nRaw line.',
+  );
+  assert.equal(result.analysis.keyQuotes[0].quoteZh, "你好，\r\n世界。");
+});
+
 test("overview generates Chinese first and translates chapters to the source language on demand", async () => {
   const requests = [];
   const background = loadBackgroundHelpers({
@@ -7344,7 +7835,7 @@ test("Bilibili Chinese note cleanup keeps the polished Chinese text", async () =
   assert.match(requests[0].messages[0].content, /整理成通顺、完整、可独立阅读的中文笔记/);
 });
 
-test("Bilibili timestamp note saves polished Chinese once without translation", async () => {
+test("Bilibili v4 cache note saves polished Chinese once without refetching", async () => {
   const requests = [];
   let storedNotes = [];
   const mediaRef = {
@@ -7499,7 +7990,7 @@ test("saving a YouTube note also freezes exact page metadata for later export", 
     ytd_settings: {},
     ytd_notes: [],
     [`digest_${videoId}`]: {
-      transcriptSourcePolicyVersion: 4,
+      transcriptSourcePolicyVersion: 5,
       transcriptSource: "supadata",
       transcriptLanguage: "zh-CN",
       transcript: [
@@ -7558,7 +8049,7 @@ test("a stale YouTube player cannot block the note or attach another video's sou
     ytd_settings: {},
     ytd_notes: [],
     [`digest_${videoId}`]: {
-      transcriptSourcePolicyVersion: 4,
+      transcriptSourcePolicyVersion: 5,
       transcriptSource: "supadata",
       transcriptLanguage: "zh-CN",
       transcript: [{ start: 0, text: "当前视频字幕。", language: "zh-CN" }],
@@ -7607,7 +8098,7 @@ test("source persistence failure never reverses a successful note save", async (
     ytd_settings: {},
     ytd_notes: [],
     [`digest_${videoId}`]: {
-      transcriptSourcePolicyVersion: 4,
+      transcriptSourcePolicyVersion: 5,
       transcriptSource: "supadata",
       transcriptLanguage: "zh-CN",
       transcript: [{ start: 0, text: "笔记应继续保存。", language: "zh-CN" }],
@@ -10803,7 +11294,7 @@ test("saving a note from a Chinese caption skips AI cleanup and keeps the origin
     aiModel: "deepseek-v4-flash",
   };
   const makeDigest = (language) => ({
-    transcriptSourcePolicyVersion: 4,
+    transcriptSourcePolicyVersion: 5,
     transcriptSource: "supadata",
     transcript: [
       { start: 0, text: "开场白。", language },

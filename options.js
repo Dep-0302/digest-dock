@@ -26,11 +26,11 @@ const YTD_OPTIONS = (() => {
       unsavedChanges: "You have unsaved changes.",
       heading: "Bring your own API keys",
       lede:
-        "Keys stay in this Chrome profile. You pick one AI provider and paste its API key to power AI features, and Supadata is the optional provider that fetches native captions for new YouTube videos. This open-source extension has no developer server or analytics.",
+        "Keys stay in this Chrome profile. Pick one AI provider and paste its API key to use AI features. This open-source extension has no developer server or analytics.",
       supadataApiKeyLabel: "Supadata API key (optional)",
       supadataPlaceholder: "Paste your Supadata key",
       supadataHelp:
-        "New YouTube captions are fetched through Supadata. It stays optional for the extension, but Supadata is called only after you confirm that one third-party request in the side panel, once per video. Bilibili does not use it. ",
+        "The side panel offers Supadata only after all free YouTube transcript routes fail. Even with a saved key, Supadata is called only after you confirm that one third-party request in the side panel, once per video. Replace the key here, or clear it and save to delete it. Bilibili does not use it. ",
       supadataLink: "Create a Supadata account and key",
       supadataHelpSuffix:
         ". Supadata generates the key during onboarding.",
@@ -69,7 +69,7 @@ const YTD_OPTIONS = (() => {
         "Your settings were upgraded to the multi-provider format. Saved keys were kept and mapped to their provider; endpoints and models now come from the built-in presets.",
       saving: "Saving…",
       addSupadataKey:
-        "Add a Supadata API key to fetch native captions for new YouTube videos after per-attempt consent.",
+        "Add a Supadata API key only if you want the optional fallback after free transcript routes fail.",
       addAiKey: "Add an API key for the selected AI provider.",
       saved: "Saved. Reopen DigestDock to use these settings.",
       saveFailed: "Could not save settings. Please try again.",
@@ -131,11 +131,11 @@ const YTD_OPTIONS = (() => {
       unsavedChanges: "有未保存的更改。",
       heading: "使用你自己的 API 密钥",
       lede:
-        "密钥仅保存在当前 Chrome 个人资料中。你选择一个 AI 服务商并填写它的 API 密钥用于 AI 功能，Supadata 是可选服务，用于为新的 YouTube 视频获取原生字幕。本开源扩展没有开发者服务器，也不使用分析服务。",
+        "密钥仅保存在当前 Chrome 个人资料中。选择一个 AI 服务商并填写 API 密钥即可使用 AI 功能。本开源扩展没有开发者服务器，也不使用分析服务。",
       supadataApiKeyLabel: "Supadata API 密钥（可选）",
       supadataPlaceholder: "粘贴 Supadata 密钥",
       supadataHelp:
-        "新的 YouTube 字幕由 Supadata 获取。它对整个扩展仍是可选配置，但只有你在侧边栏确认本次使用第三方 Supadata 时才会调用，且逐视频授权；B 站不会使用。",
+        "仅当免费的 YouTube 字幕路线全部失败时，侧边栏才会提供 Supadata。即使保存了密钥，也只有你在侧边栏确认本次使用第三方 Supadata 时才会调用，且逐视频授权。你可以在此替换密钥，或清空后保存以删除密钥；B 站不会使用它。",
       supadataLink: "创建 Supadata 账号并获取密钥",
       supadataHelpSuffix: "。Supadata 会在引导流程中生成密钥。",
       aiServiceName: "AI 服务商",
@@ -173,7 +173,7 @@ const YTD_OPTIONS = (() => {
         "设置已升级为多服务商格式。已保存的密钥被保留并归入各自服务商；Endpoint 和模型现在由内置预设提供。",
       saving: "正在保存…",
       addSupadataKey:
-        "为新的 YouTube 视频获取原生字幕，请添加可选的 Supadata API 密钥（每次逐一授权）。",
+        "仅在你希望免费字幕路线失败后使用可选后备时，才需要添加 Supadata API 密钥。",
       addAiKey: "请为所选 AI 服务商添加 API 密钥。",
       saved: "已保存。请重新打开 DigestDock 以使用这些设置。",
       saveFailed: "无法保存设置，请重试。",
@@ -513,6 +513,37 @@ const YTD_OPTIONS = (() => {
     }
   }
 
+  function supadataOptionsRequested(locationLike = {}) {
+    const hash = String(locationLike.hash || "").toLowerCase();
+    if (hash === "#section-transcript" || hash === "#supadata") return true;
+    const search = String(locationLike.search || "");
+    try {
+      const params = new URLSearchParams(search);
+      return ["focus", "section", "provider"].some(
+        (key) => String(params.get(key) || "").toLowerCase() === "supadata",
+      );
+    } catch (_error) {
+      return /(?:^|[?&])(?:focus|section|provider)=supadata(?:&|$)/i.test(
+        search,
+      );
+    }
+  }
+
+  function applySupadataSettingsVisibility(
+    section,
+    { hasKey = false, requested = false } = {},
+  ) {
+    if (!section) return false;
+    const visible = Boolean(hasKey || requested);
+    section.hidden = !visible;
+    section.dataset.visibilityReason = hasKey
+      ? "configured"
+      : requested
+        ? "explicit"
+        : "hidden";
+    return visible;
+  }
+
   function initialize(root = globalThis) {
     const doc = root.document;
     const settingsApi = root.YTD_SETTINGS;
@@ -526,6 +557,7 @@ const YTD_OPTIONS = (() => {
     const form = doc.getElementById("settingsForm");
     const aiApiKeyInput = doc.getElementById("aiApiKey");
     const supadataApiKeyInput = doc.getElementById("supadataApiKey");
+    const supadataSection = doc.getElementById("section-transcript");
     const saveStatus = doc.getElementById("saveStatus");
     const dataStatus = doc.getElementById("dataStatus");
     const backupStatus = doc.getElementById("backupStatus");
@@ -586,6 +618,25 @@ const YTD_OPTIONS = (() => {
     let currentProviderId =
       selectableProviderList[0]?.id || settingsApi.DEFAULT_PROVIDER || "deepseek";
     let providerListOpen = false;
+
+    function syncSupadataVisibility({ focus = false } = {}) {
+      const requested = supadataOptionsRequested(root.location || {});
+      const visible = applySupadataSettingsVisibility(supadataSection, {
+        hasKey: Boolean(supadataApiKeyInput?.value.trim()),
+        requested,
+      });
+      if (visible && focus && requested) {
+        const schedule =
+          typeof root.requestAnimationFrame === "function"
+            ? root.requestAnimationFrame.bind(root)
+            : (callback) => root.setTimeout?.(callback, 16);
+        schedule(() => {
+          supadataSection?.scrollIntoView?.({ block: "center" });
+          supadataApiKeyInput?.focus?.();
+        });
+      }
+      return visible;
+    }
 
     function renderStatus(element) {
       const state = statusStates.get(element);
@@ -934,6 +985,7 @@ const YTD_OPTIONS = (() => {
           : selectableProviderList[0]?.id || currentProviderId;
         aiApiKeyInput.value = providerKeyDrafts[currentProviderId] || "";
         supadataApiKeyInput.value = settings.supadataApiKey;
+        syncSupadataVisibility();
         renderActiveProvider();
         updateServiceStatus();
         if (migration.migrated) {
@@ -952,6 +1004,7 @@ const YTD_OPTIONS = (() => {
         applyLanguage(DEFAULT_LANGUAGE);
       }
       await loadSettings();
+      syncSupadataVisibility({ focus: true });
       if (!statusStates.has(saveStatus)) {
         setStatus(saveStatus, "noUnsavedChanges");
       }
@@ -981,6 +1034,7 @@ const YTD_OPTIONS = (() => {
 
       try {
         await storage.set({ [settingsApi.STORAGE_KEY]: settings });
+        syncSupadataVisibility();
         setStatus(saveStatus, "saved");
       } catch (_error) {
         setStatus(saveStatus, "saveFailed");
@@ -1262,6 +1316,7 @@ const YTD_OPTIONS = (() => {
         });
       }
       root.addEventListener?.("hashchange", () => {
+        syncSupadataVisibility({ focus: true });
         if (!syncActiveNavFromHash({ scroll: true })) syncActiveNavFromScroll();
       });
       if (syncActiveNavFromHash()) {
@@ -1352,6 +1407,8 @@ const YTD_OPTIONS = (() => {
     settingsNavTargetFromHref,
     resolveActiveSettingsSection,
     applySettingsNavState,
+    supadataOptionsRequested,
+    applySupadataSettingsVisibility,
     initialize,
   };
 })();

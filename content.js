@@ -814,11 +814,13 @@ async function saveCurrentNote() {
       showNoteSavedToast(result.note);
     } else {
       const label =
-        result.error === "SUPADATA_CONSENT_REQUIRED"
-          ? "请在侧栏授权"
-          : result.error === "SUPADATA_NOT_CONFIGURED"
-            ? "需在设置配置 Supadata"
-            : "出错了";
+        result.error === "TRANSCRIPT_TASK_REQUIRED"
+          ? "请先打开侧栏字幕"
+          : result.error === "SUPADATA_CONSENT_REQUIRED"
+            ? "请在侧栏授权"
+            : result.error === "SUPADATA_NOT_CONFIGURED"
+              ? "需在设置配置 Supadata"
+              : "出错了";
       setNoteButtonState(label);
       console.error("[DigestDock] Save note error:", result.error);
     }

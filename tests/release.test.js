@@ -57,8 +57,20 @@ test("manifest uses minimized install-time permissions", () => {
   assert.deepEqual(bilibiliContentScript?.matches, [
     "https://www.bilibili.com/video/BV*",
   ]);
+  const passiveMain = manifest.content_scripts.find((entry) =>
+    entry.js?.includes("youtube-passive-main.js"),
+  );
+  const passiveBridge = manifest.content_scripts.find((entry) =>
+    entry.js?.includes("youtube-passive-bridge.js"),
+  );
+  assert.equal(passiveMain?.run_at, "document_start");
+  assert.equal(passiveMain?.world, "MAIN");
+  assert.deepEqual(passiveMain?.matches, ["https://www.youtube.com/*"]);
+  assert.equal(passiveBridge?.run_at, "document_start");
+  assert.equal(passiveBridge?.world, "ISOLATED");
+  assert.deepEqual(passiveBridge?.matches, ["https://www.youtube.com/*"]);
   assert.equal(Object.hasOwn(manifest, "optional_host_permissions"), false);
-  assert.equal(manifest.version, "1.4.4");
+  assert.equal(manifest.version, "1.4.5");
 });
 
 test("large local caches use explicit permission and remain user-clearable", () => {
@@ -82,7 +94,7 @@ test("large local caches use explicit permission and remain user-clearable", () 
   assert.match(chineseReadme, /`unlimitedStorage`/);
 });
 
-test("cross-platform runtime dependencies match the API-primary release surface", () => {
+test("cross-platform runtime dependencies match the Passive-first release surface", () => {
   const background = read("background.js");
   const sidepanelPage = read("sidepanel.html");
   const optionsPage = read("options.html");
@@ -141,6 +153,18 @@ test("cross-platform runtime dependencies match the API-primary release surface"
       `${file} must be both allowlisted and required for release`,
     );
   }
+  for (const file of [
+    "youtube-passive-main.js",
+    "youtube-passive-bridge.js",
+  ]) {
+    assert.ok(
+      (releaseCheck.match(new RegExp(`"${file.replace(".", "\\.")}"`, "g")) || [])
+        .length >= 2,
+      `${file} must be both allowlisted and required for release`,
+    );
+  }
+  assert.doesNotMatch(releaseCheck, /"youtube-transcript-active\.js"/);
+  assert.doesNotMatch(releaseCheck, /"youtube-transcript-panel\.js"/);
   assert.doesNotMatch(releaseCheck, /"youtube-transcript\.js"/);
   assert.match(brandIcon, /#0A5FE9/);
   assert.match(brandIcon, /#04B7D2/);
@@ -157,7 +181,7 @@ test("cross-platform runtime dependencies match the API-primary release surface"
     3,
     "only the icon-adjacent DigestDock brand word must emphasize D, D, and K",
   );
-  assert.match(optionsPage, /<p class="settings-version">DigestDock 1\.4\.4<\/p>/);
+  assert.match(optionsPage, /<p class="settings-version">DigestDock 1\.4\.5<\/p>/);
   assert.match(optionsPage, /<p class="eyebrow">DIGESTDOCK<\/p>/);
   assert.match(optionsStyles, /\.brand-letter\s*\{[^}]*font-weight:\s*750/);
   assert.doesNotMatch(optionsPage, /#1F2933|#F26A4F/);
@@ -166,7 +190,12 @@ test("cross-platform runtime dependencies match the API-primary release surface"
     /public_allowlist=\(([\s\S]*?)\n\)/,
   )?.[1];
   assert.ok(publicAllowlist, "public release allowlist must be present");
-  assert.doesNotMatch(publicAllowlist, /"(?:poc|tests)\//);
+  assert.doesNotMatch(publicAllowlist, /"(?:poc|tests|experiments)\//);
+  assert.doesNotMatch(
+    publicAllowlist,
+    /(?:local-helper|hosted-api-slot|passive-capture|node-libraries)/,
+  );
+  assert.match(releaseCheck, /mjs\|cjs\|py/);
   assert.doesNotMatch(
     [background, read("options.js")].join("\n"),
     /chrome\.downloads\b/,
@@ -268,12 +297,12 @@ test("release copy documents current scope without em dashes", () => {
   assert.match(readme, /generated transcript costs \*\*2 credits per video minute\*\*/i);
   assert.match(readme, /HTTP `206` still uses \*\*1 credit\*\*/i);
   assert.match(readme, /forces `mode=native`/i);
-  assert.match(readme, /roughly 100 transcript lookups per month/i);
+  assert.match(readme, /roughly 100 lookups per month/i);
   assert.match(readme, /supadata\.ai\/pricing/i);
   assert.match(readme, /docs\.supadata\.ai\/get-transcript/i);
   assert.match(readme, /dash\.supadata\.ai\/auth\/sign-up/i);
   assert.match(readme, /saved key is never used automatically/i);
-  assert.match(readme, /asks whether to use Supadata for that video attempt/i);
+  assert.match(readme, /asks whether to use Supadata for that exact video attempt/i);
   assert.match(readme, /platform\.deepseek\.com\/api_keys/i);
   assert.match(readme, /api-docs\.deepseek\.com/i);
   assert.match(readme, /api-docs\.deepseek\.com\/quick_start\/pricing/i);
@@ -291,8 +320,8 @@ test("release copy documents current scope without em dashes", () => {
   assert.match(chineseReadme, /\u7ea6 32,600 \u4e2a\u8f93\u5165 token/);
   assert.match(chineseReadme, /\$0\.002[^\n]*\$0\.006 USD/);
   assert.match(chineseReadme, /dash\.supadata\.ai\/auth\/sign-up/i);
-  assert.match(chineseReadme, /保存 Key 不等于持续授权/);
-  assert.match(chineseReadme, /由你逐视频确认本次请求/);
+  assert.match(chineseReadme, /保存 Key 也不构成持续授权/);
+  assert.match(chineseReadme, /每个视频仍需明确确认/);
   assert.match(chineseReadme, /platform\.deepseek\.com\/api_keys/i);
   assert.match(readme, /^### The Digest button is missing on a video$/m);
   assert.match(

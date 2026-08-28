@@ -34,6 +34,8 @@ public_allowlist=(
   "note-sources.js"
   "export-jobs.js"
   "content.js"
+  "youtube-passive-main.js"
+  "youtube-passive-bridge.js"
   "bilibili.js"
   "content-bilibili.js"
   "sidepanel.html"
@@ -77,6 +79,8 @@ required_public_files=(
   "export-jobs.js"
   "icons/providers/PROVENANCE.md"
   "content.js"
+  "youtube-passive-main.js"
+  "youtube-passive-bridge.js"
   "bilibili.js"
   "content-bilibili.js"
   "sidepanel.html"
@@ -283,7 +287,7 @@ const patterns = [
 
 let found = false;
 for (const file of process.argv.slice(2)) {
-  if (!/\.(?:js|json|html|css|md|txt|yml|yaml|sh)$/i.test(file) && file !== "LICENSE") {
+  if (!/\.(?:js|mjs|cjs|py|json|jsonl|ndjson|html|css|md|txt|toml|yml|yaml|sh)$/i.test(file) && file !== "LICENSE") {
     continue;
   }
   const text = fs.readFileSync(file, "utf8");

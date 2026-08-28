@@ -1,12 +1,10 @@
-// API-primary YouTube transcript contract.
+// Passive-first YouTube transcript and explicit Supadata fallback contract.
 //
-// The mainline no longer extracts YouTube captions in the page. YouTube caption
-// bodies come only from the user-authorized Supadata provider, gated by a
-// read-only page identity/playability check, a saved key, and strict per-attempt
-// consent, and collapsed by a background single-flight with a bounded 429
-// cooldown. These offline tests pin that contract without any real network,
-// Chrome, or Supadata call. (The file keeps its historical name; its subject is
-// now the API-primary provider switch.)
+// The mainline is cache/Passive -> prompt the user to enable CC -> one explicit
+// free retry. Supadata is reachable only after that retry still returns UNKNOWN
+// and the user explicitly authorizes that video. These offline tests retain the
+// provider boundary and migration coverage without any real network, Chrome,
+// or Supadata call. The file keeps its historical name so commands stay stable.
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
@@ -143,8 +141,8 @@ function loadBackground({
   };
 }
 
-// Read-only page gate result: identity + playability + source language only.
-// It deliberately carries no caption tracks or signed request URLs.
+// Read-only page gate result: identity, playability, source language, and an
+// optional text-free caption-track summary. It carries no track URL or body.
 function pageSnapshot(
   videoId = "jNQXAC9IVRw",
   language = "en",
@@ -174,6 +172,136 @@ test("the page gate reads no signed caption URL", () => {
   assert.doesNotMatch(gate, /signature|timedtext/i);
   assert.match(gate, /playability/);
   assert.match(gate, /sourceLanguage/);
+  assert.match(gate, /captionTrackCountKnown/);
+  assert.match(gate, /captionTrackCount/);
+  assert.match(gate, /pageDefaultTrack/);
+});
+
+function executePageGateWithResponse(response, { live = true } = {}) {
+  return async (details) => {
+    const source = `(${details.func.toString()})(${JSON.stringify(details.args?.[0])})`;
+    const result = vm.runInNewContext(source, {
+      document: {
+        getElementById: () => ({
+          getPlayerResponse: () => (live ? response : null),
+        }),
+      },
+      window: { ytInitialPlayerResponse: response },
+      Object,
+      String,
+      Array,
+      Boolean,
+      RegExp,
+    });
+    return [{ result }];
+  };
+}
+
+test("page gate confirms zero tracks only from the exact live playable response", async () => {
+  const response = {
+    videoDetails: { videoId: "jNQXAC9IVRw", isLiveContent: false },
+    playabilityStatus: { status: "OK" },
+  };
+  const liveGate = loadBackground({
+    executeScript: executePageGateWithResponse(response),
+  }).helpers;
+  const live = await liveGate.readYouTubePlayabilitySnapshot(
+    42,
+    "jNQXAC9IVRw",
+  );
+  assert.equal(live.captionTrackCountKnown, true);
+  assert.equal(live.captionTrackCount, 0);
+  assert.equal(live.pageDefaultTrack, null);
+
+  const fallbackGate = loadBackground({
+    executeScript: executePageGateWithResponse(response, { live: false }),
+  }).helpers;
+  const fallback = await fallbackGate.readYouTubePlayabilitySnapshot(
+    42,
+    "jNQXAC9IVRw",
+  );
+  assert.equal(fallback.captionTrackCountKnown, false);
+  assert.equal(fallback.captionTrackCount, null);
+
+  for (const isLiveContent of [true, undefined]) {
+    const uncertainResponse = {
+      ...response,
+      videoDetails: {
+        videoId: "jNQXAC9IVRw",
+        ...(isLiveContent === undefined ? {} : { isLiveContent }),
+      },
+    };
+    const uncertainGate = loadBackground({
+      executeScript: executePageGateWithResponse(uncertainResponse),
+    }).helpers;
+    const uncertain = await uncertainGate.readYouTubePlayabilitySnapshot(
+      42,
+      "jNQXAC9IVRw",
+    );
+    assert.equal(uncertain.captionTrackCountKnown, false);
+    assert.equal(uncertain.captionTrackCount, null);
+  }
+});
+
+test("page gate returns one sanitized default track without signed fields", async () => {
+  const response = {
+    videoDetails: { videoId: "jNQXAC9IVRw", isLiveContent: false },
+    playabilityStatus: { status: "OK" },
+    captions: {
+      playerCaptionsTracklistRenderer: {
+        captionTracks: [
+          {
+            languageCode: "en_US",
+            kind: "asr",
+            vssId: "a.en",
+            baseUrl: "https://www.youtube.com/api/timedtext?signature=secret",
+          },
+        ],
+      },
+    },
+  };
+  const helpers = loadBackground({
+    executeScript: executePageGateWithResponse(response),
+  }).helpers;
+  const snapshot = await helpers.readYouTubePlayabilitySnapshot(
+    42,
+    "jNQXAC9IVRw",
+  );
+  assert.equal(snapshot.captionTrackCountKnown, true);
+  assert.equal(snapshot.captionTrackCount, 1);
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(snapshot.pageDefaultTrack)),
+    { language: "en-US", kind: "asr" },
+  );
+  assert.doesNotMatch(
+    JSON.stringify(snapshot),
+    /baseUrl|signature|timedtext|secret/i,
+  );
+});
+
+test("page gate does not guess a default from multiple unranked tracks", async () => {
+  const response = {
+    videoDetails: { videoId: "jNQXAC9IVRw", isLiveContent: false },
+    playabilityStatus: { status: "OK" },
+    captions: {
+      playerCaptionsTracklistRenderer: {
+        captionTracks: [
+          { languageCode: "en", vssId: ".en" },
+          { languageCode: "de", vssId: ".de" },
+        ],
+      },
+    },
+  };
+  const helpers = loadBackground({
+    executeScript: executePageGateWithResponse(response),
+  }).helpers;
+  const snapshot = await helpers.readYouTubePlayabilitySnapshot(
+    42,
+    "jNQXAC9IVRw",
+  );
+  assert.equal(snapshot.captionTrackCountKnown, true);
+  assert.equal(snapshot.captionTrackCount, 2);
+  assert.equal(snapshot.pageDefaultTrack, null);
 });
 
 test("a new video without a Supadata key never touches the network", async () => {
@@ -246,6 +374,28 @@ test("only strict boolean true authorizes the provider", async () => {
     );
     assert.equal(result.error, "SUPADATA_CONSENT_REQUIRED");
   }
+  assert.equal(supadataCalls, 0);
+});
+
+test("explicit consent without an exact tab identity sends no provider request", async () => {
+  let supadataCalls = 0;
+  const { helpers } = loadBackground({
+    settings: { aiApiKey: "test-key", supadataApiKey: "optional-key" },
+    executeScript: async () => pageSnapshot(),
+    fetchImpl: async () => {
+      supadataCalls += 1;
+      return jsonResponse({});
+    },
+  });
+
+  const result = await helpers.handleFetchYoutubeTranscript(
+    "jNQXAC9IVRw",
+    "en",
+    null,
+    true,
+  );
+  assert.equal(result.success, false);
+  assert.equal(result.error, "PAGE_CONTEXT_CHANGED");
   assert.equal(supadataCalls, 0);
 });
 
@@ -408,6 +558,43 @@ test("a Supadata result is rejected if the tab navigates mid-flight", async () =
   assert.equal(result.success, false);
   assert.equal(result.error, "PAGE_CONTEXT_CHANGED");
   assert.equal(supadataCalls, 1);
+});
+
+test("a simultaneous navigation cannot erase Supadata 429 cooldown", async () => {
+  let tabsGetCalls = 0;
+  let supadataCalls = 0;
+  const sessionState = {};
+  const { helpers } = loadBackground({
+    settings: { aiApiKey: "test-key", supadataApiKey: "optional-key" },
+    executeScript: async () => pageSnapshot(),
+    tabsGet: async (tabId) => {
+      tabsGetCalls += 1;
+      return {
+        id: tabId,
+        url:
+          tabsGetCalls <= 2
+            ? "https://www.youtube.com/watch?v=jNQXAC9IVRw"
+            : "https://www.youtube.com/watch?v=aqz-KE-bpKQ",
+      };
+    },
+    storageSessionGet: async (key) => ({ [key]: sessionState[key] }),
+    storageSessionSet: async (items) => Object.assign(sessionState, items),
+    fetchImpl: async () => {
+      supadataCalls += 1;
+      return jsonResponse({}, 429);
+    },
+  });
+
+  const result = await helpers.handleFetchYoutubeTranscript(
+    "jNQXAC9IVRw",
+    "en",
+    42,
+    true,
+  );
+  assert.equal(result.success, false);
+  assert.equal(result.error, "PAGE_CONTEXT_CHANGED");
+  assert.equal(supadataCalls, 1);
+  assert.ok(Number(sessionState.digestdock_supadata_cooldown_until) > Date.now());
 });
 
 test("clear LOGIN/AGE/UNPLAYABLE states never reach Supadata", async (t) => {
@@ -844,7 +1031,7 @@ test("a cache-hit YouTube note reuses the cached transcript with no provider cal
             transcript: [
               { text: "中文字幕。", start: 0, duration: 3, language: "zh-CN" },
             ],
-            transcriptSourcePolicyVersion: 4,
+            transcriptSourcePolicyVersion: 5,
             transcriptSource: "supadata",
             mediaRef: { platform: "youtube", videoId: "jNQXAC9IVRw" },
           },
@@ -872,7 +1059,7 @@ test("a cache-hit YouTube note reuses the cached transcript with no provider cal
   assert.equal(supadataCalls, 0);
 });
 
-test("a legacy local YouTube cache cannot masquerade as an API-primary result", async () => {
+test("a legacy v4 YouTube cache cannot masquerade as a current native result", async () => {
   let supadataCalls = 0;
   const { helpers } = loadBackground({
     settings: { aiApiKey: "test-key", supadataApiKey: "optional-key" },
@@ -913,7 +1100,8 @@ test("a legacy local YouTube cache cannot masquerade as an API-primary result", 
     "en",
   );
   assert.equal(result.success, false);
-  assert.equal(result.error, "SUPADATA_CONSENT_REQUIRED");
+  assert.equal(result.error, "TRANSCRIPT_TASK_REQUIRED");
+  assert.match(result.message, /侧栏.*字幕任务/);
   assert.equal(supadataCalls, 0);
 });
 
@@ -951,26 +1139,26 @@ test("a cache-miss YouTube note points the user to the side panel and calls no p
     "en",
   );
   assert.equal(result.success, false);
-  assert.equal(result.error, "SUPADATA_CONSENT_REQUIRED");
-  assert.match(result.message, /侧栏.*授权/);
+  assert.equal(result.error, "TRANSCRIPT_TASK_REQUIRED");
+  assert.match(result.message, /侧栏.*字幕任务/);
   assert.equal(supadataCalls, 0);
   assert.equal(savedNotes.length, 0);
 });
 
-test("side panel and background stay wired to the API-primary contract", () => {
+test("side panel and background stay wired to the Passive-first contract", () => {
   const panel = read("sidepanel.js");
   const background = read("background.js");
 
   // Protocol and cache-policy versions moved forward together.
-  assert.match(panel, /const REQUIRED_RUNTIME_PROTOCOL_VERSION = 11/);
-  assert.match(background, /const RUNTIME_PROTOCOL_VERSION = 11/);
-  assert.match(panel, /const TRANSCRIPT_SOURCE_POLICY_VERSION = 4/);
-  assert.match(background, /const TRANSCRIPT_SOURCE_POLICY_VERSION = 4/);
+  assert.match(panel, /const REQUIRED_RUNTIME_PROTOCOL_VERSION = 12/);
+  assert.match(background, /const RUNTIME_PROTOCOL_VERSION = 12/);
+  assert.match(panel, /const TRANSCRIPT_SOURCE_POLICY_VERSION = 5/);
+  assert.match(background, /const TRANSCRIPT_SOURCE_POLICY_VERSION = 5/);
 
-  // Consent threading and per-attempt gating.
+  // Run identity, request shape, and per-attempt third-party gating.
   assert.match(
     panel,
-    /action: "fetchTranscript"[\s\S]*?preferredLanguage: currentVideoSourceLanguage,[\s\S]*?tabId: videoTabId,[\s\S]*?supadataConsent: supadataConsent === true/,
+    /function buildTranscriptFetchRequest[\s\S]*?trackKind: YOUTUBE_TRANSCRIPT_TRACK_KIND,[\s\S]*?runId,[\s\S]*?digestGeneration: generation,[\s\S]*?routeKey,[\s\S]*?supadataConsent: supadataConsent === true,[\s\S]*?captionRetry: captionRetry === true/,
   );
   assert.match(
     panel,
@@ -981,10 +1169,15 @@ test("side panel and background stay wired to the API-primary contract", () => {
   assert.match(background, /tab\?\.pendingUrl \|\| tab\?\.url/);
   assert.match(panel, /latestTab\.pendingUrl \|\| latestTab\.url/);
 
-  // API-primary consent copy; no local-first framing.
+  // The first miss shows the CC prompt; Supadata remains an explicit fallback
+  // shown only after the user's free retry still ends UNKNOWN.
+  assert.match(panel, /请先打开 YouTube 字幕/);
+  assert.match(panel, /已打开字幕，重新读取/);
+  assert.match(panel, /captionRetry: captionRetry === true/);
+  assert.match(background, /captionRetry: message\.captionRetry === true/);
+  assert.match(panel, /function shouldOfferSupadata\(result\)[\s\S]*?=== "UNKNOWN"/);
   assert.match(panel, /本次使用 Supadata/);
   assert.match(panel, /不使用第三方服务/);
-  assert.match(panel, /SUPADATA_CONSENT_REQUIRED/);
   assert.match(panel, /SUPADATA_NOT_CONFIGURED/);
   assert.match(panel, /showSupadataRateLimited/);
   assert.match(panel, /showSupadataProviderError/);
@@ -995,11 +1188,29 @@ test("side panel and background stay wired to the API-primary contract", () => {
   assert.doesNotMatch(panel, /重试 YouTube 原生字幕/);
   assert.doesNotMatch(panel, /formatLocalTranscriptDiagnostics/);
 
-  // v4 accepts only the provider bound to the cached platform.
-  assert.match(
-    panel,
-    /cachedPlatform === "bilibili" \? "bilibili" : "supadata"[\s\S]*?cached\.transcriptSource !== expectedSource/,
+  // v5 keeps old positive caches readable even though Active and Panel are now
+  // experiment-only rather than product execution routes.
+  for (const source of [
+    "youtube-passive",
+    "youtube-active",
+    "youtube-panel",
+    "supadata",
+  ]) {
+    assert.match(panel, new RegExp(`YOUTUBE_TRANSCRIPT_SOURCES[\\s\\S]*?${source}`));
+    assert.match(background, new RegExp(`YOUTUBE_TRANSCRIPT_CACHE_SOURCES[\\s\\S]*?${source}`));
+  }
+  const nativeHandler = background.match(
+    /async function handleFetchYoutubeNativeTranscript[\s\S]*?\n\}/,
+  )?.[0];
+  assert.ok(nativeHandler);
+  assert.ok(
+    nativeHandler.indexOf("awaitYoutubePassiveGate") <
+      nativeHandler.indexOf("YOUTUBE_CAPTIONS_REQUIRED"),
   );
+  assert.doesNotMatch(nativeHandler, /runYoutubeNativeRouteLeader/);
+  assert.doesNotMatch(nativeHandler, /runYoutubeNativeSingleFlight/);
+  assert.match(background, /if \(supadataConsent === true\)/);
+  assert.match(background, /youtubeUnknownFallbackResult/);
 
   // The stored transcript-source-attempt sanitizer never leaks a signed URL.
   const sanitizer = panel.match(

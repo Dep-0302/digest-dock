@@ -3,8 +3,8 @@
  *
  * This is the "brain" of the extension. It runs in the background and handles:
  * 1. Opening the side panel when the user clicks the extension icon
- * 2. Fetching Bilibili caption tracks locally, and YouTube native captions
- *    through the user-authorized Supadata provider
+ * 2. Fetching Bilibili captions and routing YouTube captions through local
+ *    cache/Passive capture, a user-facing CC prompt, then optional Supadata
  * 3. Calling DeepSeek to analyze the transcript
  * 4. Sending results back to the side panel
  *
@@ -25,9 +25,9 @@ importScripts("export-jobs.js");
 
 const DEBUG = false;
 const ANALYSIS_SCHEMA_VERSION = 3;
-const RUNTIME_PROTOCOL_VERSION = 11;
+const RUNTIME_PROTOCOL_VERSION = 12;
 const ANALYSIS_BASE_LANGUAGE = "zh-Hans";
-const TRANSCRIPT_SOURCE_POLICY_VERSION = 4;
+const TRANSCRIPT_SOURCE_POLICY_VERSION = 5;
 const AI_PROVIDER_IDLE_TIMEOUT_MS = 50_000;
 const AI_PROVIDER_HARD_TIMEOUT_MS = 120_000;
 const AI_PROVIDER_MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
@@ -45,6 +45,23 @@ const SUPADATA_COOLDOWN_STORAGE_KEY = "digestdock_supadata_cooldown_until";
 const SUPADATA_REQUEST_TIMEOUT_MS = 20_000;
 const SUPADATA_MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
 const SUPADATA_JOB_TIMEOUT_MS = 90_000;
+const YOUTUBE_NATIVE_RATE_LIMIT_COOLDOWN_MS = 60_000;
+const YOUTUBE_NATIVE_COOLDOWN_STORAGE_KEY =
+  "youtube_native_cooldown_until";
+const YOUTUBE_PASSIVE_SESSION_STORAGE_KEY =
+  "youtube_passive_session_buffer";
+const YOUTUBE_PASSIVE_WAIT_MS = 1_500;
+const YOUTUBE_PASSIVE_MAX_BODY_BYTES = 8 * 1024 * 1024;
+const YOUTUBE_PASSIVE_MAX_STATE_BYTES = 6 * 1024 * 1024;
+const YOUTUBE_PASSIVE_MAX_ENTRIES = 6;
+const YOUTUBE_ACTIVE_PRODUCT_FILE = "youtube-transcript-active.js";
+const YOUTUBE_PANEL_PRODUCT_FILE = "youtube-transcript-panel.js";
+const YOUTUBE_TRANSCRIPT_CACHE_SOURCES = new Set([
+  "youtube-passive",
+  "youtube-active",
+  "youtube-panel",
+  "supadata",
+]);
 const debugLog = (...args) => {
   if (DEBUG) console.log(...args);
 };
@@ -55,6 +72,16 @@ const debugLog = (...args) => {
 // side panels pointed at the same tab) share one in-flight provider call
 // instead of each spending a separate Supadata credit.
 const youtubeSupadataInFlight = new Map();
+// The native free route is shared across tabs/windows by media identity. The
+// leader tab performs the bounded Active/Panel work; every waiter keeps its own
+// tab/run identity and independently revalidates the page before accepting the
+// shared result.
+const youtubeNativeInFlight = new Map();
+const youtubeTabNavigationEpochs = new Map();
+const youtubePassiveWaiters = new Set();
+let youtubePassiveMutationQueue = Promise.resolve();
+let youtubePassiveRevision = 0;
+let youtubeNativeCooldownUntil = 0;
 // A side panel can be closed and reopened while the MV3 service worker keeps an
 // authorized export batch alive. Duplicate submissions for the same durable
 // job/batch share this promise, so they never spend a second provider request.
@@ -62,6 +89,26 @@ const exportSourceBatchInFlight = new Map();
 let exportSourceBatchQueueTail = Promise.resolve();
 let exportSourceStorageGeneration = 0;
 let youtubeSupadataCooldownUntil = 0;
+
+function youtubeTabNavigationEpoch(tabId) {
+  return Number.isInteger(tabId)
+    ? Number(youtubeTabNavigationEpochs.get(tabId) || 0)
+    : -1;
+}
+
+function bumpYoutubeTabNavigationEpoch(tabId) {
+  if (!Number.isInteger(tabId)) return -1;
+  const next = youtubeTabNavigationEpoch(tabId) + 1;
+  youtubeTabNavigationEpochs.set(tabId, next);
+  return next;
+}
+
+function youtubeTabEpochStillMatches(tabId, expectedEpoch) {
+  return (
+    Number.isInteger(tabId) &&
+    youtubeTabNavigationEpoch(tabId) === expectedEpoch
+  );
+}
 
 function runYoutubeSupadataSingleFlight(key, task) {
   const existing = youtubeSupadataInFlight.get(key);
@@ -112,6 +159,63 @@ async function startYoutubeSupadataCooldown() {
     }
   } catch (_error) {
     // The in-memory value still protects the current worker lifetime.
+  }
+  return cooldownUntil;
+}
+
+function runYoutubeNativeSingleFlight(key, task) {
+  const existing = youtubeNativeInFlight.get(key);
+  if (existing) return existing;
+  const promise = Promise.resolve()
+    .then(task)
+    .finally(() => {
+      if (youtubeNativeInFlight.get(key) === promise) {
+        youtubeNativeInFlight.delete(key);
+      }
+    });
+  youtubeNativeInFlight.set(key, promise);
+  return promise;
+}
+
+async function readYoutubeNativeCooldownUntil() {
+  let cooldownUntil = youtubeNativeCooldownUntil;
+  const now = Date.now();
+  try {
+    const sessionStorage = chrome.storage?.session;
+    if (typeof sessionStorage?.get === "function") {
+      const stored = await sessionStorage.get(
+        YOUTUBE_NATIVE_COOLDOWN_STORAGE_KEY,
+      );
+      const storedUntil = Number(
+        stored?.[YOUTUBE_NATIVE_COOLDOWN_STORAGE_KEY],
+      );
+      if (
+        Number.isFinite(storedUntil) &&
+        storedUntil > now &&
+        storedUntil <= now + YOUTUBE_NATIVE_RATE_LIMIT_COOLDOWN_MS
+      ) {
+        cooldownUntil = Math.max(cooldownUntil, storedUntil);
+      }
+    }
+  } catch (_error) {
+    // The in-memory timestamp still protects this worker lifetime.
+  }
+  youtubeNativeCooldownUntil = cooldownUntil;
+  return cooldownUntil;
+}
+
+async function startYoutubeNativeCooldown() {
+  const cooldownUntil = Date.now() + YOUTUBE_NATIVE_RATE_LIMIT_COOLDOWN_MS;
+  youtubeNativeCooldownUntil = cooldownUntil;
+  try {
+    const sessionStorage = chrome.storage?.session;
+    if (typeof sessionStorage?.set === "function") {
+      await sessionStorage.set({
+        [YOUTUBE_NATIVE_COOLDOWN_STORAGE_KEY]: cooldownUntil,
+      });
+    }
+  } catch (_error) {
+    // The in-memory timestamp still protects this worker lifetime.
   }
   return cooldownUntil;
 }
@@ -562,6 +666,463 @@ async function readBoundedAiResponse(response, onActivity) {
 }
 
 // ============================================================
+// YOUTUBE PASSIVE SESSION BUFFER
+// ============================================================
+
+function validYoutubeVideoId(value) {
+  const videoId = String(value || "").trim();
+  return /^[0-9A-Za-z_-]{11}$/.test(videoId) ? videoId : "";
+}
+
+function normalizeYoutubeTrackKind(value) {
+  return ["manual-first", "manual", "asr", "any"].includes(value)
+    ? value
+    : "manual-first";
+}
+
+function youtubePrimaryLanguage(value) {
+  return normalizeLanguageCode(value).split("-")[0].toLowerCase();
+}
+
+function passiveIdentity(tabId, videoId, language, trackKind) {
+  return [
+    tabId,
+    videoId,
+    normalizeLanguageCode(language) || "und",
+    trackKind === "asr" ? "asr" : "manual",
+  ].join(":");
+}
+
+function decodePassiveEntities(value) {
+  return String(value || "")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;|&apos;/g, "'")
+    .replace(/&#x([0-9a-f]+);/gi, (_match, number) =>
+      String.fromCodePoint(Number.parseInt(number, 16)),
+    )
+    .replace(/&#(\d+);/g, (_match, number) =>
+      String.fromCodePoint(Number.parseInt(number, 10)),
+    );
+}
+
+function cleanPassiveText(value) {
+  return decodePassiveEntities(value)
+    .replace(/<[^>]+>/g, "")
+    .replace(/>> ?/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function normalizePassiveSegments(rows, language) {
+  return (Array.isArray(rows) ? rows : [])
+    .map((row) => {
+      const text = cleanPassiveText(row?.text);
+      const start = Number(row?.start);
+      const duration = Number(row?.duration);
+      if (
+        !text ||
+        !Number.isFinite(start) ||
+        !Number.isFinite(duration) ||
+        start < 0 ||
+        duration < 0
+      ) {
+        return null;
+      }
+      return {
+        text,
+        start,
+        duration,
+        language:
+          normalizeLanguageCode(language) ||
+          normalizeLanguageCode(row?.language) ||
+          null,
+      };
+    })
+    .filter(Boolean)
+    .sort((left, right) => left.start - right.start);
+}
+
+function parsePassiveJson3(body, language) {
+  let payload;
+  try {
+    payload = JSON.parse(String(body || ""));
+  } catch (_error) {
+    return [];
+  }
+  const rows = [];
+  for (const event of Array.isArray(payload?.events) ? payload.events : []) {
+    if (!Array.isArray(event?.segs) || event.aAppend === 1) continue;
+    rows.push({
+      text: event.segs.map((segment) => segment?.utf8 || "").join(""),
+      start: Number(event.tStartMs || 0) / 1000,
+      duration: Number(event.dDurationMs || 0) / 1000,
+    });
+  }
+  return normalizePassiveSegments(rows, language);
+}
+
+function readPassiveXmlAttribute(source, name) {
+  const match = String(source || "").match(
+    new RegExp(`\\b${name}=["']([^"']+)["']`, "i"),
+  );
+  return match ? match[1] : null;
+}
+
+function parsePassiveXml(body, language) {
+  const xml = String(body || "");
+  const rows = [];
+  const paragraphPattern = /<p\b([^>]*)>([\s\S]*?)<\/p>/gi;
+  let match;
+  while ((match = paragraphPattern.exec(xml))) {
+    const start = readPassiveXmlAttribute(match[1], "t");
+    const duration = readPassiveXmlAttribute(match[1], "d");
+    if (start === null || duration === null) continue;
+    const pieces = [...match[2].matchAll(/<s\b[^>]*>([\s\S]*?)<\/s>/gi)];
+    rows.push({
+      text: pieces.length
+        ? pieces.map((piece) => piece[1]).join("")
+        : match[2],
+      start: Number(start) / 1000,
+      duration: Number(duration) / 1000,
+    });
+  }
+  if (!rows.length) {
+    const classicPattern = /<text\b([^>]*)>([\s\S]*?)<\/text>/gi;
+    while ((match = classicPattern.exec(xml))) {
+      const start = readPassiveXmlAttribute(match[1], "start");
+      const duration = readPassiveXmlAttribute(match[1], "dur");
+      if (start === null || duration === null) continue;
+      rows.push({
+        text: match[2],
+        start: Number(start),
+        duration: Number(duration),
+      });
+    }
+  }
+  return normalizePassiveSegments(rows, language);
+}
+
+function formatYoutubeTranscriptTimestamp(seconds) {
+  const total = Math.max(0, Math.floor(Number(seconds) || 0));
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
+}
+
+function buildYoutubeTranscriptResult(
+  transcript,
+  {
+    source,
+    sourceAttempt,
+    language = "",
+    selectedTrack = null,
+    providerVariant = null,
+    diagnostics = null,
+  },
+) {
+  const normalized = normalizePassiveSegments(transcript, language);
+  if (!normalized.length) return null;
+  const resolvedLanguage =
+    normalizeLanguageCode(language) ||
+    normalizeLanguageCode(normalized.find((segment) => segment.language)?.language) ||
+    null;
+  return {
+    success: true,
+    routeOutcome: "HAVE_TRANSCRIPT",
+    transcript: normalized,
+    transcriptText: normalized.map((segment) => segment.text).join(" "),
+    transcriptTextTimestamped: normalized
+      .map(
+        (segment) =>
+          `[${formatYoutubeTranscriptTimestamp(segment.start)}] ${segment.text}`,
+      )
+      .join("\n"),
+    language: resolvedLanguage,
+    source,
+    sourceAttempt,
+    // Never invent a manual/ASR kind. Panel can prove complete rows and
+    // language without always proving which native track kind rendered.
+    selectedTrack: selectedTrack || null,
+    providerVariant,
+    diagnostics,
+    supadataEligible: false,
+  };
+}
+
+function normalizePassiveCapture(payload) {
+  const videoId = validYoutubeVideoId(payload?.videoId);
+  const language = normalizeLanguageCode(payload?.language) || null;
+  const trackKind = payload?.kind === "asr" ? "asr" : "manual";
+  const status = Number(payload?.status);
+  const body = typeof payload?.body === "string" ? payload.body : "";
+  const bodyBytes = new TextEncoder().encode(body).byteLength;
+  if (
+    !videoId ||
+    !Number.isInteger(status) ||
+    status < 200 ||
+    status >= 300 ||
+    !bodyBytes ||
+    bodyBytes > YOUTUBE_PASSIVE_MAX_BODY_BYTES
+  ) {
+    return null;
+  }
+  const trimmed = body.trimStart();
+  const requestedFormat = String(payload?.format || "").toLowerCase();
+  const transcript =
+    requestedFormat === "json3" || trimmed.startsWith("{")
+      ? parsePassiveJson3(body, language)
+      : parsePassiveXml(body, language);
+  const result = buildYoutubeTranscriptResult(transcript, {
+    source: "youtube-passive",
+    sourceAttempt: "YOUTUBE_PASSIVE",
+    language,
+    selectedTrack: { language, kind: trackKind },
+    providerVariant: "page-observed-timedtext",
+    diagnostics: {
+      providerInitiated: {
+        youtubePlayer: 0,
+        youtubeTimedtext: 0,
+        thirdParty: 0,
+        loopback: 0,
+      },
+      pageObserved: { youtubeTimedtext: 1 },
+      status,
+      format:
+        requestedFormat || (trimmed.startsWith("{") ? "json3" : "xml"),
+      bodyBytes,
+      trackKind,
+    },
+  });
+  return result ? { result, videoId, language, trackKind } : null;
+}
+
+async function readYoutubePassiveEntries() {
+  try {
+    const stored = await chrome.storage?.session?.get?.(
+      YOUTUBE_PASSIVE_SESSION_STORAGE_KEY,
+    );
+    const value = stored?.[YOUTUBE_PASSIVE_SESSION_STORAGE_KEY];
+    return Array.isArray(value) ? value : [];
+  } catch (_error) {
+    return [];
+  }
+}
+
+async function writeYoutubePassiveEntries(entries) {
+  const bounded = (Array.isArray(entries) ? entries : [])
+    .filter((entry) => entry && Number.isInteger(entry.tabId))
+    .sort((left, right) => Number(left.updatedAt) - Number(right.updatedAt));
+  while (
+    bounded.length > YOUTUBE_PASSIVE_MAX_ENTRIES ||
+    new TextEncoder().encode(JSON.stringify(bounded)).byteLength >
+      YOUTUBE_PASSIVE_MAX_STATE_BYTES
+  ) {
+    bounded.shift();
+  }
+  await chrome.storage?.session?.set?.({
+    [YOUTUBE_PASSIVE_SESSION_STORAGE_KEY]: bounded,
+  });
+  return bounded;
+}
+
+function queueYoutubePassiveMutation(operation) {
+  const task = youtubePassiveMutationQueue.then(operation, operation);
+  youtubePassiveMutationQueue = task.catch(() => {});
+  return task;
+}
+
+function notifyYoutubePassiveWaiters() {
+  youtubePassiveRevision += 1;
+  for (const resolve of [...youtubePassiveWaiters]) resolve();
+  youtubePassiveWaiters.clear();
+}
+
+function waitForYoutubePassiveChange(maxWaitMs, observedRevision) {
+  return new Promise((resolve) => {
+    let timeoutId;
+    const done = () => {
+      clearTimeout(timeoutId);
+      youtubePassiveWaiters.delete(done);
+      resolve();
+    };
+    if (youtubePassiveRevision !== observedRevision) {
+      done();
+      return;
+    }
+    youtubePassiveWaiters.add(done);
+    timeoutId = setTimeout(done, maxWaitMs);
+  });
+}
+
+async function handleYoutubePassiveState(payload, sender) {
+  const type = String(payload?.type || "");
+  const tabId = sender?.tab?.id;
+  const videoId = validYoutubeVideoId(payload?.videoId);
+  const language = normalizeLanguageCode(payload?.language) || null;
+  const trackKind = payload?.kind === "asr" ? "asr" : "manual";
+  if (
+    !Number.isInteger(tabId) ||
+    !videoId ||
+    !["inflight", "capture", "clear"].includes(type)
+  ) {
+    return { ok: false, error: "INVALID_PASSIVE_STATE" };
+  }
+  // A stale SPA identity is allowed to clear only its exact old entry. It may
+  // never create or replace a capture for the tab's newly active video.
+  if (type !== "clear" && !(await youtubeTabStillMatches(tabId, videoId))) {
+    return { ok: false, error: "PAGE_CONTEXT_CHANGED" };
+  }
+
+  return queueYoutubePassiveMutation(async () => {
+    const entries = await readYoutubePassiveEntries();
+    const identity = passiveIdentity(tabId, videoId, language, trackKind);
+    const previous = entries.find((entry) => entry.identity === identity);
+    let next = entries.filter((entry) => entry.identity !== identity);
+    const observedStatus = Number(payload?.status);
+    if (
+      (type === "capture" || type === "clear") &&
+      observedStatus === 429 &&
+      previous
+    ) {
+      await writeYoutubePassiveEntries(next);
+      await startYoutubeNativeCooldown();
+      notifyYoutubePassiveWaiters();
+      return { ok: true, state: "rate-limited" };
+    }
+    if (type === "inflight") {
+      next.push({
+        identity,
+        tabId,
+        videoId,
+        language,
+        trackKind,
+        state: "inflight",
+        inFlight: true,
+        updatedAt: Date.now(),
+      });
+    } else if (type === "capture") {
+      if (
+        !previous ||
+        !(
+          previous.state === "inflight" ||
+          (previous.state === "capture" && previous.inFlight === true)
+        )
+      ) {
+        return { ok: false, error: "PASSIVE_CAPTURE_NOT_INFLIGHT" };
+      }
+      const capture = normalizePassiveCapture(payload);
+      if (!capture || capture.videoId !== videoId) {
+        return { ok: false, error: "INVALID_PASSIVE_CAPTURE" };
+      }
+      next.push({
+        identity,
+        tabId,
+        videoId,
+        language: capture.language,
+        trackKind: capture.trackKind,
+        state: "capture",
+        inFlight:
+          payload?.inFlight === true || Number(payload?.inFlight) > 0,
+        capture: capture.result,
+        updatedAt: Date.now(),
+      });
+    }
+    const stored = await writeYoutubePassiveEntries(next);
+    notifyYoutubePassiveWaiters();
+    if (type === "clear") return { ok: true, cleared: true };
+    const retained = stored.some((entry) => entry.identity === identity);
+    return retained
+      ? { ok: true, state: type }
+      : { ok: false, error: "PASSIVE_CAPTURE_TOO_LARGE" };
+  });
+}
+
+async function clearYoutubePassiveTab(tabId) {
+  if (!Number.isInteger(tabId)) return;
+  return queueYoutubePassiveMutation(async () => {
+    const entries = await readYoutubePassiveEntries();
+    const next = entries.filter((entry) => entry.tabId !== tabId);
+    if (next.length !== entries.length) {
+      await writeYoutubePassiveEntries(next);
+      notifyYoutubePassiveWaiters();
+    }
+  });
+}
+
+function passiveEntryMatches(entry, request) {
+  if (
+    entry?.tabId !== request.tabId ||
+    entry?.videoId !== request.videoId
+  ) {
+    return false;
+  }
+  const requestedLanguage = youtubePrimaryLanguage(request.preferredLanguage);
+  const entryLanguage = youtubePrimaryLanguage(entry.language);
+  if (requestedLanguage && requestedLanguage !== entryLanguage) return false;
+  const requestedKind = normalizeYoutubeTrackKind(request.trackKind);
+  if (requestedKind === "manual" && entry.trackKind !== "manual") return false;
+  if (requestedKind === "asr" && entry.trackKind !== "asr") return false;
+  return true;
+}
+
+async function readYoutubePassiveGate(request) {
+  await youtubePassiveMutationQueue.catch(() => {});
+  const entries = (await readYoutubePassiveEntries())
+    .filter((entry) => passiveEntryMatches(entry, request))
+    .sort((left, right) => {
+      const requestedLanguage = normalizeLanguageCode(
+        request.preferredLanguage,
+      );
+      const exactLanguageRank = (entry) =>
+        requestedLanguage &&
+        normalizeLanguageCode(entry.language) !== requestedLanguage
+          ? 1
+          : 0;
+      const manualRank = (entry) =>
+        normalizeYoutubeTrackKind(request.trackKind) === "manual-first" &&
+        entry.trackKind !== "manual"
+          ? 1
+          : 0;
+      return (
+        exactLanguageRank(left) - exactLanguageRank(right) ||
+        manualRank(left) - manualRank(right) ||
+        Number(right.updatedAt) - Number(left.updatedAt)
+      );
+    });
+  const capture = entries.find(
+    (entry) => entry.state === "capture" && entry.capture?.success === true,
+  );
+  return {
+    capture: capture?.capture || null,
+    inFlight: entries.some(
+      (entry) =>
+        entry.state === "inflight" ||
+        (entry.state === "capture" && entry.inFlight === true),
+    ),
+  };
+}
+
+async function awaitYoutubePassiveGate(request) {
+  const startedAt = Date.now();
+  let gate = await readYoutubePassiveGate(request);
+  if (gate.capture || !gate.inFlight) return gate.capture;
+  while (gate.inFlight) {
+    const remaining = YOUTUBE_PASSIVE_WAIT_MS - (Date.now() - startedAt);
+    if (remaining <= 0) return null;
+    const observedRevision = youtubePassiveRevision;
+    // Re-read before sleeping: if a capture arrived between the previous read
+    // and waiter registration, the revision check resolves immediately.
+    gate = await readYoutubePassiveGate(request);
+    if (gate.capture || !gate.inFlight) return gate.capture;
+    await waitForYoutubePassiveChange(remaining, observedRevision);
+    gate = await readYoutubePassiveGate(request);
+    if (gate.capture) return gate.capture;
+  }
+  return null;
+}
+
+// ============================================================
 // SIDE PANEL SETUP
 // ============================================================
 
@@ -805,6 +1366,7 @@ async function handleFetchMediaTranscript(
   preferredLanguage = "",
   tabId = null,
   supadataConsent = false,
+  routeOptions = {},
 ) {
   try {
     const mediaRef = await resolveMediaRef(mediaInput);
@@ -823,13 +1385,36 @@ async function handleFetchMediaTranscript(
       preferredLanguage,
       tabId,
       supadataConsent,
+      routeOptions,
     );
   } catch (error) {
-    return {
+    const failure = {
       success: false,
       error: error?.code || "TRANSCRIPT_ERROR",
       message: error?.message || "读取视频字幕失败。",
     };
+    const firstYoutubeMiss =
+      mediaInput?.platform !== "bilibili" &&
+      supadataConsent !== true &&
+      routeOptions.captionRetry !== true;
+    return mediaInput?.platform === "bilibili"
+      ? failure
+      : withYoutubeRouteIdentity(
+          {
+            ...failure,
+            error: firstYoutubeMiss
+              ? "YOUTUBE_CAPTIONS_REQUIRED"
+              : failure.error,
+            routeOutcome: "UNKNOWN",
+            message: firstYoutubeMiss
+              ? "DigestDock 尚未从当前页面读取到字幕。请打开 YouTube 字幕后重新读取。"
+              : failure.message,
+            requiresCaptionEnable: firstYoutubeMiss,
+            supadataEligible:
+              supadataConsent !== true && routeOptions.captionRetry === true,
+          },
+          youtubeRouteIdentity(routeOptions),
+        );
   }
 }
 
@@ -863,7 +1448,14 @@ function updatePanelForTab(tabId, url) {
 // A tab navigated to a new URL.
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   if (!changeInfo.url) return; // ignore title/favicon-only updates
+  bumpYoutubeTabNavigationEpoch(tabId);
+  clearYoutubePassiveTab(tabId).catch(() => {});
   updatePanelForTab(tabId, changeInfo.url);
+});
+
+chrome.tabs.onRemoved?.addListener?.((tabId) => {
+  youtubeTabNavigationEpochs.delete(tabId);
+  clearYoutubePassiveTab(tabId).catch(() => {});
 });
 
 // The user switched to a different tab (or opened a new one).
@@ -885,6 +1477,18 @@ chrome.tabs.onActivated.addListener(async ({ tabId }) => {
  * This is like a switchboard — different "actions" trigger different handlers.
  */
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message.action === "youtubePassiveState") {
+    handleYoutubePassiveState(message.payload, sender)
+      .then(sendResponse)
+      .catch((error) =>
+        sendResponse({
+          ok: false,
+          error: String(error?.code || "PASSIVE_STATE_FAILED").slice(0, 80),
+        }),
+      );
+    return true;
+  }
+
   // We need to return true to indicate we'll respond asynchronously
   if (message.action === "resolveBilibiliMedia") {
     BILIBILI_ADAPTER.resolveMedia(message.url)
@@ -899,14 +1503,55 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.action === "fetchTranscript") {
+    const routeOptions = {
+      runId: message.runId,
+      digestGeneration: message.digestGeneration,
+      routeKey: message.routeKey,
+      trackKind: message.trackKind,
+      captionRetry: message.captionRetry === true,
+    };
+    const youtubeRequest =
+      (message.mediaRef?.platform || "youtube") === "youtube";
     handleFetchMediaTranscript(
       message.mediaRef || message.videoId,
       message.preferredLanguage,
       message.tabId ?? sender.tab?.id ?? null,
       message.supadataConsent === true,
+      routeOptions,
     )
       .then(sendResponse)
-      .catch((err) => sendResponse({ success: false, error: err.message }));
+      .catch((err) =>
+        sendResponse(
+          youtubeRequest
+            ? withYoutubeRouteIdentity(
+                {
+                  success: false,
+                  error:
+                    message.supadataConsent !== true &&
+                    routeOptions.captionRetry !== true
+                      ? "YOUTUBE_CAPTIONS_REQUIRED"
+                      : "TRANSCRIPT_ERROR",
+                  routeOutcome: "UNKNOWN",
+                  message:
+                    message.supadataConsent !== true &&
+                    routeOptions.captionRetry !== true
+                      ? "DigestDock 尚未从当前页面读取到字幕。请打开 YouTube 字幕后重新读取。"
+                      : String(err?.message || "读取字幕失败。").slice(0, 500),
+                  requiresCaptionEnable:
+                    message.supadataConsent !== true &&
+                    routeOptions.captionRetry !== true,
+                  supadataEligible:
+                    message.supadataConsent !== true &&
+                    routeOptions.captionRetry === true,
+                },
+                youtubeRouteIdentity(routeOptions),
+              )
+            : {
+                success: false,
+                error: err?.message || "读取字幕失败。",
+              },
+        ),
+      );
     return true; // Keep the message channel open for async response
   }
 
@@ -1439,18 +2084,18 @@ async function getPlayerVideoDetails(tabId) {
   }
 }
 
-// The mainline no longer runs a YouTube tab fetch bridge or a local caption
-// adapter. YouTube caption bodies come only from the user-authorized Supadata
-// provider (see handleFetchYoutubeTranscript). The experimental worktree keeps
-// the in-page extraction path for later real-video verification.
+// YouTube caption work is owned by the background router. Passive observations
+// are the only automatic free route. A miss asks the user to enable YouTube CC;
+// only a user-driven retry may reveal the explicit-consent Supadata fallback.
+// Active and Panel remain repository experiments and are not product routes.
 
 /**
  * Read-only, no-network YouTube page gate. Runs in the page MAIN world to
  * confirm the tab still shows the exact video we are about to authorize, to
- * read the default audio language, and to read the playability status. It
- * deliberately does NOT read caption-track request URLs; those never
- * enter the mainline. The absence of visible caption tracks is not evidence to
- * skip Supadata — the mode=native provider returns the final no-caption state.
+ * read the default audio language, playability status, and a text-free caption
+ * track summary. It deliberately does NOT read caption-track request URLs;
+ * those never enter the mainline. A current, playable, non-live player response
+ * can confirm zero tracks without another YouTube request.
  */
 async function readYouTubePlayabilitySnapshot(tabId, expectedVideoId) {
   if (!Number.isInteger(tabId)) return null;
@@ -1462,8 +2107,9 @@ async function readYouTubePlayabilitySnapshot(tabId, expectedVideoId) {
       func: (expectedId) => {
         try {
           const player = document.getElementById("movie_player");
+          const livePlayerResponse = player?.getPlayerResponse?.() || null;
           const response =
-            player?.getPlayerResponse?.() || window.ytInitialPlayerResponse;
+            livePlayerResponse || window.ytInitialPlayerResponse;
           const actualVideoId = response?.videoDetails?.videoId || "";
           if (!actualVideoId) {
             return { ok: false, error: "PAGE_CONTEXT_UNAVAILABLE" };
@@ -1486,23 +2132,57 @@ async function readYouTubePlayabilitySnapshot(tabId, expectedVideoId) {
           const defaultCaptionIndex =
             defaultAudio?.defaultCaptionTrackIndex ??
             defaultAudio?.captionTrackIndices?.[0];
+          const defaultCaptionTrack =
+            rawTracks[defaultCaptionIndex] ||
+            rawTracks.find((track) => track?.isDefault === true) ||
+            (rawTracks.length === 1 ? rawTracks[0] : null);
+          const playability = String(
+            response?.playabilityStatus?.status || "",
+          ).slice(0, 80);
+          const captionTrackCountKnown =
+            Boolean(livePlayerResponse) &&
+            playability === "OK" &&
+            response?.videoDetails?.isLiveContent === false &&
+            (!renderer || Array.isArray(renderer?.captionTracks));
+          const defaultTrackLanguage = String(
+            defaultCaptionTrack?.languageCode || "",
+          )
+            .trim()
+            .replace(/_/g, "-")
+            .slice(0, 35);
+          const defaultTrackKind =
+            defaultCaptionTrack?.kind === "asr" ||
+            /^a\./i.test(String(defaultCaptionTrack?.vssId || ""))
+              ? "asr"
+              : "manual";
           // Only the language code, never a signed caption request URL.
           const sourceLanguage =
             response?.videoDetails?.defaultAudioLanguage ||
             response?.microformat?.playerMicroformatRenderer
               ?.defaultAudioLanguage ||
-            rawTracks[defaultCaptionIndex]?.languageCode ||
+            defaultCaptionTrack?.languageCode ||
             "";
           return {
             ok: true,
             videoId: actualVideoId,
-            playability: String(
-              response?.playabilityStatus?.status || "",
-            ).slice(0, 80),
+            playability,
             playabilityReason: String(
               response?.playabilityStatus?.reason || "",
             ).slice(0, 200),
             sourceLanguage: String(sourceLanguage || "").slice(0, 35),
+            captionTrackCountKnown,
+            captionTrackCount: captionTrackCountKnown
+              ? rawTracks.length
+              : null,
+            pageDefaultTrack:
+              captionTrackCountKnown &&
+              rawTracks.length > 0 &&
+              defaultTrackLanguage
+                ? {
+                    language: defaultTrackLanguage,
+                    kind: defaultTrackKind,
+                  }
+                : null,
           };
         } catch (_error) {
           return { ok: false, error: "PAGE_CONTEXT_UNAVAILABLE" };
@@ -1524,6 +2204,31 @@ async function readYouTubePlayabilitySnapshot(tabId, expectedVideoId) {
     );
     return null;
   }
+}
+
+function normalizeYoutubePageCaptionEvidence(snapshot) {
+  if (snapshot?.captionTrackCountKnown !== true) return null;
+  const captionTrackCount = Number(snapshot.captionTrackCount);
+  if (
+    !Number.isSafeInteger(captionTrackCount) ||
+    captionTrackCount < 0 ||
+    captionTrackCount > 100
+  ) {
+    return null;
+  }
+  const language = normalizeLanguageCode(snapshot?.pageDefaultTrack?.language);
+  const kind = snapshot?.pageDefaultTrack?.kind;
+  const selectedTrack =
+    captionTrackCount > 0 &&
+    language &&
+    (kind === "manual" || kind === "asr")
+      ? { language, kind }
+      : null;
+  return {
+    captionTrackCountKnown: true,
+    captionTrackCount,
+    selectedTrack,
+  };
 }
 
 /**
@@ -1559,7 +2264,9 @@ function classifyYouTubePlayability(status, reason = "") {
 }
 
 async function youtubeTabStillMatches(tabId, expectedVideoId) {
-  if (!Number.isInteger(tabId)) return true;
+  // Paid/side-effecting routes must never treat missing tab identity as a
+  // match. Callers that intentionally do not have a tab do not use this gate.
+  if (!Number.isInteger(tabId)) return false;
   try {
     const tab = await chrome.tabs.get(tabId);
     // During navigation Chrome can expose the old committed URL together with
@@ -1587,14 +2294,14 @@ function pageContextChangedResult() {
 }
 
 /**
- * API-primary YouTube caption router.
+ * Explicit-consent Supadata fallback.
  *
  * Order: read-only page gate (identity + playability) -> terminal restriction
  * check -> Supadata key check -> strict per-attempt consent check -> bounded
  * Supadata rate-limit cooldown -> single-flighted Supadata provider request.
- * The mainline never constructs a direct YouTube transcript request.
+ * The free native route is intentionally not run from this function.
  */
-async function handleFetchYoutubeTranscript(
+async function handleFetchYoutubeSupadataTranscript(
   videoId,
   preferredLanguage = "",
   tabId = null,
@@ -1643,7 +2350,7 @@ async function handleFetchYoutubeTranscript(
       success: false,
       error: "SUPADATA_NOT_CONFIGURED",
       message:
-        "新的 YouTube 字幕需要 Supadata。请在设置中配置可选的 Supadata 密钥，然后回到侧栏逐次授权。",
+        "Supadata 后备尚未配置。请在免费路线最终失败后，从侧栏入口配置密钥并逐视频授权。",
     };
   }
 
@@ -1688,14 +2395,17 @@ async function handleFetchYoutubeTranscript(
     ),
   );
 
+  // Preserve a provider 429 even if the user navigated at the same moment.
+  // The stale caller still receives PAGE_CONTEXT_CHANGED below, but the
+  // provider cooldown must prevent another paid request from starting.
+  if (result?.error === "RATE_LIMITED") {
+    await startYoutubeSupadataCooldown();
+  }
+
   // Supadata (or its async job polling) can outlast a YouTube SPA navigation.
   // Never accept an old video's result for the tab's new page.
   if (!(await youtubeTabStillMatches(tabId, videoId))) {
     return pageContextChangedResult();
-  }
-
-  if (result?.error === "RATE_LIMITED") {
-    await startYoutubeSupadataCooldown();
   }
 
   if (result.success) {
@@ -1708,6 +2418,621 @@ async function handleFetchYoutubeTranscript(
   }
 
   return result;
+}
+
+function youtubeRouteIdentity(options = {}) {
+  const generation = options.digestGeneration;
+  const runId = String(
+    options.runId ??
+      (generation === undefined || generation === null ? "" : generation),
+  ).slice(0, 120);
+  return {
+    runId,
+    routeKey: String(options.routeKey || "").slice(0, 2_000),
+    trackKind: normalizeYoutubeTrackKind(options.trackKind),
+  };
+}
+
+function withYoutubeRouteIdentity(result, routeIdentity) {
+  return {
+    ...result,
+    runId: routeIdentity.runId,
+    routeKey: routeIdentity.routeKey,
+  };
+}
+
+function youtubeNativeErrorCode(result) {
+  return String(
+    result?.error || result?.errorCode || result?.code || "UNKNOWN",
+  )
+    .trim()
+    .slice(0, 80);
+}
+
+function youtubeNativeDiagnostics(result, route) {
+  const providerInitiated =
+    result?.diagnostics?.providerInitiated ||
+    result?.providerInitiated ||
+    result?.requestCounts ||
+    null;
+  return {
+    route,
+    providerVariant: String(result?.providerVariant || "").slice(0, 80) || null,
+    providerInitiated,
+    sawTracks:
+      result?.sawTracks === true ||
+      result?.diagnostics?.sawTracks === true ||
+      Boolean(result?.selectedTrack) ||
+      (Array.isArray(result?.diagnostics?.attempts) &&
+        result.diagnostics.attempts.some(
+          (attempt) => Number(attempt?.trackCount) > 0,
+        )) ||
+      Number(result?.availableTrackCount) > 0,
+    complete:
+      result?.complete === true || result?.diagnostics?.complete === true,
+  };
+}
+
+function youtubePanelRows(result) {
+  const rows = Array.isArray(result?.transcript)
+    ? result.transcript
+    : Array.isArray(result?.rows)
+      ? result.rows
+      : [];
+  return rows.map((row, index) => {
+    const start = Number(row?.start);
+    const nextStart = Number(rows[index + 1]?.start);
+    const suppliedDuration = Number(row?.duration);
+    return {
+      text: row?.text,
+      start,
+      duration: Number.isFinite(suppliedDuration)
+        ? suppliedDuration
+        : Number.isFinite(nextStart) && nextStart >= start
+          ? nextStart - start
+          : 0,
+      language: row?.language || result?.language,
+    };
+  });
+}
+
+function normalizeYoutubeNativeProviderResult(result, route) {
+  const error = youtubeNativeErrorCode(result);
+  const diagnostics = youtubeNativeDiagnostics(result, route);
+  const transcript = youtubePanelRows(result);
+  const selectedTrack = result?.selectedTrack
+    ? {
+        language:
+          normalizeLanguageCode(result.selectedTrack.language) || null,
+        kind: result.selectedTrack.kind === "asr" ? "asr" : "manual",
+      }
+    : null;
+  if (
+    (result?.success === true ||
+      result?.ok === true ||
+      result?.status === "HAVE_TRANSCRIPT") &&
+    transcript.length > 0
+  ) {
+    const success = buildYoutubeTranscriptResult(transcript, {
+      source: route === "active" ? "youtube-active" : "youtube-panel",
+      sourceAttempt:
+        route === "active" ? "YOUTUBE_ACTIVE" : "YOUTUBE_PANEL",
+      language: result?.language || selectedTrack?.language,
+      selectedTrack,
+      providerVariant:
+        result?.providerVariant ||
+        (route === "active" ? "isolated-tab" : "automatic-panel"),
+      diagnostics,
+    });
+    if (success) return success;
+  }
+
+  if (
+    result?.routeOutcome === "PAGE_CONTEXT_CHANGED" ||
+    result?.status === "PAGE_CONTEXT_CHANGED" ||
+    error === "PAGE_CONTEXT_CHANGED"
+  ) {
+    return {
+      ...pageContextChangedResult(),
+      routeOutcome: "PAGE_CONTEXT_CHANGED",
+      sourceAttempt:
+        route === "active" ? "YOUTUBE_ACTIVE" : "YOUTUBE_PANEL",
+      selectedTrack,
+      diagnostics,
+      supadataEligible: false,
+    };
+  }
+  if (
+    result?.routeOutcome === "RATE_LIMITED" ||
+    result?.status === "RATE_LIMITED" ||
+    error === "RATE_LIMITED"
+  ) {
+    return {
+      success: false,
+      error: "RATE_LIMITED",
+      routeOutcome: "RATE_LIMITED",
+      message:
+        "YouTube 原生字幕请求受到速率限制，本次不会继续尝试页面后备。",
+      sourceAttempt:
+        route === "active" ? "YOUTUBE_ACTIVE" : "YOUTUBE_PANEL",
+      selectedTrack,
+      diagnostics,
+      supadataEligible: true,
+    };
+  }
+  const confirmedUnavailable = new Set([
+    "NO_TRANSCRIPT",
+    "TRACK_UNAVAILABLE",
+    "LOGIN_REQUIRED",
+    "AGE_CHECK_REQUIRED",
+    "AGE_VERIFICATION_REQUIRED",
+    "CONTENT_CHECK_REQUIRED",
+    "MEMBERS_ONLY",
+    "REGION_BLOCKED",
+    "VIDEO_UNAVAILABLE",
+    "UNPLAYABLE",
+  ]);
+  if (
+    result?.routeOutcome === "CONFIRMED_UNAVAILABLE" ||
+    result?.status === "CONFIRMED_UNAVAILABLE" ||
+    confirmedUnavailable.has(error)
+  ) {
+    return {
+      success: false,
+      error,
+      routeOutcome: "CONFIRMED_UNAVAILABLE",
+      message: String(
+        result?.message ||
+          (error === "TRACK_UNAVAILABLE"
+            ? "当前视频没有符合所选语言和字幕类型的轨道。"
+            : "当前视频没有可用字幕，或需要额外访问权限。"),
+      ).slice(0, 500),
+      sourceAttempt:
+        route === "active" ? "YOUTUBE_ACTIVE" : "YOUTUBE_PANEL",
+      selectedTrack,
+      diagnostics,
+      supadataEligible: false,
+    };
+  }
+  return {
+    success: false,
+    error,
+    routeOutcome: "UNKNOWN",
+    message: String(result?.message || "暂时无法取得 YouTube 字幕。").slice(
+      0,
+      500,
+    ),
+    sourceAttempt:
+      route === "active" ? "YOUTUBE_ACTIVE" : "YOUTUBE_PANEL",
+    selectedTrack,
+    diagnostics,
+    supadataEligible: true,
+  };
+}
+
+async function runYoutubeProductModule(
+  tabId,
+  file,
+  globalName,
+  request,
+) {
+  try {
+    if (!(await youtubeTabStillMatches(tabId, request.videoId))) {
+      return {
+        success: false,
+        error: "PAGE_CONTEXT_CHANGED",
+        routeOutcome: "PAGE_CONTEXT_CHANGED",
+      };
+    }
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      world: "ISOLATED",
+      files: [file],
+    });
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      world: "ISOLATED",
+      args: [globalName, request],
+      func: async (providerGlobalName, providerRequest) => {
+        const provider = globalThis[providerGlobalName];
+        if (!provider || typeof provider.run !== "function") {
+          return {
+            success: false,
+            error: "PROVIDER_UNAVAILABLE",
+            message: "YouTube transcript provider module is unavailable.",
+          };
+        }
+        try {
+          return await provider.run(providerRequest);
+        } catch (error) {
+          return {
+            success: false,
+            error: String(error?.code || "PROVIDER_FAILED").slice(0, 80),
+            message: String(error?.message || "Provider failed.").slice(0, 500),
+          };
+        }
+      },
+    });
+    const providerResult =
+      results?.[0]?.result || {
+        success: false,
+        error: "INVALID_RESPONSE",
+        message: "YouTube transcript provider returned no result.",
+      };
+    // A first observed 429 must survive a simultaneous navigation long enough
+    // for the leader to write cooldown. The requester's stale-page result is
+    // still rejected later by its independent tab/epoch check.
+    if (
+      providerResult?.status === "RATE_LIMITED" ||
+      providerResult?.routeOutcome === "RATE_LIMITED" ||
+      youtubeNativeErrorCode(providerResult) === "RATE_LIMITED"
+    ) {
+      return providerResult;
+    }
+    if (!(await youtubeTabStillMatches(tabId, request.videoId))) {
+      return {
+        success: false,
+        error: "PAGE_CONTEXT_CHANGED",
+        routeOutcome: "PAGE_CONTEXT_CHANGED",
+      };
+    }
+    return providerResult;
+  } catch (error) {
+    if (!(await youtubeTabStillMatches(tabId, request.videoId))) {
+      return {
+        success: false,
+        error: "PAGE_CONTEXT_CHANGED",
+        routeOutcome: "PAGE_CONTEXT_CHANGED",
+      };
+    }
+    return {
+      success: false,
+      error: "PROVIDER_UNAVAILABLE",
+      message: String(error?.message || "Provider injection failed.").slice(
+        0,
+        500,
+      ),
+    };
+  }
+}
+
+async function runYoutubeNativeRouteLeader(request) {
+  const activeRaw = await runYoutubeProductModule(
+    request.tabId,
+    YOUTUBE_ACTIVE_PRODUCT_FILE,
+    "DIGESTDOCK_YOUTUBE_ACTIVE",
+    request,
+  );
+  const active = normalizeYoutubeNativeProviderResult(activeRaw, "active");
+  if (active.routeOutcome === "RATE_LIMITED") {
+    await startYoutubeNativeCooldown();
+    return {
+      ...active,
+      routeOutcome: "UNKNOWN",
+      skipPanel: true,
+    };
+  }
+  if (active.routeOutcome !== "UNKNOWN") return active;
+
+  const panelRaw = await runYoutubeProductModule(
+    request.tabId,
+    YOUTUBE_PANEL_PRODUCT_FILE,
+    "DIGESTDOCK_YOUTUBE_PANEL",
+    {
+      ...request,
+      eligibility: {
+        activeFoundCaptionTrack:
+          active.diagnostics?.sawTracks === true,
+        captionTrackCount:
+          request.pageCaptionEvidence?.captionTrackCount ?? null,
+        selectedTrack:
+          active.selectedTrack ||
+          request.pageCaptionEvidence?.selectedTrack ||
+          null,
+        selectedTrackEvidence: active.selectedTrack
+          ? "active"
+          : request.pageCaptionEvidence?.selectedTrack
+            ? "page-default"
+            : null,
+      },
+    },
+  );
+  return normalizeYoutubeNativeProviderResult(panelRaw, "panel");
+}
+
+async function youtubeUnknownFallbackResult(nativeResult) {
+  const settings = await getSettings();
+  const hasSupadataKey = Boolean(settings.supadataApiKey);
+  const nativeError = youtubeNativeErrorCode(nativeResult);
+  if (nativeError === "RATE_LIMITED") {
+    return {
+      ...nativeResult,
+      success: false,
+      error: "RATE_LIMITED",
+      routeOutcome: "UNKNOWN",
+      supadataEligible: true,
+      hasSupadataKey,
+    };
+  }
+  return {
+    ...nativeResult,
+    success: false,
+    error: hasSupadataKey
+      ? "SUPADATA_CONSENT_REQUIRED"
+      : "SUPADATA_NOT_CONFIGURED",
+    nativeError,
+    routeOutcome: "UNKNOWN",
+    message: hasSupadataKey
+      ? "免费字幕路线未能取得结果，可为当前视频选择使用 Supadata。"
+      : "免费字幕路线未能取得结果；如需第三方后备，可先注册并配置 Supadata。",
+    supadataEligible: true,
+    hasSupadataKey,
+  };
+}
+
+async function handleFetchYoutubeNativeTranscript(
+  videoId,
+  preferredLanguage,
+  tabId,
+  options = {},
+) {
+  const routeIdentity = youtubeRouteIdentity(options);
+  const request = {
+    videoId: validYoutubeVideoId(videoId),
+    preferredLanguage: normalizeLanguageCode(preferredLanguage) || "",
+    trackKind: routeIdentity.trackKind,
+    tabId,
+    runId: routeIdentity.runId,
+  };
+  request.language = request.preferredLanguage;
+  if (!request.videoId || !Number.isInteger(tabId)) {
+    return withYoutubeRouteIdentity(
+      {
+        success: false,
+        error: "PAGE_CONTEXT_CHANGED",
+        routeOutcome: "PAGE_CONTEXT_CHANGED",
+        message: "当前 YouTube 页面不可用，请重新打开视频。",
+        supadataEligible: false,
+      },
+      routeIdentity,
+    );
+  }
+  const requestTabEpoch = youtubeTabNavigationEpoch(tabId);
+  const requestStillCurrent = async () =>
+    youtubeTabEpochStillMatches(tabId, requestTabEpoch) &&
+    (await youtubeTabStillMatches(tabId, request.videoId));
+  if (!(await requestStillCurrent())) {
+    return withYoutubeRouteIdentity(
+      {
+        ...pageContextChangedResult(),
+        routeOutcome: "PAGE_CONTEXT_CHANGED",
+        supadataEligible: false,
+      },
+      routeIdentity,
+    );
+  }
+
+  const passive = await awaitYoutubePassiveGate(request);
+  if (!(await requestStillCurrent())) {
+    return withYoutubeRouteIdentity(
+      {
+        ...pageContextChangedResult(),
+        routeOutcome: "PAGE_CONTEXT_CHANGED",
+        supadataEligible: false,
+      },
+      routeIdentity,
+    );
+  }
+  if (passive?.success) {
+    return withYoutubeRouteIdentity(passive, routeIdentity);
+  }
+
+  let pageCaptionEvidence = null;
+  let pageSnapshot = null;
+  try {
+    pageSnapshot = await readYouTubePlayabilitySnapshot(
+      tabId,
+      request.videoId,
+    );
+    pageCaptionEvidence = normalizeYoutubePageCaptionEvidence(pageSnapshot);
+  } catch (error) {
+    if (error?.code === "PAGE_CONTEXT_CHANGED") {
+      return withYoutubeRouteIdentity(
+        {
+          ...pageContextChangedResult(),
+          routeOutcome: "PAGE_CONTEXT_CHANGED",
+          supadataEligible: false,
+        },
+        routeIdentity,
+      );
+    }
+  }
+  if (!(await requestStillCurrent())) {
+    return withYoutubeRouteIdentity(
+      {
+        ...pageContextChangedResult(),
+        routeOutcome: "PAGE_CONTEXT_CHANGED",
+        supadataEligible: false,
+      },
+      routeIdentity,
+    );
+  }
+  const terminalPlayabilityMessages = {
+    LOGIN_REQUIRED:
+      "此视频需要登录、年龄验证或其他访问权限，DigestDock 不会继续获取字幕。",
+    VIDEO_UNAVAILABLE: "此视频当前不可用，DigestDock 不会继续获取字幕。",
+  };
+  const terminalCode = pageSnapshot
+    ? classifyYouTubePlayability(
+        pageSnapshot.playability,
+        pageSnapshot.playabilityReason,
+      )
+    : null;
+  if (terminalCode && Object.hasOwn(terminalPlayabilityMessages, terminalCode)) {
+    return withYoutubeRouteIdentity(
+      {
+        success: false,
+        error: terminalCode,
+        routeOutcome: "CONFIRMED_UNAVAILABLE",
+        message: terminalPlayabilityMessages[terminalCode],
+        sourceAttempt: "YOUTUBE_PAGE_GATE",
+        selectedTrack: null,
+        supadataEligible: false,
+      },
+      routeIdentity,
+    );
+  }
+  if (
+    pageCaptionEvidence?.captionTrackCountKnown === true &&
+    pageCaptionEvidence.captionTrackCount === 0
+  ) {
+    return withYoutubeRouteIdentity(
+      {
+        success: false,
+        error: "NO_TRANSCRIPT",
+        routeOutcome: "CONFIRMED_UNAVAILABLE",
+        message: "当前 YouTube 页面确认没有可用字幕轨。",
+        sourceAttempt: "YOUTUBE_PAGE_GATE",
+        selectedTrack: null,
+        diagnostics: {
+          providerInitiated: {
+            youtubePlayer: 0,
+            youtubeTimedtext: 0,
+            thirdParty: 0,
+            loopback: 0,
+          },
+          pageEvidence: {
+            captionTrackCountKnown: true,
+            captionTrackCount: 0,
+          },
+        },
+        supadataEligible: false,
+      },
+      routeIdentity,
+    );
+  }
+  request.pageCaptionEvidence = pageCaptionEvidence;
+
+  const cooldownUntil = await readYoutubeNativeCooldownUntil();
+  if (options.captionRetry === true && Date.now() < cooldownUntil) {
+    return withYoutubeRouteIdentity(
+      await youtubeUnknownFallbackResult({
+        success: false,
+        error: "RATE_LIMITED",
+        routeOutcome: "UNKNOWN",
+        skipPanel: true,
+        message:
+          "YouTube 原生字幕路线正在短暂冷却；本次不会自动重试。",
+        sourceAttempt: "YOUTUBE_ACTIVE",
+        supadataEligible: true,
+      }),
+      routeIdentity,
+    );
+  }
+
+  // Product policy is deliberately simpler than the retained experiments:
+  // cache/Passive is the only automatic free route. A first miss asks the user
+  // to enable YouTube captions; only a user-driven retry may reveal Supadata.
+  // The Active and Panel modules remain in the repository as experiment
+  // evidence, but the shipping background never invokes them automatically.
+  if (options.captionRetry !== true) {
+    return withYoutubeRouteIdentity(
+      {
+        success: false,
+        error: "YOUTUBE_CAPTIONS_REQUIRED",
+        routeOutcome: "UNKNOWN",
+        message:
+          "DigestDock 尚未从当前页面读取到字幕。请打开 YouTube 字幕后重新读取。",
+        sourceAttempt: "YOUTUBE_PASSIVE",
+        requiresCaptionEnable: true,
+        supadataEligible: false,
+        diagnostics: {
+          providerInitiated: {
+            youtubePlayer: 0,
+            youtubeTimedtext: 0,
+            thirdParty: 0,
+            loopback: 0,
+          },
+        },
+      },
+      routeIdentity,
+    );
+  }
+
+  return withYoutubeRouteIdentity(
+    await youtubeUnknownFallbackResult({
+      success: false,
+      error: "YOUTUBE_CAPTIONS_STILL_UNAVAILABLE",
+      routeOutcome: "UNKNOWN",
+      message:
+        "打开 YouTube 字幕后仍未读取到字幕；如有需要，可选择 Supadata 第三方后备。",
+      sourceAttempt: "YOUTUBE_PASSIVE_RETRY",
+      supadataEligible: true,
+    }),
+    routeIdentity,
+  );
+}
+
+function classifySupadataRouteOutcome(result) {
+  if (result?.success === true) return "HAVE_TRANSCRIPT";
+  const error = youtubeNativeErrorCode(result);
+  if (error === "PAGE_CONTEXT_CHANGED") return "PAGE_CONTEXT_CHANGED";
+  if (
+    [
+      "NO_TRANSCRIPT",
+      "TRACK_UNAVAILABLE",
+      "LOGIN_REQUIRED",
+      "VIDEO_UNAVAILABLE",
+    ].includes(error)
+  ) {
+    return "CONFIRMED_UNAVAILABLE";
+  }
+  return "UNKNOWN";
+}
+
+async function handleFetchYoutubeTranscript(
+  videoId,
+  preferredLanguage = "",
+  tabId = null,
+  supadataConsent = false,
+  options = {},
+) {
+  const routeIdentity = youtubeRouteIdentity(options);
+  if (supadataConsent === true) {
+    const result = await handleFetchYoutubeSupadataTranscript(
+      videoId,
+      preferredLanguage,
+      tabId,
+      true,
+    );
+    return withYoutubeRouteIdentity(
+      {
+        ...result,
+        routeOutcome: classifySupadataRouteOutcome(result),
+        supadataEligible:
+          classifySupadataRouteOutcome(result) === "UNKNOWN",
+      },
+      routeIdentity,
+    );
+  }
+
+  // Unscoped legacy/background callers (for example note-save cache misses)
+  // must not silently start Active or Panel. A real DigestDock transcript task
+  // always carries the side panel's runId/digestGeneration.
+  if (!routeIdentity.runId) {
+    return handleFetchYoutubeSupadataTranscript(
+      videoId,
+      preferredLanguage,
+      tabId,
+      false,
+    );
+  }
+  return handleFetchYoutubeNativeTranscript(
+    videoId,
+    preferredLanguage,
+    tabId,
+    options,
+  );
 }
 
 // ============================================================
@@ -2184,11 +3509,11 @@ async function pollTranscriptJob(
 
 /**
  * Parses JSON returned by an LLM, tolerating the small mistakes they sometimes
- * make. Some models occasionally emit a trailing
- * comma before a ] or }, or wraps the JSON in prose / code fences. Plain
- * JSON.parse throws on those, which is what caused the "Unexpected token ']'"
- * error on the Overview tab. This function strips fences, isolates the outer
- * JSON object, removes trailing commas, and only then parses.
+ * make. Some models occasionally emit a trailing comma before a ] or }, wrap
+ * the JSON in prose / code fences, or place a literal control character inside
+ * a quoted value. Plain JSON.parse throws on those, which is what caused the
+ * Overview tab errors. This function strips fences, isolates the outer JSON
+ * object, and applies only those bounded repairs before parsing again.
  *
  * @param {string} text - The raw text from the model
  * @returns {Object} - The parsed object (throws if still unparseable)
@@ -2210,10 +3535,53 @@ function parseLooseJson(text) {
 
   try {
     return JSON.parse(cleaned);
-  } catch (firstError) {
-    // Most common LLM slip: a trailing comma right before a } or ].
-    // e.g. ["a", "b", ]  ->  ["a", "b" ]
-    const repaired = cleaned.replace(/,(\s*[}\]])/g, "$1");
+  } catch (_firstError) {
+    // Common LLM slips: a trailing comma before a closing delimiter, or a raw
+    // newline/tab inside a quoted value. Keep both repairs string-aware so
+    // quoted text such as `,}` is never mistaken for JSON syntax.
+    let repaired = "";
+    let inString = false;
+    let escaped = false;
+    for (let index = 0; index < cleaned.length; index += 1) {
+      const character = cleaned[index];
+      if (!inString) {
+        if (character === ",") {
+          let nextIndex = index + 1;
+          while (nextIndex < cleaned.length && /\s/.test(cleaned[nextIndex])) {
+            nextIndex += 1;
+          }
+          if (cleaned[nextIndex] === "}" || cleaned[nextIndex] === "]") {
+            continue;
+          }
+        }
+        repaired += character;
+        if (character === '"') inString = true;
+        continue;
+      }
+      const codeUnit = character.charCodeAt(0);
+      if (codeUnit <= 0x1f) {
+        const unicodeEscape = `u${codeUnit.toString(16).padStart(4, "0")}`;
+        repaired += escaped ? unicodeEscape : `\\${unicodeEscape}`;
+        escaped = false;
+        continue;
+      }
+      if (escaped) {
+        repaired += character;
+        escaped = false;
+        continue;
+      }
+      if (character === "\\") {
+        repaired += character;
+        escaped = true;
+        continue;
+      }
+      if (character === '"') {
+        repaired += character;
+        inString = false;
+        continue;
+      }
+      repaired += character;
+    }
     return JSON.parse(repaired);
   }
 }
@@ -2542,20 +3910,28 @@ async function handleSaveNote(
 
     // First, try to get the transcript from the digest cache. The side panel
     // saves digests to chrome.storage.LOCAL — this used to look in
-    // storage.session (the wrong store), so it missed every time and
-    // refetched the transcript from Supadata on every saved note.
+    // storage.session (the wrong store), so it missed every time and could
+    // start another provider path for every saved note.
     let transcript = null;
     try {
       const cached = await chrome.storage.local.get(`digest_${mediaKey}`);
       const digest = cached[`digest_${mediaKey}`];
-      const expectedTranscriptSource =
-        mediaRef.platform === "youtube" ? "supadata" : "bilibili";
+      const transcriptSourceMatchesPlatform =
+        mediaRef.platform === "youtube"
+          ? YOUTUBE_TRANSCRIPT_CACHE_SOURCES.has(digest?.transcriptSource)
+          : digest?.transcriptSource === "bilibili";
+      const transcriptPolicyMatchesPlatform =
+        mediaRef.platform === "youtube"
+          ? digest?.transcriptSourcePolicyVersion ===
+            TRANSCRIPT_SOURCE_POLICY_VERSION
+          : [4, TRANSCRIPT_SOURCE_POLICY_VERSION].includes(
+              digest?.transcriptSourcePolicyVersion,
+            );
       if (
         Array.isArray(digest?.transcript) &&
         digest.transcript.length > 0 &&
-        digest.transcriptSourcePolicyVersion ===
-          TRANSCRIPT_SOURCE_POLICY_VERSION &&
-        digest.transcriptSource === expectedTranscriptSource
+        transcriptPolicyMatchesPlatform &&
+        transcriptSourceMatchesPlatform
       ) {
         transcript = digest.transcript;
         debugLog("[DigestDock] Using cached transcript for note");
@@ -2583,22 +3959,23 @@ async function handleSaveNote(
         tabId,
       );
       if (!transcriptResult.success) {
-        // A cold-cache YouTube note must never silently authorize Supadata.
-        // Point the user to the side panel to authorize and generate captions
-        // once, then save notes against the cached transcript.
-        const noteConsentMessages = {
-          SUPADATA_CONSENT_REQUIRED:
-            "请先在侧栏本次授权 Supadata 并生成字幕，然后再保存笔记。",
-          SUPADATA_NOT_CONFIGURED:
-            "新的 YouTube 字幕需要 Supadata。请在设置中配置密钥并在侧栏授权生成字幕后再保存笔记。",
-        };
+        // Merely saving a note must not silently start Active, Panel, or
+        // Supadata. Ask the user to start the current video's transcript task
+        // in the side panel; that task owns the native-first route and any
+        // later third-party choice.
+        if (mediaRef.platform === "youtube") {
+          return {
+            success: false,
+            error: "TRANSCRIPT_TASK_REQUIRED",
+            message:
+              "请先在侧栏启动当前视频的字幕任务；取得字幕后再保存笔记。",
+          };
+        }
         return {
           success: false,
           error: transcriptResult.error || "Could not fetch transcript",
           message:
-            noteConsentMessages[transcriptResult.error] ||
-            transcriptResult.message ||
-            "无法读取字幕。",
+            transcriptResult.message || "无法读取字幕。",
         };
       }
       transcript = transcriptResult.transcript;
@@ -6578,12 +7955,25 @@ globalThis.__YTD_TRANSLATION_TESTING__ = {
   readYouTubePlayabilitySnapshot,
   classifyYouTubePlayability,
   youtubeTabStillMatches,
+  youtubeTabNavigationEpoch,
+  bumpYoutubeTabNavigationEpoch,
+  handleYoutubePassiveState,
+  readYoutubePassiveGate,
+  awaitYoutubePassiveGate,
+  normalizePassiveCapture,
+  normalizeYoutubeNativeProviderResult,
+  runYoutubeProductModule,
+  runYoutubeNativeRouteLeader,
+  handleFetchYoutubeNativeTranscript,
+  readYoutubeNativeCooldownUntil,
+  startYoutubeNativeCooldown,
   readYoutubeSupadataCooldownUntil,
   startYoutubeSupadataCooldown,
   readBoundedResponseText,
   fetchSupadataJson,
   supadataHttpFailure,
   pollTranscriptJob,
+  handleFetchYoutubeSupadataTranscript,
   handleFetchYoutubeTranscript,
   normalizeBilibiliMediaRef,
   resolveMediaRef,

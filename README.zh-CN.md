@@ -15,9 +15,11 @@ DigestDock 是一个基于 Manifest V3 的 Chrome 扩展，用来把带字幕的
 - 保存润色后的时间戳笔记，并通过带版本信息的 JSON 备份在设备间迁移。
 - 自行提供 API Key，凭据和项目数据保存在本地 Chrome 中，不包含分析统计或行为追踪。
 
-DigestDock 是在 [Zara Zhang 原作 YouTube Digest](https://github.com/zarazhangrui/youtube-digest) 基础上的个人衍生版本。它保留了现有 YouTube 流程，并增加 B 站字幕支持和跨平台笔记备份与恢复。原项目以及 B 站整合阶段参考的公开实现统一列在 [致谢与参考项目](#致谢与参考项目) 中。
+DigestDock 是在 [Zara Zhang 原作 YouTube Digest](https://github.com/zarazhangrui/youtube-digest) 基础上的个人衍生版本。它沿用原作的侧边栏思路，增加 B 站字幕支持和跨平台笔记备份与恢复，并在当前实验分支实现 YouTube Passive 优先字幕流程。原项目以及 B 站整合阶段参考的公开实现统一列在 [致谢与参考项目](#致谢与参考项目) 中。
 
 扩展通过 GitHub 以本地方式安装，目前没有上架 Chrome 应用商店，不赠送 API 额度，也不依赖开发者运营的后端服务。
+
+> 实验分支状态（2026 年 8 月 27 日）：真实 Chrome 已验证 YouTube 页面加载字幕时的缓存／Passive 与零请求正向缓存复用。用户批准的新候选流程会在 miss 后提示打开 YouTube 字幕（CC）；Active、Panel 只保留为实验证据，不再是产品路线。当前仍是未提交实验分支候选，不表示已经进入 `main` 或正式发布。
 
 ## 让你的编程 Agent 帮你安装
 
@@ -28,9 +30,9 @@ DigestDock 是在 [Zara Zhang 原作 YouTube Digest](https://github.com/zarazhan
 你的 Agent 应该帮你：
 
 1. 先询问你想把项目长期保存在哪里，再下载或克隆到那里，并告诉你准确的完整路径。如果你需要建议，可以推荐 macOS 或 Linux 上的 `~/Documents/digest-dock`，或 Windows 上的 `%USERPROFILE%\Documents\digest-dock`。
-2. 打开你选择的 AI 服务商官方页面；如果你需要新的 YouTube 字幕，再打开 Supadata 页面，并指导你创建相应账号。
+2. 打开你选择的 AI 服务商官方页面并指导你创建账号；正常安装时不要求注册 Supadata。
 3. 指导你在 Chrome 中通过“加载已解压的扩展程序”选择你刚才确定的那个准确项目文件夹。
-4. 告诉你应该在扩展的“设置”页面哪个位置选择 AI 服务商并填写对应 Key，以及用于新 YouTube 字幕的 Supadata Key。
+4. 告诉你应该在扩展的“设置”页面哪个位置选择 AI 服务商并填写对应 Key。
 5. 打开一个带字幕的 YouTube 视频，确认字幕和翻译功能可以使用。
 
 安装后请让这个文件夹留在原位。如果移动或删除它，Chrome 中加载的本地扩展会失效，需要从新的长期存放位置重新加载。
@@ -57,19 +59,19 @@ DigestDock 会按扩展 ID 隔离注入到页面中的控件，因此旧版 YouT
 
 ## 设置 API Key
 
-服务访问使用你自己的账号和 Key。你在 **设置** 中从预设列表选择一个 AI 服务商并填写它的 API Key，用于两个平台的概览、讲解、翻译和自动润色笔记；DeepSeek 是默认服务商。Supadata Key 对整个扩展仍是可选项，因为 B 站不会使用它；但当你选择获取新的 YouTube 字幕时需要配置。
+服务访问使用你自己的账号和 Key。你在 **设置** 中从预设列表选择一个 AI 服务商并填写它的 API Key，用于两个平台的概览、讲解、翻译和自动润色笔记；DeepSeek 是默认服务商。正常安装和免费 YouTube 字幕路线都不要求 Supadata 账号或 Key。
 
-对于新视频或已经过期的 YouTube 缓存，主线只通过 Supadata 获取字幕正文。保存 Key 不等于持续授权：侧边栏会说明将发送标准 YouTube 链接，并由你逐视频确认本次请求。明确的登录、年龄、会员、地区或不可用状态会在调用 Supadata 前停止。DigestDock 强制使用 `mode=native`，只请求已有 YouTube 字幕轨，不请求音频生成式转录。B 站仍直接读取已有字幕轨，不使用 Supadata。
+对于新视频或已经过期的 YouTube 缓存，DigestDock 先检查已验证的本地缓存和零请求 Passive 捕获。页面尚未加载字幕时，侧栏会提示你打开 YouTube **字幕／CC** 并明确重试；扩展不会自动发起 Active player/timedtext 请求，也不会自动打开和滚动 YouTube 文字稿面板。
 
-### 获取用于 YouTube 字幕的 Supadata API Key
+### 可选的 Supadata 后备
 
-如果只使用 B 站，或不需要新的 YouTube 字幕，可以跳过这一节。保存设置和使用 B 站不要求 Supadata Key。
+首次缓存／Passive miss 时不会显示 Supadata。只有你打开 YouTube 字幕并明确免费重试后仍未取得字幕，DigestDock 才显示第三方后备。如果你主动选择，扩展会打开隐藏的设置区域并显示以下步骤。保存设置、使用免费 YouTube 路线和使用 B 站都不要求 Supadata Key。保存 Key 也不构成持续授权，每个视频仍需明确确认。
 
 1. 打开 Supadata 官方[注册页面](https://dash.supadata.ai/auth/sign-up)。
 2. 创建账号并完成简短的新手引导。
 3. Supadata 会在新手引导过程中自动生成 API Key。
 4. 之后可以随时打开 [Supadata 控制台](https://dash.supadata.ai/)查找或管理 Key。
-5. 复制 Key，并粘贴到 DigestDock 设置中的 **Supadata API key**。
+5. 复制 Key，并粘贴到免费路线失败后 DigestDock 打开的 Supadata 后备输入框。
 
 如果页面流程发生变化，请查看 [Supadata 官方文档](https://docs.supadata.ai/)。
 
@@ -146,14 +148,14 @@ JSON 是用于恢复 DigestDock 笔记的数据备份格式，与阅读导出相
 
 原文阅读导出只使用本地资料，不调用 AI 或 Supadata。笔记 TXT 只检查所选视频的元数据、标题、简介和已保存笔记，不要求补齐整部字幕；字幕 TXT 才单独检查完整字幕段。资料不完整时固定提供“补充导出 / 直接导出 / 导出原文 / 放弃导出”：直接导出会明确标注缺失，不会用原文冒充中文；补充导出只读取你明确打开的视频页资料，并在你确认后补译所选范围，不会后台打开视频，也不会调用 Supadata。长任务继续保持分轮、可取消和可恢复。
 
-## 当前支持范围
+## 当前实验分支的候选范围
 
 - Chrome 116 或更高版本。
 - 标准的 `youtube.com/watch` 视频页面。
 - 标准的 `www.bilibili.com/video/BV...` 视频页面，每次只处理当前分P。
 - 当前 B 站浏览器会话可以访问的人工或 AI 字幕轨。B 站字幕读取不消耗 Supadata 额度。
-- 对 YouTube，先用只读页面检查绑定当前标签页和视频，并在调用第三方前阻止明确的访问限制；用户逐视频确认后，由 Supadata 获取已有原生字幕轨。
-- 保存 Supadata Key 不构成持续授权。新视频或过期缓存需要在侧边栏明确确认；已缓存的 Supadata 结果不会重复调用服务。
+- 实验版 YouTube 产品链先复用已验证的本地字幕或零请求 Passive 页面响应；miss 后提示用户打开 YouTube 字幕并重试，不自动运行保留的 Active 或 Panel 实验。
+- 在这条候选流程中，Supadata 是默认隐藏的可选后备，不是默认路线。保存 Supadata Key 不构成持续授权；只有显式 CC 重试仍 miss 且用户逐视频确认后才会调用。
 - 非中文字幕支持原文、简体中文和双语对照；中文字幕直接保留原文，并禁用无需使用的中文／双语翻译控件，不发送字幕翻译请求。
 - AI 概览直接生成简体中文底稿。非中文字幕只有在请求**原文**或**双语**时，才翻译章节标题和总结；重点引用会保留源字幕原句。中文字幕的三种模式复用同一份中文内容，不发起额外翻译。
 - 笔记先生成一次润色后的英文，再单独生成一次简体中文；双语笔记只合并两份已保存内容。
@@ -165,11 +167,11 @@ JSON 是用于恢复 DigestDock 笔记的数据备份格式，与阅读导出相
 - 所有 AI 功能由你在设置中选择的预设服务商提供：DeepSeek V4 Flash（默认）、智谱 GLM-4.7-Flash、阿里云百炼 Qwen Flash、SiliconFlow Qwen3-8B 或 Fireworks DeepSeek V4 Flash。每个服务商的接口地址和模型固定，Key 分别保存，没有自定义接口地址字段。
 - 设置下拉同时显示腾讯混元翻译官方图标，但该项目前为“暂不可用”：官方没有确认 `hunyuan-translation-lite` 可通过本扩展当前的单 Key OpenAI-compatible 路径调用，因此不会猜测 Endpoint、模型路由或鉴权。
 
-YouTube 覆盖范围取决于 Supadata 能否返回已有原生字幕。Shorts、直播、B 站番剧页、私密或受访问限制的视频、画面硬字幕，以及没有原生字幕轨的视频可能无法使用。目前没有测试 Firefox、Safari、移动浏览器或其他 Chromium 浏览器。
+YouTube 覆盖范围取决于页面是否为 Passive 加载了已有的人工／自动字幕轨，或本地是否存在兼容的正向缓存。新视频尚未加载字幕时，请打开 YouTube 字幕／CC 后重试。Shorts、直播、B 站番剧页、私密或受访问限制的视频、画面硬字幕，以及没有原生字幕轨的视频可能无法使用。目前没有测试 Firefox、Safari、移动浏览器或其他 Chromium 浏览器。
 
-YouTube 的 Supadata 请求强制使用 `mode=native`。两个平台都只使用已经存在的字幕轨；可以读取平台已有的自动字幕轨，但不会下载音频、执行 ASR 或其他音频转录、请求生成式转录，也不会使用 OCR。
+两个平台都只使用已经存在的字幕轨；可以读取平台已有的自动字幕轨，但不会下载音频、执行 ASR 或其他音频转录、请求生成式转录，也不会使用 OCR。只有用户打开 CC 并显式重试仍 miss 后选择 Supadata 时，DigestDock 才会强制使用其 `mode=native`。
 
-## Supadata YouTube 字幕费用
+## 可选 Supadata 后备费用
 
 截至 2026 年 8 月 9 日，[Supadata 价格页面](https://supadata.ai/pricing)显示免费版每月提供 **100 credits**，不需要信用卡，未使用的额度不会结转。价格可能变化，使用前请查看最新页面。
 
@@ -179,7 +181,7 @@ YouTube 的 Supadata 请求强制使用 `mode=native`。两个平台都只使用
 - AI 生成字幕每分钟消耗 **2 credits**。DigestDock 不会使用这条路径，因为它强制使用 `mode=native`。
 - 如果没有可用原生字幕并返回 HTTP `206`，仍会消耗 **1 credit**。
 
-用户确认新的 YouTube 字幕请求后，按照当前只获取原生字幕的方式，如果每次请求都成功，免费版每月大约可以完成 100 次查询。重试和没有字幕的查询也可能消耗额度，所以实际成功数量可能更少。缓存命中时不会再次调用 Supadata，直到缓存过期或被清除。
+用户明确选择隐藏的 Supadata 后备后，按照只获取原生字幕的方式，如果每次请求都成功，免费版每月大约可以完成 100 次查询。服务商返回没有原生字幕时也可能消耗额度。DigestDock 不会自动重试；已验证缓存命中时不会再次调用 Supadata，直到缓存过期或被清除。
 
 DeepSeek 的额度与 Supadata 分开计算。DeepSeek 可能有自己的免费额度、限速或费用。DigestDock 不收款，也不转售 API 服务。建议为你实际配置的每个服务商账号设置消费上限并定期查看用量。下方估算说明了当前 DeepSeek 翻译成本。
 
@@ -203,8 +205,8 @@ DeepSeek 说明这些价格可能很快上调，因此使用此估算前必须�
 
 DigestDock 会直接从扩展发起网络请求：
 
-1. 对 YouTube，只读取当前标签页的视频身份、元数据、源语言和访问状态，不直接向 YouTube 请求字幕正文。
-2. 对新视频或过期缓存，侧边栏先请求一次授权。只有你点击 Supadata 操作后，DigestDock 才会把标准化的视频地址和你的 Key 发送给 Supadata，并请求 `mode=native` 原生字幕；明确的登录、年龄、会员、地区或不可用状态会在此前停止。
+1. 对 YouTube，先读取本地缓存和 Passive 响应状态。miss 后提示你打开 YouTube 字幕／CC 并明确重试；DigestDock 不自动发起 player/timedtext 请求，也不操作文字稿面板。
+2. 只有该次显式免费重试仍 miss 时，侧边栏才显示可选 Supadata 后备。只有你点击该操作后，DigestDock 才会把标准化的视频地址和你的 Key 发送给 Supadata，并请求 `mode=native` 原生字幕；明确无字幕、登录、年龄、会员、地区、不可用或页面已切换的状态会在此前停止。
 3. 对 B 站，直接向 B 站请求当前视频元数据和已有字幕轨，复用浏览器当前会话但不读取或保存 Cookie 值。
 4. 当你使用 AI 功能时，把字幕和相关视频信息发送给你在设置中选择的 AI 服务商。翻译或讲解等功能只发送当前需要的内容，例如选中的文本和上下文，或少量字幕分段。
 5. API Key、设置、笔记、最近缓存、可复用的视频级导出译文和轻量导出进度保存在 Chrome 本地。导出任务不会保存 API Key、字幕／笔记正文或译文；这些文本只保留在原有笔记或视频来源记录中。临时签名的 B 站字幕 URL 只用于当次请求，不会保存或写入日志。
@@ -232,14 +234,14 @@ DigestDock 没有账号系统、广告、分析统计或行为追踪。YouTube�
 
 ### DigestDock 提示需要设置
 
-- 在设置中选择一个 AI 服务商并保存它的 API Key 以使用 AI 功能；如果需要新的 YouTube 字幕，再配置 Supadata Key。B 站不需要 Supadata。
+- 在设置中选择一个 AI 服务商并保存它的 API Key 以使用 AI 功能。Supadata 不属于正常设置；只有免费 YouTube 路线最终失败时才会出现。
 - 每个服务商的接口地址和模型都是预设的，没有需要填写的 Base URL 或 Model 字段。切换服务商会保留各自的 Key。
 - 如果设置提示旧的自定义服务已移除，请选择一个服务商并填写它的 Key。旧的自定义接口 Key 已安全清除，避免被错误用于其他服务。
 
 ### 找不到字幕
 
 - 确认视频是公开的，并且有原生字幕。
-- 使用 YouTube 时，检查 Supadata Key、剩余额度、限速和账号状态，然后在侧边栏确认本次请求；查询和重试可能消耗额度。
+- 使用 YouTube 时，点击播放器的“字幕／CC”按钮，等待画面上出现字幕，再在 DigestDock 点击“已打开字幕，重新读取”。如果这次显式重试仍未取得字幕，DigestDock 才可能显示可选 Supadata 后备；使用前再检查 Key、额度、限速和账号状态。
 - 使用 B 站时，确认当前分P存在独立字幕轨；若该字幕要求登录，请确认当前 Chrome 已登录 B 站。画面中的硬字幕无法读取。
 
 DigestDock 不会自动改用 AI 生成字幕，也不会执行音频 ASR。
