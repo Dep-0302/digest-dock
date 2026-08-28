@@ -6,9 +6,9 @@
  */
 
 const DEBUG = false;
-const REQUIRED_RUNTIME_PROTOCOL_VERSION = 11;
+const REQUIRED_RUNTIME_PROTOCOL_VERSION = 12;
 const EXPORT_CONTENT_CONTRACT_VERSION = 4;
-const OVERVIEW_CACHE_SCHEMA_VERSION = 1;
+const OVERVIEW_CACHE_SCHEMA_VERSION = 2;
 const OVERVIEW_CACHE_PREFIX = "overview_";
 const OVERVIEW_CACHE_MAX_ENTRIES = 100;
 const debugLog = (...args) => {
@@ -137,7 +137,14 @@ const NOTES_MANUAL_RETRY_DEBOUNCE_MS = 400;
 const NOTE_TRANSLATION_VALIDATION_VERSION = 1;
 const NOTE_TITLE_TRANSLATION_VALIDATION_VERSION = 1;
 const TRANSCRIPT_TRANSLATION_CACHE_VERSION = 2;
-const TRANSCRIPT_SOURCE_POLICY_VERSION = 4;
+const TRANSCRIPT_SOURCE_POLICY_VERSION = 5;
+const YOUTUBE_TRANSCRIPT_SOURCES = new Set([
+  "youtube-passive",
+  "youtube-active",
+  "youtube-panel",
+  "supadata",
+]);
+const YOUTUBE_TRANSCRIPT_TRACK_KIND = "manual-first";
 
 function sanitizeTranscriptSelectedTrack(track) {
   if (!track || typeof track !== "object") return null;
@@ -155,6 +162,144 @@ function sanitizeTranscriptSelectedTrack(track) {
         ? track.label.trim().slice(0, 100)
         : null,
   };
+}
+
+function transcriptSelectedTrackIdentity(track) {
+  const selected = sanitizeTranscriptSelectedTrack(track);
+  if (!selected) return "none";
+  return [
+    selected.language || "",
+    selected.kind,
+    selected.isGenerated ? "generated" : "manual",
+    Number.isInteger(selected.index) ? String(selected.index) : "",
+  ].join(":");
+}
+
+function transcriptContentFingerprint(transcriptTimestamped, transcriptText = "") {
+  return overviewTranscriptFingerprint(
+    String(transcriptTimestamped || transcriptText || ""),
+  );
+}
+
+function transcriptArtifactIdentity({
+  source = "",
+  language = "",
+  requestedLanguage = "",
+  selectedTrack = null,
+  fingerprint = "",
+} = {}) {
+  const normalizedSource = String(source || "").trim();
+  const normalizedLanguage = normalizeLanguageCode(language);
+  const normalizedRequestedLanguage = normalizeLanguageCode(requestedLanguage);
+  const normalizedFingerprint = String(fingerprint || "").trim();
+  if (!normalizedSource || !normalizedFingerprint) return "";
+  return JSON.stringify({
+    source: normalizedSource,
+    language: normalizedLanguage,
+    requestedLanguage: normalizedRequestedLanguage,
+    selectedTrack: transcriptSelectedTrackIdentity(selectedTrack),
+    fingerprint: normalizedFingerprint,
+  });
+}
+
+function currentTranscriptArtifactIdentity() {
+  return transcriptArtifactIdentity({
+    source: currentTranscriptSource,
+    language: currentTranscriptLanguage,
+    requestedLanguage: currentVideoSourceLanguage,
+    selectedTrack: currentTranscriptSelectedTrack,
+    fingerprint: transcriptContentFingerprint(
+      currentTranscriptTimestamped,
+      currentTranscriptText,
+    ),
+  });
+}
+
+function cachedTranscriptArtifactIdentity(cached) {
+  if (!cached || typeof cached !== "object") return "";
+  const computedFingerprint = transcriptContentFingerprint(
+    cached.transcriptTimestamped,
+    cached.transcriptText,
+  );
+  if (
+    cached.transcriptFingerprint &&
+    cached.transcriptFingerprint !== computedFingerprint
+  ) {
+    return "";
+  }
+  return transcriptArtifactIdentity({
+    source: cached.transcriptSource,
+    language: cached.transcriptLanguage,
+    requestedLanguage: cached.transcriptRequestedLanguage,
+    selectedTrack: cached.transcriptSelectedTrack,
+    fingerprint: computedFingerprint,
+  });
+}
+
+function buildTranscriptFetchRequest({
+  videoId,
+  mediaRef,
+  preferredLanguage = "",
+  tabId = null,
+  generation,
+  routeKey,
+  supadataConsent = false,
+  captionRetry = false,
+}) {
+  const runId = String(generation);
+  return {
+    action: "fetchTranscript",
+    videoId: mediaRef?.videoId || videoId,
+    mediaRef,
+    preferredLanguage,
+    trackKind: YOUTUBE_TRANSCRIPT_TRACK_KIND,
+    tabId,
+    runId,
+    digestGeneration: generation,
+    routeKey,
+    supadataConsent: supadataConsent === true,
+    captionRetry: captionRetry === true,
+  };
+}
+
+function transcriptResponseMatchesRequest(
+  result,
+  request,
+  { platform = "youtube" } = {},
+) {
+  if (!result || !request) return false;
+  // The run identity is part of the new YouTube native-chain contract only.
+  // Bilibili keeps its independent, already-shipped response contract.
+  if (platform === "bilibili") return true;
+  return (
+    String(result.runId ?? "") === String(request.runId ?? "") &&
+    String(result.routeKey ?? "") === String(request.routeKey ?? "")
+  );
+}
+
+function transcriptRouteOutcome(result) {
+  const outcome = String(result?.routeOutcome || "").trim();
+  if (
+    [
+      "HAVE_TRANSCRIPT",
+      "CONFIRMED_UNAVAILABLE",
+      "UNKNOWN",
+      "PAGE_CONTEXT_CHANGED",
+    ].includes(outcome)
+  ) {
+    return outcome;
+  }
+  if (result?.success) return "HAVE_TRANSCRIPT";
+  if (result?.error === "PAGE_CONTEXT_CHANGED") return "PAGE_CONTEXT_CHANGED";
+  return "";
+}
+
+function shouldOfferSupadata(result) {
+  return (
+    transcriptRouteOutcome(result) === "UNKNOWN" &&
+    result?.supadataEligible !== false &&
+    result?.requiresCaptionEnable !== true
+  );
 }
 
 function transcriptSourceLabel() {
@@ -504,8 +649,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     // (This used to force-clear the cache on every click, which silently
     // burned a transcript credit + analysis tokens per click.)
     // A page-level Digest click is an explicit request to leave a local-only
-    // saved-note jump and load the video's digest. It may therefore reach the
-    // ordinary per-attempt Supadata consent gate if no local transcript exists.
+    // saved-note jump and start the current video's cache/Passive transcript
+    // task. A miss first asks the user to enable CC; only the explicit retry
+    // may later expose the Supadata choice.
     void clearNoteNavigationState()
       .then(() => checkCurrentTab())
       .catch((error) => {
@@ -1783,6 +1929,7 @@ async function runDigestLoad(
   mediaRef = currentMediaRef,
   routeKey = currentRouteKey,
   supadataConsent = false,
+  captionRetry = false,
 ) {
   if (!isCurrentDigest(videoId, generation, routeKey)) return;
 
@@ -1794,7 +1941,12 @@ async function runDigestLoad(
   }
 
   // Check cache for this video
-  let cached = await loadFromCache(videoId);
+  let cached = await loadFromCache(videoId, {
+    mediaRef,
+    requestedLanguage: currentVideoSourceLanguage,
+    trackKind: YOUTUBE_TRANSCRIPT_TRACK_KIND,
+    routeKey,
+  });
   if (!isCurrentDigest(videoId, generation, routeKey)) return;
   if (
     cached &&
@@ -1849,6 +2001,8 @@ async function runDigestLoad(
       videoId,
       currentTranscriptTimestamped,
       currentTranscriptLanguage,
+      currentTranscriptSource,
+      currentTranscriptSelectedTrack,
     );
     if (!isCurrentDigest(videoId, generation, routeKey)) return;
     if (compactOverview) {
@@ -1861,6 +2015,8 @@ async function runDigestLoad(
         currentAnalysis,
         currentTranscriptTimestamped,
         currentTranscriptLanguage,
+        currentTranscriptSource,
+        currentTranscriptSelectedTrack,
       );
       if (!isCurrentDigest(videoId, generation, routeKey)) return;
     }
@@ -1930,49 +2086,73 @@ async function runDigestLoad(
   updateLoading("正在获取字幕", "");
 
   const requestMediaRef = currentMediaRef || mediaRef;
-  const transcriptResult = await chrome.runtime.sendMessage({
-    action: "fetchTranscript",
-    videoId: requestMediaRef?.videoId || videoId,
+  const transcriptRequest = buildTranscriptFetchRequest({
+    videoId,
     mediaRef: requestMediaRef,
     preferredLanguage: currentVideoSourceLanguage,
     tabId: videoTabId,
-    supadataConsent: supadataConsent === true,
+    generation,
+    routeKey,
+    supadataConsent,
+    captionRetry,
   });
+  const transcriptResult = await chrome.runtime.sendMessage(transcriptRequest);
   if (!isCurrentDigest(videoId, generation, routeKey)) return;
+  if (
+    !transcriptResponseMatchesRequest(transcriptResult, transcriptRequest, {
+      platform: requestMediaRef?.platform,
+    })
+  ) {
+    debugLog("[DigestDock Panel] Rejected stale transcript result", {
+      expectedRunId: transcriptRequest.runId,
+      receivedRunId: transcriptResult?.runId,
+      expectedRouteKey: routeKey,
+      receivedRouteKey: transcriptResult?.routeKey,
+    });
+    return;
+  }
 
   if (!transcriptResult.success) {
+    const routeOutcome = transcriptRouteOutcome(transcriptResult);
+    if (routeOutcome === "PAGE_CONTEXT_CHANGED") {
+      scheduleDigestRefresh();
+      return;
+    }
+    if (routeOutcome === "CONFIRMED_UNAVAILABLE") {
+      showError(
+        "当前视频没有可用字幕",
+        transcriptResult.message || "YouTube 已确认当前视频没有可读取的字幕。",
+      );
+      return;
+    }
+    const shouldPromptForYoutubeCaptions =
+      requestMediaRef?.platform !== "bilibili" &&
+      supadataConsent !== true &&
+      captionRetry !== true &&
+      routeOutcome === "UNKNOWN";
     if (
-      transcriptResult.error === "SUPADATA_CONSENT_REQUIRED" &&
-      supadataConsent !== true
+      shouldPromptForYoutubeCaptions ||
+      transcriptResult.requiresCaptionEnable === true ||
+      transcriptResult.error === "YOUTUBE_CAPTIONS_REQUIRED"
     ) {
       const notesOnlyContext = isActiveNotesOnlyContext()
         ? activeNotesOnlyContext
         : null;
-      showSupadataConsent(
+      showYoutubeCaptionsRequired(
         async () => {
           if (!isCurrentDigest(videoId, generation, routeKey)) return;
           const requestKey = `${generation}:${videoId}`;
-          // A same-video refresh may already own the ordinary consent-gated
-          // single-flight. Wait for it to finish, then start a fresh consented
-          // attempt. This preserves ordering without running the unconsented
-          // probe and the Supadata-authorized request in parallel or swallowing
-          // the click.
-          await runDigestSingleFlight(
-            requestKey,
-            async () => undefined,
-          );
-          if (!isCurrentDigest(videoId, generation, routeKey)) return;
-          await runDigestSingleFlight(
-            requestKey,
-            () =>
-              runDigestLoad(
-                videoId,
-                generation,
-                false,
-                requestMediaRef,
-                routeKey,
-                true,
-              ),
+          await runDigestSingleFlight(requestKey, async () => undefined);
+          await runDigestSingleFlight(requestKey, () =>
+            runDigestLoad(
+              videoId,
+              generation,
+              false,
+              requestMediaRef,
+              routeKey,
+              false,
+              true,
+            ),
           );
           if (
             currentTranscript &&
@@ -1989,10 +2169,56 @@ async function runDigestLoad(
       );
       return;
     }
+    if (
+      captionRetry === true &&
+      shouldOfferSupadata(transcriptResult) &&
+      supadataConsent !== true
+    ) {
+      const notesOnlyContext = isActiveNotesOnlyContext()
+        ? activeNotesOnlyContext
+        : null;
+      const hasSupadataKey = Boolean(
+        transcriptResult.hasSupadataKey ?? currentConfigStatus?.hasSupadataKey,
+      );
+      if (!hasSupadataKey) {
+        showSupadataNotConfigured(
+          transcriptResult.message ||
+            "免费字幕路线未能取得字幕。如你愿意，可配置 Supadata 作为逐视频确认的第三方后备。",
+        );
+        return;
+      }
+      showSupadataConsent(async () => {
+        if (!isCurrentDigest(videoId, generation, routeKey)) return;
+        const requestKey = `${generation}:${videoId}`;
+        await runDigestSingleFlight(requestKey, async () => undefined);
+        if (!isCurrentDigest(videoId, generation, routeKey)) return;
+        await runDigestSingleFlight(requestKey, () =>
+          runDigestLoad(
+            videoId,
+            generation,
+            false,
+            requestMediaRef,
+            routeKey,
+            true,
+          ),
+        );
+        if (
+          currentTranscript &&
+          notesOnlyContext &&
+          activeNotesOnlyContext?.token === notesOnlyContext.token &&
+          isActiveNotesOnlyContext()
+        ) {
+          await clearNoteNavigationState(notesOnlyContext.token);
+        }
+      }, notesOnlyContext ? () => returnToNotesOnlyContext(notesOnlyContext) : null);
+      return;
+    }
+    // Once Supadata is explicitly authorized, provider errors stay on the
+    // third-party path and never restart the free Passive/Active/Panel chain.
     if (transcriptResult.error === "SUPADATA_NOT_CONFIGURED") {
       showSupadataNotConfigured(
         transcriptResult.message ||
-          "新的 YouTube 字幕需要 Supadata。请在设置中配置密钥后逐次授权。",
+          "Supadata 密钥当前未配置；不会重新运行免费字幕路线。",
       );
       return;
     }
@@ -2047,6 +2273,17 @@ async function runDigestLoad(
   }
   applyMediaLanguageDefaults();
 
+  const previousArtifactIdentity = await readStoredTranscriptArtifactIdentity(
+    videoId,
+  );
+  if (!isCurrentDigest(videoId, generation, routeKey)) return;
+  await invalidateTranscriptDerivedArtifacts(
+    videoId,
+    previousArtifactIdentity,
+    currentTranscriptArtifactIdentity(),
+  );
+  if (!isCurrentDigest(videoId, generation, routeKey)) return;
+
   await hydrateCurrentVideoNoteSource();
   if (!isCurrentDigest(videoId, generation, routeKey)) return;
 
@@ -2054,6 +2291,8 @@ async function runDigestLoad(
     videoId,
     currentTranscriptTimestamped,
     currentTranscriptLanguage,
+    currentTranscriptSource,
+    currentTranscriptSelectedTrack,
   );
   if (!isCurrentDigest(videoId, generation, routeKey)) return;
 
@@ -5177,10 +5416,42 @@ function showSupadataConsent(onConfirm, onDecline = null) {
   primaryButton.focus();
 }
 
+function showYoutubeCaptionsRequired(onRetry, onCancel = null) {
+  showError(
+    "请先打开 YouTube 字幕",
+    "请点击视频播放器右下角的“字幕 / CC”按钮，等待字幕显示后再重新读取。",
+  );
+  const primaryButton = document.getElementById("errorBtn");
+  const secondaryButton = document.getElementById("errorSecondaryBtn");
+  primaryButton.textContent = "已打开字幕，重新读取";
+  if (secondaryButton && onCancel) {
+    secondaryButton.textContent = "返回笔记";
+    secondaryButton.hidden = false;
+  }
+  errorAction = async () => {
+    primaryButton.disabled = true;
+    if (secondaryButton) secondaryButton.disabled = true;
+    showState("loading");
+    updateLoading(
+      "正在重新读取字幕",
+      "只读取 YouTube 页面已经加载的字幕…",
+    );
+    try {
+      await onRetry();
+    } catch (error) {
+      showError(
+        "仍未读取到字幕",
+        error?.message || "请确认播放器中已经显示字幕，然后重试。",
+      );
+    }
+  };
+  errorSecondaryAction = onCancel ? () => onCancel() : null;
+  primaryButton.focus();
+}
+
 // After the user declines the third-party request, stay in a safe no-transcript
-// state. Do NOT offer a native retry that would immediately send a request; the
-// mainline has no local YouTube caption path. The default primary re-opens the
-// same single-attempt consent prompt (it never sends a request on its own).
+// state. The default primary starts a fresh user-driven transcript task; it
+// never sends a Supadata request without another explicit confirmation.
 function showSupadataDeclined() {
   showError(
     "已跳过 Supadata 字幕",
@@ -5188,11 +5459,24 @@ function showSupadataDeclined() {
   );
   const secondaryButton = document.getElementById("errorSecondaryBtn");
   if (secondaryButton) {
-    secondaryButton.textContent = "打开设置";
+    secondaryButton.textContent = "管理 Supadata";
     secondaryButton.hidden = false;
   }
-  errorSecondaryAction = () =>
-    chrome.runtime.sendMessage({ action: "openOptions" });
+  errorSecondaryAction = openSupadataOptions;
+}
+
+function openSupadataOptions() {
+  const relativeUrl = "options.html?focus=supadata#section-transcript";
+  try {
+    const url = chrome.runtime.getURL(relativeUrl);
+    if (chrome.tabs?.create) return chrome.tabs.create({ url });
+  } catch (_error) {
+    // Fall back to the generic options action in restricted test/preview hosts.
+  }
+  return chrome.runtime.sendMessage({
+    action: "openOptions",
+    focus: "supadata",
+  });
 }
 
 // A Supadata 429. The message must make clear this is Supadata's rate limit,
@@ -5208,13 +5492,13 @@ function showSupadataRateLimited(message) {
 
 function showSupadataNotConfigured(message) {
   showError(
-    "未配置 Supadata",
+    "免费字幕未能取得",
     message ||
-      "新的 YouTube 字幕需要 Supadata。请在设置中配置可选的 Supadata 密钥，然后回到侧栏逐次授权。",
+      "你可以选择配置 Supadata 作为第三方后备；在你逐视频确认前不会发送请求。",
   );
   const primaryButton = document.getElementById("errorBtn");
-  primaryButton.textContent = "打开设置";
-  errorAction = () => chrome.runtime.sendMessage({ action: "openOptions" });
+  primaryButton.textContent = "了解并配置 Supadata";
+  errorAction = openSupadataOptions;
 }
 
 function showSupadataInvalidKey(message) {
@@ -5223,8 +5507,8 @@ function showSupadataInvalidKey(message) {
     message || "请在设置中更新 Supadata API 密钥后重新授权。",
   );
   const primaryButton = document.getElementById("errorBtn");
-  primaryButton.textContent = "打开设置";
-  errorAction = () => chrome.runtime.sendMessage({ action: "openOptions" });
+  primaryButton.textContent = "管理 Supadata";
+  errorAction = openSupadataOptions;
 }
 
 function showSupadataProviderError(message) {
@@ -5898,6 +6182,8 @@ function buildOverviewCacheRecord(
   analysis,
   transcriptTimestamped,
   sourceLanguage,
+  transcriptSource = currentTranscriptSource,
+  selectedTrack = currentTranscriptSelectedTrack,
 ) {
   const mediaKey = String(videoId || "").trim().slice(0, 220);
   const transcriptFingerprint = overviewTranscriptFingerprint(
@@ -5910,6 +6196,8 @@ function buildOverviewCacheRecord(
     schemaVersion: OVERVIEW_CACHE_SCHEMA_VERSION,
     mediaKey,
     transcriptFingerprint,
+    transcriptSource: String(transcriptSource || "").trim(),
+    selectedTrackIdentity: transcriptSelectedTrackIdentity(selectedTrack),
     sourceLanguage: normalizeLanguageCode(
       sourceLanguage || analysis?.sourceLanguage,
     ),
@@ -5923,11 +6211,16 @@ function validateOverviewCacheRecord(
   videoId,
   transcriptTimestamped = "",
   sourceLanguage = "",
+  transcriptSource = "",
+  selectedTrack = null,
 ) {
   const mediaKey = String(videoId || "").trim().slice(0, 220);
+  const legacyBilibiliV1 =
+    mediaKey.startsWith("bilibili:") && record?.schemaVersion === 1;
   if (
     !record ||
-    record.schemaVersion !== OVERVIEW_CACHE_SCHEMA_VERSION ||
+    (record.schemaVersion !== OVERVIEW_CACHE_SCHEMA_VERSION &&
+      !legacyBilibiliV1) ||
     record.mediaKey !== mediaKey ||
     !hasUsableChineseAnalysis(record.analysis)
   ) {
@@ -5942,6 +6235,7 @@ function validateOverviewCacheRecord(
   ) {
     return null;
   }
+  const expectedSource = String(transcriptSource || "").trim();
   const expectedLanguage = normalizeLanguageCode(sourceLanguage);
   const cachedLanguage = normalizeLanguageCode(
     record.sourceLanguage || record.analysis?.sourceLanguage,
@@ -5953,6 +6247,18 @@ function validateOverviewCacheRecord(
   ) {
     return null;
   }
+  // v1 Bilibili overviews predate YouTube source/track binding, but already
+  // bind mediaKey, transcript fingerprint, language, and usable analysis.
+  // Preserve them so this YouTube-only policy change does not spend AI again.
+  if (legacyBilibiliV1) return record.analysis;
+  if (expectedSource && record.transcriptSource !== expectedSource) return null;
+  if (
+    expectedSource &&
+    record.selectedTrackIdentity !==
+      transcriptSelectedTrackIdentity(selectedTrack)
+  ) {
+    return null;
+  }
   return record.analysis;
 }
 
@@ -5961,6 +6267,8 @@ async function saveOverviewToCache(
   analysis,
   transcriptTimestamped = currentTranscriptTimestamped,
   sourceLanguage = currentTranscriptLanguage,
+  transcriptSource = currentTranscriptSource,
+  selectedTrack = currentTranscriptSelectedTrack,
 ) {
   const key = overviewCacheKey(videoId);
   const record = buildOverviewCacheRecord(
@@ -5968,6 +6276,8 @@ async function saveOverviewToCache(
     analysis,
     transcriptTimestamped,
     sourceLanguage,
+    transcriptSource,
+    selectedTrack,
   );
   if (!key || !record) return false;
   try {
@@ -5984,6 +6294,8 @@ async function loadOverviewFromCache(
   videoId,
   transcriptTimestamped = currentTranscriptTimestamped,
   sourceLanguage = currentTranscriptLanguage,
+  transcriptSource = currentTranscriptSource,
+  selectedTrack = currentTranscriptSelectedTrack,
 ) {
   const key = overviewCacheKey(videoId);
   if (!key) return null;
@@ -5995,6 +6307,8 @@ async function loadOverviewFromCache(
       videoId,
       transcriptTimestamped,
       sourceLanguage,
+      transcriptSource,
+      selectedTrack,
     );
     if (!analysis && record) await chrome.storage.local.remove(key);
     return analysis;
@@ -6041,6 +6355,13 @@ async function saveToCache(videoId) {
       }
     }
 
+    const transcriptFingerprint = transcriptContentFingerprint(
+      currentTranscriptTimestamped,
+      currentTranscriptText,
+    );
+    const transcriptSelectedTrack = sanitizeTranscriptSelectedTrack(
+      currentTranscriptSelectedTrack,
+    );
     const cacheData = {
       analysis: currentAnalysis, // May be null if not yet analyzed
       analysisVideoId: currentAnalysis ? videoId : null,
@@ -6049,9 +6370,10 @@ async function saveToCache(videoId) {
       transcriptTimestamped: currentTranscriptTimestamped,
       transcriptLanguage: currentTranscriptLanguage,
       transcriptSource: currentTranscriptSource,
-      transcriptSelectedTrack: sanitizeTranscriptSelectedTrack(
-        currentTranscriptSelectedTrack,
-      ),
+      transcriptSelectedTrack,
+      transcriptSelectedTrackIdentity:
+        transcriptSelectedTrackIdentity(transcriptSelectedTrack),
+      transcriptFingerprint,
       transcriptSourceAttempt: currentTranscriptSourceAttempt,
       mediaRef: currentMediaRef,
       routeKey: currentRouteKey,
@@ -6060,6 +6382,16 @@ async function saveToCache(videoId) {
       paragraphCache: paragraphCacheForVideo,
       transcriptSourcePolicyVersion: TRANSCRIPT_SOURCE_POLICY_VERSION,
       transcriptRequestedLanguage: currentVideoSourceLanguage || null,
+      transcriptRequestedTrackKind: currentPlatformIsBilibili()
+        ? null
+        : YOUTUBE_TRANSCRIPT_TRACK_KIND,
+      transcriptArtifactIdentity: transcriptArtifactIdentity({
+        source: currentTranscriptSource,
+        language: currentTranscriptLanguage,
+        requestedLanguage: currentVideoSourceLanguage,
+        selectedTrack: transcriptSelectedTrack,
+        fingerprint: transcriptFingerprint,
+      }),
       timestamp: Date.now(),
     };
 
@@ -6129,7 +6461,155 @@ async function evictOldCacheEntries(maxEntries) {
  * Loads digest results from persistent local storage.
  * Returns null if not cached or expired (30-day expiry).
  */
-async function loadFromCache(videoId) {
+function validateTranscriptCacheRecord(
+  cached,
+  {
+    videoId = "",
+    mediaRef = null,
+    requestedLanguage = "",
+    trackKind = YOUTUBE_TRANSCRIPT_TRACK_KIND,
+    routeKey = "",
+  } = {},
+) {
+  if (!cached || typeof cached !== "object") return null;
+  if (!Array.isArray(cached.transcript) || !cached.transcript.length) {
+    return null;
+  }
+
+  const cachedPlatform =
+    cached.mediaRef?.platform ||
+    mediaRef?.platform ||
+    (String(videoId).startsWith("bilibili:") ? "bilibili" : "youtube");
+  const source = String(cached.transcriptSource || "").trim();
+  const isBilibili = cachedPlatform === "bilibili";
+  if (isBilibili) {
+    // Bilibili keeps its independent cache contract. Version 4 remains valid
+    // across the YouTube-only policy expansion; newly written version 5 rows
+    // additionally carry the stronger fingerprint identity below.
+    if (
+      source !== "bilibili" ||
+      ![4, TRANSCRIPT_SOURCE_POLICY_VERSION].includes(
+        cached.transcriptSourcePolicyVersion,
+      )
+    ) {
+      return null;
+    }
+  } else if (
+    cached.transcriptSourcePolicyVersion !== TRANSCRIPT_SOURCE_POLICY_VERSION ||
+    !YOUTUBE_TRANSCRIPT_SOURCES.has(source)
+  ) {
+    return null;
+  }
+  if (videoId && cached.mediaRef?.mediaKey !== videoId) {
+    return null;
+  }
+  if (
+    mediaRef?.platform &&
+    cached.mediaRef?.platform !== mediaRef.platform
+  ) {
+    return null;
+  }
+  if (routeKey && cached.routeKey !== routeKey) return null;
+
+  if (isBilibili && cached.transcriptSourcePolicyVersion === 4) {
+    return cached;
+  }
+
+  const fingerprint = transcriptContentFingerprint(
+    cached.transcriptTimestamped,
+    cached.transcriptText,
+  );
+  if (!fingerprint || cached.transcriptFingerprint !== fingerprint) return null;
+
+  const selectedTrack = sanitizeTranscriptSelectedTrack(
+    cached.transcriptSelectedTrack,
+  );
+  if (
+    cached.transcriptSelectedTrack &&
+    !["manual", "asr"].includes(cached.transcriptSelectedTrack.kind)
+  ) {
+    return null;
+  }
+  if (
+    cached.transcriptSelectedTrackIdentity !==
+    transcriptSelectedTrackIdentity(selectedTrack)
+  ) {
+    return null;
+  }
+  if (
+    !isBilibili &&
+    !["supadata", "youtube-panel"].includes(source) &&
+    (!selectedTrack || !selectedTrack.language)
+  ) {
+    return null;
+  }
+
+  const transcriptLanguage = normalizeLanguageCode(cached.transcriptLanguage);
+  if (
+    selectedTrack?.language &&
+    transcriptLanguage &&
+    !languagesSharePrimary(selectedTrack.language, transcriptLanguage)
+  ) {
+    return null;
+  }
+
+  if (!isBilibili) {
+    if (cached.transcriptRequestedTrackKind !== trackKind) return null;
+    const expectedLanguage = normalizeLanguageCode(requestedLanguage);
+    const cachedRequestedLanguage = normalizeLanguageCode(
+      cached.transcriptRequestedLanguage,
+    );
+    if (
+      expectedLanguage &&
+      cachedRequestedLanguage !== expectedLanguage
+    ) {
+      return null;
+    }
+  }
+
+  const artifactIdentity = cachedTranscriptArtifactIdentity(cached);
+  if (
+    !artifactIdentity ||
+    cached.transcriptArtifactIdentity !== artifactIdentity
+  ) {
+    return null;
+  }
+  return cached;
+}
+
+async function readStoredTranscriptArtifactIdentity(videoId) {
+  if (!videoId) return "";
+  try {
+    const result = await chrome.storage.local.get(`digest_${videoId}`);
+    return cachedTranscriptArtifactIdentity(result[`digest_${videoId}`]);
+  } catch (_error) {
+    return "";
+  }
+}
+
+async function invalidateTranscriptDerivedArtifacts(
+  videoId,
+  previousArtifactIdentity,
+  nextArtifactIdentity,
+) {
+  if (
+    previousArtifactIdentity &&
+    nextArtifactIdentity &&
+    previousArtifactIdentity === nextArtifactIdentity
+  ) {
+    return false;
+  }
+  await chrome.storage.local.remove(overviewCacheKey(videoId));
+  await YTD_NOTE_SOURCES.removeNoteSources(chrome.storage.local, videoId);
+  currentPersistedNoteSource = null;
+  const cachePrefix = transcriptTranslationCachePrefix(videoId);
+  for (const key of [...transcriptParagraphCache.keys()]) {
+    if (key.startsWith(cachePrefix)) transcriptParagraphCache.delete(key);
+  }
+  return true;
+}
+
+async function loadFromCache(videoId, expected = {}) {
   if (!videoId) return null;
 
   try {
@@ -6137,22 +6617,6 @@ async function loadFromCache(videoId) {
     const cached = result[`digest_${videoId}`];
 
     if (!cached) return null;
-    if (
-      cached.transcriptSourcePolicyVersion !== TRANSCRIPT_SOURCE_POLICY_VERSION
-    ) {
-      return null;
-    }
-    // v4 binds every cached transcript to the active platform provider. A
-    // legacy or unknown YouTube source must never masquerade as an authorized
-    // Supadata result; Bilibili caches remain isolated to their own adapter.
-    const cachedPlatform =
-      cached.mediaRef?.platform ||
-      (String(videoId).startsWith("bilibili:") ? "bilibili" : "youtube");
-    const expectedSource =
-      cachedPlatform === "bilibili" ? "bilibili" : "supadata";
-    if (cached.transcriptSource !== expectedSource) {
-      return null;
-    }
 
     // Cache expires after 30 days
     const THIRTY_DAYS = 30 * 24 * 60 * 60 * 1000;
@@ -6161,7 +6625,7 @@ async function loadFromCache(videoId) {
       return null;
     }
 
-    return cached;
+    return validateTranscriptCacheRecord(cached, { videoId, ...expected });
   } catch (error) {
     console.error("Cache load error:", error);
     return null;
@@ -7597,7 +8061,18 @@ function setTranslatingSpinner(show) {
 // Pure helpers are exposed for the repository's Node tests. The extension does
 // not read this object at runtime.
 globalThis.__YTD_TRANSCRIPT_TESTING__ = {
+  TRANSCRIPT_SOURCE_POLICY_VERSION,
+  YOUTUBE_TRANSCRIPT_TRACK_KIND,
   createSingleFlight,
+  buildTranscriptFetchRequest,
+  transcriptResponseMatchesRequest,
+  transcriptRouteOutcome,
+  shouldOfferSupadata,
+  transcriptSelectedTrackIdentity,
+  transcriptContentFingerprint,
+  transcriptArtifactIdentity,
+  cachedTranscriptArtifactIdentity,
+  validateTranscriptCacheRecord,
   sendTranslationMessage,
   groupTranscriptEntries,
   splitOversizedThought,

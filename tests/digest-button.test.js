@@ -691,7 +691,11 @@ test("the player note button uses exact 20/50 default and 100 hover opacity", ()
   assert.equal(noteButton.style.color, "rgba(255, 255, 255, 0.5)");
 });
 
-test("a note that needs third-party transcript consent points the user to the side panel", () => {
+test("a cold-cache note points to the side-panel transcript task", () => {
+  assert.match(
+    contentScript,
+    /result\.error === "TRANSCRIPT_TASK_REQUIRED"[\s\S]*?请先打开侧栏字幕/,
+  );
   assert.match(
     contentScript,
     /result\.error === "SUPADATA_CONSENT_REQUIRED"[\s\S]*?请在侧栏授权/,

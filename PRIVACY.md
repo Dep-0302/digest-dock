@@ -1,6 +1,6 @@
 # Privacy
 
-Effective: August 23, 2026
+Effective: August 27, 2026
 
 DigestDock is a GitHub-only, bring-your-own-key Chrome extension. It has no DigestDock account, developer-operated backend, analytics, advertising, or telemetry.
 
@@ -30,11 +30,13 @@ Depending on the feature you use, DigestDock handles:
 
 ### YouTube
 
-For a standard YouTube watch page, the extension uses a read-only MAIN-world check to confirm the exact video, read limited metadata and source-language information, and classify clear access restrictions before any third-party transcript request. It does not construct a direct YouTube transcript-body request, attach YouTube cookies, or return caption request URLs from the page check.
+For a standard YouTube watch page, DigestDock first reuses a validated local transcript cache or passively observes a bounded `/api/timedtext` response that the page already requested. The Passive observer never constructs a request and never records or forwards the signed caption URL. If no zero-request result is available, the side panel asks the user to enable YouTube captions/CC and explicitly retry. The product flow does not automatically issue YouTube player/timedtext requests or open and scroll YouTube's Transcript panel. The extension does not read or export YouTube cookies, download audio, perform ASR or OCR, spoof request headers, or bypass access restrictions.
+
+The Passive bridge keeps only bounded current-tab/video/language/track state in Chrome session storage. Successful transcripts are stored in the existing local positive cache for up to 30 days; failed or no-caption results are not cached. DigestDock does not automatically retry a failed page caption request.
 
 ### Supadata
 
-For a new or expired YouTube transcript cache entry, Supadata is the mainline transcript-body provider. A saved key is not sufficient to call it: the side panel explains the third-party request and requires you to confirm that video attempt. Only after that click may DigestDock send the canonical watch URL to `https://api.supadata.ai` with your key. Consent is not stored as a standing preference. Clear login, age, membership, region, or unavailable states stop before the provider request. DigestDock forces `mode=native`, requesting an existing transcript and timestamps rather than generated audio transcription. A Supadata key is not required to save Settings or use Bilibili, but it is required for new YouTube transcripts.
+Supadata is a hidden, optional fallback. It is not shown on the first cache/Passive miss; it may appear only after the user enables YouTube CC and the explicit free retry still misses. A saved key is not sufficient to call it: the side panel explains the third-party request and requires confirmation for that video attempt. Only after that click may DigestDock send the canonical watch URL to `https://api.supadata.ai` with the key. Consent is not stored as a standing preference. Clear no-caption, login, age, membership, region, unavailable, or changed-page states stop before the provider request. DigestDock forces `mode=native`, requesting an existing transcript and timestamps rather than generated audio transcription. A Supadata key is not required to save Settings, use the free YouTube route, or use Bilibili.
 
 ### Bilibili
 
@@ -59,7 +61,7 @@ You select one provider from a preset list and provide that provider's API key; 
 
 The picker also shows a disabled Tencent Hunyuan Translation entry with its bundled official icon. It has no host permission and cannot receive or use a key because the official documentation does not yet verify `hunyuan-translation-lite` on the extension's single-key OpenAI-compatible route. DigestDock does not guess that configuration.
 
-Requests go directly from the extension to Bilibili, Supadata, or your selected AI provider. Supadata and the AI provider are authenticated with the keys you supply, while Bilibili uses the browser's current Bilibili session. YouTube receives the normal page activity and read-only extension page interaction, but DigestDock does not make a direct YouTube transcript-body request on the mainline. DigestDock's developer does not proxy or receive these requests.
+Requests go directly from the extension to Bilibili, explicitly authorized Supadata, or your selected AI provider. On YouTube, the automatic free route only observes a caption response the page already requested after the user enables CC. Supadata and the AI provider are authenticated with the keys you supply; Bilibili uses the browser's current Bilibili session. DigestDock's developer does not proxy or receive these requests.
 
 YouTube, Bilibili, Supadata, and your selected AI provider process data under their own terms, privacy policies, retention practices, and account settings. Do not send confidential, personal, or regulated content unless their terms and your obligations permit it.
 
@@ -72,6 +74,7 @@ DigestDock uses Chrome's local extension storage, not a DigestDock cloud service
 - Recent transcript, digest, and per-segment translation cache entries are stored
   locally. The cache is limited to 20 videos, and entries older than 30 days are
   removed when the side panel opens.
+- Bounded Passive observation state is stored only in Chrome session storage and is removed with the browser session or explicit cleanup.
 - Compact overview records are stored separately from the much larger transcript
   cache and are limited to 100 videos. Each record contains the media identity,
   transcript fingerprint, language, generated overview, and local timestamp; it
@@ -154,7 +157,7 @@ DigestDock uses Chrome permissions for these purposes:
   own entry and record-size limits.
 - `tabs`: identify and interact with the active supported video tab.
 - `scripting`: coordinate the extension's YouTube and Bilibili page controls.
-- YouTube host access: read the active video's URL, limited metadata, source language, and access status; operate page controls; and provide timestamp controls. It is not used for a direct transcript-body request on the mainline.
+- YouTube host access: read the active video's URL, limited metadata, source language, and access status; observe a page-issued timedtext body without its signed URL; show the CC retry guidance; and provide timestamp controls. The retained Active/Panel experiment files are not product routes and are excluded from the candidate release allowlist.
 - Bilibili and Bilibili subtitle-CDN host access: resolve the current part, read an existing subtitle track, and provide timestamp controls without requesting cookie values.
 - Supadata host access: retrieve a native YouTube transcript only after the user explicitly confirms that video attempt; clear access restrictions and unavailable videos stop before the request.
 - AI provider host access: provide AI overviews, explanations, translation, and note polishing through the provider you select. One fixed origin is granted per selectable provider: DeepSeek (`api.deepseek.com`), Zhipu GLM (`open.bigmodel.cn`), Alibaba Bailian Qwen (`dashscope.aliyuncs.com`), SiliconFlow (`api.siliconflow.cn`), and Fireworks (`api.fireworks.ai`).

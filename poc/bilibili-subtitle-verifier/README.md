@@ -28,7 +28,7 @@
 1. 在 Chrome 登录 B 站，并打开一个带“字幕”按钮的标准 BV 视频。
 2. 打开 `chrome://extensions`，启用开发者模式。
 3. 点击“加载已解压的扩展程序”，选择本目录：
-   `/Users/wangchao/Documents/youtube-digest-bilibili-subtitle-poc/poc/bilibili-subtitle-verifier`
+   `/Users/wangchao/Documents/061-DigestDock/worktrees/transcript-source-comparison-v2/poc/bilibili-subtitle-verifier`
 4. 回到视频页，点击工具栏中的 `Bilibili Subtitle Verifier`。
 5. 检查弹窗是否显示当前分P、字幕轨、内容键、有效片段数和前 8 条样本。
 
