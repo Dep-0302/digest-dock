@@ -3509,11 +3509,11 @@ async function pollTranscriptJob(
 
 /**
  * Parses JSON returned by an LLM, tolerating the small mistakes they sometimes
- * make. Some models occasionally emit a trailing
- * comma before a ] or }, or wraps the JSON in prose / code fences. Plain
- * JSON.parse throws on those, which is what caused the "Unexpected token ']'"
- * error on the Overview tab. This function strips fences, isolates the outer
- * JSON object, removes trailing commas, and only then parses.
+ * make. Some models occasionally emit a trailing comma before a ] or }, wrap
+ * the JSON in prose / code fences, or place a literal control character inside
+ * a quoted value. Plain JSON.parse throws on those, which is what caused the
+ * Overview tab errors. This function strips fences, isolates the outer JSON
+ * object, and applies only those bounded repairs before parsing again.
  *
  * @param {string} text - The raw text from the model
  * @returns {Object} - The parsed object (throws if still unparseable)
@@ -3535,10 +3535,53 @@ function parseLooseJson(text) {
 
   try {
     return JSON.parse(cleaned);
-  } catch (firstError) {
-    // Most common LLM slip: a trailing comma right before a } or ].
-    // e.g. ["a", "b", ]  ->  ["a", "b" ]
-    const repaired = cleaned.replace(/,(\s*[}\]])/g, "$1");
+  } catch (_firstError) {
+    // Common LLM slips: a trailing comma before a closing delimiter, or a raw
+    // newline/tab inside a quoted value. Keep both repairs string-aware so
+    // quoted text such as `,}` is never mistaken for JSON syntax.
+    let repaired = "";
+    let inString = false;
+    let escaped = false;
+    for (let index = 0; index < cleaned.length; index += 1) {
+      const character = cleaned[index];
+      if (!inString) {
+        if (character === ",") {
+          let nextIndex = index + 1;
+          while (nextIndex < cleaned.length && /\s/.test(cleaned[nextIndex])) {
+            nextIndex += 1;
+          }
+          if (cleaned[nextIndex] === "}" || cleaned[nextIndex] === "]") {
+            continue;
+          }
+        }
+        repaired += character;
+        if (character === '"') inString = true;
+        continue;
+      }
+      const codeUnit = character.charCodeAt(0);
+      if (codeUnit <= 0x1f) {
+        const unicodeEscape = `u${codeUnit.toString(16).padStart(4, "0")}`;
+        repaired += escaped ? unicodeEscape : `\\${unicodeEscape}`;
+        escaped = false;
+        continue;
+      }
+      if (escaped) {
+        repaired += character;
+        escaped = false;
+        continue;
+      }
+      if (character === "\\") {
+        repaired += character;
+        escaped = true;
+        continue;
+      }
+      if (character === '"') {
+        repaired += character;
+        inString = false;
+        continue;
+      }
+      repaired += character;
+    }
     return JSON.parse(repaired);
   }
 }

@@ -7457,6 +7457,61 @@ test("overview analysis validation builds the v3 Chinese-base schema", () => {
   assert.equal(detected.sourceLanguage, "ja");
 });
 
+test("overview repairs raw control characters inside model JSON strings", async () => {
+  const malformedContent = `{
+    "detectedSourceLanguage": "en",
+    "chapters": [{
+      "titleZh": "开场",
+      "summaryZh": "第一行,}
+第二行\t补充",
+      "timestampSeconds": 0
+    }],
+    "keyQuotes": [{
+      "quoteOriginal": "He said \\"hello\\".\\nEscaped line.\\tTabbed.
+Raw line.",
+      "quoteZh": "你好，\r
+世界。",
+      "timestampSeconds": 0
+    }],
+    "keyMoments": [0],
+  }`;
+  let providerCalls = 0;
+  const background = loadBackgroundHelpers({
+    fetchImpl: async (url) => {
+      if (url.startsWith("chrome-extension://")) {
+        return { ok: true, text: async () => read("prompts/analysis.md") };
+      }
+      providerCalls += 1;
+      return streamingResponse([
+        encode(JSON.stringify({
+          choices: [{ message: { content: malformedContent } }],
+        })),
+      ]);
+    },
+  });
+
+  const result = await background.handleAnalyzeTranscript(
+    "[0:00] Hello world.",
+    "Example video",
+    "Example channel",
+    "Example description",
+    60,
+    "en",
+  );
+
+  assert.equal(result.success, true);
+  assert.equal(providerCalls, 1, "local repair does not spend a retry");
+  assert.equal(
+    result.analysis.chapters[0].summaryZh,
+    "第一行,}\n第二行\t补充",
+  );
+  assert.equal(
+    result.analysis.keyQuotes[0].quoteOriginal,
+    'He said "hello".\nEscaped line.\tTabbed.\nRaw line.',
+  );
+  assert.equal(result.analysis.keyQuotes[0].quoteZh, "你好，\r\n世界。");
+});
+
 test("overview generates Chinese first and translates chapters to the source language on demand", async () => {
   const requests = [];
   const background = loadBackgroundHelpers({
