@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 2,
+  "runId": "panel-dqw4w9wgxcq-20260826-1",
+  "requestId": "panel-dqw4w9wgxcq-20260826-1",
+  "startedAt": "2026-08-26T12:46:18Z",
+  "providerId": "youtube-panel",
+  "providerVariant": "manual-rendered-panel",
+  "videoId": "dQw4w9WgXcQ",
+  "category": "manual-caption-scrollable",
+  "status": "success",
+  "elapsedMs": null,
+  "language": "en",
+  "languageEvidence": "inferred",
+  "segmentCount": 24,
+  "characterCount": 2066,
+  "firstStart": 1,
+  "lastStart": 203,
+  "errorCode": null,
+  "diagnostics": {
+    "providerInitiated": {
+      "youtubePlayer": 0,
+      "youtubeTimedtext": 0,
+      "thirdParty": 0,
+      "loopback": 0
+    },
+    "pageObserved": {
+      "youtubeTimedtext": null
+    }
+  },
+  "manualChecks": {
+    "firstTimestampCompared": false,
+    "lastTimestampCompared": false,
+    "sampleTextComparedWithoutSavingText": false,
+    "spaSecondVideoRejectedOldResult": false
+  },
+  "notes": [
+    "clean-success",
+    "manual-review-needed"
+  ]
+}

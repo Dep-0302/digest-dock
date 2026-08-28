@@ -60,6 +60,22 @@ class LocalHelperContractTests(unittest.TestCase):
                 "en",
             )
 
+    def test_reads_raw_rows_from_the_pinned_transcript_object(self):
+        class FixtureTranscript:
+            def to_raw_data(self):
+                return [{"text": "Fixture", "start": 0, "duration": 1}]
+
+            def __iter__(self):
+                raise AssertionError("snippets must not be converted individually")
+
+        self.assertEqual(
+            SERVER.transcript_rows(FixtureTranscript()),
+            [{"text": "Fixture", "start": 0, "duration": 1}],
+        )
+        with self.assertRaises(SERVER.HelperError) as context:
+            SERVER.transcript_rows([{"text": "old shape"}])
+        self.assertEqual(context.exception.code, "INVALID_RESPONSE")
+
     def test_process_request_accepts_an_injected_fixture_provider(self):
         def fixture_provider(request):
             self.assertEqual(request["providerId"], "local-helper")
@@ -141,6 +157,7 @@ class LocalHelperHttpTests(unittest.TestCase):
                 "Content-Type": "application/json",
                 "Content-Length": str(len(body)),
                 "Origin": origin if origin is not None else self.origin,
+                "X-DigestDock-Helper-Origin": self.origin,
                 "X-DigestDock-Helper-Token": token if token is not None else self.token,
             },
         )
@@ -173,6 +190,48 @@ class LocalHelperHttpTests(unittest.TestCase):
             "/health",
             headers={
                 "Origin": self.origin,
+                "X-DigestDock-Helper-Origin": self.origin,
+                "X-DigestDock-Helper-Token": self.token,
+            },
+        )
+        response = connection.getresponse()
+        payload = json.loads(response.read().decode("utf-8"))
+        connection.close()
+        self.assertEqual(response.status, 200)
+        self.assertEqual(payload["networkRequests"], 0)
+
+    def test_preflight_allows_health_get_and_transcript_post(self):
+        connection = http.client.HTTPConnection(
+            "127.0.0.1", self.httpd.server_port, timeout=2
+        )
+        connection.request(
+            "OPTIONS",
+            "/health",
+            headers={
+                "Origin": self.origin,
+                "Access-Control-Request-Method": "GET",
+                "Access-Control-Request-Headers": "X-DigestDock-Helper-Token",
+            },
+        )
+        response = connection.getresponse()
+        response.read()
+        connection.close()
+        self.assertEqual(response.status, 204)
+        methods = response.getheader("Access-Control-Allow-Methods") or ""
+        self.assertIn("GET", methods)
+        self.assertIn("POST", methods)
+        headers = response.getheader("Access-Control-Allow-Headers") or ""
+        self.assertIn("X-DigestDock-Helper-Origin", headers)
+
+    def test_health_accepts_exact_declared_extension_when_standard_origin_is_absent(self):
+        connection = http.client.HTTPConnection(
+            "127.0.0.1", self.httpd.server_port, timeout=2
+        )
+        connection.request(
+            "GET",
+            "/health",
+            headers={
+                "X-DigestDock-Helper-Origin": self.origin,
                 "X-DigestDock-Helper-Token": self.token,
             },
         )

@@ -20,6 +20,7 @@ test("active provider preserves identity and reports request classes", async () 
     youtubeAdapter: {
       async fetchTranscript(input, options) {
         assert.equal(input.videoId, "jNQXAC9IVRw");
+        assert.equal(Object.hasOwn(input, "captionTracks"), false);
         assert.equal(typeof options.fetchImpl, "function");
         await options.fetchImpl(
           "https://www.youtube.com/api/timedtext?v=jNQXAC9IVRw",
@@ -52,6 +53,27 @@ test("active provider preserves identity and reports request classes", async () 
     thirdParty: 0,
     loopback: 0,
   });
+});
+
+test("active provider forwards explicit page track evidence only when supplied", async () => {
+  let received = null;
+  const adapter = active.createAdapter({
+    youtubeAdapter: {
+      async fetchTranscript(input) {
+        received = input;
+        return {
+          language: "en",
+          transcript: [{ text: "Fixture", start: 0, duration: 1 }],
+          selectedTrack: { language: "en", kind: "manual" },
+          sourceAttempt: "PAGE",
+        };
+      },
+    },
+    fetchImpl: async () => ({ ok: true, status: 200 }),
+  });
+  await adapter.fetchTranscript(request(), { captionTracks: [] });
+  assert.equal(Object.hasOwn(received, "captionTracks"), true);
+  assert.deepEqual(received.captionTracks, []);
 });
 
 test("active provider does not invoke Supadata or another provider after failure", async () => {

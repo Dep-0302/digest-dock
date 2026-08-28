@@ -63,12 +63,17 @@ function mergeSignals(...signals) {
   return AbortSignal.any(active);
 }
 
-export function createAttemptContext(timeoutMs) {
+export function createAttemptContext(timeoutMs, fetchImpl = globalThis.fetch) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(new Error(`attempt timed out after ${timeoutMs} ms`)), timeoutMs);
   const requests = [];
 
   async function trackedFetch(input, init = {}) {
+    if (controller.signal.aborted) {
+      throw controller.signal.reason instanceof Error
+        ? controller.signal.reason
+        : new Error('attempt aborted');
+    }
     const rawUrl = typeof input === 'string' || input instanceof URL ? String(input) : input.url;
     const method = init.method || (typeof input === 'object' && input?.method) || 'GET';
     const requestStarted = performance.now();
@@ -79,7 +84,7 @@ export function createAttemptContext(timeoutMs) {
     };
 
     try {
-      const response = await fetch(input, {
+      const response = await fetchImpl(input, {
         ...init,
         signal: mergeSignals(controller.signal, init.signal)
       });
@@ -89,6 +94,13 @@ export function createAttemptContext(timeoutMs) {
       record.contentType = response.headers.get('content-type');
       const contentLength = finiteNumber(response.headers.get('content-length'));
       record.contentLength = contentLength;
+      if (response.status === 429) {
+        const error = new Error('HTTP 429 rate limited');
+        error.name = 'RateLimitedError';
+        error.status = 429;
+        controller.abort(error);
+        throw error;
+      }
       requests.push(record);
       return response;
     } catch (error) {

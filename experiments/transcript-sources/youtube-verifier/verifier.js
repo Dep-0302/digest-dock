@@ -7,7 +7,7 @@
  */
 var YOUTUBE_SUBTITLE_VERIFIER = (() => {
   const PLAYER_ENDPOINT =
-    "https://youtubei.googleapis.com/youtubei/v1/player?prettyPrint=false";
+    "https://www.youtube.com/youtubei/v1/player?prettyPrint=false";
   const DEFAULT_TIMEOUT_MS = 15_000;
   const DEFAULT_MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
   const TRUSTED_CAPTION_HOSTS = Object.freeze(["www.youtube.com"]);
@@ -368,13 +368,21 @@ var YOUTUBE_SUBTITLE_VERIFIER = (() => {
         referrerPolicy: "no-referrer",
         ...(controller ? { signal: controller.signal } : {}),
       });
+      const status = Number(response?.status) || 0;
+      if (status === 429) {
+        fail(
+          "RATE_LIMITED",
+          "YouTube 暂时限制了字幕验证请求，已在读取响应体前停止。",
+          { status: 429 },
+        );
+      }
       const { text, bytes } = await readResponseText(
         response,
         maxResponseBytes,
       );
       return {
         ok: Boolean(response?.ok),
-        status: Number(response?.status) || 0,
+        status,
         text,
         bytes,
         elapsedMs: Date.now() - started,
@@ -506,6 +514,14 @@ var YOUTUBE_SUBTITLE_VERIFIER = (() => {
             elapsedMs: playerResponse.elapsedMs,
           };
           if (!playerResponse.ok) {
+            if (playerResponse.status === 429) {
+              attempt.outcome = "rate-limited";
+              fail(
+                "RATE_LIMITED",
+                "YouTube 暂时限制了字幕验证请求，已立即停止后续尝试。",
+                { status: 429, attempts },
+              );
+            }
             attempt.outcome = "player-http-error";
             continue;
           }
@@ -567,6 +583,14 @@ var YOUTUBE_SUBTITLE_VERIFIER = (() => {
                   elapsedMs: captionResponse.elapsedMs,
                 };
                 attempt.formats.push(formatAttempt);
+                if (captionResponse.status === 429) {
+                  attempt.outcome = "rate-limited";
+                  fail(
+                    "RATE_LIMITED",
+                    "YouTube 暂时限制了字幕验证请求，已立即停止后续尝试。",
+                    { status: 429, attempts },
+                  );
+                }
                 if (!captionResponse.ok || !captionResponse.text.trim()) continue;
                 let transcript;
                 try {
@@ -610,6 +634,11 @@ var YOUTUBE_SUBTITLE_VERIFIER = (() => {
                   },
                 };
               } catch (error) {
+                if (error?.code === "RATE_LIMITED") {
+                  attempt.outcome = "rate-limited";
+                  error.attempts = attempts;
+                  throw error;
+                }
                 attempt.formats.push({
                   format: format.id,
                   trackKind: selectedTrack.kind,
@@ -620,6 +649,12 @@ var YOUTUBE_SUBTITLE_VERIFIER = (() => {
           }
           attempt.outcome = "empty-caption-body";
         } catch (error) {
+          if (error?.code === "RATE_LIMITED") {
+            attempt.outcome = "rate-limited";
+            attempt.error = safeAttemptError(error);
+            error.attempts = attempts;
+            throw error;
+          }
           attempt.outcome = "client-error";
           attempt.error = safeAttemptError(error);
         }
@@ -690,6 +725,10 @@ var YOUTUBE_SUBTITLE_VERIFIER = (() => {
     diagnosticsFromError,
   };
 })();
+
+if (typeof chrome !== "undefined" && chrome?.runtime) {
+  globalThis.YOUTUBE_SUBTITLE_VERIFIER = YOUTUBE_SUBTITLE_VERIFIER;
+}
 
 if (typeof module !== "undefined" && module.exports) {
   module.exports = YOUTUBE_SUBTITLE_VERIFIER;

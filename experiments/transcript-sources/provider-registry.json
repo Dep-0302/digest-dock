@@ -10,7 +10,12 @@
       "entrypoint": "passive-capture/extension/manifest.json",
       "adapter": "passive-capture/provider-adapter.js",
       "defaultVariant": null,
-      "implementation": "experiment"
+      "implementation": "experiment",
+      "disposition": "retain-primary",
+      "evidenceLevel": "live-mv3",
+      "acceptedVariants": ["default"],
+      "rejectedVariants": [],
+      "lastValidatedAt": "2026-08-26"
     },
     {
       "id": "youtube-active",
@@ -21,7 +26,12 @@
       "adapter": "youtube-active/adapter.js",
       "source": "youtube-active/youtube-transcript.js",
       "defaultVariant": null,
-      "implementation": "experiment-wrapper"
+      "implementation": "experiment-wrapper",
+      "disposition": "evidence-only",
+      "evidenceLevel": "live-mv3",
+      "acceptedVariants": ["isolated-tab"],
+      "rejectedVariants": ["popup-origin", "googleapis-popup-origin"],
+      "lastValidatedAt": "2026-08-27"
     },
     {
       "id": "youtube-panel",
@@ -31,7 +41,12 @@
       "entrypoint": "browser-panel/manual-probe/manifest.json",
       "adapter": "browser-panel/provider-adapter.js",
       "defaultVariant": "manual-rendered-panel",
-      "implementation": "existing-experiment"
+      "implementation": "existing-experiment",
+      "disposition": "evidence-only",
+      "evidenceLevel": "live-mv3",
+      "acceptedVariants": ["manual-rendered-panel"],
+      "rejectedVariants": [],
+      "lastValidatedAt": "2026-08-26"
     },
     {
       "id": "supadata-native",
@@ -41,7 +56,12 @@
       "entrypoint": "supadata-native/manual-probe/manifest.json",
       "adapter": "supadata-native/adapter.js",
       "defaultVariant": "mode-native",
-      "implementation": "experiment-wrapper"
+      "implementation": "experiment-wrapper",
+      "disposition": "removed-from-live-shortlist",
+      "evidenceLevel": "fixture-only",
+      "acceptedVariants": [],
+      "rejectedVariants": [],
+      "lastValidatedAt": "2026-08-26"
     },
     {
       "id": "node-libraries",
@@ -51,7 +71,16 @@
       "entrypoint": "node-libraries/src/run-comparison.mjs",
       "adapter": "node-libraries/src/contract-adapter.mjs",
       "defaultVariant": "youtube-transcript-plus",
-      "implementation": "existing-experiment"
+      "implementation": "existing-experiment",
+      "disposition": "evidence-only",
+      "evidenceLevel": "live-local",
+      "acceptedVariants": ["youtube-transcript-plus"],
+      "rejectedVariants": [
+        "youtube-caption-extractor",
+        "youtube-transcript",
+        "youtubei.js"
+      ],
+      "lastValidatedAt": "2026-08-27"
     },
     {
       "id": "local-helper",
@@ -61,7 +90,12 @@
       "entrypoint": "local-helper/extension/manifest.json",
       "adapter": "local-helper/client.js",
       "defaultVariant": "youtube-transcript-api",
-      "implementation": "experiment"
+      "implementation": "experiment",
+      "disposition": "evidence-only",
+      "evidenceLevel": "live-local-plus-mv3-health",
+      "acceptedVariants": ["youtube-transcript-api"],
+      "rejectedVariants": [],
+      "lastValidatedAt": "2026-08-27"
     },
     {
       "id": "hosted-api-slot",
@@ -71,7 +105,12 @@
       "entrypoint": "hosted-api-slot/adapter.js",
       "adapter": "hosted-api-slot/adapter.js",
       "defaultVariant": null,
-      "implementation": "contract-only"
+      "implementation": "contract-only",
+      "disposition": "removed-from-live-shortlist",
+      "evidenceLevel": "fixture-only",
+      "acceptedVariants": [],
+      "rejectedVariants": [],
+      "lastValidatedAt": "2026-08-26"
     }
   ]
 }

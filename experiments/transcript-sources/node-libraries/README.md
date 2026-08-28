@@ -32,6 +32,8 @@ RESULT_NAME=my-run npm run report
 
 `CASES` 和 `CANDIDATES` 都是逗号分隔的精确 ID。`RESULT_NAME` 默认是 `latest`；使用其他小写名称可以保存并列结果，例如 `results/language-policy.json` 和 `results/language-policy.md`。`latest` 的报告文件固定为 `results/report.md`。
 
+探针在任一请求首次收到 HTTP 429 时会中止当前 transport，并立即跳出剩余矩阵；结果环境会记录 `stoppedEarly: true` 与 `stopReason: rate-limited`。这仍不等于可以高频复跑，建议继续保持单 case、单 candidate 的小矩阵。
+
 ## 读结果时的边界
 
 - “正样本成功率”只统计语料中预期有字幕的样本。

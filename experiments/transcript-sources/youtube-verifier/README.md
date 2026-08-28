@@ -14,8 +14,12 @@
 ## 安全边界
 
 - 仅支持标准 `https://www.youtube.com/watch?v=...` 页面。
-- 只请求 `youtubei.googleapis.com/youtubei/v1/player` 和 `www.youtube.com/api/timedtext`。
-- 所有请求均为 `credentials: omit`；不声明或调用 Cookies/Storage API。
+- 只请求 `www.youtube.com/youtubei/v1/player` 和 `www.youtube.com/api/timedtext`。
+- active 算法注入当前 YouTube 标签页的 `ISOLATED` world 执行，避免扩展弹窗
+  Origin 被 player 端点统一拒绝；所有请求仍为 `credentials: omit`，不声明或
+  调用 Cookies/Storage API，也不进入页面的 MAIN world。
+- 扩展只声明 `activeTab` 与 `scripting`；不保留永久 `host_permissions`。
+  用户点击 action 后获得的临时当前标签权限足以注入，同源请求由该标签页发出。
 - 不设置浏览器禁止伪造的 `User-Agent` 或 `Origin`。
 - 每次请求 15 秒超时、8 MiB 上限。
 - 字幕 URL、查询串、签名和 Token 仅在函数局部使用，不进入弹窗诊断、缓存或存储。
@@ -28,11 +32,11 @@
 3. 选择本目录：
 
    ```text
-   /Users/wangchao/Documents/youtube-digest-transcript-source-comparison-v2/experiments/transcript-sources/youtube-verifier
+   /Users/wangchao/Documents/061-DigestDock/worktrees/transcript-source-comparison-v2/experiments/transcript-sources/youtube-verifier
    ```
 
 4. 打开一个标准 YouTube watch 页面。
-5. 点击工具栏中的 `YouTube Subtitle Verifier`。弹窗会自动运行，也可以调整语言和轨道策略后重试。
+5. 点击工具栏中的 `YouTube Subtitle Verifier`。弹窗不会自动发请求；确认语言和轨道策略后，点击“验证当前视频”才会在当前标签页的隔离环境运行一次。
 6. 点击“复制”，把脱敏诊断结果带回本任务。
 
 ## 第一轮三例 smoke

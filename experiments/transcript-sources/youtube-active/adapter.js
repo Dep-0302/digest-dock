@@ -54,16 +54,17 @@ var YOUTUBE_ACTIVE_PROVIDER = (() => {
         return baseFetch(resource, init);
       };
       try {
+        const youtubeInput = {
+          videoId,
+          pagePlayability: context.pagePlayability || "",
+          preferredLanguage: CONTRACT.normalizeLanguage(input?.preferredLanguage),
+          kind: input?.trackKind || "manual-first",
+        };
+        if (Array.isArray(context.captionTracks)) {
+          youtubeInput.captionTracks = context.captionTracks;
+        }
         const result = await youtubeAdapter.fetchTranscript(
-          {
-            videoId,
-            captionTracks: Array.isArray(context.captionTracks)
-              ? context.captionTracks
-              : [],
-            pagePlayability: context.pagePlayability || "",
-            preferredLanguage: CONTRACT.normalizeLanguage(input?.preferredLanguage),
-            kind: input?.trackKind || "manual-first",
-          },
+          youtubeInput,
           { fetchImpl: countedFetch },
         );
         return CONTRACT.createSuccessResult({

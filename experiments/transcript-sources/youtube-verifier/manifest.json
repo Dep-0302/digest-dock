@@ -4,11 +4,7 @@
   "version": "0.1.0",
   "minimum_chrome_version": "116",
   "description": "只读验证当前 YouTube 视频能否通过无 Key 的非 WEB client 取得字幕正文。",
-  "permissions": ["activeTab"],
-  "host_permissions": [
-    "https://www.youtube.com/*",
-    "https://youtubei.googleapis.com/*"
-  ],
+  "permissions": ["activeTab", "scripting"],
   "action": {
     "default_title": "验证当前 YouTube 字幕",
     "default_popup": "popup.html"

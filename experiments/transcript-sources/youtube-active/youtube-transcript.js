@@ -102,6 +102,7 @@ var YOUTUBE_TRANSCRIPT_ADAPTER = (() => {
       super(message);
       this.name = "YouTubeTranscriptError";
       this.code = code;
+      if (Number.isInteger(details.status)) this.status = details.status;
       if (Array.isArray(details.attempts)) this.attempts = details.attempts;
     }
   }
@@ -487,10 +488,18 @@ var YOUTUBE_TRANSCRIPT_ADAPTER = (() => {
         referrerPolicy: "no-referrer",
         ...(controller ? { signal: controller.signal } : {}),
       });
+      const status = Number(response?.status) || 0;
+      if (status === 429) {
+        fail(
+          "RATE_LIMITED",
+          "YouTube rate limited the request; stopped before reading its body.",
+          { status: 429 },
+        );
+      }
       const readable = await readResponseText(response, maxResponseBytes);
       return {
         ok: Boolean(response?.ok),
-        status: Number(response?.status) || 0,
+        status,
         text: readable.text,
         bytes: readable.bytes,
         elapsedMs: Date.now() - startedAt,
@@ -618,6 +627,9 @@ var YOUTUBE_TRANSCRIPT_ADAPTER = (() => {
             error instanceof YouTubeTranscriptError &&
             error.code === "RATE_LIMITED"
           ) {
+            formatAttempt.error = "RATE_LIMITED";
+            attempt.outcome = "rate-limited";
+            error.attempts = stats.attempts;
             throw error;
           }
           formatAttempt.error = safeErrorCode(error);
@@ -806,6 +818,15 @@ var YOUTUBE_TRANSCRIPT_ADAPTER = (() => {
             elapsedMs: playerResponse.elapsedMs,
           };
         } catch (error) {
+          if (
+            error instanceof YouTubeTranscriptError &&
+            error.code === "RATE_LIMITED"
+          ) {
+            attempt.error = "RATE_LIMITED";
+            attempt.outcome = "rate-limited";
+            error.attempts = stats.attempts;
+            throw error;
+          }
           attempt.error = safeErrorCode(error);
           attempt.outcome = "player-request-failed";
           continue;

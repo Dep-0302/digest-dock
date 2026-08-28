@@ -10,12 +10,19 @@ async function context() {
   if (!/^[0-9A-Za-z_-]{11}$/.test(videoId || "")) {
     throw new Error("请先切换到标准 YouTube 视频页。");
   }
-  const player = await chrome.scripting.executeScript({
+  const identity = await chrome.scripting.executeScript({
     target: { tabId: tab.id },
     world: "MAIN",
-    func: () => document.querySelector("#movie_player")?.getPlayerResponse?.()?.videoDetails?.videoId || null,
+    func: () => ({
+      playerId:
+        document.querySelector("#movie_player")
+          ?.getPlayerResponse?.()
+          ?.videoDetails?.videoId || null,
+      flexVideoId:
+        document.querySelector("ytd-watch-flexy")?.getAttribute("video-id") || null,
+    }),
   });
-  if (player?.[0]?.result !== videoId) {
+  if (!PANEL_VIDEO_IDENTITY.matches(videoId, identity?.[0]?.result)) {
     throw new Error("播放器仍在切换视频，请等待稳定后重试。");
   }
   await chrome.scripting.executeScript({

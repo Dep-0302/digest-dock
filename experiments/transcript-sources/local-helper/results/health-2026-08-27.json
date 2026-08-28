@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "observedAt": "2026-08-27T06:41:21Z",
+  "providerId": "local-helper",
+  "providerVariant": "youtube-transcript-api",
+  "surface": "chrome-extension-loopback-health",
+  "extensionId": "adncjncklfgbkjolacnbdjpbaciefahi",
+  "endpoint": "http://127.0.0.1:8765/health",
+  "allowLive": false,
+  "ok": true,
+  "networkRequests": 0,
+  "authentication": {
+    "tokenSentInHeader": true,
+    "tokenStored": false,
+    "standardOriginPresent": false,
+    "declaredOriginMatches": true
+  },
+  "serverStoppedAfterCheck": true
+}

@@ -122,7 +122,7 @@ test("falls through clients until a matching track yields non-empty parseable te
   const calls = [];
   const fetchImpl = async (url, options) => {
     calls.push({ url: String(url), options });
-    if (String(url).includes("youtubei.googleapis.com")) {
+    if (String(url).includes("/youtubei/v1/player")) {
       const client = JSON.parse(options.body).context.client.clientName;
       return response({
         playabilityStatus: { status: "OK" },
@@ -172,7 +172,7 @@ test("falls through clients until a matching track yields non-empty parseable te
 
 test("manual-first falls back to same-language ASR only after the manual body is empty", async () => {
   const fetchImpl = async (url, options) => {
-    if (String(url).includes("youtubei.googleapis.com")) {
+    if (String(url).includes("/youtubei/v1/player")) {
       return response({
         playabilityStatus: { status: "OK" },
         captions: {
@@ -288,7 +288,7 @@ test("does not misclassify transport and non-playable failures as no transcript"
 
 test("bounded fetch enforces declared size and timeout while omitting credentials", async () => {
   await assert.rejects(
-    verifier.fetchBoundedText("https://youtubei.googleapis.com/youtubei/v1/player", {
+    verifier.fetchBoundedText("https://www.youtube.com/youtubei/v1/player", {
       fetchImpl: async () => response("small", 200, { "content-length": "999" }),
       timeoutMs: 0,
       maxResponseBytes: 10,
@@ -298,7 +298,7 @@ test("bounded fetch enforces declared size and timeout while omitting credential
 
   const chunks = [new Uint8Array(8), new Uint8Array(8)];
   await assert.rejects(
-    verifier.fetchBoundedText("https://youtubei.googleapis.com/youtubei/v1/player", {
+    verifier.fetchBoundedText("https://www.youtube.com/youtubei/v1/player", {
       fetchImpl: async () => ({
         ok: true,
         status: 200,
@@ -319,7 +319,7 @@ test("bounded fetch enforces declared size and timeout while omitting credential
   );
 
   await assert.rejects(
-    verifier.fetchBoundedText("https://youtubei.googleapis.com/youtubei/v1/player", {
+    verifier.fetchBoundedText("https://www.youtube.com/youtubei/v1/player", {
       fetchImpl: (_url, options) =>
         new Promise((_resolve, reject) => {
           options.signal.addEventListener("abort", () => {
@@ -335,16 +335,93 @@ test("bounded fetch enforces declared size and timeout while omitting credential
   );
 });
 
+test("stops immediately when a player request is rate limited", async () => {
+  let calls = 0;
+  let bodyReads = 0;
+  const adapter = verifier.create({
+    fetchImpl: async () => {
+      calls += 1;
+      if (calls === 1) {
+        return {
+          ok: false,
+          status: 429,
+          headers: { get: (name) => name === "content-length" ? "999" : null },
+          text: async () => {
+            bodyReads += 1;
+            throw new Error("429 body must not be read");
+          },
+        };
+      }
+      return response({ playabilityStatus: { status: "OK" } });
+    },
+    clients: customClients,
+    timeoutMs: 0,
+    maxResponseBytes: 10,
+  });
+
+  await assert.rejects(
+    adapter.verifyVideo("https://www.youtube.com/watch?v=jNQXAC9IVRw"),
+    (error) => error.code === "RATE_LIMITED" && error.status === 429,
+  );
+  assert.equal(calls, 1);
+  assert.equal(bodyReads, 0);
+});
+
+test("stops immediately when a timedtext request is rate limited", async () => {
+  let calls = 0;
+  const adapter = verifier.create({
+    fetchImpl: async (url) => {
+      calls += 1;
+      if (String(url).includes("/youtubei/v1/player")) {
+        return response({
+          playabilityStatus: { status: "OK" },
+          captions: {
+            playerCaptionsTracklistRenderer: {
+              captionTracks: [
+                {
+                  languageCode: "en",
+                  vssId: ".en",
+                  baseUrl: "https://www.youtube.com/api/timedtext?v=jNQXAC9IVRw",
+                },
+              ],
+            },
+          },
+        });
+      }
+      return response("rate limited", 429);
+    },
+    clients: customClients,
+    timeoutMs: 0,
+  });
+
+  await assert.rejects(
+    adapter.verifyVideo("https://www.youtube.com/watch?v=jNQXAC9IVRw", {
+      language: "en",
+      mode: "manual",
+    }),
+    (error) => error.code === "RATE_LIMITED" && error.status === 429,
+  );
+  assert.equal(calls, 2);
+});
+
 test("manifest and popup keep permissions and diagnostic persistence minimal", () => {
   const root = path.join(__dirname, "..");
   const manifest = JSON.parse(fs.readFileSync(path.join(root, "manifest.json"), "utf8"));
+  const popupSource = fs.readFileSync(path.join(root, "popup.js"), "utf8");
   const source = ["verifier.js", "popup.js"]
     .map((file) => fs.readFileSync(path.join(root, file), "utf8"))
     .join("\n");
 
-  assert.deepEqual(manifest.permissions, ["activeTab"]);
-  assert.equal(manifest.host_permissions.includes("*://*/*"), false);
+  assert.deepEqual(manifest.permissions, ["activeTab", "scripting"]);
+  assert.equal(manifest.host_permissions, undefined);
+  assert.equal(verifier.PLAYER_ENDPOINT, "https://www.youtube.com/youtubei/v1/player?prettyPrint=false");
+  assert.doesNotMatch(source, /youtubei\.googleapis\.com/);
   assert.doesNotMatch(source, /chrome\.cookies|chrome\.storage|credentials:\s*["']include/);
   assert.doesNotMatch(source, /headers\s*:\s*\{[^}]*["'](?:User-Agent|Origin)["']/s);
   assert.match(source, /credentials:\s*["']omit/);
+  assert.match(popupSource, /world:\s*["']ISOLATED["']/);
+  assert.doesNotMatch(popupSource, /world:\s*["']MAIN["']/);
+  assert.match(popupSource, /segmentCount:\s*result\.transcript\.length/);
+  assert.match(popupSource, /samples:\s*result\.transcript\.slice\(0,\s*5\)/);
+  assert.doesNotMatch(popupSource, /\nrunVerification\(\);\s*$/);
 });

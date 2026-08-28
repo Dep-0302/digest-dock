@@ -1,0 +1,247 @@
+{
+  "schemaVersion": 1,
+  "startedAt": "2026-08-26T07:03:57.882Z",
+  "completedAt": "2026-08-26T07:04:00.077Z",
+  "environment": {
+    "node": "v22.23.1",
+    "platform": "darwin",
+    "architecture": "arm64",
+    "authentication": "signed-out",
+    "apiKeys": false,
+    "cookies": false,
+    "proxy": false,
+    "timeoutMs": 20000,
+    "delayMs": 0,
+    "rounds": 1,
+    "candidateOrderPolicy": "rotated per case and round"
+  },
+  "caseSource": "../corpus/corpus.json",
+  "cases": [
+    {
+      "id": "asr-long-retrieval-divergence",
+      "videoId": "KLDVxx4TqcE",
+      "title": "The Future of Human Intelligence: Education, AI, & Creativity | Sir Ken Robinson (Full Keynote)",
+      "language": "en",
+      "expectedOutcome": "transcript",
+      "expectedLanguage": "en",
+      "corpusFacts": {
+        "durationSeconds": 4345,
+        "captionTrackCount": 1,
+        "trackKind": "asr",
+        "browserPanelResult": "no-transcript",
+        "directTimedtextResult": "empty-body"
+      },
+      "purpose": "Distinguish advertised track discovery from successful transcript-body retrieval."
+    }
+  ],
+  "profiles": {
+    "youtube-caption-extractor": {
+      "package": "youtube-caption-extractor",
+      "source": "https://github.com/devhims/youtube-caption-extractor",
+      "adapter": "getSubtitles({ videoID, lang, fetch })",
+      "languageBehavior": "Defaults to en; prefers manual exact match, then ASR exact match, then falls back to the first track.",
+      "requestStrategy": "Tries IOS, ANDROID_VR, then MWEB player clients until caption tracks are found; downloads json3 timedtext.",
+      "browserFit": "Published entry is CommonJS and upstream recommends server-side use because browser calls face CORS; a bundler/bridge would still be required for the current MV3 extension."
+    },
+    "youtube-transcript": {
+      "package": "youtube-transcript",
+      "source": "https://github.com/Kakulukian/youtube-transcript",
+      "adapter": "fetchTranscript(videoId, { lang, fetch })",
+      "languageBehavior": "Exact language is strict; with no language it takes the first advertised track.",
+      "requestStrategy": "ANDROID InnerTube first, then watch-page fallback; downloads XML timedtext.",
+      "browserFit": "Small ESM/CJS package with a custom fetch hook, but direct MV3 use still needs browser host/CORS validation."
+    },
+    "youtube-transcript-plus": {
+      "package": "youtube-transcript-plus",
+      "source": "https://github.com/ericmmartin/youtube-transcript-plus",
+      "adapter": "fetchTranscript(videoId, { lang, videoFetch, playerFetch, transcriptFetch })",
+      "languageBehavior": "Exact language is strict; with no language it takes the first advertised track; listLanguages exposes track kind.",
+      "requestStrategy": "Watch page for API key, ANDROID player request, then XML timedtext; optional retry/cache hooks are disabled in this benchmark.",
+      "browserFit": "Node >=20 package; no browser export or ready-to-load MV3 bundle is declared."
+    },
+    "youtubei.js": {
+      "package": "youtubei.js",
+      "source": "https://github.com/LuanRT/YouTube.js",
+      "adapter": "Innertube.create() -> getInfo(videoId) -> getTranscript()",
+      "languageBehavior": "Transcript language selection uses human-readable menu labels rather than BCP-47 codes.",
+      "requestStrategy": "Creates an Innertube session, requests video info/next data, then calls get_transcript.",
+      "browserFit": "Ships a browser bundle, but upstream documentation requires requests to go through a server proxy. This is not equivalent to dropping the bundle into the current MV3 extension."
+    }
+  },
+  "packageMetadata": {
+    "youtube-caption-extractor": {
+      "version": "1.10.2",
+      "license": "MIT",
+      "nodeEngine": ">=18.0.0",
+      "directRuntimeDependencies": [
+        "he",
+        "striptags"
+      ],
+      "transitivePackageCountIncludingSelf": 3,
+      "packageBytes": 31103,
+      "installedFootprintBytes": 173101
+    },
+    "youtube-transcript": {
+      "version": "1.3.1",
+      "license": "MIT",
+      "nodeEngine": ">=18.0.0",
+      "directRuntimeDependencies": [],
+      "transitivePackageCountIncludingSelf": 1,
+      "packageBytes": 43825,
+      "installedFootprintBytes": 43825
+    },
+    "youtube-transcript-plus": {
+      "version": "2.0.1",
+      "license": "MIT",
+      "nodeEngine": ">=20.0.0",
+      "directRuntimeDependencies": [],
+      "transitivePackageCountIncludingSelf": 1,
+      "packageBytes": 102957,
+      "installedFootprintBytes": 102957
+    },
+    "youtubei.js": {
+      "version": "17.2.0",
+      "license": "MIT",
+      "nodeEngine": null,
+      "directRuntimeDependencies": [
+        "@bufbuild/protobuf",
+        "fflate",
+        "meriyah"
+      ],
+      "transitivePackageCountIncludingSelf": 4,
+      "packageBytes": 15651706,
+      "installedFootprintBytes": 19777959,
+      "browserBundleBytes": 1544481,
+      "browserBundleGzipBytes": 256849
+    }
+  },
+  "summary": {
+    "youtube-transcript-plus": {
+      "attemptCount": 1,
+      "expectedTranscriptCount": 1,
+      "transcriptSuccessCount": 1,
+      "transcriptSuccessRate": 1,
+      "expectedNoCaptionCount": 0,
+      "correctNoCaptionCount": 0,
+      "noCaptionAccuracy": null,
+      "expectedLanguageUnavailableCount": 0,
+      "correctLanguageUnavailableCount": 0,
+      "languageUnavailableAccuracy": null,
+      "expectationMetCount": 1,
+      "errorCount": 0,
+      "medianDurationMs": 2184,
+      "medianSuccessfulDurationMs": 2184,
+      "totalRequestCount": 3,
+      "errorCategories": {}
+    }
+  },
+  "attempts": [
+    {
+      "round": 1,
+      "caseId": "asr-long-retrieval-divergence",
+      "videoId": "KLDVxx4TqcE",
+      "language": "en",
+      "expectedOutcome": "transcript",
+      "candidate": "youtube-transcript-plus",
+      "durationMs": 2184,
+      "segmentSummary": {
+        "segmentCount": 1828,
+        "textCharacterCount": 65545,
+        "contentSha256": "d79e2a57416b877e8fc7a4b7a3af8eb36806f0f06257056e6e197aa901f67fce",
+        "canonicalTextCharacterCount": 63109,
+        "canonicalContentSha256": "f3ee14455aa55fd66d60cafa780dbbc932d5d9bd5aa7091236d64c7b850e4339",
+        "firstRawItemKeys": [
+          "duration",
+          "lang",
+          "offset",
+          "text"
+        ],
+        "normalizedFieldTypes": {
+          "text": "string",
+          "offsetSeconds": "number",
+          "durationSeconds": "number"
+        },
+        "firstOffsetSeconds": 0.56,
+        "maxEndSeconds": 4342.52,
+        "maxDurationSeconds": 10.799,
+        "nonMonotonicOffsets": 0
+      },
+      "outcome": "transcript",
+      "selectedLanguage": "en",
+      "selectionEvidence": "result-lang-field",
+      "contractReport": {
+        "schemaVersion": 2,
+        "providerId": "node-libraries",
+        "providerVariant": "youtube-transcript-plus",
+        "runId": "node-r1-0-youtube-transcript-plus",
+        "requestId": "node-request-1",
+        "videoId": "KLDVxx4TqcE",
+        "status": "success",
+        "elapsedMs": 2184,
+        "language": "en",
+        "languageEvidence": "verified",
+        "segmentCount": 1828,
+        "errorCode": null,
+        "diagnostics": {
+          "requestCounts": {
+            "player": 1,
+            "timedtext": 1
+          }
+        },
+        "context": {
+          "caseId": "asr-long-retrieval-divergence",
+          "expectedOutcome": "transcript",
+          "runIndex": 1
+        },
+        "firstStart": 0.56,
+        "lastStart": 4339.52,
+        "characterCount": 63718
+      },
+      "expectationMet": true,
+      "requests": [
+        {
+          "method": "GET",
+          "endpoint": "watch_page",
+          "url": "https://www.youtube.com/watch",
+          "status": 200,
+          "ok": true,
+          "durationMs": 822.8,
+          "contentType": "text/html; charset=utf-8",
+          "contentLength": 0
+        },
+        {
+          "method": "POST",
+          "endpoint": "player",
+          "url": "https://www.youtube.com/youtubei/v1/player",
+          "status": 200,
+          "ok": true,
+          "durationMs": 313.56,
+          "contentType": "application/json; charset=UTF-8",
+          "contentLength": 0
+        },
+        {
+          "method": "GET",
+          "endpoint": "timedtext",
+          "url": "https://www.youtube.com/api/timedtext",
+          "status": 200,
+          "ok": true,
+          "durationMs": 248.19,
+          "contentType": "text/xml; charset=UTF-8",
+          "contentLength": 0
+        }
+      ],
+      "requestSummary": {
+        "requestCount": 3,
+        "endpointCounts": {
+          "watch_page": 1,
+          "player": 1,
+          "timedtext": 1
+        },
+        "statusCounts": {
+          "200": 3
+        },
+        "failedRequestCount": 0
+      }
+    }
+  ]
+}

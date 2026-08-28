@@ -68,9 +68,8 @@ function renderSuccess(result) {
   elements.videoId.textContent = result.videoId;
   elements.client.textContent = result.sourceAttempt;
   elements.track.textContent = `${result.selectedTrack.language} · ${result.selectedTrack.kind}`;
-  elements.segmentCount.textContent = String(result.transcript.length);
-  elements.samples.textContent = result.transcript
-    .slice(0, 5)
+  elements.segmentCount.textContent = String(result.segmentCount);
+  elements.samples.textContent = result.samples
     .map(
       (entry) =>
         `[${YOUTUBE_SUBTITLE_VERIFIER.formatTimestamp(entry.start)}] ${entry.text}`,
@@ -103,6 +102,62 @@ async function assertCurrentVideo(initialTab, initialMedia, attempts = []) {
   }
 }
 
+async function verifyInIsolatedTab(tab, url, callOptions) {
+  await chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    world: "ISOLATED",
+    files: ["verifier.js"],
+  });
+  const execution = await chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    world: "ISOLATED",
+    func: async (videoUrl, options) => {
+      const verifier = globalThis.YOUTUBE_SUBTITLE_VERIFIER;
+      if (!verifier?.verifyVideo || !verifier?.diagnosticsFromError) {
+        return {
+          ok: false,
+          code: "PROBE_FAILED",
+          message: "页面隔离环境中的字幕验证器不可用。",
+          diagnostics: { attempts: [] },
+        };
+      }
+      try {
+        const result = await verifier.verifyVideo(videoUrl, options);
+        return {
+          ok: true,
+          result: {
+            videoId: result.videoId,
+            language: result.language,
+            selectedTrack: result.selectedTrack,
+            sourceAttempt: result.sourceAttempt,
+            segmentCount: result.transcript.length,
+            samples: result.transcript.slice(0, 5),
+            diagnostics: result.diagnostics,
+          },
+        };
+      } catch (error) {
+        return {
+          ok: false,
+          code: error?.code || "PROBE_FAILED",
+          message: String(error?.message || "验证失败。"),
+          diagnostics: verifier.diagnosticsFromError(error),
+        };
+      }
+    },
+    args: [url, callOptions],
+  });
+  const payload = execution?.[0]?.result;
+  if (!payload?.ok) {
+    const error = new Error(payload?.message || "页面隔离验证失败。");
+    error.code = payload?.code || "PROBE_FAILED";
+    error.attempts = Array.isArray(payload?.diagnostics?.attempts)
+      ? payload.diagnostics.attempts
+      : [];
+    throw error;
+  }
+  return payload.result;
+}
+
 async function runVerification() {
   elements.run.disabled = true;
   elements.copy.disabled = true;
@@ -120,7 +175,7 @@ async function runVerification() {
     if (!/^[0-9A-Za-z-]{2,20}$/.test(language)) {
       throw new Error("语言代码格式无效，例如 en、zh-TW、ja。");
     }
-    const result = await YOUTUBE_SUBTITLE_VERIFIER.verifyVideo(initialTab.url, {
+    const result = await verifyInIsolatedTab(initialTab, initialTab.url, {
       language,
       mode: elements.mode.value,
     });
@@ -137,7 +192,7 @@ async function runVerification() {
       ...result.diagnostics,
     });
     setStatus(
-      `验证通过：${result.sourceAttempt} 取得 ${result.transcript.length} 个有效片段。`,
+      `验证通过：${result.sourceAttempt} 取得 ${result.segmentCount} 个有效片段。`,
       "success",
     );
   } catch (error) {
@@ -190,5 +245,3 @@ elements.copy.addEventListener("click", async () => {
     setStatus("自动复制失败，已选中诊断文本。", "error");
   }
 });
-
-runVerification();

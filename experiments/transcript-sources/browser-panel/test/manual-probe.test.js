@@ -5,6 +5,31 @@ const path = require("node:path");
 
 const root = path.resolve(__dirname, "..");
 const reader = require("../manual-probe/reader.js");
+const identity = require("../manual-probe/identity.js");
+
+test("panel identity accepts the current watch-flexy fallback but rejects disagreement", () => {
+  const videoId = "dQw4w9WgXcQ";
+  assert.equal(
+    identity.matches(videoId, { playerId: videoId, flexVideoId: null }),
+    true,
+  );
+  assert.equal(
+    identity.matches(videoId, { playerId: null, flexVideoId: videoId }),
+    true,
+  );
+  assert.equal(
+    identity.matches(videoId, { playerId: videoId, flexVideoId: videoId }),
+    true,
+  );
+  assert.equal(
+    identity.matches(videoId, {
+      playerId: videoId,
+      flexVideoId: "jNQXAC9IVRw",
+    }),
+    false,
+  );
+  assert.equal(identity.matches(videoId, {}), false);
+});
 
 test("manual panel reader parses timestamps and rejects malformed rows", () => {
   assert.equal(reader.parseTimestamp("1:02"), 62);
@@ -20,6 +45,35 @@ test("manual panel reader parses timestamps and rejects malformed rows", () => {
     () => reader.normalizeRows([{ timestamp: "bad", text: "invalid" }]),
     /row 0 is invalid/,
   );
+});
+
+test("manual panel reader supports the current transcript-segment-view-model shape", () => {
+  const elements = new Map([
+    [
+      ".ytwTranscriptSegmentViewModelTimestamp:not(.ytwTranscriptSegmentViewModelTimestampA11yLabel)",
+      { textContent: "0:18" },
+    ],
+    [
+      "span.ytAttributedStringHost[role='text']",
+      { textContent: "Current rendered transcript text" },
+    ],
+  ]);
+  const row = {
+    querySelector(selector) {
+      return elements.get(selector) || null;
+    },
+  };
+  assert.deepEqual(reader.readRow(row), {
+    timestamp: "0:18",
+    text: "Current rendered transcript text",
+  });
+  assert.deepEqual(reader.normalizeRows([reader.readRow(row)]), [
+    {
+      timestamp: "0:18",
+      start: 18,
+      text: "Current rendered transcript text",
+    },
+  ]);
 });
 
 test("panel row signatures change when a stale panel is replaced", () => {
@@ -50,6 +104,18 @@ test("panel coverage rejects a jump from top to bottom with an unseen middle", (
   );
   assert.equal(continuous.complete, true);
   assert.deepEqual(continuous.ranges, [[0, 1000]]);
+});
+
+test("final result source preserves completion evidence in the popup summary", () => {
+  const source = fs.readFileSync(
+    path.join(root, "manual-probe", "reader.js"),
+    "utf8",
+  );
+  assert.match(source, /visibleRowCount:\s*rows\.length/);
+  assert.match(source, /collectedRowCount:\s*rows\.length/);
+  assert.match(source, /sawTop:\s*active\.sawTop/);
+  assert.match(source, /sawBottom:\s*active\.sawBottom/);
+  assert.match(source, /collects:\s*active\.collects/);
 });
 
 test("manual panel probe has no code path that clicks or opens YouTube UI", () => {

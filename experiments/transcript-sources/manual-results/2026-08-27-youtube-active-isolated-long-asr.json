@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 2,
+  "runId": "active-isolated-long-asr-20260827-1",
+  "requestId": "active-isolated-long-asr-20260827-1",
+  "startedAt": "2026-08-27T06:37:57.461Z",
+  "providerId": "youtube-active",
+  "providerVariant": "isolated-tab",
+  "videoId": "KLDVxx4TqcE",
+  "category": "long-asr-en",
+  "status": "success",
+  "elapsedMs": null,
+  "language": "en",
+  "languageEvidence": "verified",
+  "segmentCount": 1828,
+  "characterCount": 63109,
+  "firstStart": 0,
+  "lastStart": null,
+  "errorCode": null,
+  "diagnostics": {
+    "providerInitiated": {
+      "youtubePlayer": 1,
+      "youtubeTimedtext": 1,
+      "thirdParty": 0,
+      "loopback": 0
+    },
+    "pageObserved": {
+      "youtubeTimedtext": null
+    }
+  },
+  "manualChecks": {
+    "firstTimestampCompared": false,
+    "lastTimestampCompared": false,
+    "sampleTextComparedWithoutSavingText": true,
+    "spaSecondVideoRejectedOldResult": false
+  },
+  "notes": ["clean-success", "manual-review-needed"]
+}

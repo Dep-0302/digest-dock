@@ -1,0 +1,210 @@
+{
+  "schemaVersion": 1,
+  "startedAt": "2026-08-26T07:04:32.355Z",
+  "completedAt": "2026-08-26T07:04:34.363Z",
+  "environment": {
+    "node": "v22.23.1",
+    "platform": "darwin",
+    "architecture": "arm64",
+    "authentication": "signed-out",
+    "apiKeys": false,
+    "cookies": false,
+    "proxy": false,
+    "timeoutMs": 20000,
+    "delayMs": 0,
+    "rounds": 1,
+    "candidateOrderPolicy": "rotated per case and round"
+  },
+  "caseSource": "../corpus/corpus.json",
+  "cases": [
+    {
+      "id": "language-policy-missing-fr",
+      "videoId": "dQw4w9WgXcQ",
+      "title": "Rick Astley - Never Gonna Give You Up (Official Video) (4K Remaster)",
+      "language": "fr",
+      "expectedOutcome": "language-unavailable",
+      "expectedLanguage": null,
+      "corpusFacts": {
+        "durationSeconds": 213,
+        "pairedWith": "language-policy-control-en",
+        "driftWarning": "Available caption languages can change; each run is authoritative only for its timestamp."
+      },
+      "purpose": "Expose strict errors versus silent fallback when a requested language is absent."
+    }
+  ],
+  "profiles": {
+    "youtube-caption-extractor": {
+      "package": "youtube-caption-extractor",
+      "source": "https://github.com/devhims/youtube-caption-extractor",
+      "adapter": "getSubtitles({ videoID, lang, fetch })",
+      "languageBehavior": "Defaults to en; prefers manual exact match, then ASR exact match, then falls back to the first track.",
+      "requestStrategy": "Tries IOS, ANDROID_VR, then MWEB player clients until caption tracks are found; downloads json3 timedtext.",
+      "browserFit": "Published entry is CommonJS and upstream recommends server-side use because browser calls face CORS; a bundler/bridge would still be required for the current MV3 extension."
+    },
+    "youtube-transcript": {
+      "package": "youtube-transcript",
+      "source": "https://github.com/Kakulukian/youtube-transcript",
+      "adapter": "fetchTranscript(videoId, { lang, fetch })",
+      "languageBehavior": "Exact language is strict; with no language it takes the first advertised track.",
+      "requestStrategy": "ANDROID InnerTube first, then watch-page fallback; downloads XML timedtext.",
+      "browserFit": "Small ESM/CJS package with a custom fetch hook, but direct MV3 use still needs browser host/CORS validation."
+    },
+    "youtube-transcript-plus": {
+      "package": "youtube-transcript-plus",
+      "source": "https://github.com/ericmmartin/youtube-transcript-plus",
+      "adapter": "fetchTranscript(videoId, { lang, videoFetch, playerFetch, transcriptFetch })",
+      "languageBehavior": "Exact language is strict; with no language it takes the first advertised track; listLanguages exposes track kind.",
+      "requestStrategy": "Watch page for API key, ANDROID player request, then XML timedtext; optional retry/cache hooks are disabled in this benchmark.",
+      "browserFit": "Node >=20 package; no browser export or ready-to-load MV3 bundle is declared."
+    },
+    "youtubei.js": {
+      "package": "youtubei.js",
+      "source": "https://github.com/LuanRT/YouTube.js",
+      "adapter": "Innertube.create() -> getInfo(videoId) -> getTranscript()",
+      "languageBehavior": "Transcript language selection uses human-readable menu labels rather than BCP-47 codes.",
+      "requestStrategy": "Creates an Innertube session, requests video info/next data, then calls get_transcript.",
+      "browserFit": "Ships a browser bundle, but upstream documentation requires requests to go through a server proxy. This is not equivalent to dropping the bundle into the current MV3 extension."
+    }
+  },
+  "packageMetadata": {
+    "youtube-caption-extractor": {
+      "version": "1.10.2",
+      "license": "MIT",
+      "nodeEngine": ">=18.0.0",
+      "directRuntimeDependencies": [
+        "he",
+        "striptags"
+      ],
+      "transitivePackageCountIncludingSelf": 3,
+      "packageBytes": 31103,
+      "installedFootprintBytes": 173101
+    },
+    "youtube-transcript": {
+      "version": "1.3.1",
+      "license": "MIT",
+      "nodeEngine": ">=18.0.0",
+      "directRuntimeDependencies": [],
+      "transitivePackageCountIncludingSelf": 1,
+      "packageBytes": 43825,
+      "installedFootprintBytes": 43825
+    },
+    "youtube-transcript-plus": {
+      "version": "2.0.1",
+      "license": "MIT",
+      "nodeEngine": ">=20.0.0",
+      "directRuntimeDependencies": [],
+      "transitivePackageCountIncludingSelf": 1,
+      "packageBytes": 102957,
+      "installedFootprintBytes": 102957
+    },
+    "youtubei.js": {
+      "version": "17.2.0",
+      "license": "MIT",
+      "nodeEngine": null,
+      "directRuntimeDependencies": [
+        "@bufbuild/protobuf",
+        "fflate",
+        "meriyah"
+      ],
+      "transitivePackageCountIncludingSelf": 4,
+      "packageBytes": 15651706,
+      "installedFootprintBytes": 19777959,
+      "browserBundleBytes": 1544481,
+      "browserBundleGzipBytes": 256849
+    }
+  },
+  "summary": {
+    "youtube-transcript-plus": {
+      "attemptCount": 1,
+      "expectedTranscriptCount": 0,
+      "transcriptSuccessCount": 0,
+      "transcriptSuccessRate": null,
+      "expectedNoCaptionCount": 0,
+      "correctNoCaptionCount": 0,
+      "noCaptionAccuracy": null,
+      "expectedLanguageUnavailableCount": 1,
+      "correctLanguageUnavailableCount": 1,
+      "languageUnavailableAccuracy": 1,
+      "expectationMetCount": 1,
+      "errorCount": 0,
+      "medianDurationMs": 2006,
+      "medianSuccessfulDurationMs": null,
+      "totalRequestCount": 2,
+      "errorCategories": {
+        "language-unavailable": 1
+      }
+    }
+  },
+  "attempts": [
+    {
+      "round": 1,
+      "caseId": "language-policy-missing-fr",
+      "videoId": "dQw4w9WgXcQ",
+      "language": "fr",
+      "expectedOutcome": "language-unavailable",
+      "candidate": "youtube-transcript-plus",
+      "durationMs": 2006,
+      "error": {
+        "name": "YoutubeTranscriptNotAvailableLanguageError",
+        "message": "No transcripts are available in \"fr\" for the video with ID \"dQw4w9WgXcQ\". Available languages: en, en, de-DE, ja, pt-BR, es-419. Please try a different language.",
+        "category": "language-unavailable"
+      },
+      "outcome": "language-unavailable",
+      "segmentSummary": null,
+      "contractReport": {
+        "schemaVersion": 2,
+        "providerId": "node-libraries",
+        "providerVariant": "youtube-transcript-plus",
+        "runId": "node-r1-0-youtube-transcript-plus",
+        "requestId": "node-request-1",
+        "videoId": "dQw4w9WgXcQ",
+        "status": "failure",
+        "elapsedMs": 2006,
+        "language": null,
+        "languageEvidence": "unknown",
+        "segmentCount": 0,
+        "errorCode": "TRACK_UNAVAILABLE",
+        "diagnostics": {},
+        "context": {
+          "caseId": "language-policy-missing-fr",
+          "expectedOutcome": "language-unavailable",
+          "runIndex": 1
+        }
+      },
+      "expectationMet": true,
+      "requests": [
+        {
+          "method": "GET",
+          "endpoint": "watch_page",
+          "url": "https://www.youtube.com/watch",
+          "status": 200,
+          "ok": true,
+          "durationMs": 956.01,
+          "contentType": "text/html; charset=utf-8",
+          "contentLength": 0
+        },
+        {
+          "method": "POST",
+          "endpoint": "player",
+          "url": "https://www.youtube.com/youtubei/v1/player",
+          "status": 200,
+          "ok": true,
+          "durationMs": 329.61,
+          "contentType": "application/json; charset=UTF-8",
+          "contentLength": 0
+        }
+      ],
+      "requestSummary": {
+        "requestCount": 2,
+        "endpointCounts": {
+          "watch_page": 1,
+          "player": 1
+        },
+        "statusCounts": {
+          "200": 2
+        },
+        "failedRequestCount": 0
+      }
+    }
+  ]
+}

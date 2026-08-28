@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 2,
+  "runId": "active-popup-origin-20260826-1",
+  "requestId": "active-popup-origin-20260826-1",
+  "startedAt": "2026-08-26T13:01:36.742Z",
+  "providerId": "youtube-active",
+  "providerVariant": "popup-origin",
+  "videoId": "jNQXAC9IVRw",
+  "category": "short-manual-en",
+  "status": "failure",
+  "elapsedMs": 2239,
+  "language": null,
+  "languageEvidence": "unknown",
+  "segmentCount": 0,
+  "characterCount": 0,
+  "firstStart": null,
+  "lastStart": null,
+  "errorCode": "PROBE_FAILED",
+  "diagnostics": {
+    "providerInitiated": {
+      "youtubePlayer": 4,
+      "youtubeTimedtext": 0,
+      "thirdParty": 0,
+      "loopback": 0
+    },
+    "pageObserved": {
+      "youtubeTimedtext": null
+    }
+  },
+  "manualChecks": {
+    "firstTimestampCompared": false,
+    "lastTimestampCompared": false,
+    "sampleTextComparedWithoutSavingText": false,
+    "spaSecondVideoRejectedOldResult": false
+  },
+  "notes": ["manual-review-needed"]
+}

@@ -3,11 +3,21 @@ import test from 'node:test';
 
 import {
   classifyError,
+  createAttemptContext,
   expectationMet,
   outcomeFromSummary,
   safeUrl,
   summarizeSegments
 } from '../src/core.mjs';
+
+function response(body, status = 200) {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    headers: { get: () => null },
+    text: async () => String(body)
+  };
+}
 
 test('safeUrl drops API keys and timedtext tokens', () => {
   assert.equal(
@@ -51,6 +61,28 @@ test('classifyError separates clean no-caption and upstream API failures', () =>
     classifyError(new Error('Request to https://www.youtube.com/youtubei/v1/get_transcript?key=x failed with status code 400')).category,
     'upstream-api-error'
   );
+});
+
+test('attempt context aborts all later transport after the first HTTP 429', async () => {
+  let calls = 0;
+  const context = createAttemptContext(1_000, async () => {
+    calls += 1;
+    return response('rate limited', 429);
+  });
+
+  await assert.rejects(
+    context.trackedFetch('https://www.youtube.com/youtubei/v1/player'),
+    (error) => error.name === 'RateLimitedError' && error.status === 429
+  );
+  await assert.rejects(
+    context.trackedFetch('https://www.youtube.com/api/timedtext'),
+    (error) => error.name === 'RateLimitedError' && error.status === 429
+  );
+  assert.equal(calls, 1);
+  assert.equal(context.requests.length, 1);
+  assert.equal(context.requests[0].status, 429);
+  assert.equal(classifyError(context.requests[0].error).category, 'rate-limited');
+  context.dispose();
 });
 
 test('outcome and expectation comparison keep errors distinct from negatives', () => {

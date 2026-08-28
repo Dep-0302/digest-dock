@@ -151,6 +151,19 @@ def normalize_segments(rows: Any, language: str | None = None) -> list[dict[str,
     return output
 
 
+def transcript_rows(fetched: Any) -> list[dict[str, Any]]:
+    to_raw_data = getattr(fetched, "to_raw_data", None)
+    if not callable(to_raw_data):
+        raise HelperError(
+            "INVALID_RESPONSE",
+            "Provider transcript does not expose the pinned raw-data contract.",
+        )
+    rows = to_raw_data()
+    if not isinstance(rows, list):
+        raise HelperError("INVALID_RESPONSE", "Provider transcript rows are invalid.")
+    return rows
+
+
 def fetch_with_youtube_transcript_api(request: dict[str, Any]) -> dict[str, Any]:
     try:
         import requests  # type: ignore[import-not-found]
@@ -205,7 +218,7 @@ def fetch_with_youtube_transcript_api(request: dict[str, Any]) -> dict[str, Any]
                 404,
             )
         fetched = selected.fetch()
-        rows = [item.to_raw_data() for item in fetched]
+        rows = transcript_rows(fetched)
         selected_language = str(selected.language_code or "") or None
         segments = normalize_segments(rows, selected_language)
         return {
@@ -276,6 +289,37 @@ def make_handler(
         def _cors_allowed(self) -> bool:
             return self.headers.get("Origin") == allowed_origin
 
+        def _extension_identity_allowed(self) -> bool:
+            standard_origin = self.headers.get("Origin")
+            declared_origin = self.headers.get("X-DigestDock-Helper-Origin")
+            return declared_origin == allowed_origin and standard_origin in (
+                None,
+                allowed_origin,
+            )
+
+        def _audit_auth(self, outcome: str) -> None:
+            print(
+                json.dumps(
+                    {
+                        "event": "loopback-auth",
+                        "method": self.command,
+                        "path": self.path,
+                        "outcome": outcome,
+                        "standardOriginPresent": self.headers.get("Origin") is not None,
+                        "standardOriginMatches": self._cors_allowed(),
+                        "declaredOriginPresent": self.headers.get(
+                            "X-DigestDock-Helper-Origin"
+                        )
+                        is not None,
+                        "declaredOriginMatches": self.headers.get(
+                            "X-DigestDock-Helper-Origin"
+                        )
+                        == allowed_origin,
+                    }
+                ),
+                flush=True,
+            )
+
         def _send(self, status: int, payload: dict[str, Any]) -> None:
             body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
             if len(body) > MAX_RESPONSE_BYTES:
@@ -299,25 +343,29 @@ def make_handler(
 
         def do_OPTIONS(self) -> None:  # noqa: N802 - stdlib handler contract
             if not self._cors_allowed():
+                self._audit_auth("origin-mismatch")
                 self._send(403, {"ok": False, "errorCode": "HELPER_UNAUTHORIZED"})
                 return
             self.send_response(204)
             self.send_header("Access-Control-Allow-Origin", allowed_origin)
-            self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
             self.send_header(
                 "Access-Control-Allow-Headers",
-                "Content-Type, X-DigestDock-Helper-Token",
+                "Content-Type, X-DigestDock-Helper-Origin, X-DigestDock-Helper-Token",
             )
             self.send_header("Access-Control-Max-Age", "300")
             self.end_headers()
 
         def do_GET(self) -> None:  # noqa: N802 - stdlib handler contract
-            if self.path != "/health" or not self._cors_allowed():
+            if self.path != "/health" or not self._extension_identity_allowed():
+                self._audit_auth("origin-mismatch")
                 self._send(403, {"ok": False, "errorCode": "HELPER_UNAUTHORIZED"})
                 return
             if self.headers.get("X-DigestDock-Helper-Token") != pairing_token:
+                self._audit_auth("token-mismatch")
                 self._send(401, {"ok": False, "errorCode": "HELPER_UNAUTHORIZED"})
                 return
+            self._audit_auth("accepted")
             self._send(
                 200,
                 {
@@ -330,12 +378,15 @@ def make_handler(
             )
 
         def do_POST(self) -> None:  # noqa: N802 - stdlib handler contract
-            if self.path != "/v1/transcript" or not self._cors_allowed():
+            if self.path != "/v1/transcript" or not self._extension_identity_allowed():
+                self._audit_auth("origin-mismatch")
                 self._send(403, {"ok": False, "errorCode": "HELPER_UNAUTHORIZED"})
                 return
             if self.headers.get("X-DigestDock-Helper-Token") != pairing_token:
+                self._audit_auth("token-mismatch")
                 self._send(401, {"ok": False, "errorCode": "HELPER_UNAUTHORIZED"})
                 return
+            self._audit_auth("accepted")
             if self.headers.get_content_type() != "application/json":
                 self._send(415, {"ok": False, "errorCode": "INVALID_RESPONSE"})
                 return

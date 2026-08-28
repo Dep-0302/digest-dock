@@ -6,8 +6,9 @@ const languageInput = document.getElementById("language");
 const runButton = document.getElementById("runBtn");
 const healthButton = document.getElementById("healthBtn");
 const statusElement = document.getElementById("status");
+const extensionOrigin = chrome.runtime.getURL("").replace(/\/$/, "");
 
-originElement.textContent = `chrome-extension://${chrome.runtime.id}`;
+originElement.textContent = extensionOrigin;
 
 function videoIdFromUrl(value) {
   try {
@@ -76,6 +77,7 @@ async function runHelper() {
       cache: "no-store",
       headers: {
         "Content-Type": "application/json",
+        "X-DigestDock-Helper-Origin": extensionOrigin,
         "X-DigestDock-Helper-Token": token,
       },
       body: JSON.stringify({
@@ -165,7 +167,10 @@ async function checkHealth() {
     credentials: "omit",
     redirect: "error",
     cache: "no-store",
-    headers: { "X-DigestDock-Helper-Token": token },
+    headers: {
+      "X-DigestDock-Helper-Origin": extensionOrigin,
+      "X-DigestDock-Helper-Token": token,
+    },
   });
   const payload = await response.json();
   if (!response.ok || payload?.ok !== true || payload.networkRequests !== 0) {

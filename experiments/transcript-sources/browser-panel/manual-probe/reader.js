@@ -92,11 +92,15 @@ var PANEL_TRANSCRIPT_READER = (() => {
 
   function readRow(row) {
     const timestamp =
+      row.querySelector(
+        ".ytwTranscriptSegmentViewModelTimestamp:not(.ytwTranscriptSegmentViewModelTimestampA11yLabel)",
+      )?.textContent ||
       row.querySelector(".segment-timestamp")?.textContent ||
       row.querySelector("[class*='timestamp']")?.textContent ||
       row.querySelector("button")?.textContent ||
       "";
     const text =
+      row.querySelector("span.ytAttributedStringHost[role='text']")?.textContent ||
       row.querySelector(".segment-text")?.textContent ||
       row.querySelector("[class*='segment-text']")?.textContent ||
       row.querySelector("yt-formatted-string")?.textContent ||
@@ -350,10 +354,17 @@ var PANEL_TRANSCRIPT_READER = (() => {
       return {
         ok: false,
         errorCode: "PANEL_INCOMPLETE",
+        providerId: "youtube-panel",
+        providerVariant: "manual-rendered-panel",
+        videoId: active.videoId,
         collectedRowCount: active.rows.size,
         sawTop: active.sawTop,
         sawBottom: active.sawBottom,
         coverageRatio: coverage.ratio,
+        collects: active.collects,
+        generation: active.generation,
+        complete: false,
+        completenessEvidence: "incomplete",
       };
     }
     const rows = [...active.rows.values()].sort((left, right) => left.start - right.start);
@@ -362,6 +373,10 @@ var PANEL_TRANSCRIPT_READER = (() => {
       providerId: "youtube-panel",
       providerVariant: "manual-rendered-panel",
       videoId: expectedVideoId,
+      visibleRowCount: rows.length,
+      collectedRowCount: rows.length,
+      sawTop: active.sawTop,
+      sawBottom: active.sawBottom,
       complete: true,
       generation: active.generation,
       panelGeneration: active.generation,
@@ -382,6 +397,7 @@ var PANEL_TRANSCRIPT_READER = (() => {
     videoIdFromUrl,
     parseTimestamp,
     normalizeRows,
+    readRow,
     rowSignature,
     mergeCoverageRanges,
     coverageMetrics,

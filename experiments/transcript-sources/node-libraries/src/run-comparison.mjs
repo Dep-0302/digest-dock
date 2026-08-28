@@ -113,9 +113,11 @@ const timeoutMs = integerEnv('TIMEOUT_MS', 20_000, 1_000);
 const delayMs = integerEnv('DELAY_MS', 250, 0);
 const attempts = [];
 const startedAt = new Date().toISOString();
+let stoppedForRateLimit = false;
 
 console.log(`Running ${cases.length} cases × ${candidates.length} candidates × ${rounds} round(s)`);
 
+matrix:
 for (let round = 1; round <= rounds; round += 1) {
   for (let caseIndex = 0; caseIndex < cases.length; caseIndex += 1) {
     const testCase = cases[caseIndex];
@@ -198,9 +200,34 @@ for (let round = 1; round <= rounds; round += 1) {
       } finally {
         context.dispose();
       }
-      attempt.expectationMet = expectationMet(testCase, attempt.outcome);
       attempt.requests = context.requests;
       attempt.requestSummary = requestSummary(context.requests);
+      const hitRateLimit =
+        attempt.error?.category === 'rate-limited' ||
+        Object.hasOwn(attempt.requestSummary.statusCounts, '429');
+      if (hitRateLimit && attempt.error?.category !== 'rate-limited') {
+        attempt.error = {
+          name: 'RateLimitedError',
+          message: 'HTTP 429 rate limited',
+          category: 'rate-limited'
+        };
+        attempt.outcome = 'error';
+        attempt.segmentSummary = null;
+        attempt.contractReport = toCandidateReport(
+          adaptCandidateFailure({
+            ...contractIdentity,
+            category: 'rate-limited',
+            elapsedMs: attempt.durationMs
+          }),
+          {
+            category: testCase.category,
+            caseId: testCase.id,
+            expectedOutcome: testCase.expectedOutcome,
+            runIndex: round
+          }
+        );
+      }
+      attempt.expectationMet = expectationMet(testCase, attempt.outcome);
       attempts.push(attempt);
       const marker = attempt.expectationMet ? 'PASS' : 'MISS';
       console.log(
@@ -209,6 +236,11 @@ for (let round = 1; round <= rounds; round += 1) {
         `${attempt.requestSummary.requestCount} requests` +
         (attempt.error ? `, ${attempt.error.category}` : '')
       );
+      if (hitRateLimit) {
+        stoppedForRateLimit = true;
+        console.warn('STOP rate-limited: skipped the remaining matrix after the first HTTP 429.');
+        break matrix;
+      }
       if (delayMs) await new Promise((resolve) => setTimeout(resolve, delayMs));
     }
   }
@@ -234,7 +266,9 @@ const output = {
     timeoutMs,
     delayMs,
     rounds,
-    candidateOrderPolicy: 'rotated per case and round'
+    candidateOrderPolicy: 'rotated per case and round',
+    stoppedEarly: stoppedForRateLimit,
+    stopReason: stoppedForRateLimit ? 'rate-limited' : null
   },
   caseSource: caseConfig.sourceCorpus,
   cases,

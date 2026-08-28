@@ -1,23 +1,37 @@
 # Seven-provider YouTube transcript source experiment
 
 This directory contains the shared contract, historical evidence, isolated
-dependencies, and tomorrow's manual entrypoints for seven transcript providers.
-It remains outside the public DigestDock extension ZIP.
+dependencies, and manual-result entrypoints for seven transcript providers. It
+remains outside the public DigestDock extension ZIP. After the user-approved
+product simplification, only cache/Passive remains an automatic free route;
+Active and Panel are retained as evidence-only experiments. The product
+shortlist is now cache/Passive, an explicit user CC retry, and optional
+explicit-consent Supadata.
 
 ## Fixed providers
 
-| Provider ID | Entry | Current implementation state |
+| Provider ID | Entry | Current evidence and disposition |
 | --- | --- | --- |
-| `youtube-passive` | `passive-capture/extension/` | Standalone MV3 observer plus offline tests; live YouTube unverified |
-| `youtube-active` | repository root plus `youtube-active/adapter.js` | Existing active adapter plus strict experiment wrapper |
-| `youtube-panel` | `browser-panel/manual-probe/` | User-opened panel collector plus historical automated runner |
-| `supadata-native` | `supadata-native/manual-probe/` | Direct per-attempt control and fixture wrapper; no request run today |
-| `node-libraries` | `node-libraries/` | Pinned dependencies installed locally; live probe not rerun today |
-| `local-helper` | `local-helper/` | Token-paired loopback server/client and isolated venv; YouTube unverified |
-| `hosted-api-slot` | `hosted-api-slot/` | Fixed-endpoint fixture contract only; no vendor selected |
+| `youtube-passive` | `passive-capture/extension/` | Retain as primary zero-request route; real MV3 accepted with 670 segments and SPA freshness |
+| `youtube-active` | `youtube-verifier/` plus `youtube-active/adapter.js` | Evidence only: `isolated-tab` passed bounded standalone cases, but is no longer called by the product flow; both popup-origin variants remain rejected after repeatable 403s |
+| `youtube-panel` | `browser-panel/manual-probe/` | Evidence only: manual rendered-panel collection succeeded in a limited sample, but the product no longer opens or scrolls the panel automatically |
+| `supadata-native` | `supadata-native/manual-probe/` | Removed from the live shortlist; fixture/history retained only, with no deletion authorization |
+| `node-libraries` | `node-libraries/` | Evidence only; `youtube-transcript-plus` is the accepted Node comparator, not a production MV3 dependency |
+| `local-helper` | `local-helper/` | Evidence only; real core extraction and authenticated MV3 loopback health accepted, but the companion-process burden is not retained for production |
+| `hosted-api-slot` | `hosted-api-slot/` | Removed from the live shortlist; provider-neutral fixture/history retained only, with no deletion authorization |
 
 The YouTube Data API, Downie, ASR, OCR, proxy rotation, and access-control
 bypasses are outside this matrix.
+
+The authoritative accepted/rejected variants, evidence levels, dispositions,
+and validation dates are recorded in `provider-registry.json`. The current eight
+text-free browser results are summarized in `manual-results/REPORT.md`;
+expected-negative boundaries are reported separately from unexpected failures.
+Here, `accepted` means the single-route evidence was sufficient for shortlist
+and experimental integration. It does not mean the combined product chain has
+passed Phase 4: the Panel receipt still lacks a saved language-menu signal and
+manual text comparison, and the integrated chain still needs its own current
+page, first/last coverage, request, and restore receipt.
 
 ## Offline verification
 
@@ -63,12 +77,14 @@ tests, `npm run check`, or packaging.
 - Only public videos and YouTube-provided manual/automatic captions.
 - Third-party code stays inside this experiment and is not copied into the
   production extension.
-- Supadata and any later hosted provider require a new visible action for every
-  real attempt. Keys/tokens are typed into password fields and are not stored by
-  the standalone probes.
+- Supadata and the hosted-provider slot are outside the current live shortlist.
+  Their code and fixture evidence remain only because removal was not
+  authorized. No key request, paid call, vendor research, or live attempt may
+  resume without a new explicit decision.
 
 ## Output
 
 `summary.md` preserves the 2026-08-18 historical baseline. The authoritative
-current plan, completion record, subtraction rules, and tomorrow runbook are in
-`../../TRANSCRIPT-SEVEN-PROVIDER-EXECUTION.md`.
+current completion record and subtraction decisions are in
+`../../TRANSCRIPT-SEVEN-PROVIDER-EXECUTION.md`; the implementation plan is in
+`../../TRANSCRIPT-SHORTLIST-EXECUTION.md`.

@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 2,
+  "runId": "passive-spa-20260826-1",
+  "requestId": "passive-spa-20260826-1",
+  "startedAt": "2026-08-26T12:41:09.783Z",
+  "providerId": "youtube-passive",
+  "providerVariant": null,
+  "videoId": "UixhcccGcdY",
+  "category": "spa-second-video",
+  "status": "success",
+  "elapsedMs": null,
+  "language": "en-US",
+  "languageEvidence": "verified",
+  "segmentCount": 670,
+  "characterCount": null,
+  "firstStart": 0,
+  "lastStart": 1503.376,
+  "errorCode": null,
+  "diagnostics": {
+    "providerInitiated": {
+      "youtubePlayer": 0,
+      "youtubeTimedtext": 0,
+      "thirdParty": 0,
+      "loopback": 0
+    },
+    "pageObserved": {
+      "youtubeTimedtext": 1
+    }
+  },
+  "manualChecks": {
+    "firstTimestampCompared": false,
+    "lastTimestampCompared": false,
+    "sampleTextComparedWithoutSavingText": false,
+    "spaSecondVideoRejectedOldResult": true
+  },
+  "notes": [
+    "clean-success",
+    "spa-stale-rejected"
+  ]
+}
