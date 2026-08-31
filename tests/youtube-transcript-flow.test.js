@@ -719,6 +719,41 @@ test("an explicit CC retry offers Supadata without calling it; consent bypasses 
   assert.equal(consented.counts.panelRun, 0);
 });
 
+test("Supadata 429 returns an exact cooldown and blocks an immediate second provider call", async () => {
+  const worker = loadBackground({
+    settings: { aiApiKey: "test", supadataApiKey: "optional-key" },
+    fetchImpl: async () => ({
+      ok: false,
+      status: 429,
+      json: async () => ({}),
+    }),
+  });
+
+  const first = await worker.helpers.handleFetchYoutubeTranscript(
+    VIDEO_ID,
+    "en",
+    1,
+    true,
+    nativeOptions("cooldown-1"),
+  );
+  assert.equal(first.success, false);
+  assert.equal(first.error, "RATE_LIMITED");
+  assert.equal(first.routeOutcome, "UNKNOWN");
+  assert.ok(first.cooldownUntil > Date.now());
+  assert.equal(worker.counts.fetch, 1);
+
+  const second = await worker.helpers.handleFetchYoutubeTranscript(
+    VIDEO_ID,
+    "en",
+    1,
+    true,
+    nativeOptions("cooldown-2"),
+  );
+  assert.equal(second.error, "RATE_LIMITED");
+  assert.equal(second.cooldownUntil, first.cooldownUntil);
+  assert.equal(worker.counts.fetch, 1);
+});
+
 test("an unexpected YouTube orchestration error still echoes run identity", async () => {
   const worker = loadBackground({
     activeResult: { status: "UNKNOWN", errorCode: "PROBE_FAILED" },

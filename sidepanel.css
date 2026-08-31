@@ -956,6 +956,297 @@ body {
 /* ============================================================
    LOADING STATE
    ============================================================ */
+/* ============================================================
+   MVP WORKSPACE STATES — local transcript status, persistent shell
+   ============================================================ */
+.workspace-state-region {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-block: 0 18px;
+}
+
+.workspace-state-region[hidden],
+.transcript-ready-region[hidden] {
+  display: none;
+}
+
+.workspace-state-card {
+  min-width: 0;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  background: var(--surface);
+  overflow-wrap: anywhere;
+}
+
+.workspace-state-region.kind-action .workspace-state-card,
+.workspace-state-region.kind-consent .workspace-state-card {
+  border-color: rgba(7, 109, 209, 0.24);
+  background: linear-gradient(180deg, rgba(234, 246, 252, 0.88), #fff 78%);
+}
+
+.workspace-state-region.kind-terminal .workspace-state-card {
+  background: var(--surface-raised);
+}
+
+.workspace-state-region.kind-error .workspace-state-card {
+  border-color: rgba(194, 59, 73, 0.32);
+  background: linear-gradient(180deg, var(--danger-dim), #fff 76%);
+}
+
+.workspace-state-heading {
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+}
+
+.workspace-state-icon {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 10px;
+  color: var(--text-secondary);
+  background: var(--surface-raised);
+}
+
+.workspace-state-region.kind-action .workspace-state-icon,
+.workspace-state-region.kind-consent .workspace-state-icon {
+  color: var(--accent);
+  background: rgba(7, 109, 209, 0.1);
+}
+
+.workspace-state-region.kind-error .workspace-state-icon {
+  color: var(--danger);
+  background: var(--danger-dim);
+}
+
+.workspace-state-icon svg {
+  width: 18px;
+  height: 18px;
+}
+
+.workspace-state-copy {
+  min-width: 0;
+  flex: 1;
+}
+
+.workspace-state-title {
+  color: var(--text);
+  font: 680 15px/1.35 var(--font-display);
+  letter-spacing: -0.01em;
+}
+
+.workspace-state-message {
+  margin-block-start: 5px;
+  color: var(--text-secondary);
+  font-size: 12.75px;
+  line-height: 1.6;
+  white-space: pre-line;
+}
+
+.workspace-state-steps,
+.workspace-consent-scope {
+  display: grid;
+  gap: 8px;
+  margin-block-start: 14px;
+}
+
+.workspace-state-steps {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.workspace-state-step,
+.workspace-consent-item {
+  min-width: 0;
+  padding: 10px 11px;
+  border-radius: var(--r-sm);
+  background: rgba(255, 255, 255, 0.78);
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.workspace-state-step strong {
+  display: block;
+  margin-block-end: 2px;
+  color: var(--accent);
+  font: 700 11px/1.2 var(--font-body);
+}
+
+.workspace-consent-scope {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.workspace-consent-item {
+  text-align: center;
+  color: var(--text);
+}
+
+.workspace-state-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-block-start: 15px;
+}
+
+.workspace-state-action {
+  min-height: 36px;
+  padding: 8px 13px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  color: var(--text-secondary);
+  font: 650 12.5px/1.35 var(--font-body);
+  cursor: pointer;
+  transition:
+    transform 0.1s ease,
+    border-color 0.16s ease,
+    color 0.16s ease,
+    background 0.16s ease;
+}
+
+.workspace-state-action:hover:not(:disabled) {
+  border-color: var(--border-heavy);
+  color: var(--text);
+  background: var(--surface-raised);
+}
+
+.workspace-state-action:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.workspace-state-action.primary {
+  border-color: transparent;
+  background: var(--accent-gradient);
+  color: #fff;
+}
+
+.workspace-state-action.primary:hover:not(:disabled) {
+  border-color: transparent;
+  background: var(--accent-gradient-hover);
+  color: #fff;
+}
+
+.workspace-state-action:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.workspace-state-action:disabled {
+  cursor: not-allowed;
+  opacity: 0.52;
+  transform: none;
+}
+
+.workspace-state-region.kind-error .workspace-state-action:focus-visible {
+  outline-color: var(--danger);
+}
+
+.workspace-skeleton-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.workspace-skeleton-card {
+  display: grid;
+  grid-template-columns: var(--time-rail) minmax(0, 1fr);
+  gap: 12px;
+  min-height: 70px;
+  padding: 13px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface);
+}
+
+.workspace-skeleton-time,
+.workspace-skeleton-line {
+  position: relative;
+  overflow: hidden;
+  border-radius: 5px;
+  background: var(--surface-raised);
+}
+
+.workspace-skeleton-time {
+  width: 42px;
+  height: 11px;
+  margin-block-start: 4px;
+}
+
+.workspace-skeleton-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding-inline-start: 12px;
+  border-inline-start: 1px solid var(--border);
+}
+
+.workspace-skeleton-line {
+  width: 92%;
+  height: 11px;
+}
+
+.workspace-skeleton-line.short {
+  width: 61%;
+}
+
+.workspace-skeleton-time::after,
+.workspace-skeleton-line::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(255, 255, 255, 0.82),
+    transparent
+  );
+  animation: workspaceSkeleton 1.35s ease-in-out infinite;
+}
+
+@keyframes workspaceSkeleton {
+  to {
+    transform: translateX(100%);
+  }
+}
+
+.transcript-ready-region.is-readonly {
+  opacity: 0.76;
+}
+
+.transcript-ready-region.is-readonly #exportTranscriptBtn {
+  cursor: not-allowed;
+  opacity: 0.46;
+}
+
+@media (max-width: 360px) {
+  .workspace-state-steps,
+  .workspace-consent-scope {
+    grid-template-columns: 1fr;
+  }
+
+  .workspace-consent-item {
+    text-align: start;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .workspace-skeleton-time::after,
+  .workspace-skeleton-line::after {
+    animation: none;
+  }
+
+  .workspace-state-action {
+    transition: none;
+  }
+}
+
 .loading-container {
   display: flex;
   flex-direction: column;

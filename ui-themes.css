@@ -1,0 +1,444 @@
+/*
+ * UI THEMES — DigestDock optional skins (presentation only)
+ *
+ * Loaded AFTER sidepanel.css / options.css. The default "classic" theme is the
+ * untouched base stylesheet: this file never redefines bare `:root` tokens, it
+ * only overrides variables under `html[data-theme="..."]` scopes, so the
+ * classic UI stays pixel-identical. Two extra scopes are provided:
+ *
+ *   - "ink-night"  墨夜：深色石墨工作台，亮蓝青状态色
+ *   - "warm-paper" 暖纸：米色纸面阅读氛围，铜棕状态色
+ *
+ * Both pages share this file. sidepanel.css tokens (--bg, --text, --border,
+ * ...) and options.css tokens (--panel, --ink, --line, ...) are overridden in
+ * the same block; each page only reads its own names. Layout, typography,
+ * spacing, radii and the time rail are intentionally NOT themed.
+ *
+ * A small number of rules in the base stylesheets use hard-coded colors that
+ * bypass the variables (selection fill, workspace card gradients, skeleton
+ * shine, menu shadows, options-page note tints). Those are re-stated per theme
+ * in the "hard-coded color fixes" sections below.
+ */
+
+/* ============================================================
+   THEME: 墨夜 ink-night (dark graphite workbench)
+   ============================================================ */
+html[data-theme="ink-night"] {
+  color-scheme: dark;
+
+  /* sidepanel.css tokens */
+  --bg: #12171d;
+  --canvas: #0d1217;
+  --surface: #1a222b;
+  --surface-raised: #222c37;
+  --border: #2f3a46;
+  --border-heavy: #41505f;
+  --text: #e7edf3;
+  --text-secondary: #aebbc7;
+  --text-muted: #91a0ae;
+
+  --accent: #4b9df0;
+  --accent-hover: #6fb2f4;
+  --accent-dim: rgba(75, 157, 240, 0.14);
+  --accent-divider: rgba(75, 157, 240, 0.3);
+  --accent-gradient:
+    linear-gradient(135deg, rgba(2, 14, 36, 0.28) 0%, rgba(2, 18, 42, 0.34) 52%, rgba(2, 22, 40, 0.48) 100%),
+    linear-gradient(135deg, #1f6fe0 0%, #1283d8 52%, #0aa5c2 100%);
+  --accent-gradient-hover:
+    linear-gradient(135deg, rgba(2, 14, 36, 0.38) 0%, rgba(2, 18, 42, 0.44) 52%, rgba(2, 22, 40, 0.58) 100%),
+    linear-gradient(135deg, #1f6fe0 0%, #1283d8 52%, #0aa5c2 100%);
+  --active-surface: #16283b;
+  --selection-blue: #4b9df0;
+  --success: #3ea37f;
+  --success-dim: rgba(62, 163, 127, 0.16);
+  --highlight: #33aacb;
+  --danger: #d46975;
+  --danger-hover: #e08590;
+  --danger-dim: rgba(212, 105, 117, 0.14);
+
+  /* Brand mark stays brand-colored in every theme; the accent icon gradient
+     follows the theme so state cues (tab underline, current-card marker,
+     primary icon buttons) stay coherent on dark surfaces. */
+  --accent-icon-gradient: linear-gradient(135deg, #1c68d6 0%, #0f7fc6 52%, #0898b4 100%);
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.35);
+  --shadow-lg: 0 16px 40px rgba(0, 0, 0, 0.55);
+  --state-shadow: 0 8px 18px rgba(0, 0, 0, 0.4);
+  --surface-hover: rgba(255, 255, 255, 0.06);
+
+  /* options.css tokens */
+  --panel: #151b22;
+  --surface-soft: #222c37;
+  --ink: #e7edf3;
+  --ink-secondary: #aebbc7;
+  --ink-muted: #91a0ae;
+  --line: #2f3a46;
+  --control-border: #66798c;
+  --accent-focus: #4b9df0;
+  --accent-focus-soft: #4b9df0;
+  --accent-border: rgba(75, 157, 240, 0.45);
+  --provider-icon-surface:
+    linear-gradient(145deg, #253241 0%, #22303e 52%, #1e2c3a 100%);
+  --provider-icon-border: rgba(75, 157, 240, 0.28);
+  --provider-icon-shadow:
+    0 3px 8px rgba(0, 0, 0, 0.35),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+/* ink-night: hard-coded color fixes (side panel) */
+html[data-theme="ink-night"] ::selection {
+  background: rgba(75, 157, 240, 0.32);
+  color: var(--text);
+}
+
+html[data-theme="ink-night"] .workspace-state-region.kind-action .workspace-state-card,
+html[data-theme="ink-night"] .workspace-state-region.kind-consent .workspace-state-card {
+  border-color: rgba(75, 157, 240, 0.32);
+  background: linear-gradient(180deg, rgba(22, 40, 59, 0.9), var(--surface) 78%);
+}
+
+html[data-theme="ink-night"] .workspace-state-region.kind-error .workspace-state-card {
+  border-color: rgba(212, 105, 117, 0.4);
+  background: linear-gradient(180deg, var(--danger-dim), var(--surface) 76%);
+}
+
+html[data-theme="ink-night"] .workspace-state-region.kind-action .workspace-state-icon,
+html[data-theme="ink-night"] .workspace-state-region.kind-consent .workspace-state-icon {
+  color: var(--accent);
+  background: rgba(75, 157, 240, 0.16);
+}
+
+html[data-theme="ink-night"] .workspace-state-step,
+html[data-theme="ink-night"] .workspace-consent-item {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+html[data-theme="ink-night"] .workspace-skeleton-time::after,
+html[data-theme="ink-night"] .workspace-skeleton-line::after {
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.14), transparent);
+}
+
+html[data-theme="ink-night"] .follow-playback-btn {
+  box-shadow: 0 8px 18px rgba(0, 0, 0, 0.45);
+}
+
+html[data-theme="ink-night"] .follow-playback-btn:hover {
+  box-shadow: 0 10px 22px rgba(0, 0, 0, 0.5);
+}
+
+html[data-theme="ink-night"] .notes-filter .enhance-btn.active {
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
+}
+
+html[data-theme="ink-night"] .explain-modal-overlay {
+  background: rgba(3, 7, 11, 0.62);
+}
+
+/* ink-night: hard-coded color fixes (options page) */
+html[data-theme="ink-night"] .service-avatar {
+  color: #9fc6ea;
+}
+
+html[data-theme="ink-night"] .service-avatar--transcript {
+  color: #a8b4e8;
+}
+
+html[data-theme="ink-night"] .privacy-note {
+  color: #a9cde6;
+}
+
+html[data-theme="ink-night"] .supadata-note {
+  background: #232b3e;
+  color: #b3bedf;
+}
+
+html[data-theme="ink-night"] .supadata-note a {
+  color: #9fb4f2;
+}
+
+html[data-theme="ink-night"] .capability-tag {
+  color: #a9cde6;
+}
+
+html[data-theme="ink-night"] .service-status[data-status="configured"] {
+  border-color: rgba(62, 163, 127, 0.4);
+  background: rgba(62, 163, 127, 0.16);
+}
+
+html[data-theme="ink-night"] button.danger {
+  border-color: rgba(212, 105, 117, 0.45);
+}
+
+html[data-theme="ink-night"] .provider-select-list {
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.5);
+}
+
+html[data-theme="ink-night"] .settings-nav-item.is-active {
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+}
+
+html[data-theme="ink-night"] .language-switch .language-option[aria-pressed="true"] {
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
+}
+
+html[data-theme="ink-night"] .field-toggle:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+/* ============================================================
+   THEME: 暖纸 warm-paper (warm reading paper, copper accent)
+   ============================================================ */
+html[data-theme="warm-paper"] {
+  color-scheme: light;
+
+  /* sidepanel.css tokens */
+  --bg: #f4efe5;
+  --canvas: #ece6d9;
+  --surface: #fffdf6;
+  --surface-raised: #f2ecdf;
+  --border: #e2dac6;
+  --border-heavy: #cbc1a6;
+  --text: #2f2a20;
+  --text-secondary: #5d5644;
+  --text-muted: #6b624f;
+
+  --accent: #a0521a;
+  --accent-hover: #864311;
+  --accent-dim: rgba(160, 82, 26, 0.1);
+  --accent-divider: rgba(160, 82, 26, 0.25);
+  --accent-gradient:
+    linear-gradient(135deg, rgba(64, 28, 2, 0.16) 0%, rgba(64, 30, 4, 0.22) 52%, rgba(58, 30, 6, 0.42) 100%),
+    linear-gradient(135deg, #b85a1e 0%, #c97a24 52%, #e09a2f 100%);
+  --accent-gradient-hover:
+    linear-gradient(135deg, rgba(64, 28, 2, 0.26) 0%, rgba(64, 30, 4, 0.32) 52%, rgba(58, 30, 6, 0.5) 100%),
+    linear-gradient(135deg, #b85a1e 0%, #c97a24 52%, #e09a2f 100%);
+  --active-surface: #f8ecd7;
+  --selection-blue: #a0521a;
+  --success: #4b7f5e;
+  --success-dim: rgba(75, 127, 94, 0.12);
+  --highlight: #bd7a1c;
+  --danger: #b24a42;
+  --danger-hover: #93382f;
+  --danger-dim: rgba(178, 74, 66, 0.1);
+
+  --accent-icon-gradient: linear-gradient(135deg, #a54e14 0%, #b56a1c 52%, #cf8a24 100%);
+
+  --shadow-sm: 0 1px 2px rgba(47, 42, 32, 0.06);
+  --shadow-md: 0 4px 12px rgba(47, 42, 32, 0.09);
+  --shadow-lg: 0 16px 40px rgba(47, 42, 32, 0.22);
+  --state-shadow: 0 8px 18px rgba(47, 42, 32, 0.12);
+  --surface-hover: rgba(47, 42, 32, 0.05);
+
+  /* options.css tokens */
+  --panel: #f1ebde;
+  --surface-soft: #f2ecdf;
+  --ink: #2f2a20;
+  --ink-secondary: #5d5644;
+  --ink-muted: #6b624f;
+  --line: #e2dac6;
+  --control-border: #8d8065;
+  --accent-focus: #a0521a;
+  --accent-focus-soft: #a0521a;
+  --accent-border: rgba(160, 82, 26, 0.4);
+  --provider-icon-surface:
+    linear-gradient(145deg, #fffdf8 0%, #faf2e2 52%, #f6ecd8 100%);
+  --provider-icon-border: rgba(160, 82, 26, 0.2);
+  --provider-icon-shadow:
+    0 3px 8px rgba(47, 42, 32, 0.1),
+    inset 0 1px 0 rgba(255, 255, 255, 0.9);
+}
+
+/* warm-paper: hard-coded color fixes (side panel) */
+html[data-theme="warm-paper"] ::selection {
+  background: rgba(160, 82, 26, 0.18);
+  color: var(--text);
+}
+
+html[data-theme="warm-paper"] .workspace-state-region.kind-action .workspace-state-card,
+html[data-theme="warm-paper"] .workspace-state-region.kind-consent .workspace-state-card {
+  border-color: rgba(160, 82, 26, 0.26);
+  background: linear-gradient(180deg, rgba(248, 236, 215, 0.92), var(--surface) 78%);
+}
+
+html[data-theme="warm-paper"] .workspace-state-region.kind-error .workspace-state-card {
+  border-color: rgba(178, 74, 66, 0.34);
+  background: linear-gradient(180deg, var(--danger-dim), var(--surface) 76%);
+}
+
+html[data-theme="warm-paper"] .workspace-state-region.kind-action .workspace-state-icon,
+html[data-theme="warm-paper"] .workspace-state-region.kind-consent .workspace-state-icon {
+  color: var(--accent);
+  background: rgba(160, 82, 26, 0.12);
+}
+
+html[data-theme="warm-paper"] .workspace-state-step,
+html[data-theme="warm-paper"] .workspace-consent-item {
+  background: rgba(255, 253, 246, 0.82);
+}
+
+html[data-theme="warm-paper"] .workspace-skeleton-time::after,
+html[data-theme="warm-paper"] .workspace-skeleton-line::after {
+  background: linear-gradient(90deg, transparent, rgba(255, 253, 246, 0.85), transparent);
+}
+
+html[data-theme="warm-paper"] .follow-playback-btn {
+  box-shadow: 0 8px 18px rgba(112, 58, 8, 0.26);
+}
+
+html[data-theme="warm-paper"] .follow-playback-btn:hover {
+  box-shadow: 0 10px 22px rgba(112, 58, 8, 0.3);
+}
+
+html[data-theme="warm-paper"] .notes-filter .enhance-btn.active {
+  text-shadow: 0 1px 2px rgba(70, 32, 4, 0.4);
+}
+
+html[data-theme="warm-paper"] .explain-modal-overlay {
+  background: rgba(47, 42, 32, 0.5);
+}
+
+/* warm-paper: hard-coded color fixes (options page) */
+html[data-theme="warm-paper"] .service-avatar {
+  color: #7c6440;
+}
+
+html[data-theme="warm-paper"] .service-avatar--transcript {
+  color: #6f5a2e;
+}
+
+html[data-theme="warm-paper"] .privacy-note {
+  color: #6b4f16;
+}
+
+html[data-theme="warm-paper"] .supadata-note {
+  background: #f5ead2;
+  color: #715614;
+}
+
+html[data-theme="warm-paper"] .supadata-note a {
+  color: #7c5c10;
+}
+
+html[data-theme="warm-paper"] .capability-tag {
+  color: #6b4f16;
+}
+
+html[data-theme="warm-paper"] .service-status[data-status="configured"] {
+  border-color: rgba(75, 127, 94, 0.34);
+  background: rgba(75, 127, 94, 0.14);
+}
+
+html[data-theme="warm-paper"] button.danger {
+  border-color: rgba(178, 74, 66, 0.45);
+}
+
+html[data-theme="warm-paper"] .provider-select-list {
+  box-shadow: 0 12px 30px rgba(47, 42, 32, 0.18);
+}
+
+html[data-theme="warm-paper"] .settings-nav-item.is-active {
+  box-shadow: 0 1px 4px rgba(47, 42, 32, 0.1);
+}
+
+html[data-theme="warm-paper"] .language-switch .language-option[aria-pressed="true"] {
+  box-shadow: 0 1px 4px rgba(47, 42, 32, 0.14);
+}
+
+html[data-theme="warm-paper"] .field-toggle:hover {
+  background: rgba(47, 42, 32, 0.06);
+}
+
+/* ============================================================
+   THEME SWITCHER (side panel header only)
+   The trigger reuses the existing .settings-btn look; only the menu and the
+   option rows are defined here so the base stylesheet stays untouched.
+   ============================================================ */
+.theme-switch {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.theme-switch-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 60;
+  min-width: 172px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  box-shadow: var(--state-shadow);
+}
+
+.theme-switch-menu[hidden] {
+  display: none;
+}
+
+.theme-option {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  color: var(--text-secondary);
+  font: 600 12px/1.3 var(--font-body);
+  text-align: left;
+  cursor: pointer;
+}
+
+.theme-option:hover {
+  background: var(--surface-raised);
+  color: var(--text);
+}
+
+.theme-option:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.theme-option.is-current {
+  color: var(--text);
+}
+
+.theme-swatch {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  border-radius: 5px;
+  border: 1px solid var(--border-heavy);
+}
+
+.theme-swatch--classic {
+  background: linear-gradient(135deg, #f7f9fa 0 50%, #0a5fe9 50% 100%);
+}
+
+.theme-swatch--night {
+  background: linear-gradient(135deg, #1a222b 0 50%, #4b9df0 50% 100%);
+}
+
+.theme-swatch--paper {
+  background: linear-gradient(135deg, #fffdf6 0 50%, #b85a1e 50% 100%);
+}
+
+.theme-option-label {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.theme-option-check {
+  flex: 0 0 auto;
+  width: 14px;
+  text-align: center;
+  color: var(--accent);
+  font-weight: 800;
+  visibility: hidden;
+}
+
+.theme-option.is-current .theme-option-check {
+  visibility: visible;
+}

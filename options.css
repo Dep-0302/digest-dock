@@ -280,13 +280,17 @@ h2 {
 
 .service-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(
+    auto-fit,
+    minmax(min(100%, 520px), 1fr)
+  );
   gap: 20px;
+  margin-bottom: 20px;
 }
 
 .service-card {
   margin: 0;
-  padding: 22px;
+  padding: 24px;
   background: var(--surface-soft);
 }
 
@@ -395,7 +399,7 @@ button {
 input {
   width: 100%;
   padding: 12px 44px 12px 14px;
-  border: 1px solid var(--line);
+  border: 1px solid var(--control-border, var(--line));
   border-radius: var(--radius-control);
   background: var(--surface);
   color: var(--ink);
@@ -531,10 +535,6 @@ button.danger:hover {
   font-size: 13px;
 }
 
-.data-card {
-  margin-top: 36px;
-}
-
 /* ------------------------------------------------------------------ */
 /* AI provider picker                                                  */
 /* ------------------------------------------------------------------ */
@@ -573,7 +573,7 @@ button.danger:hover {
   gap: 10px;
   width: 100%;
   padding: 10px 12px;
-  border: 1px solid var(--line);
+  border: 1px solid var(--control-border, var(--line));
   border-radius: var(--radius-control);
   background: var(--surface);
   color: var(--ink);

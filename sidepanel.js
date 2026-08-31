@@ -15,6 +15,38 @@ const debugLog = (...args) => {
   if (DEBUG) console.log(...args);
 };
 
+// The MVP runtime is loaded by sidepanel.html before this legacy composition
+// file. Node-only helper tests may intentionally omit it; production never does.
+const SIDEPANEL_STATE_API = globalThis.DIGESTDOCK_SIDEPANEL_STATE || null;
+const SIDEPANEL_EFFECTS_API = globalThis.DIGESTDOCK_SIDEPANEL_EFFECTS || null;
+const SIDEPANEL_MVP_AVAILABLE = Boolean(
+  SIDEPANEL_STATE_API && SIDEPANEL_EFFECTS_API,
+);
+
+let sidepanelMvpState = SIDEPANEL_MVP_AVAILABLE
+  ? SIDEPANEL_STATE_API.createInitialState()
+  : null;
+let sidepanelMvpTaskSequence = 0;
+let sidepanelMvpProgressOverride = null;
+let sidepanelMvpSkeletonTimer = null;
+let sidepanelMvpSkeletonVisible = false;
+let sidepanelMvpCooldownTimer = null;
+const sidepanelMvpTaskGate = SIDEPANEL_MVP_AVAILABLE
+  ? SIDEPANEL_EFFECTS_API.createTaskGate()
+  : null;
+const sidepanelMvpConsentVault = SIDEPANEL_MVP_AVAILABLE
+  ? SIDEPANEL_EFFECTS_API.createConsentTokenVault()
+  : null;
+const sidepanelMvpTranscriptFlight = SIDEPANEL_MVP_AVAILABLE
+  ? SIDEPANEL_EFFECTS_API.createSingleFlight()
+  : null;
+const sidepanelMvpSupadataDispatcher = SIDEPANEL_MVP_AVAILABLE
+  ? SIDEPANEL_EFFECTS_API.createSupadataDispatcher({
+      tokenVault: sidepanelMvpConsentVault,
+      send: (request) => chrome.runtime.sendMessage(request),
+    })
+  : null;
+
 /**
  * Formats a playback offset for the time rail.
  * Below one hour: MM:SS (e.g. 00:37, 59:18). At or above one hour: H:MM:SS
@@ -300,6 +332,513 @@ function shouldOfferSupadata(result) {
     result?.supadataEligible !== false &&
     result?.requiresCaptionEnable !== true
   );
+}
+
+function sidepanelMvpCurrentIdentity() {
+  if (!SIDEPANEL_MVP_AVAILABLE || !sidepanelMvpState?.session?.videoId) {
+    return null;
+  }
+  return SIDEPANEL_STATE_API.normalizeIdentity(sidepanelMvpState.session);
+}
+
+function sidepanelMvpNextTaskId(origin = "task") {
+  sidepanelMvpTaskSequence += 1;
+  return `${String(origin).toLowerCase()}-${Date.now().toString(36)}-${sidepanelMvpTaskSequence}`;
+}
+
+function sidepanelMvpTaskResultEnvelope(task) {
+  if (!task) return null;
+  return {
+    scope: "transcript",
+    taskId: task.id,
+    identity: task.identity,
+  };
+}
+
+function sidepanelMvpRegisterCurrentTask() {
+  const task = sidepanelMvpState?.transcript?.activeTask;
+  if (!SIDEPANEL_MVP_AVAILABLE || !task) return null;
+  return sidepanelMvpTaskGate.begin({
+    scope: "transcript",
+    taskId: task.id,
+    taskOrigin: task.origin,
+    identity: task.identity,
+  });
+}
+
+function sidepanelMvpDispatch(event, { preserveProgress = false } = {}) {
+  if (!SIDEPANEL_MVP_AVAILABLE) return null;
+  const next = SIDEPANEL_STATE_API.reduceSidepanelState(sidepanelMvpState, event);
+  if (next !== sidepanelMvpState && !preserveProgress) {
+    sidepanelMvpProgressOverride = null;
+  }
+  sidepanelMvpState = next;
+  renderSidepanelMvpTranscriptState();
+  return sidepanelMvpState;
+}
+
+function sidepanelMvpBindSession(
+  videoId,
+  routeKey,
+  { forceNewTask = false } = {},
+) {
+  if (!SIDEPANEL_MVP_AVAILABLE) return null;
+  const previousIdentity = sidepanelMvpCurrentIdentity();
+  const identityChanged =
+    !previousIdentity ||
+    previousIdentity.videoId !== videoId ||
+    previousIdentity.routeKey !== routeKey;
+  if (!identityChanged && !forceNewTask) {
+    return sidepanelMvpState.transcript.activeTask;
+  }
+
+  clearTimeout(sidepanelMvpSkeletonTimer);
+  clearTimeout(sidepanelMvpCooldownTimer);
+  sidepanelMvpSkeletonTimer = null;
+  sidepanelMvpCooldownTimer = null;
+  sidepanelMvpSkeletonVisible = false;
+  if (previousIdentity) sidepanelMvpConsentVault.revokeIdentity(previousIdentity);
+  sidepanelMvpTaskGate.clear();
+
+  if (!identityChanged) {
+    const taskId = sidepanelMvpNextTaskId("generation");
+    sidepanelMvpDispatch({
+      type: SIDEPANEL_STATE_API.EVENTS.SESSION_BIND,
+      videoId,
+      routeKey,
+      epoch: 0,
+      forceGeneration: true,
+      taskId,
+      taskOrigin: SIDEPANEL_STATE_API.TASK_ORIGINS.INITIAL_LOAD,
+    });
+    return sidepanelMvpRegisterCurrentTask();
+  }
+
+  const taskId = sidepanelMvpNextTaskId("initial");
+  sidepanelMvpDispatch({
+    type: SIDEPANEL_STATE_API.EVENTS.SESSION_BIND,
+    videoId,
+    routeKey,
+    epoch: 0,
+    taskId,
+    taskOrigin: SIDEPANEL_STATE_API.TASK_ORIGINS.INITIAL_LOAD,
+  });
+  return sidepanelMvpRegisterCurrentTask();
+}
+
+function sidepanelMvpBeginEvent(type, origin, extra = {}) {
+  if (!SIDEPANEL_MVP_AVAILABLE) return null;
+  const taskId = sidepanelMvpNextTaskId(origin);
+  const previousState = sidepanelMvpState;
+  sidepanelMvpDispatch({ type, taskId, ...extra });
+  if (sidepanelMvpState === previousState) return null;
+
+  const task = sidepanelMvpState?.transcript?.activeTask;
+  const identity = sidepanelMvpCurrentIdentity();
+  if (
+    !task ||
+    !identity ||
+    task.id !== taskId ||
+    task.origin !== origin ||
+    !SIDEPANEL_STATE_API.sameIdentity(task.identity, identity)
+  ) {
+    return null;
+  }
+  return sidepanelMvpRegisterCurrentTask();
+}
+
+function sidepanelMvpResolveTranscript(result, task, { finishTask = true } = {}) {
+  if (!SIDEPANEL_MVP_AVAILABLE || !task) return false;
+  const envelope = sidepanelMvpTaskResultEnvelope(task);
+  if (!sidepanelMvpTaskGate.isCurrent(envelope)) return false;
+  sidepanelMvpDispatch({
+    type: SIDEPANEL_STATE_API.EVENTS.TRANSCRIPT_RESULT,
+    identity: task.identity,
+    taskId: task.id,
+    taskOrigin: task.origin,
+    result,
+  });
+  if (finishTask) sidepanelMvpTaskGate.finish(envelope);
+  return true;
+}
+
+function sidepanelMvpShowWorkspaceShell() {
+  if (!SIDEPANEL_MVP_AVAILABLE || !sidepanelMvpState?.session?.videoId) return;
+  const welcome = document.getElementById("welcomeState");
+  const loading = document.getElementById("loadingState");
+  const error = document.getElementById("errorState");
+  const results = document.getElementById("resultsState");
+  const tabs = document.getElementById("tabsNav");
+  const videoInfo = document.getElementById("videoInfo");
+  if (welcome) welcome.style.display = "none";
+  if (loading) loading.style.display = "none";
+  if (error) error.style.display = "none";
+  if (results) results.style.display = "block";
+  if (tabs) tabs.style.display = "flex";
+  if (videoInfo) videoInfo.style.display = "block";
+  const title = document.getElementById("videoTitle");
+  if (title) title.textContent = currentVideoTitle || "当前视频";
+  document.querySelectorAll(".tab").forEach((tab) => {
+    const active = tab.dataset.tab === sidepanelMvpState.activeTab;
+    tab.classList.toggle("active", active);
+    tab.setAttribute("aria-selected", String(active));
+  });
+  document.querySelectorAll(".tab-panel").forEach((panel) => {
+    panel.classList.toggle(
+      "active",
+      panel.dataset.panel === sidepanelMvpState.activeTab,
+    );
+  });
+  updateVideoMetaLine();
+  updateHeaderLanguageControlsVisibility();
+}
+
+function sidepanelMvpIconMarkup(component) {
+  if (component.kind === SIDEPANEL_STATE_API.COMPONENT_KINDS.ERROR) {
+    return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3 2.8 19h18.4L12 3Z"></path><path d="M12 9v4"></path><path d="M12 17h.01"></path></svg>';
+  }
+  if (component.kind === SIDEPANEL_STATE_API.COMPONENT_KINDS.CONSENT) {
+    return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3 5 6v5c0 4.6 2.8 8 7 10 4.2-2 7-5.4 7-10V6l-7-3Z"></path><path d="M9 12.2 11 14l4-4"></path></svg>';
+  }
+  if (component.kind === SIDEPANEL_STATE_API.COMPONENT_KINDS.TERMINAL) {
+    return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M8 12h8"></path></svg>';
+  }
+  if (component.status === SIDEPANEL_STATE_API.TRANSCRIPT_STATUSES.NEEDS_CC) {
+    return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="6" width="18" height="12" rx="3"></rect><path d="M10 10.5a2 2 0 1 0 0 3"></path><path d="M17 10.5a2 2 0 1 0 0 3"></path></svg>';
+  }
+  return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h12"></path><path d="M8 12h12"></path><path d="M4 17h12"></path><circle cx="18" cy="7" r="1.5"></circle></svg>';
+}
+
+function appendSidepanelMvpSkeleton(region) {
+  const list = document.createElement("div");
+  list.className = "workspace-skeleton-list";
+  list.setAttribute("aria-hidden", "true");
+  for (let index = 0; index < 4; index += 1) {
+    const card = document.createElement("div");
+    card.className = "workspace-skeleton-card";
+    const time = document.createElement("div");
+    time.className = "workspace-skeleton-time";
+    const copy = document.createElement("div");
+    copy.className = "workspace-skeleton-copy";
+    const longLine = document.createElement("div");
+    longLine.className = "workspace-skeleton-line";
+    const shortLine = document.createElement("div");
+    shortLine.className = "workspace-skeleton-line short";
+    copy.append(longLine, shortLine);
+    card.append(time, copy);
+    list.append(card);
+  }
+  region.append(list);
+}
+
+function appendSidepanelMvpDetails(card, component) {
+  if (component.status === SIDEPANEL_STATE_API.TRANSCRIPT_STATUSES.NEEDS_CC) {
+    const steps = document.createElement("div");
+    steps.className = "workspace-state-steps";
+    for (const [number, text] of [
+      ["01", "在 YouTube 播放器打开 CC"],
+      ["02", "看到字幕后回到这里重新读取"],
+    ]) {
+      const step = document.createElement("div");
+      step.className = "workspace-state-step";
+      const marker = document.createElement("strong");
+      marker.textContent = number;
+      step.append(marker, document.createTextNode(text));
+      steps.append(step);
+    }
+    card.append(steps);
+  }
+
+  if (
+    component.status ===
+    SIDEPANEL_STATE_API.TRANSCRIPT_STATUSES.NEEDS_SUPADATA_CHOICE
+  ) {
+    const scope = document.createElement("div");
+    scope.className = "workspace-consent-scope";
+    for (const text of ["仅当前视频", "仅本次调用", "可能消耗额度"]) {
+      const item = document.createElement("div");
+      item.className = "workspace-consent-item";
+      item.textContent = text;
+      scope.append(item);
+    }
+    card.append(scope);
+  }
+}
+
+function renderSidepanelMvpTranscriptState() {
+  if (!SIDEPANEL_MVP_AVAILABLE || typeof document === "undefined") return;
+  const region = document.getElementById("transcriptStateRegion");
+  const readyRegion = document.getElementById("transcriptReadyRegion");
+  if (!region || !readyRegion || !sidepanelMvpState?.session?.videoId) return;
+
+  sidepanelMvpShowWorkspaceShell();
+  const view = SIDEPANEL_STATE_API.deriveView(sidepanelMvpState, {
+    now: Date.now(),
+    canReturnToNotes: isActiveNotesOnlyContext(),
+  });
+  const component = { ...view.transcript.component };
+  if (
+    sidepanelMvpProgressOverride &&
+    component.kind === SIDEPANEL_STATE_API.COMPONENT_KINDS.PROGRESS
+  ) {
+    component.title = sidepanelMvpProgressOverride.title || component.title;
+    component.message =
+      sidepanelMvpProgressOverride.subtitle || component.message;
+  }
+  clearTimeout(sidepanelMvpCooldownTimer);
+  sidepanelMvpCooldownTimer = null;
+  if (component.cooldownRemainingMs > 0) {
+    component.message = `${component.message}\n约 ${Math.max(
+      1,
+      Math.ceil(component.cooldownRemainingMs / 1000),
+    )} 秒后可再次选择。`;
+    sidepanelMvpCooldownTimer = setTimeout(() => {
+      sidepanelMvpCooldownTimer = null;
+      renderSidepanelMvpTranscriptState();
+    }, component.cooldownRemainingMs + 25);
+  }
+
+  const isReady =
+    component.status === SIDEPANEL_STATE_API.TRANSCRIPT_STATUSES.READY;
+  const showRetainedReady =
+    component.retainedReady === true && Boolean(currentTranscript?.length);
+  readyRegion.hidden = !(isReady || showRetainedReady);
+  readyRegion.classList.toggle("is-readonly", sidepanelMvpState.session.readOnly);
+  const exportButton = document.getElementById("exportTranscriptBtn");
+  if (exportButton) exportButton.disabled = sidepanelMvpState.session.readOnly;
+
+  if (isReady) {
+    clearTimeout(sidepanelMvpSkeletonTimer);
+    sidepanelMvpSkeletonTimer = null;
+    sidepanelMvpSkeletonVisible = false;
+    region.hidden = true;
+    region.replaceChildren();
+    return;
+  }
+
+  region.hidden = false;
+  region.className = `workspace-state-region kind-${component.kind.toLowerCase()}`;
+  region.setAttribute(
+    "aria-busy",
+    String(component.kind === SIDEPANEL_STATE_API.COMPONENT_KINDS.PROGRESS),
+  );
+  region.setAttribute(
+    "role",
+    component.kind === SIDEPANEL_STATE_API.COMPONENT_KINDS.ERROR
+      ? "alert"
+      : "status",
+  );
+  region.setAttribute(
+    "aria-live",
+    component.kind === SIDEPANEL_STATE_API.COMPONENT_KINDS.ERROR
+      ? "assertive"
+      : "polite",
+  );
+  region.replaceChildren();
+
+  const card = document.createElement("div");
+  card.className = "workspace-state-card";
+  const heading = document.createElement("div");
+  heading.className = "workspace-state-heading";
+  const icon = document.createElement("span");
+  icon.className = "workspace-state-icon";
+  icon.innerHTML = sidepanelMvpIconMarkup(component);
+  const copy = document.createElement("div");
+  copy.className = "workspace-state-copy";
+  const title = document.createElement("div");
+  title.className = "workspace-state-title";
+  title.textContent = component.title;
+  copy.append(title);
+  if (component.message) {
+    const message = document.createElement("div");
+    message.className = "workspace-state-message";
+    message.textContent = component.message;
+    copy.append(message);
+  }
+  heading.append(icon, copy);
+  card.append(heading);
+  appendSidepanelMvpDetails(card, component);
+
+  if (view.transcript.actions.length) {
+    const actions = document.createElement("div");
+    actions.className = "workspace-state-actions";
+    const disabled = new Set(component.disabledActionIds || []);
+    for (const model of view.transcript.actions) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = `workspace-state-action ${model.kind}`;
+      button.dataset.mvpEvent = model.event.type;
+      button.dataset.mvpActionId = model.id;
+      button.textContent = model.label;
+      button.disabled = disabled.has(model.id);
+      actions.append(button);
+    }
+    card.append(actions);
+  }
+  region.append(card);
+
+  const isInitialLoading =
+    component.status === SIDEPANEL_STATE_API.TRANSCRIPT_STATUSES.LOADING;
+  const showSkeletonNow =
+    component.kind === SIDEPANEL_STATE_API.COMPONENT_KINDS.PROGRESS &&
+    (!isInitialLoading || sidepanelMvpSkeletonVisible);
+  if (showSkeletonNow) appendSidepanelMvpSkeleton(region);
+  if (isInitialLoading && !sidepanelMvpSkeletonVisible && !sidepanelMvpSkeletonTimer) {
+    sidepanelMvpSkeletonTimer = setTimeout(() => {
+      sidepanelMvpSkeletonTimer = null;
+      if (
+        sidepanelMvpState?.transcript?.status ===
+        SIDEPANEL_STATE_API.TRANSCRIPT_STATUSES.LOADING
+      ) {
+        sidepanelMvpSkeletonVisible = true;
+        renderSidepanelMvpTranscriptState();
+      }
+    }, SIDEPANEL_STATE_API.TIMING.CACHE_SKELETON_DELAY_MS);
+  }
+}
+
+async function sidepanelMvpRefreshConfig() {
+  const config = await chrome.runtime.sendMessage({ action: "checkConfig" });
+  if (config?.runtimeProtocolVersion === REQUIRED_RUNTIME_PROTOCOL_VERSION) {
+    currentConfigStatus = config;
+  }
+  return currentConfigStatus || {};
+}
+
+function sidepanelMvpRunCurrentTask({ captionRetry = false, consentToken = null } = {}) {
+  const task = sidepanelMvpState?.transcript?.activeTask;
+  const identity = sidepanelMvpCurrentIdentity();
+  if (!task || !identity) return Promise.resolve();
+  const key = SIDEPANEL_EFFECTS_API.taskFlightKey("transcript", identity);
+  return sidepanelMvpTranscriptFlight.run(key, () =>
+    runDigestLoad(
+      currentVideoId,
+      digestGeneration,
+      false,
+      currentMediaRef,
+      currentRouteKey,
+      Boolean(consentToken),
+      captionRetry,
+      { mvpTask: task, consentToken },
+    ),
+  );
+}
+
+async function sidepanelMvpHandleAction(
+  eventType,
+  actionIdentity = sidepanelMvpCurrentIdentity(),
+) {
+  const events = SIDEPANEL_STATE_API.EVENTS;
+  if (eventType === events.USER_RETRY_FREE) {
+    const task = sidepanelMvpBeginEvent(
+      events.USER_RETRY_FREE,
+      SIDEPANEL_STATE_API.TASK_ORIGINS.USER_RETRY_FREE,
+    );
+    if (!task) return;
+    return sidepanelMvpRunCurrentTask({ captionRetry: true });
+  }
+  if (eventType === events.USER_CONSENT) {
+    const requestedIdentity = actionIdentity;
+    if (
+      !requestedIdentity ||
+      !SIDEPANEL_STATE_API.sameIdentity(
+        requestedIdentity,
+        sidepanelMvpCurrentIdentity(),
+      ) ||
+      sidepanelMvpState?.transcript?.status !==
+        SIDEPANEL_STATE_API.TRANSCRIPT_STATUSES.NEEDS_SUPADATA_CHOICE
+    ) {
+      return;
+    }
+    const requestedTranscript = sidepanelMvpState.transcript;
+    let config;
+    try {
+      config = await sidepanelMvpRefreshConfig();
+    } catch (error) {
+      if (
+        !SIDEPANEL_STATE_API.sameIdentity(
+          requestedIdentity,
+          sidepanelMvpCurrentIdentity(),
+        ) ||
+        sidepanelMvpState?.transcript !== requestedTranscript
+      ) {
+        return;
+      }
+      throw error;
+    }
+    if (
+      !SIDEPANEL_STATE_API.sameIdentity(
+        requestedIdentity,
+        sidepanelMvpCurrentIdentity(),
+      ) ||
+      sidepanelMvpState?.transcript !== requestedTranscript ||
+      sidepanelMvpState?.transcript?.status !==
+        SIDEPANEL_STATE_API.TRANSCRIPT_STATUSES.NEEDS_SUPADATA_CHOICE
+    ) {
+      return;
+    }
+    if (!config.hasSupadataKey) {
+      sidepanelMvpDispatch({
+        type: events.USER_CONSENT,
+        identity: requestedIdentity,
+        hasKey: false,
+        now: Date.now(),
+      });
+      return;
+    }
+    const consentToken = sidepanelMvpConsentVault.mint(requestedIdentity);
+    const task = sidepanelMvpBeginEvent(
+      events.USER_CONSENT,
+      SIDEPANEL_STATE_API.TASK_ORIGINS.USER_CONSENT,
+      {
+        identity: requestedIdentity,
+        hasKey: true,
+        consentToken: consentToken.id,
+        now: Date.now(),
+      },
+    );
+    if (!task) {
+      sidepanelMvpConsentVault.revoke(consentToken);
+      return;
+    }
+    return sidepanelMvpRunCurrentTask({ consentToken });
+  }
+  if (eventType === events.OPEN_SUPADATA_SETTINGS) {
+    return openSupadataOptions();
+  }
+  if (eventType === events.USER_RETURN_TO_NOTES) {
+    return returnToNotesOnlyContext();
+  }
+  if (
+    eventType === events.USER_RESOLVED ||
+    eventType === events.USER_RECONNECT_CURRENT_VIDEO ||
+    eventType === events.USER_RECOVER_ERROR
+  ) {
+    const origin =
+      eventType === events.USER_RESOLVED
+        ? SIDEPANEL_STATE_API.TASK_ORIGINS.USER_RESOLVED
+        : eventType === events.USER_RECONNECT_CURRENT_VIDEO
+          ? SIDEPANEL_STATE_API.TASK_ORIGINS.USER_RECONNECT_CURRENT_VIDEO
+          : SIDEPANEL_STATE_API.TASK_ORIGINS.USER_RECOVER_ERROR;
+    const task = sidepanelMvpBeginEvent(eventType, origin);
+    if (task) return sidepanelMvpRunCurrentTask();
+    return;
+  }
+  sidepanelMvpDispatch({ type: eventType });
+}
+
+async function sidepanelMvpHandleSettingsChanged() {
+  if (!SIDEPANEL_MVP_AVAILABLE) return;
+  const config = await sidepanelMvpRefreshConfig();
+  if (
+    config.hasSupadataKey &&
+    sidepanelMvpState?.transcript?.status ===
+      SIDEPANEL_STATE_API.TRANSCRIPT_STATUSES.NEEDS_SUPADATA_CONFIG
+  ) {
+    sidepanelMvpDispatch({ type: SIDEPANEL_STATE_API.EVENTS.KEY_SAVED });
+    return;
+  }
+  renderSidepanelMvpTranscriptState();
 }
 
 function transcriptSourceLabel() {
@@ -624,6 +1163,10 @@ function groupTranscriptEntries(entries, limits = TRANSCRIPT_SEGMENT_LIMITS) {
 
 document.addEventListener("DOMContentLoaded", async () => {
   setupEventListeners();
+  if (!SIDEPANEL_MVP_AVAILABLE) {
+    showRuntimeVersionError();
+    return;
+  }
   await evictOldCacheEntries(20);
 
   currentConfigStatus = await chrome.runtime.sendMessage({
@@ -661,7 +1204,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   if (message.action === "transcriptProgress") {
     // Background is telling us the transcript fetch status changed
-    updateLoading(message.title, message.subtitle);
+    if (
+      SIDEPANEL_MVP_AVAILABLE &&
+      sidepanelMvpState?.transcript?.status !==
+        SIDEPANEL_STATE_API.TRANSCRIPT_STATUSES.READY
+    ) {
+      sidepanelMvpProgressOverride = {
+        title: String(message.title || ""),
+        subtitle: String(message.subtitle || ""),
+      };
+      renderSidepanelMvpTranscriptState();
+    } else {
+      updateLoading(message.title, message.subtitle);
+    }
     sendResponse({ success: true });
   }
   if (message.action === "noteSaved" || message.action === "notesChanged") {
@@ -755,6 +1310,16 @@ function extractMediaLocator(url) {
     };
   } catch {
     return null;
+  }
+}
+
+function isDigestDockOptionsUrl(url) {
+  try {
+    const target = new URL(String(url || ""));
+    const options = new URL(chrome.runtime.getURL("options.html"));
+    return target.origin === options.origin && target.pathname === options.pathname;
+  } catch (_error) {
+    return false;
   }
 }
 
@@ -1090,6 +1655,7 @@ function updateHeaderLanguageControlsVisibility() {
  * refresh the digest when the video changed.
  */
 function handleFrontTabUrl(url, tabId = null) {
+  if (isDigestDockOptionsUrl(url)) return;
   const locator = extractMediaLocator(url);
   if (!locator) {
     const activeToken = activeNotesOnlyContext?.token || "";
@@ -1161,6 +1727,56 @@ chrome.tabs.onRemoved?.addListener((tabId) => {
 });
 
 function setupEventListeners() {
+  document
+    .getElementById("transcriptStateRegion")
+    ?.addEventListener("click", (event) => {
+      const button = event.target.closest?.("[data-mvp-event]");
+      if (!button || button.disabled) return;
+      button.disabled = true;
+      const eventType = String(button.dataset.mvpEvent || "");
+      const actionIdentity = sidepanelMvpCurrentIdentity();
+      Promise.resolve(
+        sidepanelMvpHandleAction(eventType, actionIdentity),
+      ).catch((error) => {
+        console.error("[DigestDock Panel] MVP action failed:", error);
+        if (
+          !actionIdentity ||
+          !SIDEPANEL_STATE_API.sameIdentity(
+            actionIdentity,
+            sidepanelMvpCurrentIdentity(),
+          )
+        ) {
+          return;
+        }
+        const task = sidepanelMvpState?.transcript?.activeTask;
+        if (
+          task &&
+          SIDEPANEL_STATE_API.sameIdentity(task.identity, actionIdentity)
+        ) {
+          sidepanelMvpResolveTranscript(
+            {
+              success: false,
+              routeOutcome: "UNKNOWN",
+              error: "TRANSCRIPT_ERROR",
+              message: error?.message || "字幕操作未能完成，请稍后重试。",
+            },
+            task,
+          );
+        } else {
+          renderSidepanelMvpTranscriptState();
+        }
+      });
+    });
+
+  chrome.storage?.onChanged?.addListener((changes, areaName) => {
+    if (
+      areaName === "local" &&
+      Object.hasOwn(changes || {}, YTD_SETTINGS.STORAGE_KEY)
+    ) {
+      void sidepanelMvpHandleSettingsChanged();
+    }
+  });
+
   // Tab switching
   document.querySelectorAll(".tab").forEach((tab) => {
     tab.addEventListener("click", () => switchTab(tab.dataset.tab));
@@ -1413,11 +2029,6 @@ async function runCheckCurrentTab(generation, options = {}) {
       return;
     }
 
-    if (!currentConfigStatus?.hasAiKey) {
-      showConfigError(currentConfigStatus || {});
-      return;
-    }
-
     let nextMediaRef = locator;
     let nextVideoUrl = tab.url;
     let nextVideoTitle = "";
@@ -1567,6 +2178,7 @@ function resetDigestStateForVideo(videoId, videoUrl, mediaRef, routeKey) {
   currentVideoUrl = videoUrl;
   currentMediaRef = mediaRef;
   currentRouteKey = routeKey;
+  sidepanelMvpBindSession(videoId, routeKey, { forceNewTask: true });
   currentAnalysis = null;
   currentTranscript = null;
   currentTranscriptText = null;
@@ -1878,6 +2490,21 @@ function startDigest(
     currentRouteKey = nextRouteKey;
   }
 
+  if (SIDEPANEL_MVP_AVAILABLE && !videoChanged) {
+    const transcriptStatus = sidepanelMvpState?.transcript?.status;
+    if (
+      transcriptStatus === SIDEPANEL_STATE_API.TRANSCRIPT_STATUSES.READY ||
+      ![
+        SIDEPANEL_STATE_API.TRANSCRIPT_STATUSES.LOADING,
+        SIDEPANEL_STATE_API.TRANSCRIPT_STATUSES.RETRYING_FREE,
+        SIDEPANEL_STATE_API.TRANSCRIPT_STATUSES.FETCHING_SUPADATA,
+      ].includes(transcriptStatus)
+    ) {
+      renderSidepanelMvpTranscriptState();
+      return Promise.resolve();
+    }
+  }
+
   const generation = digestGeneration;
   const requestKey = `${generation}:${videoId}`;
   return runDigestSingleFlight(requestKey, () =>
@@ -1930,12 +2557,30 @@ async function runDigestLoad(
   routeKey = currentRouteKey,
   supadataConsent = false,
   captionRetry = false,
+  mvpOptions = {},
 ) {
   if (!isCurrentDigest(videoId, generation, routeKey)) return;
+  const mvpTask = SIDEPANEL_MVP_AVAILABLE
+    ? mvpOptions.mvpTask || sidepanelMvpState?.transcript?.activeTask
+    : null;
+  const mvpEnvelope = sidepanelMvpTaskResultEnvelope(mvpTask);
+  const ownsDigestLoad = () =>
+    isCurrentDigest(videoId, generation, routeKey) &&
+    (!SIDEPANEL_MVP_AVAILABLE ||
+      (mvpTask && sidepanelMvpTaskGate.isCurrent(mvpEnvelope)));
+  if (!ownsDigestLoad()) return;
 
   // Check if we already have this video loaded in memory
   if (!videoChanged && videoId === currentVideoId && currentAnalysis) {
-    showState("results");
+    if (SIDEPANEL_MVP_AVAILABLE && currentTranscript) {
+      sidepanelMvpResolveTranscript(
+        { success: true, routeOutcome: "HAVE_TRANSCRIPT", source: "memory" },
+        mvpTask,
+      );
+      renderSidepanelMvpTranscriptState();
+    } else {
+      showState("results");
+    }
     refreshOverviewForCurrentVideoIfVisible();
     return;
   }
@@ -1947,7 +2592,7 @@ async function runDigestLoad(
     trackKind: YOUTUBE_TRANSCRIPT_TRACK_KIND,
     routeKey,
   });
-  if (!isCurrentDigest(videoId, generation, routeKey)) return;
+  if (!ownsDigestLoad()) return;
   if (
     cached &&
     ((cached.routeKey && cached.routeKey !== routeKey) ||
@@ -2004,7 +2649,7 @@ async function runDigestLoad(
       currentTranscriptSource,
       currentTranscriptSelectedTrack,
     );
-    if (!isCurrentDigest(videoId, generation, routeKey)) return;
+    if (!ownsDigestLoad()) return;
     if (compactOverview) {
       currentAnalysis = compactOverview;
     } else if (currentAnalysis) {
@@ -2018,7 +2663,7 @@ async function runDigestLoad(
         currentTranscriptSource,
         currentTranscriptSelectedTrack,
       );
-      if (!isCurrentDigest(videoId, generation, routeKey)) return;
+      if (!ownsDigestLoad()) return;
     }
     applyMediaLanguageDefaults();
     isAnalysisLoading = false;
@@ -2033,7 +2678,7 @@ async function runDigestLoad(
       }
     }
     await hydrateCurrentVideoNoteSource();
-    if (!isCurrentDigest(videoId, generation, routeKey)) return;
+    if (!ownsDigestLoad()) return;
 
     if (currentVideoTitle || currentChannelName) {
       const videoInfo = document.getElementById("videoInfo");
@@ -2043,6 +2688,16 @@ async function runDigestLoad(
     }
 
     // Always render transcript first
+    if (SIDEPANEL_MVP_AVAILABLE) {
+      sidepanelMvpResolveTranscript(
+        {
+          success: true,
+          routeOutcome: "HAVE_TRANSCRIPT",
+          source: currentTranscriptSource || "cache",
+        },
+        mvpTask,
+      );
+    }
     renderTranscript();
 
     // Render analysis if we have it cached
@@ -2051,8 +2706,11 @@ async function runDigestLoad(
       highlightMomentsOnPage(currentAnalysis.keyMoments);
     }
 
-    showState("results");
-    document.getElementById("tabsNav").style.display = "flex";
+    if (SIDEPANEL_MVP_AVAILABLE) renderSidepanelMvpTranscriptState();
+    else {
+      showState("results");
+      document.getElementById("tabsNav").style.display = "flex";
+    }
 
     // Respect the user's explicit All Notes filter. A saved-note navigation
     // must not silently collapse the library back to the current video after
@@ -2082,8 +2740,11 @@ async function runDigestLoad(
     videoInfo.style.display = "block";
   }
 
-  showState("loading");
-  updateLoading("正在获取字幕", "");
+  if (SIDEPANEL_MVP_AVAILABLE) renderSidepanelMvpTranscriptState();
+  else {
+    showState("loading");
+    updateLoading("正在获取字幕", "");
+  }
 
   const requestMediaRef = currentMediaRef || mediaRef;
   const transcriptRequest = buildTranscriptFetchRequest({
@@ -2096,8 +2757,49 @@ async function runDigestLoad(
     supadataConsent,
     captionRetry,
   });
-  const transcriptResult = await chrome.runtime.sendMessage(transcriptRequest);
-  if (!isCurrentDigest(videoId, generation, routeKey)) return;
+  let transcriptResult;
+  try {
+    if (SIDEPANEL_MVP_AVAILABLE && mvpOptions.consentToken) {
+      const consentToken = mvpOptions.consentToken;
+      transcriptResult = await sidepanelMvpSupadataDispatcher.dispatch({
+        identity: mvpTask.identity,
+        token: consentToken,
+        request: transcriptRequest,
+        onConsumed: () => {
+          sidepanelMvpDispatch({
+            type: SIDEPANEL_STATE_API.EVENTS.SUPADATA_REQUEST_DISPATCHED,
+            identity: mvpTask.identity,
+            taskId: mvpTask.id,
+            consentToken: consentToken.id,
+          });
+        },
+      });
+    } else {
+      transcriptResult = await chrome.runtime.sendMessage(transcriptRequest);
+    }
+  } catch (error) {
+    if (mvpOptions.consentToken) {
+      sidepanelMvpConsentVault.revoke(mvpOptions.consentToken);
+    }
+    transcriptResult = {
+      success: false,
+      error: error?.code || "TRANSCRIPT_ERROR",
+      routeOutcome:
+        error?.code === "PAGE_CONTEXT_CHANGED"
+          ? "PAGE_CONTEXT_CHANGED"
+          : "UNKNOWN",
+      message: error?.message || "读取字幕失败，请稍后重试。",
+      runId: transcriptRequest.runId,
+      routeKey: transcriptRequest.routeKey,
+    };
+  }
+  if (!ownsDigestLoad()) return;
+  if (
+    SIDEPANEL_MVP_AVAILABLE &&
+    !sidepanelMvpTaskGate.isCurrent(mvpEnvelope)
+  ) {
+    return;
+  }
   if (
     !transcriptResponseMatchesRequest(transcriptResult, transcriptRequest, {
       platform: requestMediaRef?.platform,
@@ -2112,7 +2814,17 @@ async function runDigestLoad(
     return;
   }
 
-  if (!transcriptResult.success) {
+  if (SIDEPANEL_MVP_AVAILABLE) {
+    sidepanelMvpResolveTranscript(transcriptResult, mvpTask, {
+      finishTask: transcriptResult?.success !== true,
+    });
+    if (
+      sidepanelMvpState.transcript.status !==
+      SIDEPANEL_STATE_API.TRANSCRIPT_STATUSES.READY
+    ) {
+      return;
+    }
+  } else if (!transcriptResult.success) {
     const routeOutcome = transcriptRouteOutcome(transcriptResult);
     if (routeOutcome === "PAGE_CONTEXT_CHANGED") {
       scheduleDigestRefresh();
@@ -2140,7 +2852,7 @@ async function runDigestLoad(
         : null;
       showYoutubeCaptionsRequired(
         async () => {
-          if (!isCurrentDigest(videoId, generation, routeKey)) return;
+          if (!ownsDigestLoad()) return;
           const requestKey = `${generation}:${videoId}`;
           await runDigestSingleFlight(requestKey, async () => undefined);
           await runDigestSingleFlight(requestKey, () =>
@@ -2188,10 +2900,10 @@ async function runDigestLoad(
         return;
       }
       showSupadataConsent(async () => {
-        if (!isCurrentDigest(videoId, generation, routeKey)) return;
+        if (!ownsDigestLoad()) return;
         const requestKey = `${generation}:${videoId}`;
         await runDigestSingleFlight(requestKey, async () => undefined);
-        if (!isCurrentDigest(videoId, generation, routeKey)) return;
+        if (!ownsDigestLoad()) return;
         await runDigestSingleFlight(requestKey, () =>
           runDigestLoad(
             videoId,
@@ -2276,16 +2988,16 @@ async function runDigestLoad(
   const previousArtifactIdentity = await readStoredTranscriptArtifactIdentity(
     videoId,
   );
-  if (!isCurrentDigest(videoId, generation, routeKey)) return;
+  if (!ownsDigestLoad()) return;
   await invalidateTranscriptDerivedArtifacts(
     videoId,
     previousArtifactIdentity,
     currentTranscriptArtifactIdentity(),
   );
-  if (!isCurrentDigest(videoId, generation, routeKey)) return;
+  if (!ownsDigestLoad()) return;
 
   await hydrateCurrentVideoNoteSource();
-  if (!isCurrentDigest(videoId, generation, routeKey)) return;
+  if (!ownsDigestLoad()) return;
 
   currentAnalysis = await loadOverviewFromCache(
     videoId,
@@ -2294,7 +3006,7 @@ async function runDigestLoad(
     currentTranscriptSource,
     currentTranscriptSelectedTrack,
   );
-  if (!isCurrentDigest(videoId, generation, routeKey)) return;
+  if (!ownsDigestLoad()) return;
 
   // Render transcript immediately (no LLM needed)
   renderTranscript();
@@ -2302,8 +3014,11 @@ async function runDigestLoad(
     renderAnalysisResults(currentAnalysis);
     highlightMomentsOnPage(currentAnalysis.keyMoments);
   }
-  showState("results");
-  document.getElementById("tabsNav").style.display = "flex";
+  if (SIDEPANEL_MVP_AVAILABLE) renderSidepanelMvpTranscriptState();
+  else {
+    showState("results");
+    document.getElementById("tabsNav").style.display = "flex";
+  }
 
   // Preserve an explicitly selected All Notes view across digest loading.
   loadNotes(notesFilterShowAll ? null : videoId);
@@ -2314,9 +3029,13 @@ async function runDigestLoad(
 
   // Save transcript to cache (without analysis)
   await saveToCache(videoId);
-  if (!isCurrentDigest(videoId, generation, routeKey)) return;
+  if (!ownsDigestLoad()) return;
 
   refreshOverviewForCurrentVideoIfVisible();
+
+  if (SIDEPANEL_MVP_AVAILABLE) {
+    sidepanelMvpTaskGate.finish(mvpEnvelope);
+  }
 
   // Generate analysis only when Overview is the active tab. Otherwise keep the
   // original lazy-load behavior so transcript-only use does not spend AI tokens.
@@ -5609,11 +6328,19 @@ function resumeDigestFromNotesOnly(tabName) {
   const context = activeNotesOnlyContext;
   if (!context) return Promise.resolve();
 
-  showState("loading");
-  updateLoading(
-    tabName === "overview" ? "正在准备概览" : "正在获取字幕",
-    "",
-  );
+  if (SIDEPANEL_MVP_AVAILABLE) {
+    sidepanelMvpProgressOverride = {
+      title: tabName === "overview" ? "正在准备概览" : "正在获取字幕",
+      subtitle: "",
+    };
+    renderSidepanelMvpTranscriptState();
+  } else {
+    showState("loading");
+    updateLoading(
+      tabName === "overview" ? "正在准备概览" : "正在获取字幕",
+      "",
+    );
+  }
   noteNavigationResumePromise = checkCurrentTab({
     resumeNoteNavigationToken: context.token,
   })
@@ -5640,8 +6367,16 @@ function resumeDigestFromNotesOnly(tabName) {
 }
 
 function switchTab(tabName) {
+  if (SIDEPANEL_MVP_AVAILABLE && sidepanelMvpState?.session?.videoId) {
+    sidepanelMvpState = SIDEPANEL_STATE_API.reduceSidepanelState(
+      sidepanelMvpState,
+      { type: SIDEPANEL_STATE_API.EVENTS.USER_SELECT_TAB, tab: tabName },
+    );
+  }
   document.querySelectorAll(".tab").forEach((tab) => {
-    tab.classList.toggle("active", tab.dataset.tab === tabName);
+    const active = tab.dataset.tab === tabName;
+    tab.classList.toggle("active", active);
+    tab.setAttribute?.("aria-selected", String(active));
   });
 
   document.querySelectorAll(".tab-panel").forEach((panel) => {
@@ -8117,6 +8852,7 @@ globalThis.__YTD_TRANSCRIPT_TESTING__ = {
   renderSubtitleInlineMarkup,
   renderTranscriptSegmentContent,
   extractMediaLocator,
+  isDigestDockOptionsUrl,
   transcriptTranslationCacheKey,
   transcriptExportMode,
   buildTranscriptExportSource,
@@ -8154,4 +8890,9 @@ globalThis.__YTD_TRANSCRIPT_TESTING__ = {
   applyNoteTitleTranslations,
   groupTranscriptEntries,
   formatTimecode,
+  sidepanelMvpBindSession,
+  sidepanelMvpBeginEvent,
+  sidepanelMvpHandleAction,
+  sidepanelMvpResolveTranscript,
+  getSidepanelMvpState: () => sidepanelMvpState,
 };

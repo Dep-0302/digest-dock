@@ -265,3 +265,25 @@ test("settings page locks to the viewport with a single internal scroller", () =
     /@media \(max-width: 900px\)[\s\S]*\.service-grid\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\)/,
   );
 });
+
+test("service cards fill the row and keep the shared card spacing rhythm", () => {
+  const css = read("options.css");
+
+  // auto-fit collapses an unused service track when the on-demand Supadata
+  // card is hidden, while still allowing two equal columns when both cards
+  // are visible and the content area is wide enough.
+  assert.match(
+    css,
+    /\.service-grid\s*\{[^}]*grid-template-columns:\s*repeat\(\s*auto-fit,\s*minmax\(min\(100%,\s*520px\),\s*1fr\)\s*\)[^}]*gap:\s*20px;[^}]*margin-bottom:\s*20px/,
+  );
+
+  // Service cards use the same inset as the other top-level settings cards.
+  assert.match(
+    css,
+    /\.service-card\s*\{[^}]*margin:\s*0;[^}]*padding:\s*24px/,
+  );
+
+  // No one-off top margin interrupts the shared 20px card rhythm farther
+  // down the settings page.
+  assert.doesNotMatch(css, /\.data-card\s*\{[^}]*margin-top/);
+});

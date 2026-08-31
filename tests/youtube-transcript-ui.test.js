@@ -56,7 +56,10 @@ function loadSidepanelHelpers() {
     YTD_NOTE_SOURCES: require("../note-sources.js"),
   };
   sandbox.globalThis = sandbox;
-  vm.runInContext(read("sidepanel.js"), vm.createContext(sandbox));
+  const context = vm.createContext(sandbox);
+  vm.runInContext(read("sidepanel-state.js"), context);
+  vm.runInContext(read("sidepanel-effects.js"), context);
+  vm.runInContext(read("sidepanel.js"), context);
   return sandbox.__YTD_TRANSCRIPT_TESTING__;
 }
 
@@ -362,6 +365,75 @@ test("one transcript request carries the current run identity and rejects late r
       { platform: "bilibili" },
     ),
     true,
+  );
+});
+
+test("runtime adapter carries one exact task from first UNKNOWN through free retry to consent choice", () => {
+  const helpers = loadSidepanelHelpers();
+  const firstTask = helpers.sidepanelMvpBindSession(
+    "video-1",
+    "youtube:video-1",
+  );
+  assert.ok(firstTask);
+  assert.equal(
+    helpers.sidepanelMvpResolveTranscript(
+      {
+        success: false,
+        routeOutcome: "UNKNOWN",
+        error: "YOUTUBE_CAPTIONS_REQUIRED",
+        requiresCaptionEnable: true,
+      },
+      firstTask,
+    ),
+    true,
+  );
+  assert.equal(
+    helpers.getSidepanelMvpState().transcript.status,
+    "needs_cc",
+  );
+
+  const retryTask = helpers.sidepanelMvpBeginEvent(
+    "USER_RETRY_FREE",
+    "USER_RETRY_FREE",
+  );
+  assert.ok(retryTask);
+  assert.equal(
+    helpers.sidepanelMvpResolveTranscript(
+      {
+        success: false,
+        routeOutcome: "UNKNOWN",
+        error: "SUPADATA_CONSENT_REQUIRED",
+        hasSupadataKey: true,
+      },
+      retryTask,
+    ),
+    true,
+  );
+  const state = helpers.getSidepanelMvpState();
+  assert.equal(state.transcript.status, "needs_supadata_choice");
+  assert.equal(state.transcript.retryUsed, true);
+
+  assert.equal(
+    helpers.sidepanelMvpResolveTranscript(
+      { success: true, routeOutcome: "HAVE_TRANSCRIPT" },
+      firstTask,
+    ),
+    false,
+    "the replaced task must stay rejected",
+  );
+});
+
+test("the extension options tab preserves the current side-panel session", () => {
+  const helpers = loadSidepanelHelpers();
+  assert.equal(
+    helpers.isDigestDockOptionsUrl(
+      "chrome-extension://test/options.html?focus=supadata#section-transcript",
+    ),
+    true,
+  );
+  assert.equal(
+    helpers.isDigestDockOptionsUrl("https://example.com/options.html"),
+    false,
   );
 });
 

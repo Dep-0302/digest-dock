@@ -70,7 +70,7 @@ test("manifest uses minimized install-time permissions", () => {
   assert.equal(passiveBridge?.world, "ISOLATED");
   assert.deepEqual(passiveBridge?.matches, ["https://www.youtube.com/*"]);
   assert.equal(Object.hasOwn(manifest, "optional_host_permissions"), false);
-  assert.equal(manifest.version, "1.4.5");
+  assert.equal(manifest.version, "1.4.6");
 });
 
 test("large local caches use explicit permission and remain user-clearable", () => {
@@ -116,6 +116,12 @@ test("cross-platform runtime dependencies match the Passive-first release surfac
   const panelRuntimeIndex = sidepanelPage.indexOf(
     '<script src="sidepanel.js"></script>',
   );
+  const panelStateIndex = sidepanelPage.indexOf(
+    '<script src="sidepanel-state.js"></script>',
+  );
+  const panelEffectsIndex = sidepanelPage.indexOf(
+    '<script src="sidepanel-effects.js"></script>',
+  );
 
   assert.doesNotMatch(background, /importScripts\("youtube-transcript\.js"\)/);
   assert.match(background, /importScripts\("notes-backup\.js"\)/);
@@ -128,10 +134,19 @@ test("cross-platform runtime dependencies match the Passive-first release surfac
   assert.ok(
     panelNoteSourcesIndex >= 0 &&
       panelExportJobsIndex >= 0 &&
+      panelStateIndex >= 0 &&
+      panelEffectsIndex >= 0 &&
       panelRuntimeIndex >= 0 &&
       panelNoteSourcesIndex < panelExportJobsIndex &&
-      panelExportJobsIndex < panelRuntimeIndex,
-    "sidepanel.html must load note-sources.js, then export-jobs.js, then sidepanel.js",
+      panelExportJobsIndex < panelStateIndex &&
+      panelStateIndex < panelEffectsIndex &&
+      panelEffectsIndex < panelRuntimeIndex,
+    "sidepanel.html must load note/export dependencies, then state/effects, then sidepanel.js",
+  );
+  assert.ok(
+    (releaseCheck.match(/"sidepanel-state\.js"/g) || []).length >= 2 &&
+      (releaseCheck.match(/"sidepanel-effects\.js"/g) || []).length >= 2,
+    "sidepanel state/effects must be allowlisted and required for release",
   );
   assert.ok(
     optionsPage.indexOf('<script src="notes-backup.js"></script>') <
@@ -181,7 +196,7 @@ test("cross-platform runtime dependencies match the Passive-first release surfac
     3,
     "only the icon-adjacent DigestDock brand word must emphasize D, D, and K",
   );
-  assert.match(optionsPage, /<p class="settings-version">DigestDock 1\.4\.5<\/p>/);
+  assert.match(optionsPage, /<p class="settings-version">DigestDock 1\.4\.6<\/p>/);
   assert.match(optionsPage, /<p class="eyebrow">DIGESTDOCK<\/p>/);
   assert.match(optionsStyles, /\.brand-letter\s*\{[^}]*font-weight:\s*750/);
   assert.doesNotMatch(optionsPage, /#1F2933|#F26A4F/);
@@ -199,6 +214,35 @@ test("cross-platform runtime dependencies match the Passive-first release surfac
   assert.doesNotMatch(
     [background, read("options.js")].join("\n"),
     /chrome\.downloads\b/,
+  );
+});
+
+test("side panel MVP keeps identity and navigation persistent while transcript state stays local", () => {
+  const html = read("sidepanel.html");
+  const css = read("sidepanel.css");
+  const panel = read("sidepanel.js");
+  const tabDetection = panel.slice(
+    panel.indexOf("async function runCheckCurrentTab"),
+    panel.indexOf("// DIGEST PIPELINE"),
+  );
+
+  assert.match(html, /id="tabsNav"[\s\S]*?role="tablist"/);
+  assert.match(
+    html,
+    /id="transcriptStateRegion"[\s\S]*?aria-live="polite"[\s\S]*?aria-busy="false"/,
+  );
+  assert.match(html, /id="transcriptReadyRegion"/);
+  assert.match(css, /\.workspace-state-region\.kind-consent/);
+  assert.match(css, /\.workspace-state-region\.kind-terminal/);
+  assert.match(css, /\.workspace-state-region\.kind-error/);
+  assert.match(css, /\.workspace-skeleton-list/);
+  assert.match(panel, /function renderSidepanelMvpTranscriptState\(/);
+  assert.match(panel, /sidepanelMvpSupadataDispatcher\.dispatch\(/);
+  assert.match(panel, /SUPADATA_REQUEST_DISPATCHED/);
+  assert.doesNotMatch(
+    tabDetection,
+    /!currentConfigStatus\?\.hasAiKey/,
+    "subtitle reading must not require an AI Provider key",
   );
 });
 
@@ -353,7 +397,7 @@ test("release copy documents current scope without em dashes", () => {
   );
   assert.match(optionsPage, /id="providerSelectButton"[\s\S]*?role="combobox"/);
   assert.match(optionsPage, /id="providerSelectList"[\s\S]*?role="listbox"/);
-  assert.match(optionsStyles, /\.data-card\s*\{[^}]*margin-top:\s*36px;/);
+  assert.doesNotMatch(optionsStyles, /\.data-card\s*\{[^}]*margin-top/);
   // A one-time legacy-shape migration is still persisted exactly once.
   assert.match(optionsScript, /migration\.migrated[\s\S]*storage\.set/);
   assert.doesNotMatch(optionsPage, /~\/Documents\/(?:youtube-digest|digest-dock)/);
