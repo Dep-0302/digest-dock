@@ -429,7 +429,21 @@ function sidepanelMvpBindSession(
 function sidepanelMvpBeginEvent(type, origin, extra = {}) {
   if (!SIDEPANEL_MVP_AVAILABLE) return null;
   const taskId = sidepanelMvpNextTaskId(origin);
+  const previousState = sidepanelMvpState;
   sidepanelMvpDispatch({ type, taskId, ...extra });
+  if (sidepanelMvpState === previousState) return null;
+
+  const task = sidepanelMvpState?.transcript?.activeTask;
+  const identity = sidepanelMvpCurrentIdentity();
+  if (
+    !task ||
+    !identity ||
+    task.id !== taskId ||
+    task.origin !== origin ||
+    !SIDEPANEL_STATE_API.sameIdentity(task.identity, identity)
+  ) {
+    return null;
+  }
   return sidepanelMvpRegisterCurrentTask();
 }
 
@@ -710,31 +724,74 @@ function sidepanelMvpRunCurrentTask({ captionRetry = false, consentToken = null 
   );
 }
 
-async function sidepanelMvpHandleAction(eventType) {
+async function sidepanelMvpHandleAction(
+  eventType,
+  actionIdentity = sidepanelMvpCurrentIdentity(),
+) {
   const events = SIDEPANEL_STATE_API.EVENTS;
   if (eventType === events.USER_RETRY_FREE) {
-    sidepanelMvpBeginEvent(
+    const task = sidepanelMvpBeginEvent(
       events.USER_RETRY_FREE,
       SIDEPANEL_STATE_API.TASK_ORIGINS.USER_RETRY_FREE,
     );
+    if (!task) return;
     return sidepanelMvpRunCurrentTask({ captionRetry: true });
   }
   if (eventType === events.USER_CONSENT) {
-    const config = await sidepanelMvpRefreshConfig();
+    const requestedIdentity = actionIdentity;
+    if (
+      !requestedIdentity ||
+      !SIDEPANEL_STATE_API.sameIdentity(
+        requestedIdentity,
+        sidepanelMvpCurrentIdentity(),
+      ) ||
+      sidepanelMvpState?.transcript?.status !==
+        SIDEPANEL_STATE_API.TRANSCRIPT_STATUSES.NEEDS_SUPADATA_CHOICE
+    ) {
+      return;
+    }
+    const requestedTranscript = sidepanelMvpState.transcript;
+    let config;
+    try {
+      config = await sidepanelMvpRefreshConfig();
+    } catch (error) {
+      if (
+        !SIDEPANEL_STATE_API.sameIdentity(
+          requestedIdentity,
+          sidepanelMvpCurrentIdentity(),
+        ) ||
+        sidepanelMvpState?.transcript !== requestedTranscript
+      ) {
+        return;
+      }
+      throw error;
+    }
+    if (
+      !SIDEPANEL_STATE_API.sameIdentity(
+        requestedIdentity,
+        sidepanelMvpCurrentIdentity(),
+      ) ||
+      sidepanelMvpState?.transcript !== requestedTranscript ||
+      sidepanelMvpState?.transcript?.status !==
+        SIDEPANEL_STATE_API.TRANSCRIPT_STATUSES.NEEDS_SUPADATA_CHOICE
+    ) {
+      return;
+    }
     if (!config.hasSupadataKey) {
       sidepanelMvpDispatch({
         type: events.USER_CONSENT,
+        identity: requestedIdentity,
         hasKey: false,
         now: Date.now(),
       });
       return;
     }
-    const identity = sidepanelMvpCurrentIdentity();
-    const consentToken = sidepanelMvpConsentVault.mint(identity);
+    const consentToken = sidepanelMvpConsentVault.mint(requestedIdentity);
     const task = sidepanelMvpBeginEvent(
       events.USER_CONSENT,
       SIDEPANEL_STATE_API.TASK_ORIGINS.USER_CONSENT,
       {
+        identity: requestedIdentity,
         hasKey: true,
         consentToken: consentToken.id,
         now: Date.now(),
@@ -1677,10 +1734,25 @@ function setupEventListeners() {
       if (!button || button.disabled) return;
       button.disabled = true;
       const eventType = String(button.dataset.mvpEvent || "");
-      Promise.resolve(sidepanelMvpHandleAction(eventType)).catch((error) => {
+      const actionIdentity = sidepanelMvpCurrentIdentity();
+      Promise.resolve(
+        sidepanelMvpHandleAction(eventType, actionIdentity),
+      ).catch((error) => {
         console.error("[DigestDock Panel] MVP action failed:", error);
+        if (
+          !actionIdentity ||
+          !SIDEPANEL_STATE_API.sameIdentity(
+            actionIdentity,
+            sidepanelMvpCurrentIdentity(),
+          )
+        ) {
+          return;
+        }
         const task = sidepanelMvpState?.transcript?.activeTask;
-        if (task) {
+        if (
+          task &&
+          SIDEPANEL_STATE_API.sameIdentity(task.identity, actionIdentity)
+        ) {
           sidepanelMvpResolveTranscript(
             {
               success: false,
@@ -8820,6 +8892,7 @@ globalThis.__YTD_TRANSCRIPT_TESTING__ = {
   formatTimecode,
   sidepanelMvpBindSession,
   sidepanelMvpBeginEvent,
+  sidepanelMvpHandleAction,
   sidepanelMvpResolveTranscript,
   getSidepanelMvpState: () => sidepanelMvpState,
 };

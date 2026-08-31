@@ -98,7 +98,10 @@ class FakeElement {
   addEventListener() {}
 }
 
-function createHarness() {
+function createHarness({
+  sendMessage = async () => ({}),
+  storageGet = async () => ({}),
+} = {}) {
   const ids = new Map();
   const element = (id, tag = "div") => {
     const node = new FakeElement(tag, id);
@@ -176,7 +179,7 @@ function createHarness() {
     chrome: {
       runtime: {
         onMessage: listeners,
-        sendMessage: async () => ({}),
+        sendMessage,
         getURL: (value) => `chrome-extension://test/${value}`,
       },
       windows: { getCurrent: async () => ({ id: 1 }) },
@@ -185,7 +188,14 @@ function createHarness() {
         onActivated: listeners,
         onRemoved: listeners,
       },
-      storage: { onChanged: listeners },
+      storage: {
+        local: {
+          get: storageGet,
+          set: async () => {},
+          remove: async () => {},
+        },
+        onChanged: listeners,
+      },
     },
     YTD_SETTINGS: require("../settings.js"),
     BILIBILI_ADAPTER: require("../bilibili.js"),
@@ -201,6 +211,7 @@ function createHarness() {
   return {
     helpers: sandbox.__YTD_TRANSCRIPT_TESTING__,
     stateApi: sandbox.DIGESTDOCK_SIDEPANEL_STATE,
+    evaluate: (code) => vm.runInContext(code, context),
     elements: {
       welcome,
       loading,
@@ -218,6 +229,47 @@ function findButtons(node, found = []) {
   if (node?.tagName === "BUTTON") found.push(node);
   for (const child of node?.children || []) findButtons(child, found);
   return found;
+}
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((done, fail) => {
+    resolve = done;
+    reject = fail;
+  });
+  return { promise, resolve, reject };
+}
+
+function bindCurrentVideo(harness, videoId, generation) {
+  harness.evaluate(`currentVideoId = ${JSON.stringify(videoId)}; currentRouteKey = ${JSON.stringify(`youtube:${videoId}`)}; currentMediaRef = { platform: "youtube", videoId: ${JSON.stringify(videoId)}, mediaKey: ${JSON.stringify(videoId)} }; digestGeneration = ${generation}; videoTabId = 7;`);
+  return harness.helpers.sidepanelMvpBindSession(videoId, `youtube:${videoId}`);
+}
+
+function moveToConsentChoice(harness, videoId, generation) {
+  const { helpers, stateApi } = harness;
+  const firstTask = bindCurrentVideo(harness, videoId, generation);
+  helpers.sidepanelMvpResolveTranscript(
+    {
+      routeOutcome: "UNKNOWN",
+      error: "YOUTUBE_CAPTIONS_REQUIRED",
+      requiresCaptionEnable: true,
+    },
+    firstTask,
+  );
+  const retryTask = helpers.sidepanelMvpBeginEvent(
+    stateApi.EVENTS.USER_RETRY_FREE,
+    stateApi.TASK_ORIGINS.USER_RETRY_FREE,
+  );
+  helpers.sidepanelMvpResolveTranscript(
+    {
+      routeOutcome: "UNKNOWN",
+      error: "SUPADATA_CONSENT_REQUIRED",
+      hasSupadataKey: true,
+    },
+    retryTask,
+  );
+  return helpers.getSidepanelMvpState();
 }
 
 test("persistent shell survives loading, CC guidance, retry, and ready transitions", () => {
@@ -266,6 +318,210 @@ test("persistent shell survives loading, CC guidance, retry, and ready transitio
   assert.equal(elements.stateRegion.hidden, true);
   assert.equal(elements.readyRegion.hidden, false);
   assert.equal(elements.tabsNav.style.display, "flex");
+});
+
+test("rejected MVP events never reuse the current task", () => {
+  const harness = createHarness();
+  const initialTask = bindCurrentVideo(harness, "video-loading", 1);
+  const rejectedTask = harness.helpers.sidepanelMvpBeginEvent(
+    harness.stateApi.EVENTS.USER_CONSENT,
+    harness.stateApi.TASK_ORIGINS.USER_CONSENT,
+    {
+      hasKey: true,
+      consentToken: "stale-token",
+      now: Date.now(),
+    },
+  );
+
+  assert.equal(rejectedTask, null);
+  assert.equal(
+    harness.helpers.getSidepanelMvpState().transcript.activeTask.id,
+    initialTask.id,
+  );
+  assert.equal(
+    harness.helpers.getSidepanelMvpState().transcript.activeTask.origin,
+    harness.stateApi.TASK_ORIGINS.INITIAL_LOAD,
+  );
+});
+
+test("rejected retry actions do not run an existing task", async () => {
+  const messages = [];
+  const harness = createHarness({
+    sendMessage: async (message) => {
+      messages.push(message);
+      return {};
+    },
+  });
+  const initialTask = bindCurrentVideo(harness, "video-loading", 1);
+
+  await harness.helpers.sidepanelMvpHandleAction(
+    harness.stateApi.EVENTS.USER_RETRY_FREE,
+  );
+
+  assert.deepEqual(messages, []);
+  assert.equal(
+    harness.helpers.getSidepanelMvpState().transcript.activeTask.id,
+    initialTask.id,
+  );
+});
+
+test("Supadata consent cannot move to another video during config refresh", async () => {
+  const configGate = deferred();
+  const messages = [];
+  const harness = createHarness({
+    sendMessage: async (message) => {
+      messages.push(JSON.parse(JSON.stringify(message)));
+      if (message.action === "checkConfig") return configGate.promise;
+      return {
+        success: false,
+        error: "PAGE_CONTEXT_CHANGED",
+        routeOutcome: "PAGE_CONTEXT_CHANGED",
+        runId: message.runId,
+        routeKey: message.routeKey,
+      };
+    },
+  });
+  const { helpers, stateApi } = harness;
+
+  const firstTask = bindCurrentVideo(harness, "video-a", 1);
+  helpers.sidepanelMvpResolveTranscript(
+    {
+      routeOutcome: "UNKNOWN",
+      error: "YOUTUBE_CAPTIONS_REQUIRED",
+      requiresCaptionEnable: true,
+    },
+    firstTask,
+  );
+  const retryTask = helpers.sidepanelMvpBeginEvent(
+    stateApi.EVENTS.USER_RETRY_FREE,
+    stateApi.TASK_ORIGINS.USER_RETRY_FREE,
+  );
+  helpers.sidepanelMvpResolveTranscript(
+    {
+      routeOutcome: "UNKNOWN",
+      error: "SUPADATA_CONSENT_REQUIRED",
+      hasSupadataKey: true,
+    },
+    retryTask,
+  );
+  assert.equal(
+    helpers.getSidepanelMvpState().transcript.status,
+    stateApi.TRANSCRIPT_STATUSES.NEEDS_SUPADATA_CHOICE,
+  );
+
+  const consentRequest = helpers.sidepanelMvpHandleAction(
+    stateApi.EVENTS.USER_CONSENT,
+  );
+  await Promise.resolve();
+  assert.deepEqual(messages.map((message) => message.action), ["checkConfig"]);
+
+  const secondTask = bindCurrentVideo(harness, "video-b", 2);
+  helpers.sidepanelMvpResolveTranscript(
+    {
+      routeOutcome: "UNKNOWN",
+      error: "YOUTUBE_CAPTIONS_REQUIRED",
+      requiresCaptionEnable: true,
+    },
+    secondTask,
+  );
+  const secondRetryTask = helpers.sidepanelMvpBeginEvent(
+    stateApi.EVENTS.USER_RETRY_FREE,
+    stateApi.TASK_ORIGINS.USER_RETRY_FREE,
+  );
+  helpers.sidepanelMvpResolveTranscript(
+    {
+      routeOutcome: "UNKNOWN",
+      error: "SUPADATA_CONSENT_REQUIRED",
+      hasSupadataKey: true,
+    },
+    secondRetryTask,
+  );
+
+  configGate.resolve({ runtimeProtocolVersion: 12, hasSupadataKey: true });
+  await consentRequest;
+
+  const state = helpers.getSidepanelMvpState();
+  assert.equal(state.session.videoId, "video-b");
+  assert.equal(
+    state.transcript.status,
+    stateApi.TRANSCRIPT_STATUSES.NEEDS_SUPADATA_CHOICE,
+  );
+  assert.equal(state.transcript.activeTask, null);
+  assert.deepEqual(
+    messages.map((message) => message.action),
+    ["checkConfig"],
+    "the stale A consent must not dispatch a transcript request for B",
+  );
+});
+
+test("old consent cannot authorize a renewed prompt for the same identity", async () => {
+  const configGate = deferred();
+  const messages = [];
+  const harness = createHarness({
+    sendMessage: async (message) => {
+      messages.push(JSON.parse(JSON.stringify(message)));
+      if (message.action === "checkConfig") return configGate.promise;
+      return {};
+    },
+  });
+  const { helpers, stateApi } = harness;
+  moveToConsentChoice(harness, "video-a", 1);
+
+  const consentRequest = helpers.sidepanelMvpHandleAction(
+    stateApi.EVENTS.USER_CONSENT,
+  );
+  await Promise.resolve();
+  const firstPrompt = helpers.getSidepanelMvpState().transcript;
+  await helpers.sidepanelMvpHandleAction(stateApi.EVENTS.USER_DECLINE);
+  await helpers.sidepanelMvpHandleAction(stateApi.EVENTS.USER_RECONSIDER);
+  const renewedPrompt = helpers.getSidepanelMvpState().transcript;
+  assert.notEqual(renewedPrompt, firstPrompt);
+  assert.equal(
+    renewedPrompt.status,
+    stateApi.TRANSCRIPT_STATUSES.NEEDS_SUPADATA_CHOICE,
+  );
+
+  configGate.resolve({ runtimeProtocolVersion: 12, hasSupadataKey: true });
+  await consentRequest;
+
+  assert.equal(
+    helpers.getSidepanelMvpState().transcript,
+    renewedPrompt,
+    "the renewed prompt must remain untouched by the old click",
+  );
+  assert.deepEqual(messages.map((message) => message.action), ["checkConfig"]);
+});
+
+test("stale config errors do not settle a new video's task", async () => {
+  const configGate = deferred();
+  const messages = [];
+  const harness = createHarness({
+    sendMessage: async (message) => {
+      messages.push(JSON.parse(JSON.stringify(message)));
+      if (message.action === "checkConfig") return configGate.promise;
+      return {};
+    },
+  });
+  const { helpers, stateApi } = harness;
+  moveToConsentChoice(harness, "video-a", 1);
+  const consentRequest = helpers.sidepanelMvpHandleAction(
+    stateApi.EVENTS.USER_CONSENT,
+  );
+  await Promise.resolve();
+
+  const secondTask = bindCurrentVideo(harness, "video-b", 2);
+  const beforeReject = helpers.getSidepanelMvpState();
+  configGate.reject(new Error("stale config failure"));
+  await assert.doesNotReject(consentRequest);
+
+  const afterReject = helpers.getSidepanelMvpState();
+  assert.equal(afterReject, beforeReject);
+  assert.equal(afterReject.transcript.activeTask.id, secondTask.id);
+  assert.equal(
+    afterReject.transcript.activeTask.origin,
+    stateApi.TASK_ORIGINS.INITIAL_LOAD,
+  );
+  assert.deepEqual(messages.map((message) => message.action), ["checkConfig"]);
 });
 
 test("consent, terminal, and error use distinct local structures", () => {

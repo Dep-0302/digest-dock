@@ -836,7 +836,8 @@
       case EVENTS.USER_CONSENT: {
         if (
           current.transcript.status !==
-          TRANSCRIPT_STATUSES.NEEDS_SUPADATA_CHOICE
+            TRANSCRIPT_STATUSES.NEEDS_SUPADATA_CHOICE ||
+          !eventMatchesSession(current, event)
         ) {
           return current;
         }

@@ -150,6 +150,7 @@ var YTD_UI_THEMES = (() => {
         const isCurrent = option.getAttribute("data-theme-id") === current;
         option.setAttribute("aria-checked", isCurrent ? "true" : "false");
         option.classList.toggle("is-current", isCurrent);
+        option.setAttribute("tabindex", isCurrent ? "0" : "-1");
       }
       const label = `界面主题：${themeLabel(current)}`;
       button.setAttribute("title", label);
@@ -160,15 +161,20 @@ var YTD_UI_THEMES = (() => {
       syncMenu();
       menu.hidden = false;
       button.setAttribute("aria-expanded", "true");
+      const currentOption = options.find(
+        (option) => option.getAttribute("aria-checked") === "true",
+      );
+      (currentOption || options[0])?.focus();
     };
-    const closeMenu = () => {
+    const closeMenu = ({ restoreFocus = false } = {}) => {
       menu.hidden = true;
       button.setAttribute("aria-expanded", "false");
+      if (restoreFocus) button.focus();
     };
 
     button.addEventListener("click", () => {
       if (menu.hidden) openMenu();
-      else closeMenu();
+      else closeMenu({ restoreFocus: true });
     });
     scope.addEventListener("click", (event) => {
       if (menu.hidden) return;
@@ -177,15 +183,48 @@ var YTD_UI_THEMES = (() => {
     });
     scope.addEventListener("keydown", (event) => {
       if (event.key === "Escape" && !menu.hidden) {
-        closeMenu();
-        button.focus();
+        event.preventDefault();
+        closeMenu({ restoreFocus: true });
+        return;
       }
+      if (menu.hidden) return;
+      if (event.key === "Tab") {
+        closeMenu();
+        return;
+      }
+      if (
+        !["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key) ||
+        options.length === 0
+      ) {
+        return;
+      }
+      event.preventDefault();
+      const checkedIndex = Math.max(
+        0,
+        options.findIndex(
+          (option) => option.getAttribute("aria-checked") === "true",
+        ),
+      );
+      const activeIndex = options.indexOf(scope.activeElement);
+      const fromIndex = activeIndex >= 0 ? activeIndex : checkedIndex;
+      const nextIndex =
+        event.key === "Home"
+          ? 0
+          : event.key === "End"
+            ? options.length - 1
+            : event.key === "ArrowDown"
+              ? (fromIndex + 1) % options.length
+              : (fromIndex - 1 + options.length) % options.length;
+      options.forEach((option, index) => {
+        option.setAttribute("tabindex", index === nextIndex ? "0" : "-1");
+      });
+      options[nextIndex].focus();
     });
     for (const option of options) {
       option.addEventListener("click", () => {
         applyTheme(persistTheme(option.getAttribute("data-theme-id")));
         syncMenu();
-        closeMenu();
+        closeMenu({ restoreFocus: true });
       });
     }
 

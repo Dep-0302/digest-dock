@@ -103,6 +103,7 @@ function fetchingSupadata({ taskId = "supadata-1", token = "token-1" } = {}) {
   const choice = finalUnknown();
   return reduceSidepanelState(choice, {
     type: EVENTS.USER_CONSENT,
+    identity: choice.session,
     hasKey: true,
     consentToken: token,
     taskId,
@@ -510,6 +511,7 @@ test("consent without a key opens configuration; saving a key returns to consent
   const choice = finalUnknown();
   const config = reduceSidepanelState(choice, {
     type: EVENTS.USER_CONSENT,
+    identity: choice.session,
     hasKey: false,
     now: 1000,
   });
@@ -528,6 +530,37 @@ test("consent without a key opens configuration; saving a key returns to consent
   assert.equal(saved.transcript.supadataConfigured, true);
   assert.equal(saved.transcript.activeTask, null);
   assert.equal(saved.transcript.consentToken, null);
+});
+
+test("consent fails closed without the exact session identity", () => {
+  const choice = finalUnknown();
+  const event = {
+    type: EVENTS.USER_CONSENT,
+    hasKey: true,
+    consentToken: "token-identity",
+    taskId: "task-identity",
+    now: 1000,
+  };
+
+  assert.strictEqual(reduceSidepanelState(choice, event), choice);
+  assert.strictEqual(
+    reduceSidepanelState(choice, {
+      ...event,
+      identity: {
+        ...choice.session,
+        videoId: "another-video",
+        routeKey: "youtube:another-video",
+      },
+    }),
+    choice,
+  );
+  assert.equal(
+    reduceSidepanelState(choice, {
+      ...event,
+      identity: choice.session,
+    }).transcript.status,
+    TRANSCRIPT_STATUSES.FETCHING_SUPADATA,
+  );
 });
 
 test("per-attempt consent is held only until request dispatch and provider recovery requires a new choice", () => {

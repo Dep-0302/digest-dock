@@ -8,6 +8,112 @@ const themes = require("../ui-themes.js");
 const root = path.resolve(__dirname, "..");
 const read = (file) => fs.readFileSync(path.join(root, file), "utf8");
 
+function themeToken(css, themeId, token) {
+  const block = css.match(
+    new RegExp(`html\\[data-theme="${themeId}"\\]\\s*\\{([\\s\\S]*?)\\n\\}`),
+  )?.[1];
+  assert.ok(block, `missing ${themeId} theme block`);
+  const value = block.match(
+    new RegExp(`--${token}:\\s*(#[0-9a-f]{6})`, "i"),
+  )?.[1];
+  assert.ok(value, `missing solid --${token} in ${themeId}`);
+  return value;
+}
+
+function relativeLuminance(hex) {
+  const channels = [1, 3, 5]
+    .map((index) => Number.parseInt(hex.slice(index, index + 2), 16) / 255)
+    .map((value) =>
+      value <= 0.04045
+        ? value / 12.92
+        : Math.pow((value + 0.055) / 1.055, 2.4),
+    );
+  return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2];
+}
+
+function contrastRatio(foreground, background) {
+  const lighter = Math.max(
+    relativeLuminance(foreground),
+    relativeLuminance(background),
+  );
+  const darker = Math.min(
+    relativeLuminance(foreground),
+    relativeLuminance(background),
+  );
+  return (lighter + 0.05) / (darker + 0.05);
+}
+
+function createThemeMenuHarness() {
+  const documentListeners = new Map();
+  const doc = {
+    activeElement: null,
+    addEventListener(type, listener) {
+      documentListeners.set(type, listener);
+    },
+  };
+
+  class Control {
+    constructor(themeId = "") {
+      this.attributes = new Map();
+      this.listeners = new Map();
+      this.hidden = false;
+      this.classList = { toggle() {} };
+      if (themeId) this.setAttribute("data-theme-id", themeId);
+    }
+
+    setAttribute(name, value) {
+      this.attributes.set(name, String(value));
+    }
+
+    getAttribute(name) {
+      return this.attributes.get(name) || null;
+    }
+
+    addEventListener(type, listener) {
+      this.listeners.set(type, listener);
+    }
+
+    dispatch(type, event = {}) {
+      return this.listeners.get(type)?.({ target: this, ...event });
+    }
+
+    focus() {
+      doc.activeElement = this;
+    }
+
+    contains(target) {
+      return target === this;
+    }
+  }
+
+  const button = new Control();
+  const menu = new Control();
+  const options = themes.THEME_IDS.map((id) => new Control(id));
+  menu.hidden = true;
+  menu.querySelectorAll = () => options;
+  menu.contains = (target) => target === menu || options.includes(target);
+  doc.getElementById = (id) =>
+    id === "themeSwitchBtn" ? button : id === "themeSwitchMenu" ? menu : null;
+
+  themes.initThemeSwitcher(doc);
+  return {
+    button,
+    menu,
+    options,
+    keydown(key) {
+      let prevented = false;
+      documentListeners.get("keydown")?.({
+        key,
+        preventDefault() {
+          prevented = true;
+        },
+      });
+      return prevented;
+    },
+    activeElement: () => doc.activeElement,
+  };
+}
+
 test("theme registry keeps the classic default plus exactly two new skins", () => {
   assert.deepEqual(themes.THEME_IDS, ["classic", "ink-night", "warm-paper"]);
   assert.equal(themes.DEFAULT_THEME_ID, "classic");
@@ -92,10 +198,92 @@ test("theme stylesheet only overrides tokens under data-theme scopes", () => {
     "--accent:", "--accent-hover:", "--accent-gradient:", "--active-surface:",
     "--success:", "--danger:", "--state-shadow:",
     "--panel:", "--surface-soft:", "--ink:", "--ink-secondary:", "--ink-muted:", "--line:",
+    "--control-border:",
   ]) {
     const count = (css.match(new RegExp(token.replace(/[-:]/g, "\\$&"), "g")) || []).length;
     assert.ok(count >= 2, `${token} must be overridden by both themes`);
   }
+});
+
+test("optional themes keep muted text, control edges, and focus rings visible", () => {
+  const css = read("ui-themes.css");
+  const optionsCss = read("options.css");
+  const cases = [
+    {
+      id: "ink-night",
+      mutedBackground: "surface-raised",
+      controlBackground: "surface-raised",
+      focusBackground: "surface-raised",
+    },
+    {
+      id: "warm-paper",
+      mutedBackground: "canvas",
+      controlBackground: "canvas",
+      focusBackground: "surface",
+    },
+  ];
+
+  for (const item of cases) {
+    assert.ok(
+      contrastRatio(
+        themeToken(css, item.id, "text-muted"),
+        themeToken(css, item.id, item.mutedBackground),
+      ) >= 4.5,
+      `${item.id} muted text must meet 4.5:1`,
+    );
+    assert.ok(
+      contrastRatio(
+        themeToken(css, item.id, "control-border"),
+        themeToken(css, item.id, item.controlBackground),
+      ) >= 3,
+      `${item.id} control borders must meet 3:1`,
+    );
+    assert.ok(
+      contrastRatio(
+        themeToken(css, item.id, "accent-focus"),
+        themeToken(css, item.id, item.focusBackground),
+      ) >= 3,
+      `${item.id} focus rings must meet 3:1`,
+    );
+  }
+
+  assert.match(optionsCss, /input[\s\S]*?var\(--control-border, var\(--line\)\)/);
+  assert.match(optionsCss, /\.provider-select-button[\s\S]*?var\(--control-border, var\(--line\)\)/);
+});
+
+test("theme menu restores focus and supports standard directional keys", () => {
+  const source = read("ui-themes.js");
+  assert.match(source, /closeMenu\({ restoreFocus: true }\)/);
+  assert.match(source, /option\.setAttribute\("tabindex"/);
+  for (const key of ["ArrowDown", "ArrowUp", "Home", "End", "Escape"]) {
+    assert.ok(source.includes(`"${key}"`), `missing ${key} keyboard support`);
+  }
+
+  const harness = createThemeMenuHarness();
+  harness.button.dispatch("click");
+  assert.equal(harness.activeElement(), harness.options[0]);
+  assert.deepEqual(
+    harness.options.map((option) => option.getAttribute("tabindex")),
+    ["0", "-1", "-1"],
+  );
+
+  assert.equal(harness.keydown("ArrowDown"), true);
+  assert.equal(harness.activeElement(), harness.options[1]);
+  assert.deepEqual(
+    harness.options.map((option) => option.getAttribute("tabindex")),
+    ["-1", "0", "-1"],
+  );
+
+  assert.equal(harness.keydown("End"), true);
+  assert.equal(harness.activeElement(), harness.options[2]);
+  assert.deepEqual(
+    harness.options.map((option) => option.getAttribute("tabindex")),
+    ["-1", "-1", "0"],
+  );
+
+  harness.options[2].dispatch("click");
+  assert.equal(harness.menu.hidden, true);
+  assert.equal(harness.activeElement(), harness.button);
 });
 
 test("release packaging ships both theme files", () => {
