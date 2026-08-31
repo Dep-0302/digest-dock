@@ -280,13 +280,17 @@ h2 {
 
 .service-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(
+    auto-fit,
+    minmax(min(100%, 520px), 1fr)
+  );
   gap: 20px;
+  margin-bottom: 20px;
 }
 
 .service-card {
   margin: 0;
-  padding: 22px;
+  padding: 24px;
   background: var(--surface-soft);
 }
 
@@ -529,10 +533,6 @@ button.danger:hover {
   margin-top: 10px;
   color: var(--ink-muted);
   font-size: 13px;
-}
-
-.data-card {
-  margin-top: 36px;
 }
 
 /* ------------------------------------------------------------------ */

@@ -397,7 +397,7 @@ test("release copy documents current scope without em dashes", () => {
   );
   assert.match(optionsPage, /id="providerSelectButton"[\s\S]*?role="combobox"/);
   assert.match(optionsPage, /id="providerSelectList"[\s\S]*?role="listbox"/);
-  assert.match(optionsStyles, /\.data-card\s*\{[^}]*margin-top:\s*36px;/);
+  assert.doesNotMatch(optionsStyles, /\.data-card\s*\{[^}]*margin-top/);
   // A one-time legacy-shape migration is still persisted exactly once.
   assert.match(optionsScript, /migration\.migrated[\s\S]*storage\.set/);
   assert.doesNotMatch(optionsPage, /~\/Documents\/(?:youtube-digest|digest-dock)/);
