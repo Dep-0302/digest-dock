@@ -1,0 +1,170 @@
+<!doctype html>
+<!--
+  EXPERIMENT ONLY - not shipped. Visual preview of the DigestDock settings page
+  under each UI theme. Uses the real options.css + ui-themes.css.
+  Open with ?theme=classic | ink-night | warm-paper (default: classic).
+-->
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>DigestDock 设置页主题预览</title>
+    <link rel="stylesheet" href="../options.css" />
+    <link rel="stylesheet" href="../ui-themes.css" />
+    <script>
+      (function () {
+        var theme = new URLSearchParams(location.search).get("theme") || "classic";
+        if (theme !== "classic") document.documentElement.setAttribute("data-theme", theme);
+      })();
+    </script>
+  </head>
+  <body>
+    <div class="settings-app">
+      <aside class="settings-sidebar">
+        <div class="settings-brand">
+          <span class="settings-brand-mark" aria-hidden="true">
+            <svg width="26" height="26" viewBox="0 0 128 128" fill="none">
+              <defs>
+                <linearGradient id="pvBrandBase" x1="12" y1="8" x2="116" y2="120" gradientUnits="userSpaceOnUse">
+                  <stop offset="0" stop-color="#0A5FE9"></stop>
+                  <stop offset="0.46" stop-color="#087FE8"></stop>
+                  <stop offset="1" stop-color="#04B7D2"></stop>
+                </linearGradient>
+              </defs>
+              <rect width="128" height="128" rx="32" fill="url(#pvBrandBase)"></rect>
+              <rect x="24" y="32" width="80" height="16" rx="8" fill="#FFFFFF"></rect>
+              <circle cx="32" cy="64" r="8" fill="#D8F7FF"></circle>
+              <rect x="48" y="56" width="56" height="16" rx="8" fill="#FFFFFF"></rect>
+              <rect x="40" y="80" width="56" height="16" rx="8" fill="#FFFFFF"></rect>
+            </svg>
+          </span>
+          <span class="settings-brand-name"><span class="brand-word"><strong class="brand-letter">D</strong>igest<strong class="brand-letter">D</strong>oc<strong class="brand-letter">K</strong></span></span>
+        </div>
+        <nav class="settings-nav" aria-label="设置导航">
+          <p class="settings-nav-group">设置</p>
+          <a class="settings-nav-item is-active" href="#section-services" aria-current="location">服务连接</a>
+          <a class="settings-nav-item" href="#notesBackupCard">笔记与备份</a>
+          <a class="settings-nav-item" href="#section-data">本地数据</a>
+          <p class="settings-nav-group">其他</p>
+          <a class="settings-nav-item" href="#section-privacy">隐私说明</a>
+        </nav>
+        <p class="settings-version">DigestDock 1.4.5</p>
+      </aside>
+
+      <main class="settings-content">
+        <header class="settings-topbar">
+          <div class="settings-topbar-heading">
+            <p class="eyebrow">DIGESTDOCK</p>
+            <h1>使用你自己的 API 密钥</h1>
+          </div>
+          <div class="language-switch" role="group" aria-label="界面语言">
+            <button class="language-option" type="button" aria-pressed="false">English</button>
+            <button class="language-option" type="button" aria-pressed="true">中文</button>
+          </div>
+        </header>
+
+        <div class="settings-scroll">
+          <p class="lede">密钥仅保存在当前 Chrome 个人资料中。选择一个 AI 服务商并填写 API 密钥即可使用 AI 功能。</p>
+
+          <section class="settings-section" id="section-services">
+            <h2 class="settings-section-title">服务连接</h2>
+            <div class="service-grid">
+              <section class="card service-card">
+                <div class="service-head">
+                  <span class="service-avatar service-avatar--ai" aria-hidden="true">
+                    <span class="service-avatar-monogram">D</span>
+                  </span>
+                  <div class="service-headings">
+                    <h3 class="service-name">AI 服务商</h3>
+                    <p class="service-tagline">DeepSeek V4 Flash</p>
+                  </div>
+                  <span class="service-status" data-status="configured">已配置</span>
+                </div>
+                <div class="field">
+                  <div class="field-label-row">
+                    <span class="field-label-text">AI 服务商</span>
+                  </div>
+                  <div class="provider-select">
+                    <button class="provider-select-button" type="button">
+                      <span class="provider-select-avatar" aria-hidden="true">
+                        <span class="provider-monogram">D</span>
+                      </span>
+                      <span class="provider-select-name">DeepSeek</span>
+                      <svg class="provider-select-caret" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"></path></svg>
+                    </button>
+                  </div>
+                  <p class="help provider-capability-row">
+                    <span class="provider-capability-label">支持能力：</span>
+                    <span class="capability-tags">
+                      <span class="capability-tag">概览</span>
+                      <span class="capability-tag">解释</span>
+                      <span class="capability-tag">翻译</span>
+                    </span>
+                  </p>
+                </div>
+                <div class="field">
+                  <div class="field-label-row">
+                    <label>API 密钥</label>
+                    <span class="field-flag field-flag--required">必需</span>
+                  </div>
+                  <div class="field-input">
+                    <input type="password" placeholder="粘贴当前服务的 API 密钥" value="sk-placeholder" readonly />
+                    <button class="field-toggle" type="button" aria-pressed="false" aria-label="显示或隐藏密钥">
+                      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"></path><circle cx="12" cy="12" r="3"></circle></svg>
+                    </button>
+                  </div>
+                  <div class="privacy-note">使用 AI 功能时，所选服务会收到视频字幕及相关视频上下文。</div>
+                </div>
+              </section>
+
+              <section class="card service-card">
+                <div class="service-head">
+                  <span class="service-avatar service-avatar--transcript" aria-hidden="true">S</span>
+                  <div class="service-headings">
+                    <h3 class="service-name">Supadata</h3>
+                    <p class="service-tagline">新 YouTube 视频的可选字幕服务</p>
+                  </div>
+                  <span class="service-status" data-status="unknown">未配置</span>
+                </div>
+                <div class="field">
+                  <div class="field-label-row">
+                    <label>Supadata API 密钥（可选）</label>
+                    <span class="field-flag">可选</span>
+                  </div>
+                  <div class="field-input">
+                    <input type="password" placeholder="粘贴 Supadata 密钥" readonly />
+                  </div>
+                  <p class="help supadata-note">仅当免费的 YouTube 字幕路线全部失败时，侧边栏才会提供 Supadata。</p>
+                </div>
+              </section>
+            </div>
+          </section>
+
+          <section class="card" id="notesBackupCard">
+            <h2>笔记备份</h2>
+            <p class="help">JSON 备份只包含已保存笔记、语言版本和经过校验的媒体身份与时间戳。</p>
+            <div class="data-actions">
+              <button type="button">导出笔记备份</button>
+              <button type="button">导入笔记备份</button>
+            </div>
+          </section>
+
+          <section class="card data-card" id="section-data">
+            <h2>本地数据</h2>
+            <p class="help">摘要、翻译和笔记仅保存在当前 Chrome 个人资料中。你可以随时删除。</p>
+            <div class="data-actions">
+              <button type="button">清除缓存的摘要</button>
+              <button type="button">删除全部笔记</button>
+              <button class="danger" type="button">重置扩展数据</button>
+            </div>
+          </section>
+        </div>
+
+        <div class="settings-savebar">
+          <span class="savebar-status">已保存</span>
+          <button class="primary" type="button">保存设置</button>
+        </div>
+      </main>
+    </div>
+  </body>
+</html>

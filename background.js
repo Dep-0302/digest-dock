@@ -2381,6 +2381,7 @@ async function handleFetchYoutubeSupadataTranscript(
     return {
       success: false,
       error: "RATE_LIMITED",
+      cooldownUntil,
       message:
         "Supadata 刚刚返回了速率限制，正在冷却，请稍后再授权重试。这是 Supadata 的限流，并非 YouTube。",
     };
@@ -2398,9 +2399,10 @@ async function handleFetchYoutubeSupadataTranscript(
   // Preserve a provider 429 even if the user navigated at the same moment.
   // The stale caller still receives PAGE_CONTEXT_CHANGED below, but the
   // provider cooldown must prevent another paid request from starting.
-  if (result?.error === "RATE_LIMITED") {
-    await startYoutubeSupadataCooldown();
-  }
+  const rateLimitCooldownUntil =
+    result?.error === "RATE_LIMITED"
+      ? await startYoutubeSupadataCooldown()
+      : 0;
 
   // Supadata (or its async job polling) can outlast a YouTube SPA navigation.
   // Never accept an old video's result for the tab's new page.
@@ -2417,7 +2419,9 @@ async function handleFetchYoutubeSupadataTranscript(
     };
   }
 
-  return result;
+  return rateLimitCooldownUntil > 0
+    ? { ...result, cooldownUntil: rateLimitCooldownUntil }
+    : result;
 }
 
 function youtubeRouteIdentity(options = {}) {

@@ -116,6 +116,12 @@ test("cross-platform runtime dependencies match the Passive-first release surfac
   const panelRuntimeIndex = sidepanelPage.indexOf(
     '<script src="sidepanel.js"></script>',
   );
+  const panelStateIndex = sidepanelPage.indexOf(
+    '<script src="sidepanel-state.js"></script>',
+  );
+  const panelEffectsIndex = sidepanelPage.indexOf(
+    '<script src="sidepanel-effects.js"></script>',
+  );
 
   assert.doesNotMatch(background, /importScripts\("youtube-transcript\.js"\)/);
   assert.match(background, /importScripts\("notes-backup\.js"\)/);
@@ -128,10 +134,19 @@ test("cross-platform runtime dependencies match the Passive-first release surfac
   assert.ok(
     panelNoteSourcesIndex >= 0 &&
       panelExportJobsIndex >= 0 &&
+      panelStateIndex >= 0 &&
+      panelEffectsIndex >= 0 &&
       panelRuntimeIndex >= 0 &&
       panelNoteSourcesIndex < panelExportJobsIndex &&
-      panelExportJobsIndex < panelRuntimeIndex,
-    "sidepanel.html must load note-sources.js, then export-jobs.js, then sidepanel.js",
+      panelExportJobsIndex < panelStateIndex &&
+      panelStateIndex < panelEffectsIndex &&
+      panelEffectsIndex < panelRuntimeIndex,
+    "sidepanel.html must load note/export dependencies, then state/effects, then sidepanel.js",
+  );
+  assert.ok(
+    (releaseCheck.match(/"sidepanel-state\.js"/g) || []).length >= 2 &&
+      (releaseCheck.match(/"sidepanel-effects\.js"/g) || []).length >= 2,
+    "sidepanel state/effects must be allowlisted and required for release",
   );
   assert.ok(
     optionsPage.indexOf('<script src="notes-backup.js"></script>') <
@@ -199,6 +214,35 @@ test("cross-platform runtime dependencies match the Passive-first release surfac
   assert.doesNotMatch(
     [background, read("options.js")].join("\n"),
     /chrome\.downloads\b/,
+  );
+});
+
+test("side panel MVP keeps identity and navigation persistent while transcript state stays local", () => {
+  const html = read("sidepanel.html");
+  const css = read("sidepanel.css");
+  const panel = read("sidepanel.js");
+  const tabDetection = panel.slice(
+    panel.indexOf("async function runCheckCurrentTab"),
+    panel.indexOf("// DIGEST PIPELINE"),
+  );
+
+  assert.match(html, /id="tabsNav"[\s\S]*?role="tablist"/);
+  assert.match(
+    html,
+    /id="transcriptStateRegion"[\s\S]*?aria-live="polite"[\s\S]*?aria-busy="false"/,
+  );
+  assert.match(html, /id="transcriptReadyRegion"/);
+  assert.match(css, /\.workspace-state-region\.kind-consent/);
+  assert.match(css, /\.workspace-state-region\.kind-terminal/);
+  assert.match(css, /\.workspace-state-region\.kind-error/);
+  assert.match(css, /\.workspace-skeleton-list/);
+  assert.match(panel, /function renderSidepanelMvpTranscriptState\(/);
+  assert.match(panel, /sidepanelMvpSupadataDispatcher\.dispatch\(/);
+  assert.match(panel, /SUPADATA_REQUEST_DISPATCHED/);
+  assert.doesNotMatch(
+    tabDetection,
+    /!currentConfigStatus\?\.hasAiKey/,
+    "subtitle reading must not require an AI Provider key",
   );
 });
 

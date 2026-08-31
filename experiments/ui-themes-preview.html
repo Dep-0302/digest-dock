@@ -1,0 +1,243 @@
+<!doctype html>
+<!--
+  EXPERIMENT ONLY - not shipped. Visual preview of the DigestDock UI themes.
+  Uses the real sidepanel.css + ui-themes.css with representative markup.
+  Open with ?theme=classic | ink-night | warm-paper (default: classic).
+  The gallery page (ui-themes-gallery.html) embeds all three side by side.
+-->
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>DigestDock 主题预览</title>
+    <link rel="stylesheet" href="../sidepanel.css" />
+    <link rel="stylesheet" href="../ui-themes.css" />
+    <script>
+      (function () {
+        var theme = new URLSearchParams(location.search).get("theme") || "classic";
+        if (theme !== "classic") document.documentElement.setAttribute("data-theme", theme);
+      })();
+    </script>
+    <style>
+      /* preview harness only */
+      body { min-width: 340px; }
+      .preview-block-label {
+        padding: 26px 16px 8px;
+        font: 700 11px/1 var(--font-body);
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: var(--text-muted);
+      }
+    </style>
+  </head>
+  <body>
+    <!-- HEADER (replicated from sidepanel.html) -->
+    <div class="header">
+      <div class="header-top">
+        <div class="video-info" id="videoInfo">
+          <div class="video-title" id="videoTitle">The Future of AI Interfaces: A Long Conversation About Design, Tools and Taste</div>
+          <div class="video-channel" id="videoChannel">Design Matters · YouTube · 1:12:08</div>
+        </div>
+        <div class="header-actions">
+          <div
+            class="language-mode-control transcript-mode-control"
+            role="group"
+            aria-label="字幕语言"
+          >
+            <button class="language-mode-btn" type="button">原文</button>
+            <button class="language-mode-btn" type="button">中文</button>
+            <button class="language-mode-btn active" type="button">双语</button>
+          </div>
+          <div class="theme-switch">
+            <button class="settings-btn theme-switch-btn" type="button" title="界面主题" aria-label="界面主题">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <circle cx="12" cy="12" r="9"></circle>
+                <path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor" stroke="none"></path>
+              </svg>
+            </button>
+            <div class="theme-switch-menu" role="menu" aria-label="选择界面主题" hidden></div>
+          </div>
+          <button class="settings-btn" type="button" title="打开 DigestDock 设置" aria-label="打开 DigestDock 设置">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <circle cx="12" cy="12" r="3"></circle>
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+            </svg>
+          </button>
+        </div>
+      </div>
+      <div class="tabs" role="tablist" aria-label="当前视频工作区">
+        <button class="tab active" type="button" role="tab">字幕</button>
+        <button class="tab" type="button" role="tab">概览</button>
+        <button class="tab" type="button" role="tab">笔记</button>
+      </div>
+    </div>
+
+    <div class="content">
+      <!-- WORKSPACE STATE CARD -->
+      <div class="preview-block-label">状态卡</div>
+      <div class="workspace-state-region kind-action">
+        <div class="workspace-state-card">
+          <div class="workspace-state-heading">
+            <span class="workspace-state-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" width="18" height="18">
+                <circle cx="12" cy="12" r="9"></circle>
+                <path d="M12 7v5l3 3"></path>
+              </svg>
+            </span>
+            <div class="workspace-state-copy">
+              <div class="workspace-state-title">需要打开字幕</div>
+              <div class="workspace-state-message">这个视频还没有加载字幕。请在播放器中打开 CC 字幕后重试。</div>
+            </div>
+          </div>
+          <div class="workspace-state-actions">
+            <button class="workspace-state-action primary" type="button">已打开字幕，重新读取</button>
+            <button class="workspace-state-action" type="button">稍后</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- TRANSCRIPT -->
+      <div class="preview-block-label">字幕</div>
+      <div class="section">
+        <div class="section-header transcript-section-header">
+          <div class="section-title">完整字幕</div>
+          <div class="transcript-actions">
+            <button class="icon-btn" type="button" title="复制完整字幕" aria-label="复制完整字幕">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+            </button>
+            <button class="icon-btn" type="button" title="导出完整字幕" aria-label="导出完整字幕">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+            </button>
+          </div>
+        </div>
+        <div id="transcriptList">
+          <div class="transcript-entry">
+            <button class="transcript-time" type="button">12:04</button>
+            <div class="transcript-copy">
+              <span class="transcript-text transcript-original">So when we talk about taste in tooling, we really mean a thousand small decisions that compound.</span>
+              <span class="transcript-translation">所以当我们谈论工具品味时，其实指的是无数个会复利的小决策。</span>
+            </div>
+          </div>
+          <div class="transcript-entry active-playback">
+            <button class="transcript-time" type="button">1:00:27</button>
+            <div class="transcript-copy">
+              <span class="transcript-text transcript-original">The interface should answer three questions at a glance: where am I, what time is it, and what can I do next.</span>
+              <span class="transcript-translation">界面应该一眼回答三个问题：我在哪里、现在几点、下一步能做什么。</span>
+            </div>
+          </div>
+          <div class="transcript-entry">
+            <button class="transcript-time" type="button">3:02:58</button>
+            <div class="transcript-copy">
+              <span class="transcript-text transcript-original">That is the whole job of a time-indexed reading tool.</span>
+              <span class="transcript-translation translation-pending">正在翻译…</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- OVERVIEW -->
+      <div class="preview-block-label">概览</div>
+      <div class="section">
+        <div class="section-title">章节</div>
+        <ul class="chapter-list">
+          <li class="chapter-item active-chapter">
+            <span class="chapter-timestamp">00:00</span>
+            <span class="chapter-content">
+              <span class="chapter-title">开场：为什么工具需要品味</span>
+              <span class="chapter-summary">从日常软件的小决策谈起，界定"品味"在工具设计中的含义。</span>
+            </span>
+          </li>
+          <li class="chapter-item">
+            <span class="chapter-timestamp">18:42</span>
+            <span class="chapter-content">
+              <span class="chapter-title">时间索引的阅读体验</span>
+              <span class="chapter-summary">字幕、章节与笔记如何围绕时间轴组织，而不是围绕页面组织。</span>
+            </span>
+          </li>
+        </ul>
+      </div>
+      <div class="section">
+        <div class="section-title">关键语句</div>
+        <div class="quote-item">
+          <div class="quote-text">"The interface should answer three questions at a glance."</div>
+          <div class="quote-meta">
+            <span class="quote-timestamp">1:00:27</span>
+            <span class="quote-actions">
+              <button class="icon-btn primary" type="button" title="从此处播放" aria-label="从此处播放">
+                <svg viewBox="0 0 24 24" fill="currentColor" stroke="none" width="15" height="15"><path d="M8 5v14l11-7z"></path></svg>
+              </button>
+              <button class="icon-btn" type="button" title="复制" aria-label="复制">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+              </button>
+            </span>
+          </div>
+        </div>
+      </div>
+
+      <!-- NOTES -->
+      <div class="preview-block-label">笔记</div>
+      <div class="section">
+        <div class="section-header">
+          <div class="section-title">已保存的笔记</div>
+          <div class="notes-header-actions">
+            <div class="notes-filter">
+              <button class="enhance-btn active" type="button">当前视频</button>
+              <button class="enhance-btn" type="button">全部笔记</button>
+            </div>
+            <div class="notes-export">
+              <button class="enhance-btn" type="button">导出笔记</button>
+            </div>
+          </div>
+        </div>
+        <div id="notesList">
+          <div class="note-source-group">
+            <div class="note-source-header">
+              <div class="note-source-title">
+                <span class="note-source-title-line">The Future of AI Interfaces</span>
+                <span class="note-source-title-line note-source-title-line--zh">AI 界面的未来</span>
+              </div>
+              <span class="note-source-meta">Design Matters · YouTube · 2 条笔记</span>
+              <span class="note-source-actions">
+                <button class="note-source-open" type="button">打开视频</button>
+              </span>
+            </div>
+            <div class="note-source-list">
+              <div class="note-item">
+                <div class="note-header">
+                  <span class="note-timestamp">1:00:27</span>
+                  <span class="note-video-title">The Future of AI Interfaces</span>
+                </div>
+                <div class="note-text">
+                  <span class="note-language-block">界面三问：我在哪里、现在几点、下一步能做什么。</span>
+                  <span class="note-language-block">Three questions every interface should answer at a glance.</span>
+                </div>
+                <div class="note-actions">
+                  <button class="icon-btn primary" type="button" title="播放" aria-label="播放">
+                    <svg viewBox="0 0 24 24" fill="currentColor" stroke="none" width="15" height="15"><path d="M8 5v14l11-7z"></path></svg>
+                  </button>
+                  <button class="icon-btn" type="button" title="复制文字" aria-label="复制文字">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                  </button>
+                  <button class="icon-btn is-done" type="button" title="已复制链接" aria-label="已复制链接">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg>
+                  </button>
+                </div>
+              </div>
+              <div class="note-item">
+                <div class="note-header">
+                  <span class="note-timestamp">3:02:58</span>
+                  <span class="note-video-title">The Future of AI Interfaces</span>
+                </div>
+                <div class="note-text">
+                  <span class="note-language-block">时间索引工具的全部工作。</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <button class="follow-playback-btn" type="button" style="display: inline-flex">跟随视频</button>
+  </body>
+</html>

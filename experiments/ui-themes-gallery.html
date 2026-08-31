@@ -1,0 +1,90 @@
+<!doctype html>
+<!--
+  EXPERIMENT ONLY - not shipped. Side-by-side gallery of the three DigestDock
+  UI themes (classic / ink-night / warm-paper) for design review. Each column
+  is an iframe running the real sidepanel.css/options.css + ui-themes.css.
+-->
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>DigestDock 界面主题画廊</title>
+    <style>
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        padding: 24px;
+        background: #20262c;
+        color: #e8edf2;
+        font: 14px/1.6 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+      h1 { font-size: 20px; margin: 0 0 4px; }
+      .hint { color: #9aa7b2; margin: 0 0 20px; font-size: 13px; }
+      .row {
+        display: flex;
+        gap: 18px;
+        align-items: flex-start;
+        margin-bottom: 28px;
+        flex-wrap: wrap;
+      }
+      .cell { flex: 0 0 auto; }
+      .cell h2 {
+        font-size: 13px;
+        font-weight: 700;
+        margin: 0 0 8px;
+        color: #c3cdd6;
+        letter-spacing: 0.04em;
+      }
+      .cell iframe {
+        display: block;
+        border: 1px solid #39434d;
+        border-radius: 14px;
+        background: #fff;
+      }
+      .row-label {
+        font-size: 12px;
+        font-weight: 800;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: #7f8b96;
+        margin: 0 0 12px;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>DigestDock 界面主题画廊（实验预览）</h1>
+    <p class="hint">三套皮肤共用同一内核与同一套基础样式；经典工作台即当前线上 UI，未做任何改动。</p>
+
+    <p class="row-label">侧栏</p>
+    <div class="row">
+      <div class="cell">
+        <h2>经典工作台（当前默认）</h2>
+        <iframe src="ui-themes-preview.html?theme=classic" width="360" height="640" title="侧栏 - 经典工作台"></iframe>
+      </div>
+      <div class="cell">
+        <h2>墨夜（新）</h2>
+        <iframe src="ui-themes-preview.html?theme=ink-night" width="360" height="640" title="侧栏 - 墨夜"></iframe>
+      </div>
+      <div class="cell">
+        <h2>暖纸（新）</h2>
+        <iframe src="ui-themes-preview.html?theme=warm-paper" width="360" height="640" title="侧栏 - 暖纸"></iframe>
+      </div>
+    </div>
+
+    <p class="row-label">设置页</p>
+    <div class="row">
+      <div class="cell">
+        <h2>经典工作台（当前默认）</h2>
+        <iframe src="ui-themes-options-preview.html?theme=classic" width="420" height="560" title="设置页 - 经典工作台"></iframe>
+      </div>
+      <div class="cell">
+        <h2>墨夜（新）</h2>
+        <iframe src="ui-themes-options-preview.html?theme=ink-night" width="420" height="560" title="设置页 - 墨夜"></iframe>
+      </div>
+      <div class="cell">
+        <h2>暖纸（新）</h2>
+        <iframe src="ui-themes-options-preview.html?theme=warm-paper" width="420" height="560" title="设置页 - 暖纸"></iframe>
+      </div>
+    </div>
+  </body>
+</html>

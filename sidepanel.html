@@ -5,6 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>DigestDock</title>
     <link rel="stylesheet" href="sidepanel.css" />
+    <link rel="stylesheet" href="ui-themes.css" />
+    <script src="ui-themes.js"></script>
   </head>
   <body>
     <!-- HEADER -->
@@ -111,6 +113,64 @@
               aria-label="正在生成中文笔记"
             ></span>
           </div>
+          <div class="theme-switch">
+            <button
+              class="settings-btn theme-switch-btn"
+              id="themeSwitchBtn"
+              type="button"
+              title="界面主题"
+              aria-label="界面主题"
+              aria-haspopup="menu"
+              aria-expanded="false"
+              aria-controls="themeSwitchMenu"
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <circle cx="12" cy="12" r="9"></circle>
+                <path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor" stroke="none"></path>
+              </svg>
+            </button>
+            <div
+              class="theme-switch-menu"
+              id="themeSwitchMenu"
+              role="menu"
+              aria-label="选择界面主题"
+              hidden
+            >
+              <button
+                class="theme-option"
+                type="button"
+                role="menuitemradio"
+                aria-checked="true"
+                data-theme-id="classic"
+              >
+                <span class="theme-swatch theme-swatch--classic" aria-hidden="true"></span>
+                <span class="theme-option-label">经典工作台</span>
+                <span class="theme-option-check" aria-hidden="true">✓</span>
+              </button>
+              <button
+                class="theme-option"
+                type="button"
+                role="menuitemradio"
+                aria-checked="false"
+                data-theme-id="ink-night"
+              >
+                <span class="theme-swatch theme-swatch--night" aria-hidden="true"></span>
+                <span class="theme-option-label">墨夜</span>
+                <span class="theme-option-check" aria-hidden="true">✓</span>
+              </button>
+              <button
+                class="theme-option"
+                type="button"
+                role="menuitemradio"
+                aria-checked="false"
+                data-theme-id="warm-paper"
+              >
+                <span class="theme-swatch theme-swatch--paper" aria-hidden="true"></span>
+                <span class="theme-option-label">暖纸</span>
+                <span class="theme-option-check" aria-hidden="true">✓</span>
+              </button>
+            </div>
+          </div>
           <button
             class="settings-btn"
             id="settingsBtn"
@@ -127,10 +187,39 @@
       </div>
 
       <!-- Tab navigation -->
-      <div class="tabs" id="tabsNav" style="display: none">
-        <button class="tab active" data-tab="transcript">字幕</button>
-        <button class="tab" data-tab="overview">概览</button>
-        <button class="tab" data-tab="notes">笔记</button>
+      <div class="tabs"
+        id="tabsNav"
+        role="tablist"
+        aria-label="当前视频工作区"
+        style="display: none"
+      >
+        <button
+          class="tab active"
+          id="transcriptTab"
+          type="button"
+          role="tab"
+          data-tab="transcript"
+          aria-controls="transcriptPanel"
+          aria-selected="true"
+        >字幕</button>
+        <button
+          class="tab"
+          id="overviewTab"
+          type="button"
+          role="tab"
+          data-tab="overview"
+          aria-controls="overviewPanel"
+          aria-selected="false"
+        >概览</button>
+        <button
+          class="tab"
+          id="notesTab"
+          type="button"
+          role="tab"
+          data-tab="notes"
+          aria-controls="notesPanel"
+          aria-selected="false"
+        >笔记</button>
       </div>
     </div>
 
@@ -188,8 +277,23 @@
       <!-- RESULTS -->
       <div id="resultsState" style="display: none">
         <!-- TAB: Transcript (default - no LLM required) -->
-        <div class="tab-panel active" data-panel="transcript">
-          <div class="section">
+        <div
+          class="tab-panel active"
+          id="transcriptPanel"
+          role="tabpanel"
+          aria-labelledby="transcriptTab"
+          data-panel="transcript"
+        >
+          <div
+            class="workspace-state-region"
+            id="transcriptStateRegion"
+            role="status"
+            aria-live="polite"
+            aria-atomic="true"
+            aria-busy="false"
+            hidden
+          ></div>
+          <div class="section transcript-ready-region" id="transcriptReadyRegion">
             <div class="section-header transcript-section-header">
               <div class="section-title">完整字幕</div>
               <div class="transcript-actions">
@@ -239,7 +343,13 @@
         </div>
 
         <!-- TAB: Overview (chapters + key quotes) - requires LLM -->
-        <div class="tab-panel" data-panel="overview">
+        <div
+          class="tab-panel"
+          id="overviewPanel"
+          role="tabpanel"
+          aria-labelledby="overviewTab"
+          data-panel="overview"
+        >
           <p
             class="overview-translation-status"
             id="overviewTranslationStatus"
@@ -285,7 +395,13 @@
         </div>
 
         <!-- TAB: Notes -->
-        <div class="tab-panel" data-panel="notes">
+        <div
+          class="tab-panel"
+          id="notesPanel"
+          role="tabpanel"
+          aria-labelledby="notesTab"
+          data-panel="notes"
+        >
           <div class="section">
             <div class="section-header">
               <div class="section-title">已保存的笔记</div>
@@ -456,6 +572,8 @@
     <script src="note-export.js"></script>
     <script src="note-sources.js"></script>
     <script src="export-jobs.js"></script>
+    <script src="sidepanel-state.js"></script>
+    <script src="sidepanel-effects.js"></script>
     <script src="sidepanel.js"></script>
   </body>
 </html>
