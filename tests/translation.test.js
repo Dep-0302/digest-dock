@@ -58,7 +58,12 @@ function loadSidepanelRuntime({
   noteSourcesImpl = require("../note-sources.js"),
   exportJobsImpl = require("../export-jobs.js"),
 } = {}) {
-  const listeners = { addListener() {} };
+  const runtimeMessageListeners = [];
+  const listeners = {
+    addListener(listener) {
+      runtimeMessageListeners.push(listener);
+    },
+  };
   const tabUpdatedListeners = [];
   const tabActivatedListeners = [];
   const sandbox = {
@@ -120,9 +125,14 @@ function loadSidepanelRuntime({
   sandbox.globalThis = sandbox;
   const context = vm.createContext(sandbox);
   vm.runInContext(read("sidepanel.js"), context);
+  vm.runInContext(
+    'currentConfigStatus = { hasAiKey: true, provider: { displayName: "DeepSeek" } };',
+    context,
+  );
   return {
     helpers: sandbox.__YTD_TRANSCRIPT_TESTING__,
     sandbox,
+    runtimeMessageListeners,
     tabUpdatedListeners,
     tabActivatedListeners,
     evaluate: (code) => vm.runInContext(code, context),
@@ -154,6 +164,7 @@ function loadBackgroundHelpers({
   bilibiliAdapterImpl = bilibiliAdapter,
   noteSourcesImpl = require("../note-sources.js"),
   exportJobsImpl = require("../export-jobs.js"),
+  runtimeSendMessageImpl = () => Promise.resolve({ success: true }),
 } = {}) {
   const listeners = { addListener() {} };
   const runtimeMessageListeners = [];
@@ -196,7 +207,7 @@ function loadBackgroundHelpers({
         },
         openOptionsPage() {},
         getURL: (resourcePath) => `chrome-extension://test/${resourcePath}`,
-        sendMessage: () => Promise.resolve({ success: true }),
+        sendMessage: runtimeSendMessageImpl,
       },
       tabs: { onUpdated: listeners, onActivated: listeners, ...tabsImpl },
     },
@@ -4324,7 +4335,7 @@ test("Header exposes tab-specific transcript, overview, and notes language modes
   // back to YouTube never inherits a Bilibili button that was left hidden.
   assert.match(
     js,
-    /function applyMediaLanguageDefaults\(\)[\s\S]*?currentNotesMode = isBilibili \? "zh" : "bilingual"[\s\S]*?\.transcript-mode-btn, \.overview-mode-btn, \.notes-mode-btn[\s\S]*?button\.hidden = false/,
+    /function applyMediaLanguageDefaults\(\)[\s\S]*?currentNotesMode = currentVideoIsChinese\(\)[\s\S]*?hasConfiguredAiService\(\)[\s\S]*?"bilingual"[\s\S]*?"original"[\s\S]*?\.transcript-mode-btn, \.overview-mode-btn, \.notes-mode-btn[\s\S]*?button\.hidden = false/,
   );
   assert.doesNotMatch(
     js,
@@ -4424,7 +4435,7 @@ test("notesChanged refreshes imported notes without starting translation", async
   );
   assert.match(
     read("sidepanel.js"),
-    /message\.action === "noteSaved" \|\| message\.action === "notesChanged"[\s\S]*?loadNotes\([\s\S]*?translateMissing: message\.action === "noteSaved"/,
+    /message\.action === "noteSaved" \|\| message\.action === "notesChanged"[\s\S]*?loadNotes\([\s\S]*?translateMissing:[\s\S]*?message\.action === "noteSaved"[\s\S]*?message\.preserveOriginalOnly !== true/,
   );
 });
 
@@ -6928,6 +6939,359 @@ test("notes render and copy original, Chinese, and bilingual variants", () => {
   );
 });
 
+test("free mode explains optional AI features with the selected provider name", () => {
+  const runtime = loadSidepanelRuntime();
+  runtime.evaluate(
+    'currentConfigStatus = { hasAiKey: false, provider: { displayName: "智谱 GLM" } };',
+  );
+
+  assert.equal(runtime.helpers.hasConfiguredAiService(), false);
+  assert.equal(runtime.helpers.activeAiServiceLabel(), "智谱 GLM");
+  assert.match(
+    runtime.helpers.aiFeatureSetupMessage("生成概览"),
+    /字幕阅读、时间跳转和原文笔记无需 AI 密钥.*生成概览.*智谱 GLM/,
+  );
+  assert.match(
+    runtime.helpers.summarizeNoteTranslationFailures([
+      { code: "PROVIDER_ERROR" },
+    ]),
+    /智谱 GLM请求失败/,
+  );
+});
+
+test("free mode saves the current timestamped note without an AI request", async () => {
+  const runtime = loadSidepanelRuntime();
+  const fixture = runtime.evaluate(`
+    (() => {
+      const actions = [];
+      const label = { textContent: "保存当前时刻" };
+      const button = {
+        disabled: false,
+        textContent: "",
+        querySelector: () => label,
+      };
+      const status = {
+        textContent: "",
+        hidden: true,
+        classList: { toggle() {} },
+      };
+      document.getElementById = (id) =>
+        id === "saveCurrentMomentBtn" ? button :
+        id === "notesLanguageStatus" ? status : null;
+      currentConfigStatus = {
+        hasAiKey: false,
+        provider: { displayName: "DeepSeek" },
+      };
+      currentVideoId = "video-free-note";
+      currentRouteKey = "youtube:video-free-note";
+      currentVideoUrl = "https://www.youtube.com/watch?v=video-free-note";
+      currentVideoTitle = "Free note video";
+      currentChannelName = "Channel";
+      currentTranscriptLanguage = "en";
+      currentVideoSourceLanguage = "en";
+      currentMediaRef = {
+        platform: "youtube",
+        mediaKey: "video-free-note",
+        canonicalUrl: currentVideoUrl,
+      };
+      videoTabId = 42;
+      chrome.runtime.sendMessage = async (message) => {
+        actions.push(JSON.parse(JSON.stringify(message)));
+        if (message.action === "relayToContent") {
+          return { success: true, response: { currentTime: 12 } };
+        }
+        if (message.action === "saveNote") return { success: true };
+        throw new Error("unexpected action: " + message.action);
+      };
+      return {
+        run: () => saveCurrentMomentFromPanel(),
+        snapshot: () => JSON.stringify({
+          actions,
+          label: label.textContent,
+          status: status.textContent,
+          disabled: button.disabled,
+        }),
+      };
+    })()
+  `);
+
+  await fixture.run();
+  const snapshot = JSON.parse(fixture.snapshot());
+  assert.deepEqual(
+    snapshot.actions.map((message) => message.action),
+    ["relayToContent", "saveNote"],
+  );
+  assert.equal(snapshot.actions[1].timestamp, 9);
+  assert.equal(snapshot.actions[0].expectedRouteKey, "youtube:video-free-note");
+  assert.equal(snapshot.actions[1].expectedRouteKey, "youtube:video-free-note");
+  assert.equal(snapshot.actions[1].skipAiCleanup, true);
+  assert.equal(snapshot.actions.some((message) => /translate|analyze/i.test(message.action)), false);
+  assert.equal(snapshot.label, "已保存");
+  assert.equal(snapshot.status, "已保存当前时刻。");
+  assert.equal(snapshot.disabled, false);
+});
+
+test("the current-moment action rejects a late time result from another video", async () => {
+  const runtime = loadSidepanelRuntime();
+  const fixture = runtime.evaluate(`
+    (() => {
+      const actions = [];
+      const label = { textContent: "保存当前时刻" };
+      const button = {
+        disabled: false,
+        textContent: "",
+        querySelector: () => label,
+      };
+      const status = {
+        textContent: "",
+        hidden: true,
+        classList: { toggle() {} },
+      };
+      document.getElementById = (id) =>
+        id === "saveCurrentMomentBtn" ? button :
+        id === "notesLanguageStatus" ? status : null;
+      currentVideoId = "video-a";
+      currentRouteKey = "youtube:video-a";
+      currentVideoUrl = "https://www.youtube.com/watch?v=video-a";
+      currentMediaRef = {
+        platform: "youtube",
+        videoId: "video-a",
+        mediaKey: "video-a",
+        canonicalUrl: currentVideoUrl,
+      };
+      videoTabId = 42;
+      chrome.runtime.sendMessage = async (message) => {
+        actions.push(JSON.parse(JSON.stringify(message)));
+        if (message.action === "relayToContent") {
+          currentVideoId = "video-b";
+          currentRouteKey = "youtube:video-b";
+          digestGeneration += 1;
+          return { success: true, response: { currentTime: 12 } };
+        }
+        throw new Error("saveNote must not run for stale context");
+      };
+      return {
+        run: () => saveCurrentMomentFromPanel(),
+        snapshot: () => JSON.stringify({
+          actions,
+          label: label.textContent,
+          status: status.textContent,
+        }),
+      };
+    })()
+  `);
+
+  await fixture.run();
+  const snapshot = JSON.parse(fixture.snapshot());
+  assert.deepEqual(
+    snapshot.actions.map((message) => message.action),
+    ["relayToContent"],
+  );
+  assert.equal(snapshot.label, "保存当前时刻");
+  assert.match(snapshot.status, /视频页面已切换/);
+});
+
+test("original current-moment notes bypass AI cleanup even when a key exists", async () => {
+  const videoId = "free-note-with-key";
+  let storedNotes = [];
+  let providerCalls = 0;
+  const runtimeMessages = [];
+  const mediaRef = {
+    platform: "youtube",
+    videoId,
+    mediaKey: videoId,
+    canonicalUrl: `https://www.youtube.com/watch?v=${videoId}`,
+  };
+  const background = loadBackgroundHelpers({
+    storageGetImpl: async (key) => {
+      if (key === "ytd_settings") {
+        return {
+          ytd_settings: {
+            provider: "deepseek",
+            aiApiKeys: { deepseek: "configured-key" },
+          },
+        };
+      }
+      if (key === `digest_${videoId}`) {
+        return {
+          [`digest_${videoId}`]: {
+            transcriptSourcePolicyVersion: 5,
+            transcriptSource: "youtube-passive",
+            transcriptLanguage: "en",
+            transcript: [
+              { start: 0, text: "Before the key idea.", language: "en" },
+              { start: 8, text: "The key idea is local-first.", language: "en" },
+              { start: 16, text: "After the key idea.", language: "en" },
+            ],
+          },
+        };
+      }
+      if (key === "ytd_notes") return { ytd_notes: storedNotes };
+      return {};
+    },
+    storageSetImpl: async (items) => {
+      if (Array.isArray(items.ytd_notes)) storedNotes = items.ytd_notes;
+    },
+    tabsImpl: {
+      get: async () => ({
+        id: 42,
+        url: `https://www.youtube.com/watch?v=${videoId}`,
+      }),
+    },
+    fetchImpl: async () => {
+      providerCalls += 1;
+      throw new Error("provider must not run");
+    },
+    runtimeSendMessageImpl: async (message) => {
+      runtimeMessages.push(JSON.parse(JSON.stringify(message)));
+      return { success: true };
+    },
+  });
+
+  const result = await background.handleSaveNote(
+    mediaRef,
+    9,
+    "Free note video",
+    "Channel",
+    mediaRef.canonicalUrl,
+    42,
+    "en",
+    `youtube:${videoId}`,
+    true,
+  );
+
+  assert.equal(result.success, true);
+  assert.equal(providerCalls, 0);
+  assert.equal(storedNotes.length, 1);
+  assert.match(storedNotes[0].text, /The key idea is local-first/);
+  assert.equal(storedNotes[0].translatedText, "");
+  const savedBroadcast = runtimeMessages.find(
+    (message) => message.action === "noteSaved",
+  );
+  assert.ok(savedBroadcast);
+  assert.equal(savedBroadcast.preserveOriginalOnly, true);
+});
+
+test("an original-only save notification never starts note translation", async () => {
+  const actions = [];
+  const runtime = loadSidepanelRuntime({
+    sendMessage: async (message) => {
+      actions.push(JSON.parse(JSON.stringify(message)));
+      if (message.action === "getNotes") {
+        return {
+          success: true,
+          notes: [
+            {
+              id: "original-only-note",
+              videoId: "video-original-only",
+              mediaKey: "video-original-only",
+              platform: "youtube",
+              videoTitle: "Original-only note",
+              timestamp: "0:09",
+              timestampSeconds: 9,
+              text: "Keep this note local.",
+              rawText: "Keep this note local.",
+              translatedText: "",
+              sourceLanguage: "en",
+            },
+          ],
+        };
+      }
+      if (message.action === "translateNotes") {
+        throw new Error("translateNotes must not run");
+      }
+      return { success: true };
+    },
+  });
+  runtime.evaluate(`
+    currentConfigStatus = {
+      hasAiKey: true,
+      provider: { displayName: "DeepSeek" },
+    };
+    currentNotesMode = "bilingual";
+    currentVideoId = "video-original-only";
+    notesFilterShowAll = false;
+  `);
+  const listener = runtime.runtimeMessageListeners[0];
+  assert.equal(typeof listener, "function");
+
+  listener(
+    {
+      action: "noteSaved",
+      preserveOriginalOnly: true,
+      note: { mediaKey: "different-video" },
+    },
+    {},
+    () => {},
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(
+    actions.map((message) => message.action),
+    ["getNotes"],
+  );
+});
+
+test("note save rejects a tab that changes route before persistence", async () => {
+  const videoId = "note-route-a";
+  let storedNotes = [];
+  let tabReads = 0;
+  const mediaRef = {
+    platform: "youtube",
+    videoId,
+    mediaKey: videoId,
+    canonicalUrl: `https://www.youtube.com/watch?v=${videoId}`,
+  };
+  const background = loadBackgroundHelpers({
+    storageGetImpl: async (key) => {
+      if (key === "ytd_settings") return { ytd_settings: {} };
+      if (key === `digest_${videoId}`) {
+        return {
+          [`digest_${videoId}`]: {
+            transcriptSourcePolicyVersion: 5,
+            transcriptSource: "youtube-passive",
+            transcriptLanguage: "en",
+            transcript: [{ start: 0, text: "Route A note.", language: "en" }],
+          },
+        };
+      }
+      if (key === "ytd_notes") return { ytd_notes: storedNotes };
+      return {};
+    },
+    storageSetImpl: async (items) => {
+      if (Array.isArray(items.ytd_notes)) storedNotes = items.ytd_notes;
+    },
+    tabsImpl: {
+      get: async () => {
+        tabReads += 1;
+        return {
+          id: 42,
+          url:
+            tabReads === 1
+              ? `https://www.youtube.com/watch?v=${videoId}`
+              : "https://www.youtube.com/watch?v=note-route-b",
+        };
+      },
+    },
+  });
+
+  const result = await background.handleSaveNote(
+    mediaRef,
+    9,
+    "Route A",
+    "Channel",
+    mediaRef.canonicalUrl,
+    42,
+    "en",
+    `youtube:${videoId}`,
+    true,
+  );
+
+  assert.equal(result.success, false);
+  assert.equal(result.code, "PAGE_CONTEXT_CHANGED");
+  assert.equal(storedNotes.length, 0);
+});
+
 test("clicking the active Chinese notes mode retries once without duplicate requests", async () => {
   const runtime = loadSidepanelRuntime();
   const fixture = runtime.evaluate(`
@@ -7512,6 +7876,42 @@ Raw line.",
   assert.equal(result.analysis.keyQuotes[0].quoteZh, "你好，\r\n世界。");
 });
 
+test("AI entry points fail closed with free-core guidance when no key is saved", async () => {
+  let providerCalls = 0;
+  const background = loadBackgroundHelpers({
+    settings: { provider: "zhipu", aiApiKeys: { zhipu: "" } },
+    fetchImpl: async () => {
+      providerCalls += 1;
+      throw new Error("provider must not be called");
+    },
+  });
+
+  const overview = await background.handleAnalyzeTranscript(
+    "[0:00] Hello world.",
+    "Example video",
+    "Example channel",
+    "Example description",
+    60,
+    "en",
+  );
+  assert.equal(overview.success, false);
+  assert.equal(overview.error, "NO_AI_KEY");
+  assert.match(overview.message, /字幕阅读、时间跳转和原文笔记仍可使用/);
+  assert.match(overview.message, /智谱 GLM API 密钥/);
+
+  const transcript = await background.handleTranslateContent(
+    { segments: [{ id: "segment-1", text: "Hello world." }] },
+    "transcriptBatch",
+    "zh",
+    "Example video",
+  );
+  assert.equal(transcript.success, false);
+  assert.equal(transcript.code, "NO_AI_KEY");
+  assert.equal(transcript.actualProviderCalls, 0);
+  assert.match(transcript.error, /字幕阅读、时间跳转和原文笔记仍可使用/);
+  assert.equal(providerCalls, 0);
+});
+
 test("overview generates Chinese first and translates chapters to the source language on demand", async () => {
   const requests = [];
   const background = loadBackgroundHelpers({
@@ -8003,6 +8403,12 @@ test("saving a YouTube note also freezes exact page metadata for later export", 
     storageSetImpl: storage.set,
     storageRemoveImpl: storage.remove,
     storageClearImpl: storage.clear,
+    tabsImpl: {
+      get: async () => ({
+        id: 77,
+        url: `https://www.youtube.com/watch?v=${videoId}`,
+      }),
+    },
     scriptingImpl: {
       async executeScript() {
         return [{
@@ -8060,6 +8466,12 @@ test("a stale YouTube player cannot block the note or attach another video's sou
     storageSetImpl: storage.set,
     storageRemoveImpl: storage.remove,
     storageClearImpl: storage.clear,
+    tabsImpl: {
+      get: async () => ({
+        id: 78,
+        url: `https://www.youtube.com/watch?v=${videoId}`,
+      }),
+    },
     scriptingImpl: {
       async executeScript() {
         return [{
@@ -8109,6 +8521,12 @@ test("source persistence failure never reverses a successful note save", async (
     storageSetImpl: storage.set,
     storageRemoveImpl: storage.remove,
     storageClearImpl: storage.clear,
+    tabsImpl: {
+      get: async () => ({
+        id: 79,
+        url: `https://www.youtube.com/watch?v=${videoId}`,
+      }),
+    },
     noteSourcesImpl: {
       ...noteSources,
       async writeNoteSource() {

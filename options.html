@@ -64,7 +64,7 @@
         <header class="settings-topbar">
           <div class="settings-topbar-heading">
             <p class="eyebrow">DIGESTDOCK</p>
-            <h1 data-i18n="heading">使用你自己的 API 密钥</h1>
+            <h1 data-i18n="heading">按需连接 AI 服务</h1>
           </div>
           <div
             class="language-switch"
@@ -93,7 +93,7 @@
 
         <div class="settings-scroll">
           <p class="lede" data-i18n="lede">
-            密钥仅保存在当前 Chrome 个人资料中。选择一个 AI 服务商并填写 API 密钥即可使用 AI 功能。本开源扩展没有开发者服务器，也不使用分析服务。
+            无需 API 密钥即可阅读原字幕、跳转时间点、保存原文笔记和导出原文。只有生成概览、讲解、翻译或润色笔记时，才需要添加 AI 密钥。
           </p>
 
           <form id="settingsForm">
@@ -115,7 +115,7 @@
                       id="aiStatus"
                       data-status="unknown"
                       data-i18n="statusNotConfigured"
-                      >未配置</span
+                      >未添加密钥</span
                     >
                   </div>
 
@@ -166,7 +166,7 @@
                     <div class="field-label-row">
                       <label for="aiApiKey" data-i18n="aiKeyLabel">API 密钥</label>
                       <span class="field-flag field-flag--required" data-i18n="fieldRequired"
-                        >必需</span
+                        >AI 功能需要</span
                       >
                     </div>
                     <div class="field-input">
@@ -195,7 +195,7 @@
                     </div>
                     <p class="help">
                       <span id="providerHelpText" data-i18n="aiKeyHelp"
-                        >所选 AI 服务用于生成概览、解释内容、翻译字幕和润色笔记。</span
+                        >所选 AI 服务用于生成概览、解释内容、翻译字幕和润色笔记。留空仍可使用免费字幕和原文笔记功能。</span
                       >
                       <a
                         id="providerHelpLink"
@@ -207,7 +207,7 @@
                       ><span data-i18n="createKeyLinkSuffix">。</span>
                     </p>
                     <div class="privacy-note" data-i18n="providerPrivacyNote">
-                      使用 AI 功能时，所选服务会收到视频字幕及相关视频上下文。保存前请查看该服务的服务条款和价格。
+                      密钥只在当前 Chrome 个人资料中持久保存。保存原文笔记不会发送内容；生成概览、讲解、翻译或 AI 润色笔记时，密钥和必要内容会从扩展直接发送给所选服务。请先查看该服务的条款和价格。
                     </div>
                   </div>
                 </section>
@@ -231,7 +231,7 @@
                       id="supadataStatus"
                       data-status="unknown"
                       data-i18n="statusNotConfigured"
-                      >未配置</span
+                      >未添加密钥</span
                     >
                   </div>
                   <div class="field">
@@ -267,7 +267,7 @@
                     </div>
                     <p class="help supadata-note">
                       <span data-i18n="supadataHelp"
-                        >仅当免费的 YouTube 字幕路线全部失败时，侧边栏才会提供 Supadata。即使保存了密钥，也只有你在侧边栏确认本次使用第三方 Supadata 时才会调用，且逐视频授权。你可以在此替换密钥，或清空后保存以删除密钥；B 站不会使用它。</span
+                        >仅当免费的 YouTube 字幕路线全部失败时，侧边栏才会提供 Supadata。保存密钥不会授权调用；每次使用 Supadata 都必须在侧边栏重新确认。你可以在此替换密钥，或清空后保存以删除密钥；B 站不会使用它。</span
                       >
                       <a
                         href="https://dash.supadata.ai/auth/sign-up"
@@ -344,7 +344,7 @@
           <section class="card privacy-card" id="section-privacy">
             <h2 data-i18n="navPrivacy">隐私说明</h2>
             <p class="help" data-i18n="privacySummary">
-              DigestDock 没有开发者服务器，也不使用分析服务。API 密钥、缓存摘要、翻译和笔记只保存在当前 Chrome 个人资料中。
+              DigestDock 没有开发者服务器，也不使用分析服务。API 密钥、缓存摘要、翻译和笔记只在当前 Chrome 个人资料中持久保存；AI 功能运行时，必要内容和对应密钥会直接发送给所选服务，Supadata 仍需每次调用单独确认。
             </p>
             <footer data-i18n-html="footer">
               完整数据流说明请参阅仓库中的
@@ -355,7 +355,14 @@
 
         <div class="settings-savebar">
           <span id="saveStatus" class="savebar-status" role="status" aria-live="polite"></span>
-          <button class="primary" type="submit" form="settingsForm" data-i18n="saveSettings">
+          <button
+            class="primary"
+            id="saveSettingsBtn"
+            type="submit"
+            form="settingsForm"
+            data-i18n="saveSettings"
+            disabled
+          >
             保存设置
           </button>
         </div>

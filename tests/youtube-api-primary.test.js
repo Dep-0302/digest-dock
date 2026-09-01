@@ -402,7 +402,7 @@ test("explicit consent without an exact tab identity sends no provider request",
 test("consent triggers exactly one canonical mode=native request", async () => {
   const requestedUrls = [];
   const { helpers } = loadBackground({
-    settings: { aiApiKey: "test-key", supadataApiKey: "optional-key" },
+    settings: { supadataApiKey: "optional-key" },
     executeScript: async () => pageSnapshot("jNQXAC9IVRw", "en"),
     fetchImpl: async (url) => {
       requestedUrls.push(String(url));

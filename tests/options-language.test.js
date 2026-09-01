@@ -232,7 +232,7 @@ test("the provider monogram stays a readable, wrong-provider-proof glyph", () =>
   assert.equal(options.providerMonogram(""), "?");
 });
 
-test("Supadata stays optional and saving writes the whole provider key map", () => {
+test("free mode and Supadata-only settings save without an AI key", () => {
   const html = read("options.html");
   const optionsScript = read("options.js");
 
@@ -243,16 +243,61 @@ test("Supadata stays optional and saving writes the whole provider key map", () 
   assert.doesNotMatch(supadataInput, /\srequired(?:\s|=|>)/i);
   assert.match(options.translate("en", "supadataApiKeyLabel"), /optional/i);
   assert.match(options.translate("zh-CN", "supadataApiKeyLabel"), /可选/);
-  assert.match(options.translate("en", "supadataHelp"), /confirm[\s\S]*third-party/i);
-  assert.match(options.translate("zh-CN", "supadataHelp"), /确认[\s\S]*第三方/);
+  assert.match(
+    options.translate("en", "supadataHelp"),
+    /every Supadata request[\s\S]*new confirmation/i,
+  );
+  assert.match(
+    options.translate("zh-CN", "supadataHelp"),
+    /每次使用 Supadata[\s\S]*重新确认/,
+  );
 
   const saveSettings = optionsScript.match(
     /async function saveSettings\(event\)[\s\S]*?\n    }/,
   )?.[0];
   assert.ok(saveSettings, "Expected the Settings save handler");
-  // One write persists every provider's key; the active-key gate uses the
-  // registry contract, never a single legacy aiApiKey field.
-  assert.match(saveSettings, /aiApiKeys\[id\] = providerKeyDrafts\[id\]/);
-  assert.match(saveSettings, /hasActiveApiKey\(settings\)/);
+  // Saving is allowed with no AI key so the free core, Supadata-only setup,
+  // and clearing the final stored key all remain possible.
+  assert.match(saveSettings, /buildSettingsDraft\(settingsApi/);
+  assert.match(saveSettings, /if \(!settingsLoaded\)/);
+  assert.ok(
+    saveSettings.indexOf("if (!settingsLoaded)") <
+      saveSettings.indexOf("buildSettingsDraft(settingsApi"),
+    "failed settings reads must stop before a replacement key map is built",
+  );
+  assert.doesNotMatch(saveSettings, /hasActiveApiKey\(settings\)/);
   assert.doesNotMatch(saveSettings, /settings\.aiApiKey\b/);
+  assert.match(
+    html,
+    /id="saveSettingsBtn"[\s\S]*?type="submit"[\s\S]*?disabled/,
+  );
+  assert.match(
+    optionsScript,
+    /settingsLoaded = true[\s\S]*?saveSettingsBtn\.disabled = false/,
+  );
+
+  const settingsApi = require("../settings.js");
+  const supadataOnly = options.buildSettingsDraft(settingsApi, {
+    providerId: "deepseek",
+    providerKeyDrafts: {},
+    activeApiKey: "",
+    supadataApiKey: "  supadata-only  ",
+  });
+  assert.equal(settingsApi.hasActiveApiKey(supadataOnly), false);
+  assert.equal(supadataOnly.supadataApiKey, "supadata-only");
+
+  const allEmpty = options.buildSettingsDraft(settingsApi, {
+    providerId: "zhipu",
+    providerKeyDrafts: { deepseek: "keep-deepseek" },
+    activeApiKey: "",
+    supadataApiKey: "",
+  });
+  assert.equal(allEmpty.provider, "zhipu");
+  assert.equal(allEmpty.aiApiKeys.zhipu, "");
+  assert.equal(allEmpty.aiApiKeys.deepseek, "keep-deepseek");
+  assert.equal(allEmpty.supadataApiKey, "");
+  assert.match(options.translate("en", "fieldRequired"), /AI/i);
+  assert.match(options.translate("zh-CN", "fieldRequired"), /AI 功能/);
+  assert.match(options.translate("en", "lede"), /No API key/i);
+  assert.match(options.translate("zh-CN", "lede"), /无需 API 密钥/);
 });

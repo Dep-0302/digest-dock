@@ -113,6 +113,22 @@ let errorSecondaryAction = null;
 let tabCheckGeneration = 0;
 let digestGeneration = 0;
 
+function hasConfiguredAiService(config = currentConfigStatus) {
+  return config?.hasAiKey === true;
+}
+
+function activeAiServiceLabel(config = currentConfigStatus) {
+  return String(config?.provider?.displayName || "当前 AI 服务").trim();
+}
+
+function aiFeatureSetupMessage(featureLabel) {
+  return `字幕阅读、时间跳转和原文笔记无需 AI 密钥。${featureLabel}需要先在右上角设置中配置 ${activeAiServiceLabel()} API 密钥。`;
+}
+
+function openAiSettings() {
+  return chrome.runtime.sendMessage({ action: "openOptions" });
+}
+
 // A cross-video click from the saved-notes library means "open this note",
 // not "start acquiring subtitles".  Keep that intent in session storage so
 // it survives Chrome swapping/recreating the global side-panel document while
@@ -1221,9 +1237,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   if (message.action === "noteSaved" || message.action === "notesChanged") {
     // Refresh after a save, import, clear, or reset. Only a freshly saved note
-    // may retry its missing Chinese version automatically.
+    // may retry its missing Chinese version automatically. The Notes empty-
+    // state action is explicitly original-only, even when an AI key exists.
     loadNotes(notesFilterShowAll ? null : currentVideoId, {
-      translateMissing: message.action === "noteSaved",
+      translateMissing:
+        message.action === "noteSaved" &&
+        message.preserveOriginalOnly !== true,
     });
     // Capture this video's export material once it has a note.
     if (message.action === "noteSaved") {
@@ -1597,14 +1616,17 @@ function currentPlatformIsBilibili() {
 }
 
 function applyMediaLanguageDefaults() {
-  const isBilibili = currentPlatformIsBilibili();
   currentTranscriptMode = "original";
   // The current product contract is Chinese-first on every platform.
   currentOverviewMode = "zh";
-  // Bilibili notes default to Chinese but keep all three modes: the "All notes"
-  // view aggregates YouTube + Bilibili and can hold multiple original
-  // languages, so its language control must stay available on Bilibili too.
-  currentNotesMode = isBilibili ? "zh" : "bilingual";
+  // Free mode starts with the original note text and performs no background AI
+  // work. A Chinese source is already readable, while configured users keep the
+  // established bilingual default for non-Chinese videos.
+  currentNotesMode = currentVideoIsChinese()
+    ? "zh"
+    : hasConfiguredAiService()
+      ? "bilingual"
+      : "original";
   setTranscriptModeButtons(currentTranscriptMode);
   setOverviewModeButtons(currentOverviewMode);
   setNotesModeButtons(currentNotesMode);
@@ -1791,7 +1813,7 @@ function setupEventListeners() {
       return startDigest(currentVideoId, currentVideoUrl).catch((error) => {
         console.error("[DigestDock Panel] Retry error:", error);
         showError(
-          "无法打开摘要",
+          "无法读取当前视频",
           error?.message || "重新加载当前 YouTube 视频失败，请刷新页面后重试。",
         );
       });
@@ -1814,6 +1836,9 @@ function setupEventListeners() {
   document
     .getElementById("exportTranscriptBtn")
     ?.addEventListener("click", exportTranscript);
+  document
+    .getElementById("saveCurrentMomentBtn")
+    ?.addEventListener("click", () => void saveCurrentMomentFromPanel());
   document.querySelectorAll(".transcript-mode-btn").forEach((button) => {
     button.addEventListener("click", () => {
       handleTranscriptModeChange(button.dataset.transcriptMode);
@@ -2151,7 +2176,7 @@ async function runCheckCurrentTab(generation, options = {}) {
     }
     console.error("Tab check error:", error);
     showError(
-      "无法打开摘要",
+      "无法读取当前视频",
       error?.message || "读取当前视频失败，请刷新页面后重试。",
     );
   }
@@ -2895,7 +2920,7 @@ async function runDigestLoad(
       if (!hasSupadataKey) {
         showSupadataNotConfigured(
           transcriptResult.message ||
-            "免费字幕路线未能取得字幕。如你愿意，可配置 Supadata 作为逐视频确认的第三方后备。",
+            "免费字幕路线未能取得字幕。如你愿意，可配置 Supadata 作为每次调用都需确认的第三方后备。",
         );
         return;
       }
@@ -3083,6 +3108,14 @@ function hasCompleteOriginalAnalysis(analysis) {
         ),
     )
   );
+}
+
+function setTranscriptTranslationStatus(message = "", isError = false) {
+  const status = document.getElementById("transcriptTranslationStatus");
+  if (!status) return;
+  status.textContent = message;
+  status.classList.toggle("error", isError);
+  status.hidden = !message;
 }
 
 function setOverviewTranslationStatus(message = "", isError = false) {
@@ -3374,9 +3407,93 @@ function renderAnalysisResults(analysis) {
   });
 }
 
-/**
- * Saves a key quote as a timestamped note.
- */
+/** Saves the current playback moment from the Notes empty state. */
+async function saveCurrentMomentFromPanel() {
+  const button = document.getElementById("saveCurrentMomentBtn");
+  const label = button?.querySelector?.("span");
+  if (
+    !button ||
+    !currentVideoId ||
+    !currentRouteKey ||
+    !Number.isInteger(videoTabId)
+  ) {
+    return;
+  }
+  const actionContext = Object.freeze({
+    generation: digestGeneration,
+    tabId: videoTabId,
+    routeKey: currentRouteKey,
+    videoId: currentVideoId,
+    videoUrl: currentVideoUrl,
+    videoTitle: currentVideoTitle,
+    channelName: currentChannelName,
+    sourceLanguage:
+      currentVideoSourceLanguage || currentTranscriptLanguage || "",
+    mediaRef: currentMediaRef ? { ...currentMediaRef } : null,
+  });
+  const contextIsCurrent = () =>
+    digestGeneration === actionContext.generation &&
+    videoTabId === actionContext.tabId &&
+    currentRouteKey === actionContext.routeKey &&
+    currentVideoId === actionContext.videoId;
+  const setLabel = (text) => {
+    if (label) label.textContent = text;
+    else button.textContent = text;
+  };
+
+  button.disabled = true;
+  setLabel("正在保存…");
+  setNotesTranslationStatus();
+  try {
+    const timingResult = await chrome.runtime.sendMessage({
+      action: "relayToContent",
+      tabId: actionContext.tabId,
+      expectedRouteKey: actionContext.routeKey,
+      payload: { action: "getCurrentTime" },
+    });
+    const timing = requireContentRelayResponse(
+      timingResult,
+      "无法读取当前播放位置。",
+    );
+    if (!contextIsCurrent()) {
+      throw new Error("视频页面已切换，请在当前视频重新保存。");
+    }
+    const timestamp = Math.max(
+      0,
+      Math.floor(Number(timing.currentTime) || 0) - 3,
+    );
+    const result = await chrome.runtime.sendMessage({
+      action: "saveNote",
+      videoId: actionContext.videoId,
+      mediaRef: actionContext.mediaRef,
+      videoUrl:
+        actionContext.mediaRef?.canonicalUrl || actionContext.videoUrl,
+      timestamp,
+      videoTitle: actionContext.videoTitle,
+      channelName: actionContext.channelName,
+      tabId: actionContext.tabId,
+      expectedRouteKey: actionContext.routeKey,
+      preferredLanguage: actionContext.sourceLanguage,
+      sourceLanguage: actionContext.sourceLanguage,
+      skipAiCleanup: true,
+    });
+    if (!result?.success) {
+      throw new Error(result?.message || result?.error || "笔记保存失败。");
+    }
+    setLabel("已保存");
+    setNotesTranslationStatus("已保存当前时刻。");
+  } catch (error) {
+    setLabel("保存当前时刻");
+    setNotesTranslationStatus(
+      error?.message || "无法保存当前时刻，请重试。",
+      true,
+    );
+  } finally {
+    button.disabled = false;
+  }
+}
+
+/** Saves a key quote as a timestamped note. */
 async function saveQuoteAsNote(quote, btn) {
   if (!currentVideoId) return;
 
@@ -6213,7 +6330,7 @@ function showSupadataNotConfigured(message) {
   showError(
     "免费字幕未能取得",
     message ||
-      "你可以选择配置 Supadata 作为第三方后备；在你逐视频确认前不会发送请求。",
+      "你可以选择配置 Supadata 作为第三方后备；每次调用都需重新确认，确认前不会发送请求。",
   );
   const primaryButton = document.getElementById("errorBtn");
   primaryButton.textContent = "了解并配置 Supadata";
@@ -6250,15 +6367,12 @@ function showPageRefreshRequired(tabId, message) {
 }
 
 function showConfigError(configStatus) {
-  const missingKeys = [];
-  if (!configStatus.hasAiKey) missingKeys.push("DeepSeek");
-
   showError(
-    "缺少 API 密钥",
-    `请在 DigestDock 设置中添加 ${missingKeys.join(" 和 ")} API 密钥。`,
+    "AI 功能尚未配置",
+    `字幕阅读、时间跳转和原文笔记仍可使用。如需概览、讲解、翻译或笔记润色，请在设置中添加 ${activeAiServiceLabel(configStatus)} API 密钥。`,
   );
-  document.getElementById("errorBtn").textContent = "打开设置";
-  errorAction = () => chrome.runtime.sendMessage({ action: "openOptions" });
+  document.getElementById("errorBtn").textContent = "配置 AI 功能";
+  errorAction = openAiSettings;
 }
 
 function showRuntimeVersionError() {
@@ -6356,7 +6470,7 @@ function resumeDigestFromNotesOnly(tabName) {
     .catch((error) => {
       console.error("[DigestDock Panel] Resume digest error:", error);
       showError(
-        "无法打开摘要",
+        "无法读取当前视频",
         error?.message || "读取当前视频失败，请刷新页面后重试。",
       );
     })
@@ -6416,6 +6530,22 @@ function switchTab(tabName) {
 async function triggerAnalysis() {
   if (!currentTranscriptTimestamped || isAnalysisLoading || currentAnalysis)
     return;
+
+  if (!hasConfiguredAiService()) {
+    setOverviewTranslationStatus(aiFeatureSetupMessage("生成概览"));
+    const chapterList = document.getElementById("chapterList");
+    const quotesList = document.getElementById("quotesList");
+    if (chapterList) {
+      chapterList.innerHTML =
+        '<li class="chapter-item ai-setup-placeholder">字幕已就绪。配置 AI 服务后可生成章节概览。</li>';
+    }
+    if (quotesList) {
+      quotesList.innerHTML =
+        '<div class="quote-item ai-setup-placeholder">配置 AI 服务后可提取关键语句。</div>';
+    }
+    return;
+  }
+  setOverviewTranslationStatus();
 
   const videoId = currentVideoId;
   const generation = digestGeneration;
@@ -6828,6 +6958,7 @@ function setupExplainFeature() {
  * Shows the explanation modal and fetches it from the configured AI provider.
  */
 async function showExplanation(selectedText) {
+  const needsAiConfig = !hasConfiguredAiService();
   // Create modal
   const modal = document.createElement("div");
   modal.id = "explainModal";
@@ -6840,10 +6971,11 @@ async function showExplanation(selectedText) {
       </div>
       <div class="explain-selected-text">"${escapeHtml(selectedText.substring(0, 200))}${selectedText.length > 200 ? "..." : ""}"</div>
       <div class="explain-modal-content" id="explanationContent">
-        <div class="explain-loading">
-          <div class="loading-bar"></div>
-          <span>正在分析…</span>
-        </div>
+        ${
+          needsAiConfig
+            ? `<div class="explain-error">${escapeHtml(aiFeatureSetupMessage("解释所选内容"))}</div><button class="enhance-btn" id="configureAiForExplain" type="button">打开设置</button>`
+            : '<div class="explain-loading"><div class="loading-bar"></div><span>正在分析…</span></div>'
+        }
       </div>
     </div>
   `;
@@ -6857,6 +6989,13 @@ async function showExplanation(selectedText) {
   modal.addEventListener("click", (e) => {
     if (e.target === modal) modal.remove();
   });
+
+  if (needsAiConfig) {
+    document
+      .getElementById("configureAiForExplain")
+      ?.addEventListener("click", () => void openAiSettings());
+    return;
+  }
 
   // Get some context around the selection from the transcript
   const transcriptContext = getTranscriptContext(selectedText);
@@ -7671,49 +7810,50 @@ function setNotesTranslationLoading(show) {
 }
 
 function summarizeNoteTranslationFailures(failures = []) {
+  const providerLabel = activeAiServiceLabel();
   const codes = new Set(
     failures
       .map((failure) => String(failure?.code || ""))
       .filter(Boolean),
   );
   if (codes.has("RATE_LIMITED")) {
-    return "DeepSeek 请求受限，请稍后再次点击当前语言重试。";
+    return `${providerLabel}请求受限，请稍后再次点击当前语言重试。`;
   }
   if (codes.has("PROVIDER_TIMEOUT")) {
-    return "DeepSeek 请求超时，请再次点击当前语言重试。";
+    return `${providerLabel}请求超时，请再次点击当前语言重试。`;
   }
   if (codes.has("NOTE_JOB_TIMEOUT")) {
     return "笔记翻译任务等待超时，请再次点击当前语言重试。";
   }
   if (codes.has("PROVIDER_ERROR")) {
-    return "DeepSeek 请求失败，请检查网络或稍后再次点击当前语言重试。";
+    return `${providerLabel}请求失败，请检查网络或稍后再次点击当前语言重试。`;
   }
   if (codes.has("OUTPUT_TRUNCATED")) {
-    return "DeepSeek 输出被截断，请再次点击当前语言重试。";
+    return `${providerLabel}输出被截断，请再次点击当前语言重试。`;
   }
   if (codes.has("CONTENT_FILTERED")) {
-    return "DeepSeek 未返回这条内容，已保留原文。";
+    return `${providerLabel}未返回这条内容，已保留原文。`;
   }
   if (codes.has("PROVIDER_UNAVAILABLE")) {
-    return "DeepSeek 暂时不可用，请稍后再次点击当前语言重试。";
+    return `${providerLabel}暂时不可用，请稍后再次点击当前语言重试。`;
   }
   if (codes.has("UNEXPECTED_FINISH_REASON")) {
-    return "DeepSeek 未正常完成响应，请再次点击当前语言重试。";
+    return `${providerLabel}未正常完成响应，请再次点击当前语言重试。`;
   }
   if (codes.has("RETRY_BUDGET_EXHAUSTED")) {
     return "本轮重试次数已达上限，请再次点击当前语言继续。";
   }
   if (codes.has("EMPTY_RESPONSE")) {
-    return "DeepSeek 返回了空内容，请再次点击当前语言重试。";
+    return `${providerLabel}返回了空内容，请再次点击当前语言重试。`;
   }
   if (codes.has("INVALID_JSON")) {
-    return "DeepSeek 返回格式无法解析，请再次点击当前语言重试。";
+    return `${providerLabel}返回格式无法解析，请再次点击当前语言重试。`;
   }
   if (codes.has("MISSING_ITEM")) {
-    return "DeepSeek 返回结果漏掉了这条笔记，请再次点击当前语言重试。";
+    return `${providerLabel}返回结果漏掉了这条笔记，请再次点击当前语言重试。`;
   }
   if (codes.has("MULTIPLE_CANDIDATES")) {
-    return "DeepSeek 返回了多个冲突结果，请再次点击当前语言重试。";
+    return `${providerLabel}返回了多个冲突结果，请再次点击当前语言重试。`;
   }
   if (codes.has("INVALID_TRANSLATION")) {
     return "返回内容仍主要为英文或含非中文脚本，已保留原文。";
@@ -7747,6 +7887,10 @@ async function ensureNotesChinese() {
   const titleWork = collectMissingNoteTitleWork(currentNotes);
   if (!missingNotes.length && !titleWork.length) {
     setNotesTranslationStatus();
+    return;
+  }
+  if (!hasConfiguredAiService()) {
+    setNotesTranslationStatus(aiFeatureSetupMessage("生成中文或双语笔记"));
     return;
   }
 
@@ -7880,6 +8024,16 @@ function handleNotesModeChange(mode) {
     retryMissingNotesFromUser();
     return;
   }
+  const needsAiTranslation =
+    mode !== "original" &&
+    (currentNotes.some(
+      (note) => noteOriginalText(note) && !noteChineseText(note),
+    ) || collectMissingNoteTitleWork(currentNotes).length > 0);
+  if (needsAiTranslation && !hasConfiguredAiService()) {
+    setNotesModeButtons(currentNotesMode);
+    setNotesTranslationStatus(aiFeatureSetupMessage("生成中文或双语笔记"));
+    return;
+  }
   revokeNoteExportAuthorization();
   const navigationState = activeNotesOnlyContext || pendingNoteNavigation;
   if (navigationState?.exportContinuation) {
@@ -7966,6 +8120,7 @@ async function loadNotes(videoId, { translateMissing = true } = {}) {
 function renderNotes(notes, filteredVideoId) {
   const notesList = document.getElementById("notesList");
   const notesIntro = document.getElementById("notesIntro");
+  const notesIntroText = document.getElementById("notesIntroText");
   const languageStatus = document.getElementById("notesLanguageStatus");
 
   if (!notesList) return;
@@ -7976,10 +8131,18 @@ function renderNotes(notes, filteredVideoId) {
   if (!notes || notes.length === 0) {
     updateNoteExportMenuContext(0);
     setNotesTranslationStatus();
-    notesIntro.style.display = "block";
-    notesIntro.textContent = filteredVideoId
-      ? "当前视频还没有笔记。将鼠标移到视频上，点击书签图标即可保存。"
-      : "还没有保存任何笔记。将鼠标移到视频上，点击书签图标即可保存。";
+    notesIntro.style.display = "flex";
+    const saveCurrentMomentLabel = document.querySelector(
+      "#saveCurrentMomentBtn span",
+    );
+    if (saveCurrentMomentLabel) {
+      saveCurrentMomentLabel.textContent = "保存当前时刻";
+    }
+    if (notesIntroText) {
+      notesIntroText.textContent = filteredVideoId
+        ? "当前视频还没有笔记。保存当前播放位置，稍后可直接跳回。"
+        : "还没有保存任何笔记。请先打开一个视频，再保存当前播放位置。";
+    }
     return;
   }
 
@@ -8432,6 +8595,24 @@ async function handleTranscriptModeChange(mode) {
     return;
   }
 
+  if (mode !== "original" && !hasConfiguredAiService()) {
+    const segments = getActiveTranscriptSegments();
+    const hasMissingTranslation = segments.some(
+      (segment) =>
+        !transcriptParagraphCache.has(
+          transcriptTranslationCacheKey(currentVideoId, segment),
+        ),
+    );
+    if (hasMissingTranslation) {
+      setTranscriptModeButtons(currentTranscriptMode);
+      setTranscriptTranslationStatus(
+        aiFeatureSetupMessage("生成中文字幕或双语字幕"),
+      );
+      return;
+    }
+  }
+  setTranscriptTranslationStatus();
+
   const previousMode = currentTranscriptMode;
   currentTranscriptMode = mode;
 
@@ -8453,6 +8634,7 @@ async function handleTranscriptModeChange(mode) {
   setTranscriptModeButtons(mode);
 
   if (mode === "original") {
+    setTranscriptTranslationStatus();
     renderTranscript();
     return;
   }
@@ -8716,6 +8898,22 @@ async function translateTranscript() {
 
   const segments = getActiveTranscriptSegments();
   if (!segments.length || currentTranscriptMode === "original") return;
+  const hasMissingTranslation = segments.some(
+    (segment) =>
+      !transcriptParagraphCache.has(
+        transcriptTranslationCacheKey(currentVideoId, segment),
+      ),
+  );
+  if (hasMissingTranslation && !hasConfiguredAiService()) {
+    currentTranscriptMode = "original";
+    setTranscriptModeButtons("original");
+    renderTranscript();
+    setTranscriptTranslationStatus(
+      aiFeatureSetupMessage("生成中文字幕或双语字幕"),
+    );
+    return;
+  }
+  setTranscriptTranslationStatus();
 
   translationGeneration += 1;
   const generation = translationGeneration;
@@ -8798,6 +8996,9 @@ function setTranslatingSpinner(show) {
 globalThis.__YTD_TRANSCRIPT_TESTING__ = {
   TRANSCRIPT_SOURCE_POLICY_VERSION,
   YOUTUBE_TRANSCRIPT_TRACK_KIND,
+  hasConfiguredAiService,
+  activeAiServiceLabel,
+  aiFeatureSetupMessage,
   createSingleFlight,
   buildTranscriptFetchRequest,
   transcriptResponseMatchesRequest,
@@ -8845,6 +9046,7 @@ globalThis.__YTD_TRANSCRIPT_TESTING__ = {
   notePlatformLabel,
   noteSourceMetaText,
   summarizeNoteTranslationFailures,
+  saveCurrentMomentFromPanel,
   renderNoteLanguageContent,
   renderChapterLanguageContent,
   renderQuoteLanguageContent,

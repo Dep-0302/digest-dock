@@ -1,8 +1,10 @@
 # Privacy
 
-Effective: August 27, 2026
+Effective: August 31, 2026
 
 DigestDock is a GitHub-only, bring-your-own-key Chrome extension. It has no DigestDock account, developer-operated backend, analytics, advertising, or telemetry.
+
+DigestDock handles user data only when it is necessary to provide its disclosed single purpose: turning the current supported video into a transcript, translation, overview, and timestamped notes. It does not use this data for unrelated purposes, advertising, credit decisions, or sale. API keys are persisted only in the current Chrome profile. When an AI feature runs, the required key and content are sent directly to the selected provider as described below; Supadata still requires a new confirmation for every call.
 
 ## Data the extension handles
 

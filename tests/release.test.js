@@ -272,6 +272,22 @@ test("release copy documents current scope without em dashes", () => {
   assert.match(readme, /standard `www\.bilibili\.com\/video\/BV\.\.\.` pages/);
   assert.doesNotMatch(readme, /before deciding how much of it to watch/i);
   assert.match(readme, /^## Install with your coding agent$/m);
+  assert.doesNotMatch(
+    [readme, chineseReadme].join("\n"),
+    /uncommitted branch candidate|candidate scope on this experimental branch|未提交实验分支候选|当前实验分支的候选范围/,
+  );
+  assert.match(
+    readme,
+    /No API key is required to read source transcripts, jump by timestamp, save original-language notes/,
+  );
+  assert.match(
+    chineseReadme,
+    /阅读原字幕、跳转时间点、保存原文笔记.*不需要 API Key/,
+  );
+  assert.match(
+    read("PRIVACY.md"),
+    /only when it is necessary to provide its disclosed single purpose/,
+  );
   assert.match(
     readme,
     /permanent folder I choose[\s\S]*tell me its exact full path[\s\S]*If I need a suggestion during this first installation[\s\S]*`~\/Documents\/digest-dock`[\s\S]*`%USERPROFILE%\\Documents\\digest-dock`[\s\S]*do not assume either path/,
@@ -346,7 +362,7 @@ test("release copy documents current scope without em dashes", () => {
   assert.match(readme, /docs\.supadata\.ai\/get-transcript/i);
   assert.match(readme, /dash\.supadata\.ai\/auth\/sign-up/i);
   assert.match(readme, /saved key is never used automatically/i);
-  assert.match(readme, /asks whether to use Supadata for that exact video attempt/i);
+  assert.match(readme, /every Supadata request needs a new confirmation/i);
   assert.match(readme, /platform\.deepseek\.com\/api_keys/i);
   assert.match(readme, /api-docs\.deepseek\.com/i);
   assert.match(readme, /api-docs\.deepseek\.com\/quick_start\/pricing/i);
@@ -365,7 +381,7 @@ test("release copy documents current scope without em dashes", () => {
   assert.match(chineseReadme, /\$0\.002[^\n]*\$0\.006 USD/);
   assert.match(chineseReadme, /dash\.supadata\.ai\/auth\/sign-up/i);
   assert.match(chineseReadme, /保存 Key 也不构成持续授权/);
-  assert.match(chineseReadme, /每个视频仍需明确确认/);
+  assert.match(chineseReadme, /每次请求都要重新确认/);
   assert.match(chineseReadme, /platform\.deepseek\.com\/api_keys/i);
   assert.match(readme, /^### The Digest button is missing on a video$/m);
   assert.match(
@@ -376,8 +392,8 @@ test("release copy documents current scope without em dashes", () => {
   const optionsPage = read("options.html");
   const optionsStyles = read("options.css");
   const optionsScript = read("options.js");
-  assert.match(optionsScript, /only after you confirm that one third-party request/i);
-  assert.match(optionsScript, /确认本次使用第三方 Supadata/);
+  assert.match(optionsScript, /every Supadata request requires a new confirmation/i);
+  assert.match(optionsScript, /每次使用 Supadata.*重新确认/);
   assert.match(optionsPage, /dash\.supadata\.ai\/auth\/sign-up/i);
   assert.match(optionsPage, /platform\.deepseek\.com\/api_keys/i);
   // The provider picker is a custom ARIA combobox, not a native <select>, and
@@ -424,8 +440,8 @@ test("release copy documents current scope without em dashes", () => {
   // published build now ships a preset provider picker with DeepSeek as default.
   assert.doesNotMatch(publishedDocs, /only AI provider/i);
   assert.doesNotMatch(publishedDocs, /Copy customization prompt/i);
-  assert.match(readme, /select one AI provider from a preset list/i);
-  assert.match(chineseReadme, /从预设列表选择一个 AI 服务商/);
+  assert.match(readme, /select an AI provider from a preset picker/i);
+  assert.match(chineseReadme, /从预设选择器中挑选/);
   assert.match(readme, /DeepSeek is the default provider/i);
   assert.match(chineseReadme, /DeepSeek 是默认服务商/);
   for (const modelLabel of ["GLM-4.7-Flash", "Qwen3-8B", "Fireworks"]) {
