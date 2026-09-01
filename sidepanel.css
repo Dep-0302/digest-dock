@@ -1458,6 +1458,7 @@ body {
 /* ============================================================
    OVERVIEW / NOTES TRANSLATION STATUS
    ============================================================ */
+.transcript-translation-status,
 .overview-translation-status,
 .notes-language-status {
   margin-bottom: 14px;
@@ -1470,6 +1471,7 @@ body {
   line-height: 1.5;
 }
 
+.transcript-translation-status.error,
 .overview-translation-status.error,
 .notes-language-status.error {
   background: var(--danger-dim);
@@ -1477,6 +1479,7 @@ body {
   color: var(--danger-hover);
 }
 
+.transcript-translation-status[hidden],
 .overview-translation-status[hidden],
 .notes-language-status[hidden] {
   display: none;
@@ -1975,12 +1978,50 @@ body {
 }
 
 .notes-intro {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
   font-family: var(--font-reading);
   font-size: 13px;
   color: var(--text-muted);
   text-align: center;
   padding: 44px 20px;
   line-height: 1.7;
+}
+
+.notes-intro p {
+  max-width: 30rem;
+  margin: 0;
+}
+
+.notes-save-current {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 36px;
+  padding: 8px 14px;
+  border-color: transparent;
+  background: var(--accent-gradient);
+  color: white;
+  box-shadow: var(--shadow-sm);
+}
+
+.notes-save-current:hover:not(:disabled),
+.notes-save-current:focus-visible {
+  border-color: transparent;
+  background: var(--accent-gradient-hover);
+  color: white;
+}
+
+.ai-setup-placeholder {
+  color: var(--text-muted);
+  cursor: default;
+}
+
+.chapter-item.ai-setup-placeholder {
+  padding: 12px 14px;
+  border: none;
 }
 
 /* One bordered source container per video; notes grouped inside by timecode. */

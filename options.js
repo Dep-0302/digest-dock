@@ -15,22 +15,22 @@ const YTD_OPTIONS = (() => {
       navNotes: "Notes & backup",
       navPrivacy: "Privacy",
       supadataTagline: "Optional provider for new YouTube transcripts",
-      statusConfigured: "Configured",
-      statusNotConfigured: "Not configured",
-      fieldRequired: "Required",
+      statusConfigured: "Key entered",
+      statusNotConfigured: "No key saved",
+      fieldRequired: "Required for AI",
       fieldOptional: "Optional",
       toggleKeyVisibility: "Show or hide the key",
       privacySummary:
-        "DigestDock has no developer server and uses no analytics. API keys, cached digests, translations, and notes stay only in this Chrome profile.",
+        "DigestDock has no developer server and uses no analytics. API keys, cached digests, translations, and notes persist only in this Chrome profile. When an AI feature runs, necessary content and the matching key go directly to the selected provider; Supadata still needs a separate confirmation for every call.",
       noUnsavedChanges: "No unsaved changes.",
       unsavedChanges: "You have unsaved changes.",
-      heading: "Bring your own API keys",
+      heading: "Connect AI when you need it",
       lede:
-        "Keys stay in this Chrome profile. Pick one AI provider and paste its API key to use AI features. This open-source extension has no developer server or analytics.",
+        "No API key is needed to read source transcripts, jump by timestamp, save original-language notes, or export original content. Add a key only for AI overviews, explanations, translation, or note polishing.",
       supadataApiKeyLabel: "Supadata API key (optional)",
       supadataPlaceholder: "Paste your Supadata key",
       supadataHelp:
-        "The side panel offers Supadata only after all free YouTube transcript routes fail. Even with a saved key, Supadata is called only after you confirm that one third-party request in the side panel, once per video. Replace the key here, or clear it and save to delete it. Bilibili does not use it. ",
+        "The side panel offers Supadata only after all free YouTube transcript routes fail. A saved key never authorizes a call: every Supadata request requires a new confirmation in the side panel. Replace the key here, or clear it and save to delete it. Bilibili does not use it. ",
       supadataLink: "Create a Supadata account and key",
       supadataHelpSuffix:
         ". Supadata generates the key during onboarding.",
@@ -46,11 +46,11 @@ const YTD_OPTIONS = (() => {
       aiKeyLabel: "API key",
       aiKeyPlaceholder: "Paste the selected provider's API key",
       aiKeyHelp:
-        "The selected AI provider generates overviews, explanations, transcript translation, and note polishing. ",
+        "The selected AI provider generates overviews, explanations, transcript translation, and note polishing. Leave this blank to keep using the free transcript and original-note features. ",
       createKeyLink: "Create an API key",
       createKeyLinkSuffix: ".",
       providerPrivacyNote:
-        "When you use AI features, the selected provider receives the video transcript and relevant video context. Review that provider's terms and pricing before saving.",
+        "Keys are stored only in this Chrome profile. Saving an original note sends nothing; overviews, explanations, translation, or AI note polishing send the key and necessary content directly to the selected provider. Review that provider's terms and pricing first.",
       saveSettings: "Save settings",
       notesBackup: "Notes backup",
       notesBackupHelp:
@@ -71,7 +71,7 @@ const YTD_OPTIONS = (() => {
       addSupadataKey:
         "Add a Supadata API key only if you want the optional fallback after free transcript routes fail.",
       addAiKey: "Add an API key for the selected AI provider.",
-      saved: "Saved. Reopen DigestDock to use these settings.",
+      saved: "Saved. Return to DigestDock to continue.",
       saveFailed: "Could not save settings. Please try again.",
       exportingNotes: "Preparing notes backup…",
       notesExported: ({ count }) =>
@@ -108,7 +108,7 @@ const YTD_OPTIONS = (() => {
       allDataDeleted: "All DigestDock data was deleted.",
       resetFailed: "Could not reset the extension data. Please try again.",
       settingsLoadFailed:
-        "Could not load saved settings. You can still preview this page.",
+        "Could not load saved settings. Reload this page before saving so existing keys stay unchanged.",
     },
     "zh-CN": {
       pageTitle: "DigestDock 设置",
@@ -120,22 +120,22 @@ const YTD_OPTIONS = (() => {
       navNotes: "笔记与备份",
       navPrivacy: "隐私说明",
       supadataTagline: "新 YouTube 视频的可选字幕服务",
-      statusConfigured: "已配置",
-      statusNotConfigured: "未配置",
-      fieldRequired: "必需",
+      statusConfigured: "已输入密钥",
+      statusNotConfigured: "未添加密钥",
+      fieldRequired: "AI 功能需要",
       fieldOptional: "可选",
       toggleKeyVisibility: "显示或隐藏密钥",
       privacySummary:
-        "DigestDock 没有开发者服务器，也不使用分析服务。API 密钥、缓存摘要、翻译和笔记只保存在当前 Chrome 个人资料中。",
+        "DigestDock 没有开发者服务器，也不使用分析服务。API 密钥、缓存摘要、翻译和笔记只在当前 Chrome 个人资料中持久保存；AI 功能运行时，必要内容和对应密钥会直接发送给所选服务，Supadata 仍需每次调用单独确认。",
       noUnsavedChanges: "设置没有未保存的更改。",
       unsavedChanges: "有未保存的更改。",
-      heading: "使用你自己的 API 密钥",
+      heading: "按需连接 AI 服务",
       lede:
-        "密钥仅保存在当前 Chrome 个人资料中。选择一个 AI 服务商并填写 API 密钥即可使用 AI 功能。本开源扩展没有开发者服务器，也不使用分析服务。",
+        "无需 API 密钥即可阅读原字幕、跳转时间点、保存原文笔记和导出原文。只有生成概览、讲解、翻译或润色笔记时，才需要添加 AI 密钥。",
       supadataApiKeyLabel: "Supadata API 密钥（可选）",
       supadataPlaceholder: "粘贴 Supadata 密钥",
       supadataHelp:
-        "仅当免费的 YouTube 字幕路线全部失败时，侧边栏才会提供 Supadata。即使保存了密钥，也只有你在侧边栏确认本次使用第三方 Supadata 时才会调用，且逐视频授权。你可以在此替换密钥，或清空后保存以删除密钥；B 站不会使用它。",
+        "仅当免费的 YouTube 字幕路线全部失败时，侧边栏才会提供 Supadata。保存密钥不会授权调用；每次使用 Supadata 都必须在侧边栏重新确认。你可以在此替换密钥，或清空后保存以删除密钥；B 站不会使用它。",
       supadataLink: "创建 Supadata 账号并获取密钥",
       supadataHelpSuffix: "。Supadata 会在引导流程中生成密钥。",
       aiServiceName: "AI 服务商",
@@ -150,11 +150,11 @@ const YTD_OPTIONS = (() => {
       aiKeyLabel: "API 密钥",
       aiKeyPlaceholder: "粘贴当前服务的 API 密钥",
       aiKeyHelp:
-        "所选 AI 服务用于生成概览、解释内容、翻译字幕和润色笔记。",
+        "所选 AI 服务用于生成概览、解释内容、翻译字幕和润色笔记。留空仍可使用免费字幕和原文笔记功能。",
       createKeyLink: "前往创建 API 密钥",
       createKeyLinkSuffix: "。",
       providerPrivacyNote:
-        "使用 AI 功能时，所选服务会收到视频字幕及相关视频上下文。保存前请查看该服务的服务条款和价格。",
+        "密钥只在当前 Chrome 个人资料中持久保存。保存原文笔记不会发送内容；生成概览、讲解、翻译或 AI 润色笔记时，密钥和必要内容会从扩展直接发送给所选服务。请先查看该服务的条款和价格。",
       saveSettings: "保存设置",
       notesBackup: "笔记备份",
       notesBackupHelp:
@@ -175,7 +175,7 @@ const YTD_OPTIONS = (() => {
       addSupadataKey:
         "仅在你希望免费字幕路线失败后使用可选后备时，才需要添加 Supadata API 密钥。",
       addAiKey: "请为所选 AI 服务商添加 API 密钥。",
-      saved: "已保存。请重新打开 DigestDock 以使用这些设置。",
+      saved: "已保存，返回 DigestDock 即可继续。",
       saveFailed: "无法保存设置，请重试。",
       exportingNotes: "正在准备笔记备份…",
       notesExported: ({ count }) => `已导出 ${count} 条笔记。`,
@@ -207,7 +207,7 @@ const YTD_OPTIONS = (() => {
         "要从当前 Chrome 个人资料中删除 API 密钥、缓存摘要、翻译和已保存的笔记吗？",
       allDataDeleted: "已删除全部 DigestDock 数据。",
       resetFailed: "无法重置扩展数据，请重试。",
-      settingsLoadFailed: "无法加载已保存的设置，但你仍可预览此页面。",
+      settingsLoadFailed: "无法加载已保存的设置。请先重新加载此页面再保存，现有密钥不会被改动。",
     },
   };
 
@@ -352,6 +352,36 @@ const YTD_OPTIONS = (() => {
     const name = String(displayName || "").trim();
     const latin = name.match(/[A-Za-z]/);
     return (latin ? latin[0] : name.charAt(0) || "?").toUpperCase();
+  }
+
+  function buildSettingsDraft(
+    settingsApi,
+    {
+      providerId = "",
+      providerKeyDrafts = {},
+      activeApiKey = "",
+      supadataApiKey = "",
+    } = {},
+  ) {
+    if (
+      !settingsApi ||
+      !Array.isArray(settingsApi.AI_PROVIDER_IDS) ||
+      typeof settingsApi.normalize !== "function"
+    ) {
+      throw new TypeError("Settings API is unavailable");
+    }
+    const selectedProvider =
+      String(providerId || "").trim() || settingsApi.DEFAULT_PROVIDER;
+    const aiApiKeys = {};
+    for (const id of settingsApi.AI_PROVIDER_IDS) {
+      aiApiKeys[id] =
+        id === selectedProvider ? activeApiKey : providerKeyDrafts[id] || "";
+    }
+    return settingsApi.normalize({
+      provider: selectedProvider,
+      aiApiKeys,
+      supadataApiKey,
+    });
   }
 
   // Sets a local brand icon on an <img>/monogram pair. The icon is only ever a
@@ -559,6 +589,7 @@ const YTD_OPTIONS = (() => {
     const supadataApiKeyInput = doc.getElementById("supadataApiKey");
     const supadataSection = doc.getElementById("section-transcript");
     const saveStatus = doc.getElementById("saveStatus");
+    const saveSettingsBtn = doc.getElementById("saveSettingsBtn");
     const dataStatus = doc.getElementById("dataStatus");
     const backupStatus = doc.getElementById("backupStatus");
     const exportNotesBtn = doc.getElementById("exportNotesBtn");
@@ -618,6 +649,7 @@ const YTD_OPTIONS = (() => {
     let currentProviderId =
       selectableProviderList[0]?.id || settingsApi.DEFAULT_PROVIDER || "deepseek";
     let providerListOpen = false;
+    let settingsLoaded = false;
 
     function syncSupadataVisibility({ focus = false } = {}) {
       const requested = supadataOptionsRequested(root.location || {});
@@ -992,8 +1024,14 @@ const YTD_OPTIONS = (() => {
           await storage.set({ [settingsApi.STORAGE_KEY]: settings });
           setStatus(saveStatus, "migrationWarning");
         }
+        settingsLoaded = true;
+        if (saveSettingsBtn) saveSettingsBtn.disabled = false;
+        return true;
       } catch (_error) {
+        settingsLoaded = false;
+        if (saveSettingsBtn) saveSettingsBtn.disabled = true;
         setStatus(saveStatus, "settingsLoadFailed");
+        return false;
       }
     }
 
@@ -1012,25 +1050,21 @@ const YTD_OPTIONS = (() => {
 
     async function saveSettings(event) {
       event.preventDefault();
+      if (!settingsLoaded) {
+        setStatus(saveStatus, "settingsLoadFailed");
+        return;
+      }
       setStatus(saveStatus, "saving");
 
       // Persist the whole key map in one write: the visible input holds the
       // active provider's key, the drafts hold the others entered this session.
-      providerKeyDrafts[currentProviderId] = aiApiKeyInput.value;
-      const aiApiKeys = {};
-      for (const id of settingsApi.AI_PROVIDER_IDS) {
-        aiApiKeys[id] = providerKeyDrafts[id] || "";
-      }
-      const settings = settingsApi.normalize({
-        provider: currentProviderId,
-        aiApiKeys,
+      const settings = buildSettingsDraft(settingsApi, {
+        providerId: currentProviderId,
+        providerKeyDrafts,
+        activeApiKey: aiApiKeyInput.value,
         supadataApiKey: supadataApiKeyInput.value,
       });
-
-      if (!settingsApi.hasActiveApiKey(settings)) {
-        setStatus(saveStatus, "addAiKey");
-        return;
-      }
+      providerKeyDrafts[currentProviderId] = aiApiKeyInput.value;
 
       try {
         await storage.set({ [settingsApi.STORAGE_KEY]: settings });
@@ -1404,6 +1438,7 @@ const YTD_OPTIONS = (() => {
     translate,
     updateLanguageButtonState,
     providerMonogram,
+    buildSettingsDraft,
     settingsNavTargetFromHref,
     resolveActiveSettingsSection,
     applySettingsNavState,

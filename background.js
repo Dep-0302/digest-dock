@@ -392,6 +392,10 @@ function providerDisplayLabel(settings) {
   return resolveActiveProvider(settings)?.displayName || "AI 服务";
 }
 
+function missingAiKeyMessage(settings) {
+  return `AI 功能尚未配置。字幕阅读、时间跳转和原文笔记仍可使用；如需概览、讲解、翻译或笔记润色，请在 DigestDock 设置中添加 ${providerDisplayLabel(settings)} API 密钥。`;
+}
+
 function isMissingContentReceiverError(error) {
   const message = String(error?.message || error || "");
   return (
@@ -501,9 +505,7 @@ async function requestAiCompletion({
   const providerLabel = provider?.displayName || "AI 服务";
   const apiKey = YTD_SETTINGS.apiKeyFor(settings, provider?.id);
   if (!apiKey) {
-    const error = new Error(
-      `尚未配置${providerLabel} API 密钥，请打开 DigestDock 设置。`,
-    );
+    const error = new Error(missingAiKeyMessage(settings));
     error.code = "NO_AI_KEY";
     throw error;
   }
@@ -1174,6 +1176,44 @@ function youtubeVideoIdFromUrl(url) {
   }
 }
 
+function mediaRouteKeyFromUrl(url) {
+  const youtubeVideoId = youtubeVideoIdFromUrl(url);
+  if (youtubeVideoId) return `youtube:${youtubeVideoId}`;
+  try {
+    const media = BILIBILI_ADAPTER.parseBilibiliVideoUrl(String(url || ""));
+    return `bilibili:${media.bvid}:p${media.page}`;
+  } catch {
+    return "";
+  }
+}
+
+function mediaRouteKeyFromRef(mediaRef) {
+  if (mediaRef?.platform === "youtube") {
+    const videoId = String(mediaRef.videoId || mediaRef.mediaKey || "").trim();
+    return videoId ? `youtube:${videoId}` : "";
+  }
+  if (mediaRef?.platform === "bilibili") {
+    const bvid = String(mediaRef.bvid || "").trim();
+    const page = Math.max(1, Math.floor(Number(mediaRef.page) || 1));
+    return bvid ? `bilibili:${bvid}:p${page}` : "";
+  }
+  return "";
+}
+
+async function requireExactTabRoute(tabId, expectedRouteKey) {
+  const routeKey = String(expectedRouteKey || "").trim();
+  if (!Number.isInteger(tabId) || !routeKey) return true;
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  if (!tab || mediaRouteKeyFromUrl(effectiveTabUrl(tab)) !== routeKey) {
+    const error = new Error(
+      "视频页面已切换，未保存其他视频的播放位置。",
+    );
+    error.code = "PAGE_CONTEXT_CHANGED";
+    throw error;
+  }
+  return true;
+}
+
 function effectiveTabUrl(tab) {
   return String(tab?.pendingUrl || tab?.url || "");
 }
@@ -1611,6 +1651,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       message.videoUrl || sender.tab?.url || "",
       message.tabId ?? sender.tab?.id ?? null,
       message.preferredLanguage || "",
+      message.expectedRouteKey || "",
+      message.skipAiCleanup === true,
     )
       .then(sendResponse)
       .catch((err) => sendResponse({ success: false, error: err.message }));
@@ -1884,6 +1926,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
         if (tabs[0]) {
           const targetUrl = effectiveTabUrl(tabs[0]);
+          const expectedRouteKey = String(message.expectedRouteKey || "").trim();
+          if (
+            expectedRouteKey &&
+            mediaRouteKeyFromUrl(targetUrl) !== expectedRouteKey
+          ) {
+            const pageChangedError = new Error(
+              "视频页面已切换，未读取其他视频的播放位置。",
+            );
+            pageChangedError.code = "PAGE_CONTEXT_CHANGED";
+            throw pageChangedError;
+          }
           debugLog(
             "[DigestDock BG] Sending to tab:",
             tabs[0].id,
@@ -1966,6 +2019,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             }
           }
 
+          await requireExactTabRoute(tabs[0].id, expectedRouteKey);
           debugLog("[DigestDock BG] Got response from content:", response);
           sendResponse({ success: true, response });
         } else {
@@ -2350,7 +2404,7 @@ async function handleFetchYoutubeSupadataTranscript(
       success: false,
       error: "SUPADATA_NOT_CONFIGURED",
       message:
-        "Supadata 后备尚未配置。请在免费路线最终失败后，从侧栏入口配置密钥并逐视频授权。",
+        "Supadata 后备尚未配置。请在免费路线最终失败后，从侧栏入口配置密钥；每次调用都需要重新确认。",
     };
   }
 
@@ -3631,7 +3685,7 @@ async function handleAnalyzeTranscript(
       return {
         success: false,
         error: "NO_AI_KEY",
-        message: `尚未配置${providerDisplayLabel(settings)} API 密钥，请打开 DigestDock 设置。`,
+        message: missingAiKeyMessage(settings),
       };
     }
 
@@ -3901,6 +3955,8 @@ async function handleSaveNote(
   sourceUrl = "",
   tabId = null,
   preferredLanguage = "",
+  expectedRouteKey = "",
+  skipAiCleanup = false,
 ) {
   const saveGeneration = noteStorageGeneration;
   const sourceStorageGeneration = exportSourceStorageGeneration;
@@ -3908,6 +3964,19 @@ async function handleSaveNote(
     const mediaRef = await resolveMediaRef(mediaInput, sourceUrl);
     const mediaKey = mediaRef.mediaKey || mediaRef.videoId;
     const canonicalVideoUrl = mediaRef.canonicalUrl;
+    const resolvedRouteKey = mediaRouteKeyFromRef(mediaRef);
+    const actionRouteKey = String(expectedRouteKey || resolvedRouteKey).trim();
+    if (
+      expectedRouteKey &&
+      (!resolvedRouteKey || actionRouteKey !== resolvedRouteKey)
+    ) {
+      const pageChangedError = new Error(
+        "视频身份已变化，未保存这条笔记。",
+      );
+      pageChangedError.code = "PAGE_CONTEXT_CHANGED";
+      throw pageChangedError;
+    }
+    await requireExactTabRoute(tabId, actionRouteKey);
     const resolvedVideoTitle = videoTitle || mediaRef.title || "Untitled Video";
     const resolvedChannelName = channelName || mediaRef.channelName || "";
     const safeTimestamp = Math.max(0, Math.floor(Number(timestamp) || 0));
@@ -4077,8 +4146,13 @@ async function handleSaveNote(
     // Chinese captions intentionally get one Chinese cleanup call to repair
     // sentence boundaries and punctuation; the Notes panel remains the sole
     // owner of any later translation work.
-    const cleanedText =
-      isChineseLanguage(matchedLanguage) && !directBilibiliChineseNote
+    await requireExactTabRoute(tabId, actionRouteKey);
+    const combinedOriginalText = [beforeLine, matchedLine.text, afterLine]
+      .filter(Boolean)
+      .join(" ");
+    const cleanedText = skipAiCleanup
+      ? combinedOriginalText
+      : isChineseLanguage(matchedLanguage) && !directBilibiliChineseNote
         ? String(matchedLine.text || "").trim()
       : await cleanupNoteText(
           matchedLine.text,
@@ -4138,6 +4212,7 @@ async function handleSaveNote(
     };
 
     // Save to storage
+    await requireExactTabRoute(tabId, actionRouteKey);
     const saved = await saveNoteToStorage(note, saveGeneration);
     if (!saved) {
       return {
@@ -4169,12 +4244,23 @@ async function handleSaveNote(
     // from being retried immediately by noteSaved -> loadNotes.
 
     // Notify side panel to refresh notes list
-    chrome.runtime.sendMessage({ action: "noteSaved", note }).catch(() => {});
+    chrome.runtime
+      .sendMessage({
+        action: "noteSaved",
+        note,
+        preserveOriginalOnly: skipAiCleanup,
+      })
+      .catch(() => {});
 
     return { success: true, note };
   } catch (error) {
     console.error("[DigestDock] Save note error:", error);
-    return { success: false, error: error.message };
+    return {
+      success: false,
+      code: error?.code || "NOTE_SAVE_FAILED",
+      error: error?.code || error?.message || "NOTE_SAVE_FAILED",
+      message: error?.message || "笔记保存失败。",
+    };
   }
 }
 
@@ -4572,7 +4658,7 @@ async function handleExplainSelection(
       return {
         success: false,
         error: "NO_AI_KEY",
-        message: `尚未配置${providerDisplayLabel(settings)} API 密钥。`,
+        message: missingAiKeyMessage(settings),
       };
     }
 
@@ -6273,7 +6359,8 @@ async function handleTranslateOverviewOriginal(
     if (!YTD_SETTINGS.hasActiveApiKey(settings)) {
       return {
         success: false,
-        error: `尚未配置${providerDisplayLabel(settings)} API 密钥`,
+        code: "NO_AI_KEY",
+        error: missingAiKeyMessage(settings),
       };
     }
 
@@ -7553,7 +7640,8 @@ async function runTranslateNoteBodies(notes, job) {
     if (!YTD_SETTINGS.hasActiveApiKey(settings)) {
       return {
         success: false,
-        error: `尚未配置${providerDisplayLabel(settings)} API 密钥`,
+        code: "NO_AI_KEY",
+        error: missingAiKeyMessage(settings),
       };
     }
     job.settings = settings;
@@ -7749,7 +7837,8 @@ async function handleTranslateContent(
     if (!YTD_SETTINGS.hasActiveApiKey(settings)) {
       return {
         success: false,
-        error: `尚未配置${providerDisplayLabel(settings)} API 密钥`,
+        code: "NO_AI_KEY",
+        error: missingAiKeyMessage(settings),
         actualProviderCalls,
       };
     }
@@ -7780,7 +7869,7 @@ async function handleTranslateContent(
       if (!YTD_SETTINGS.hasActiveApiKey(authorizedSettings)) {
         throw exportSourceBatchError(
           "NO_AI_KEY",
-          `尚未配置${providerDisplayLabel(authorizedSettings)} API 密钥`,
+          missingAiKeyMessage(authorizedSettings),
         );
       }
       actualProviderCalls += 1;

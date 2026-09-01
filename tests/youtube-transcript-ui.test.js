@@ -513,4 +513,6 @@ test("Supadata settings stay hidden unless explicitly requested or configured", 
   assert.doesNotMatch(defaultLede[1], /Supadata/i);
   assert.doesNotMatch(options.translate("en", "lede"), /Supadata/i);
   assert.doesNotMatch(options.translate("zh-CN", "lede"), /Supadata/i);
+  assert.match(options.translate("en", "lede"), /No API key/i);
+  assert.match(options.translate("zh-CN", "lede"), /无需 API 密钥/);
 });

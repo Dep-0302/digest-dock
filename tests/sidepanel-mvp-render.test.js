@@ -320,6 +320,22 @@ test("persistent shell survives loading, CC guidance, retry, and ready transitio
   assert.equal(elements.tabsNav.style.display, "flex");
 });
 
+test("free first-use copy and the Notes empty state expose the no-key core", () => {
+  const html = read("sidepanel.html");
+  assert.match(
+    html,
+    /免费阅读字幕、跳转时间点并保存原文笔记。概览、讲解和翻译按需启用。/,
+  );
+  assert.match(
+    html,
+    /id="transcriptTranslationStatus"[\s\S]*?role="status"[\s\S]*?aria-live="polite"/,
+  );
+  assert.match(
+    html,
+    /id="saveCurrentMomentBtn"[\s\S]*?type="button"[\s\S]*?保存当前时刻/,
+  );
+});
+
 test("rejected MVP events never reuse the current task", () => {
   const harness = createHarness();
   const initialTask = bindCurrentVideo(harness, "video-loading", 1);

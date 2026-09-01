@@ -237,7 +237,7 @@
         </div>
         <div class="welcome-title">准备开始</div>
         <div class="welcome-desc">
-          打开一个 YouTube 或带字幕的 B 站视频并点击扩展图标，即可生成 AI 学习摘要。
+          打开 YouTube 或带字幕的 B 站视频，即可免费阅读字幕、跳转时间点并保存原文笔记。概览、讲解和翻译按需启用。
         </div>
       </div>
 
@@ -334,6 +334,13 @@
             <p
               class="notes-export-status"
               id="transcriptExportStatus"
+              role="status"
+              aria-live="polite"
+              hidden
+            ></p>
+            <p
+              class="transcript-translation-status"
+              id="transcriptTranslationStatus"
               role="status"
               aria-live="polite"
               hidden
@@ -539,10 +546,22 @@
               aria-live="polite"
               hidden
             ></p>
-            <p class="notes-intro" id="notesIntro">
-              将鼠标移到视频上，点击书签图标即可保存带时间戳的笔记；也可以在
-              视频获得焦点时按 N 键。
-            </p>
+            <div class="notes-intro" id="notesIntro">
+              <p id="notesIntroText">
+                保存当前播放位置，稍后可从笔记直接跳回视频。
+              </p>
+              <button
+                class="enhance-btn notes-save-current"
+                id="saveCurrentMomentBtn"
+                type="button"
+              >
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M6 4.5A2.5 2.5 0 0 1 8.5 2h7A2.5 2.5 0 0 1 18 4.5V22l-6-3.5L6 22z"></path>
+                  <path d="M12 7v6M9 10h6"></path>
+                </svg>
+                <span>保存当前时刻</span>
+              </button>
+            </div>
             <p
               class="notes-language-status"
               id="notesLanguageStatus"
