@@ -7,6 +7,7 @@
     <link rel="stylesheet" href="options.css" />
     <link rel="stylesheet" href="ui-themes.css" />
     <script src="ui-themes.js"></script>
+    <script src="reading-display.js"></script>
   </head>
   <body>
     <div class="settings-app">
@@ -45,6 +46,9 @@
           <a class="settings-nav-item is-active" href="#section-services" aria-current="location" data-i18n="navServices"
             >服务连接</a
           >
+          <a class="settings-nav-item" href="#section-reading" data-i18n="navReading"
+            >阅读显示</a
+          >
           <a class="settings-nav-item" href="#notesBackupCard" data-i18n="navNotes"
             >笔记与备份</a
           >
@@ -57,7 +61,7 @@
           >
         </nav>
 
-        <p class="settings-version">DigestDock 1.4.6</p>
+        <p class="settings-version">DigestDock 1.4.7</p>
       </aside>
 
       <main class="settings-content">
@@ -284,6 +288,83 @@
               </div>
             </section>
           </form>
+
+          <section
+            class="card reading-display-card"
+            id="section-reading"
+            aria-labelledby="readingDisplayTitle"
+          >
+            <div class="reading-display-head">
+              <div>
+                <h2 id="readingDisplayTitle" data-i18n="readingDisplay">
+                  阅读显示
+                </h2>
+                <p class="help" data-i18n="readingDisplayHelp">
+                  调整字幕、概览摘要、笔记正文和对应时间码的大小。粗体只作用于正文，标题与操作按钮保持原样；选择后立即应用。
+                </p>
+              </div>
+              <span class="reading-display-live" data-i18n="readingImmediate">
+                即时应用
+              </span>
+            </div>
+
+            <div class="reading-display-grid">
+              <fieldset class="reading-choice-fieldset">
+                <legend data-i18n="readingSize">阅读文字大小</legend>
+                <div class="reading-choice-list reading-size-list">
+                  <label class="reading-choice">
+                    <input type="radio" name="readingSize" value="small" />
+                    <span class="reading-choice-card">
+                      <span class="reading-size-sample reading-size-sample--small" aria-hidden="true">Aa</span>
+                      <span data-i18n="readingSizeSmall">小</span>
+                    </span>
+                  </label>
+                  <label class="reading-choice">
+                    <input type="radio" name="readingSize" value="standard" checked />
+                    <span class="reading-choice-card">
+                      <span class="reading-size-sample reading-size-sample--standard" aria-hidden="true">Aa</span>
+                      <span data-i18n="readingSizeStandard">标准</span>
+                    </span>
+                  </label>
+                  <label class="reading-choice">
+                    <input type="radio" name="readingSize" value="large" />
+                    <span class="reading-choice-card">
+                      <span class="reading-size-sample reading-size-sample--large" aria-hidden="true">Aa</span>
+                      <span data-i18n="readingSizeLarge">大</span>
+                    </span>
+                  </label>
+                  <label class="reading-choice">
+                    <input type="radio" name="readingSize" value="xlarge" />
+                    <span class="reading-choice-card">
+                      <span class="reading-size-sample reading-size-sample--xlarge" aria-hidden="true">Aa</span>
+                      <span data-i18n="readingSizeExtraLarge">特大</span>
+                    </span>
+                  </label>
+                </div>
+              </fieldset>
+
+              <fieldset class="reading-choice-fieldset">
+                <legend data-i18n="readingWeight">文字粗细</legend>
+                <div class="reading-choice-list reading-weight-list">
+                  <label class="reading-choice">
+                    <input type="radio" name="readingWeight" value="regular" checked />
+                    <span class="reading-choice-card reading-weight-sample--regular">
+                      <span aria-hidden="true">Aa</span>
+                      <span data-i18n="readingWeightRegular">常规</span>
+                    </span>
+                  </label>
+                  <label class="reading-choice">
+                    <input type="radio" name="readingWeight" value="bold" />
+                    <span class="reading-choice-card reading-weight-sample--bold">
+                      <span aria-hidden="true">Aa</span>
+                      <span data-i18n="readingWeightBold">粗体</span>
+                    </span>
+                  </label>
+                </div>
+              </fieldset>
+            </div>
+            <p id="readingDisplayStatus" class="reading-display-status" role="status" aria-live="polite"></p>
+          </section>
 
           <section class="card" id="notesBackupCard">
             <h2 data-i18n="notesBackup">笔记备份</h2>

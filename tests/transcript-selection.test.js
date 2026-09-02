@@ -7,6 +7,10 @@ const source = fs.readFileSync(
   path.resolve(__dirname, "..", "sidepanel.js"),
   "utf8",
 );
+const contentSource = fs.readFileSync(
+  path.resolve(__dirname, "..", "content.js"),
+  "utf8",
+);
 
 test("only the time rail seeks; the transcript body stays selectable text", () => {
   assert.match(
@@ -33,11 +37,15 @@ test("only the time rail seeks; the transcript body stays selectable text", () =
 
   const railWiring = source.match(/attachTranscriptTimeSeek\(div, [^)]+\)/g) || [];
   assert.ok(
-    railWiring.includes("attachTranscriptTimeSeek(div, group.start)"),
+    railWiring.includes(
+      "attachTranscriptTimeSeek(div, group.seekStart ?? group.start)",
+    ),
     "raw transcript rows must wire seek onto the time rail",
   );
   assert.ok(
-    railWiring.includes("attachTranscriptTimeSeek(div, segment.start)"),
+    railWiring.includes(
+      "attachTranscriptTimeSeek(div, segment.seekStart ?? segment.start)",
+    ),
     "translated-only and bilingual rows must wire seek onto the time rail",
   );
 
@@ -50,6 +58,29 @@ test("only the time rail seeks; the transcript body stays selectable text", () =
   assert.doesNotMatch(
     source,
     /div\.addEventListener\("click", \(\) => seekTo\((?:group|segment)\.start\)\);/,
+  );
+});
+
+test("timestamp seeks use the exact route and require a real player success", () => {
+  assert.match(
+    source,
+    /async function seekTo\(seconds\)[\s\S]*?action: "relayToContent"[\s\S]*?expectedRouteKey: currentRouteKey/,
+  );
+  assert.match(
+    source,
+    /async function seekTo\(seconds\)[\s\S]*?result\?\.success === true && result\.response\?\.success === true/,
+  );
+  assert.doesNotMatch(
+    source,
+    /async function seekTo\(seconds\)[\s\S]*?chrome\.tabs\.sendMessage/,
+  );
+  assert.match(
+    contentSource,
+    /message\.action === "seekTo"[\s\S]*?sendResponse\(\{ success: seekToTimestamp\(message\.seconds\) \}\)/,
+  );
+  assert.match(
+    contentSource,
+    /function seekToTimestamp\(seconds\)[\s\S]*?if \(!video\)[\s\S]*?return false[\s\S]*?video\.currentTime = seconds[\s\S]*?return true/,
   );
 });
 

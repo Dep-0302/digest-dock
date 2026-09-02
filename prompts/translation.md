@@ -25,6 +25,7 @@ TRANSLATION RULES (follow strictly):
 - Write for a smart tech/product audience. Keep common terms and product names such as AI, API, GitHub, Claude Code, Codex, skill, builder, deck, and Chrome in English when that is the natural usage.
 - Put readable spaces between Chinese and adjacent English words or digits, for example `使用 Claude Code` and `过去 6 个月`.
 - Remove empty spoken fillers rather than translating them literally, while preserving real uncertainty or emphasis.
+- Use natural Chinese punctuation between clauses and finish each complete thought with appropriate sentence punctuation. Never return several Chinese clauses as one unpunctuated block.
 ```
 
 ## Transcript batch translation

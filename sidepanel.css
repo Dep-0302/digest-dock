@@ -106,6 +106,47 @@
 
   /* Time rail — wide enough for 3:02:58 without crowding the body */
   --time-rail: 66px;
+
+  /* User-controlled reading text. Body copy can also change weight; reading
+     timecodes follow size only so the hierarchy stays coordinated. */
+  --reading-body-size: 13.5px;
+  --reading-summary-size: 12.5px;
+  --reading-time-size: 12.5px;
+  --reading-body-weight: 400;
+}
+
+html[data-reading-size="small"] {
+  --reading-body-size: 12.5px;
+  --reading-summary-size: 12px;
+  --reading-time-size: 11.5px;
+}
+
+html[data-reading-size="standard"] {
+  --reading-body-size: 13.5px;
+  --reading-summary-size: 12.5px;
+  --reading-time-size: 12.5px;
+}
+
+html[data-reading-size="large"] {
+  --reading-body-size: 15.5px;
+  --reading-summary-size: 14.5px;
+  --reading-time-size: 14px;
+  --time-rail: 68px;
+}
+
+html[data-reading-size="xlarge"] {
+  --reading-body-size: 17.5px;
+  --reading-summary-size: 16.5px;
+  --reading-time-size: 15.5px;
+  --time-rail: 72px;
+}
+
+html[data-reading-weight="regular"] {
+  --reading-body-weight: 400;
+}
+
+html[data-reading-weight="bold"] {
+  --reading-body-weight: 600;
 }
 
 /* ============================================================
@@ -138,6 +179,16 @@ body {
 ::selection {
   background: rgba(7, 109, 209, 0.18);
   color: var(--text);
+}
+
+/* Overview key quotes may use generated quotation marks without changing the
+   stored/copyable text. Transcript cue boundaries use line breaks instead. */
+.chinese-visual-quote::before {
+  content: "“";
+}
+
+.chinese-visual-quote::after {
+  content: "”";
 }
 
 ::-webkit-scrollbar {
@@ -615,7 +666,7 @@ body {
 /* The time rail is the only seek target; keep the body natively selectable. */
 .transcript-time {
   font-family: var(--font-time);
-  font-size: 12px;
+  font-size: var(--reading-time-size);
   font-weight: 400;
   font-variant-numeric: tabular-nums;
   font-feature-settings: "tnum" 1;
@@ -664,6 +715,12 @@ body {
 
 .transcript-original,
 .transcript-translation {
+  display: block;
+}
+
+/* Adjacent source cues remain one semantic/cache segment, but read as distinct
+   visual lines. No newline or delimiter is inserted into the subtitle text. */
+.transcript-fragment-line {
   display: block;
 }
 
@@ -771,42 +828,113 @@ body {
 }
 
 /* ============================================================
-   FOLLOW PLAYBACK — compact blue-cyan action that restores auto-follow
+   FOLLOW PLAYBACK — transcript-only 5-second recovery after manual scrolling
    ============================================================ */
-.follow-playback-btn {
+.follow-playback-bar {
   position: fixed;
   bottom: 18px;
   left: 50%;
   transform: translateX(-50%);
   z-index: 100;
-  display: inline-flex;
+  display: flex;
   align-items: center;
-  gap: 0;
-  background: var(--accent-gradient);
-  color: #fff;
-  border: 1px solid rgba(255, 255, 255, 0.24);
-  padding: 9px 18px;
+  gap: 8px;
+  width: max-content;
+  max-width: calc(100vw - 24px);
+  padding: 7px 8px 7px 13px;
+  border: 1px solid var(--border-heavy);
   border-radius: var(--r-pill);
+  background: var(--surface);
+  color: var(--text-secondary);
+  box-shadow: var(--state-shadow);
+}
+
+.follow-playback-bar[hidden] {
+  display: none;
+}
+
+.follow-playback-hint {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-family: var(--font-body);
   font-weight: 600;
-  font-size: 12.5px;
+  font-size: 12px;
+}
+
+.follow-playback-bar button {
+  min-height: 34px;
+  padding: 7px 11px;
+  border-radius: var(--r-pill);
   cursor: pointer;
+  font-family: var(--font-body);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.follow-stay-btn {
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-secondary);
+}
+
+.follow-stay-btn:hover {
+  border-color: var(--border-heavy);
+  color: var(--text);
+}
+
+.follow-playback-btn {
+  border: 1px solid transparent;
+  background: var(--accent-gradient);
+  color: #fff;
   transition:
     background 0.16s ease,
-    transform 0.16s ease,
     box-shadow 0.16s ease;
-  box-shadow: 0 8px 18px rgba(4, 73, 139, 0.24);
+  box-shadow: var(--shadow-sm);
 }
 
 .follow-playback-btn:hover {
   background: var(--accent-gradient-hover);
-  transform: translateX(-50%) translateY(-1px);
-  box-shadow: 0 10px 22px rgba(4, 73, 139, 0.28);
+  box-shadow: var(--shadow-md);
 }
 
-.follow-playback-btn:focus-visible {
+.follow-playback-bar button:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
+}
+
+.follow-playback-bar.is-held .follow-playback-hint {
+  color: var(--text-muted);
+}
+
+.follow-playback-bar.is-held .follow-stay-btn {
+  display: none;
+}
+
+.sr-only {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  padding: 0 !important;
+  margin: -1px !important;
+  overflow: hidden !important;
+  clip: rect(0, 0, 0, 0) !important;
+  white-space: nowrap !important;
+  border: 0 !important;
+}
+
+@media (max-width: 420px) {
+  .follow-playback-bar {
+    left: 12px;
+    right: 12px;
+    transform: none;
+    width: auto;
+  }
+
+  .follow-playback-hint {
+    flex: 1 1 auto;
+  }
 }
 
 /* ============================================================
@@ -842,7 +970,7 @@ body {
 
 .chapter-timestamp {
   font-family: var(--font-time);
-  font-size: 12px;
+  font-size: var(--reading-time-size);
   font-weight: 400;
   font-variant-numeric: tabular-nums;
   font-feature-settings: "tnum" 1;
@@ -940,7 +1068,7 @@ body {
 
 .quote-timestamp {
   font-family: var(--font-time);
-  font-size: 12.5px;
+  font-size: var(--reading-time-size);
   font-weight: 500;
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.02em;
@@ -2141,7 +2269,7 @@ body {
 
 .note-timestamp {
   font-family: var(--font-time);
-  font-size: 13px;
+  font-size: var(--reading-time-size);
   font-weight: 500;
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.02em;
@@ -2317,6 +2445,20 @@ body {
   background: var(--danger-dim);
 }
 
+/* Reading-display preferences apply only to long-form body copy. */
+.transcript-text,
+.transcript-copy,
+.quote-text,
+.note-text {
+  font-size: var(--reading-body-size);
+  font-weight: var(--reading-body-weight);
+}
+
+.chapter-summary {
+  font-size: var(--reading-summary-size);
+  font-weight: var(--reading-body-weight);
+}
+
 /* ============================================================
    NARROW PANEL ADJUSTMENTS
    ============================================================ */
@@ -2344,6 +2486,14 @@ body {
   :root {
     --time-rail: 60px;
   }
+
+  html[data-reading-size="large"] {
+    --time-rail: 64px;
+  }
+
+  html[data-reading-size="xlarge"] {
+    --time-rail: 68px;
+  }
 }
 
 /* ============================================================
@@ -2362,9 +2512,5 @@ body {
   .chapter-item.active-chapter {
     transform: none;
     width: 100%;
-  }
-
-  .follow-playback-btn:hover {
-    transform: translateX(-50%);
   }
 }

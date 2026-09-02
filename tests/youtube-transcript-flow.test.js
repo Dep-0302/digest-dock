@@ -60,7 +60,11 @@ function pageSnapshot(videoId = VIDEO_ID, options = {}) {
           options.captionTrackCountKnown === true
             ? Number(options.captionTrackCount || 0)
             : null,
+        availableTracks: Array.isArray(options.availableTracks)
+          ? options.availableTracks
+          : [],
         pageDefaultTrack: options.pageDefaultTrack || null,
+        pageCurrentTrack: options.pageCurrentTrack || null,
       },
     },
   ];
@@ -79,6 +83,8 @@ function loadBackground({
   fetchImpl = async () => {
     throw new Error("unexpected network request");
   },
+  tabsGet,
+  scriptingExecuteScript,
   storageLocalGet,
   pageSnapshotOptions = {},
   bilibiliAdapterImpl = bilibiliAdapter,
@@ -93,9 +99,13 @@ function loadBackground({
   const localState = { ytd_settings: settings };
   const sessionState = {};
   const runtimeMessageListeners = [];
+  const tabUpdatedListeners = [];
   const listeners = { addListener() {} };
 
   const executeScript = async (details) => {
+    if (typeof scriptingExecuteScript === "function") {
+      return scriptingExecuteScript(details);
+    }
     if (details.files?.includes("youtube-transcript-active.js")) {
       counts.activeInject += 1;
       return [];
@@ -193,16 +203,22 @@ function loadBackground({
         sendMessage: async () => ({ success: true }),
       },
       tabs: {
-        onUpdated: listeners,
-        onActivated: listeners,
-        get: async (tabId) => {
-          const videoId = tabVideoIds.get(tabId);
-          if (!videoId) throw new Error("tab missing");
-          return {
-            id: tabId,
-            url: `https://www.youtube.com/watch?v=${videoId}`,
-          };
+        onUpdated: {
+          addListener(listener) {
+            tabUpdatedListeners.push(listener);
+          },
         },
+        onActivated: listeners,
+        get:
+          tabsGet ||
+          (async (tabId) => {
+            const videoId = tabVideoIds.get(tabId);
+            if (!videoId) throw new Error("tab missing");
+            return {
+              id: tabId,
+              url: `https://www.youtube.com/watch?v=${videoId}`,
+            };
+          }),
         query: async () => [],
         sendMessage: async () => ({ success: true }),
       },
@@ -240,6 +256,9 @@ function loadBackground({
     sessionState,
     tabVideoIds,
     dispatch,
+    triggerTabUpdated(tabId, changeInfo) {
+      for (const listener of tabUpdatedListeners) listener(tabId, changeInfo);
+    },
   };
 }
 
@@ -311,6 +330,451 @@ test("Passive capture ends the route with zero Active, Panel, and third-party ca
   );
 });
 
+test("concurrent Passive inflight and capture preserve arrival order across delayed tab checks", async () => {
+  let releaseFirstTabLookup;
+  let tabLookupCount = 0;
+  const worker = loadBackground({
+    tabsGet: async (tabId) => {
+      tabLookupCount += 1;
+      if (tabLookupCount === 1) {
+        await new Promise((resolve) => {
+          releaseFirstTabLookup = resolve;
+        });
+      }
+      return {
+        id: tabId,
+        url: `https://www.youtube.com/watch?v=${VIDEO_ID}`,
+      };
+    },
+  });
+
+  const inflight = worker.dispatch(
+    {
+      action: "youtubePassiveState",
+      payload: {
+        type: "inflight",
+        videoId: VIDEO_ID,
+        language: "en",
+        kind: "manual",
+        status: 0,
+        inFlight: true,
+      },
+    },
+    { tab: { id: 1 } },
+  );
+  const capture = worker.dispatch(
+    {
+      action: "youtubePassiveState",
+      payload: {
+        type: "capture",
+        videoId: VIDEO_ID,
+        language: "en",
+        kind: "manual",
+        status: 200,
+        inFlight: false,
+        body: json3Body("ordered after delayed identity check"),
+      },
+    },
+    { tab: { id: 1 } },
+  );
+
+  while (!releaseFirstTabLookup) await Promise.resolve();
+  assert.equal(
+    tabLookupCount,
+    1,
+    "the capture must wait behind the inflight event's identity check",
+  );
+  releaseFirstTabLookup();
+  const [inflightResult, captureResult] = await Promise.all([inflight, capture]);
+  assert.equal(inflightResult.ok, true);
+  assert.equal(captureResult.ok, true);
+
+  const gate = await worker.helpers.readYoutubePassiveGate({
+    tabId: 1,
+    videoId: VIDEO_ID,
+    preferredLanguage: "en",
+    trackKind: "manual-first",
+  });
+  assert.equal(
+    gate.capture?.transcript?.[0]?.text,
+    "ordered after delayed identity check",
+  );
+  assert.equal(gate.inFlight, false);
+});
+
+test("Passive falls back to an actually observed non-preferred language", async () => {
+  const worker = loadBackground();
+  await worker.dispatch(
+    {
+      action: "youtubePassiveState",
+      payload: {
+        type: "inflight",
+        videoId: VIDEO_ID,
+        language: "en",
+        kind: "manual",
+        status: 0,
+        inFlight: true,
+      },
+    },
+    { tab: { id: 1 } },
+  );
+  await worker.dispatch(
+    {
+      action: "youtubePassiveState",
+      payload: {
+        type: "capture",
+        videoId: VIDEO_ID,
+        language: "en",
+        kind: "manual",
+        status: 200,
+        inFlight: false,
+        body: json3Body("visible English captions"),
+      },
+    },
+    { tab: { id: 1 } },
+  );
+
+  const result = await worker.helpers.handleFetchYoutubeNativeTranscript(
+    VIDEO_ID,
+    "zh-Hans",
+    1,
+    nativeOptions("71"),
+  );
+  assert.equal(result.success, true);
+  assert.equal(result.source, "youtube-passive");
+  assert.equal(result.language, "en");
+  assert.equal(result.selectedTrack.language, "en");
+  assert.equal(result.transcript[0].text, "visible English captions");
+  assert.equal(worker.counts.activeRun, 0);
+  assert.equal(worker.counts.panelRun, 0);
+  assert.equal(worker.counts.fetch, 0);
+});
+
+test("Passive ranks exact language ahead of a manual non-preferred track", async () => {
+  const worker = loadBackground();
+  for (const track of [
+    { language: "en", kind: "manual", text: "manual English" },
+    { language: "zh-Hans", kind: "asr", text: "exact Chinese" },
+  ]) {
+    await worker.dispatch(
+      {
+        action: "youtubePassiveState",
+        payload: {
+          type: "inflight",
+          videoId: VIDEO_ID,
+          language: track.language,
+          kind: track.kind,
+          status: 0,
+          inFlight: true,
+        },
+      },
+      { tab: { id: 1 } },
+    );
+    await worker.dispatch(
+      {
+        action: "youtubePassiveState",
+        payload: {
+          type: "capture",
+          videoId: VIDEO_ID,
+          language: track.language,
+          kind: track.kind,
+          status: 200,
+          inFlight: false,
+          body: json3Body(track.text),
+        },
+      },
+      { tab: { id: 1 } },
+    );
+  }
+
+  const result = await worker.helpers.handleFetchYoutubeNativeTranscript(
+    VIDEO_ID,
+    "zh-Hans",
+    1,
+    nativeOptions("72"),
+  );
+  assert.equal(result.success, true);
+  assert.equal(result.language, "zh-Hans");
+  assert.equal(result.selectedTrack.kind, "asr");
+  assert.equal(result.transcript[0].text, "exact Chinese");
+});
+
+test("automatic track selection treats Chinese varieties equally and keeps manual source order", () => {
+  const worker = loadBackground();
+  const selected = worker.helpers.chooseYoutubeAutomaticTrack({
+    captionTrackCountKnown: true,
+    captionTrackCount: 5,
+    availableTracks: [
+      { language: "en", kind: "manual" },
+      { language: "zh-Hans", kind: "asr" },
+      { language: "yue-HK", kind: "manual" },
+      { language: "zh-Hant", kind: "manual" },
+      { language: "cmn-Hans", kind: "asr" },
+    ],
+    currentTrack: { language: "en", kind: "manual" },
+    selectedTrack: { language: "en", kind: "manual" },
+  });
+  assert.deepEqual(JSON.parse(JSON.stringify(selected)), {
+    language: "yue-HK",
+    kind: "manual",
+  });
+});
+
+test("without Chinese, automatic selection uses the current track then the page default", () => {
+  const worker = loadBackground();
+  const evidence = {
+    captionTrackCountKnown: true,
+    captionTrackCount: 2,
+    availableTracks: [
+      { language: "en", kind: "manual" },
+      { language: "de", kind: "manual" },
+    ],
+    selectedTrack: { language: "en", kind: "manual" },
+  };
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(worker.helpers.chooseYoutubeAutomaticTrack({
+      ...evidence,
+      currentTrack: { language: "de", kind: "manual" },
+    }))),
+    { language: "de", kind: "manual" },
+  );
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(worker.helpers.chooseYoutubeAutomaticTrack(evidence))),
+    { language: "en", kind: "manual" },
+  );
+});
+
+test("Passive miss runs one fixed Active request for the page-selected Chinese track", async () => {
+  const worker = loadBackground({
+    pageSnapshotOptions: {
+      captionTrackCountKnown: true,
+      captionTrackCount: 4,
+      availableTracks: [
+        { language: "en", kind: "manual" },
+        { language: "zh-Hans", kind: "asr" },
+        { language: "zh-Hant", kind: "manual" },
+        { language: "yue-HK", kind: "manual" },
+      ],
+      pageDefaultTrack: { language: "en", kind: "manual" },
+    },
+    activeRun: async (request) => {
+      assert.equal(request.language, "zh-Hant");
+      assert.equal(request.trackKind, "manual");
+      return {
+        ...transcriptResult("Chinese Active"),
+        language: "zh-Hant",
+        selectedTrack: { language: "zh-Hant", kind: "manual" },
+        transcript: [
+          { text: "中文", start: 0, duration: 2, language: "zh-Hant" },
+        ],
+      };
+    },
+  });
+  const result = await worker.helpers.handleFetchYoutubeNativeTranscript(
+    VIDEO_ID,
+    "en",
+    1,
+    nativeOptions("active-zh"),
+  );
+  assert.equal(result.success, true);
+  assert.equal(result.source, "youtube-active");
+  assert.equal(result.language, "zh-Hant");
+  assert.equal(result.selectedTrack.kind, "manual");
+  assert.equal(worker.counts.activeInject, 1);
+  assert.equal(worker.counts.activeRun, 1);
+  assert.equal(worker.counts.panelInject, 0);
+  assert.equal(worker.counts.panelRun, 0);
+});
+
+test("duplicate automatic requests share one Active flight and keep caller identities", async () => {
+  let releaseActive;
+  let markActiveStarted;
+  const activeStarted = new Promise((resolve) => {
+    markActiveStarted = resolve;
+  });
+  const activeGate = new Promise((resolve) => {
+    releaseActive = resolve;
+  });
+  const worker = loadBackground({
+    pageSnapshotOptions: {
+      captionTrackCountKnown: true,
+      captionTrackCount: 1,
+      availableTracks: [{ language: "en", kind: "manual" }],
+      pageDefaultTrack: { language: "en", kind: "manual" },
+    },
+    activeRun: async () => {
+      markActiveStarted();
+      await activeGate;
+      return transcriptResult("shared Active");
+    },
+  });
+  const first = worker.helpers.handleFetchYoutubeNativeTranscript(
+    VIDEO_ID,
+    "en",
+    1,
+    nativeOptions("active-shared-1"),
+  );
+  const second = worker.helpers.handleFetchYoutubeNativeTranscript(
+    VIDEO_ID,
+    "en",
+    2,
+    nativeOptions("active-shared-2"),
+  );
+  await activeStarted;
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  releaseActive();
+  const [firstResult, secondResult] = await Promise.all([first, second]);
+  assert.equal(firstResult.success, true);
+  assert.equal(secondResult.success, true);
+  assert.equal(firstResult.runId, "active-shared-1");
+  assert.equal(secondResult.runId, "active-shared-2");
+  assert.equal(worker.counts.activeRun, 1);
+  assert.equal(worker.counts.panelRun, 0);
+});
+
+test("an ordinary Active miss returns the first CC prompt without Panel or Supadata", async () => {
+  const worker = loadBackground({
+    settings: { aiApiKey: "test", supadataApiKey: "optional-key" },
+    pageSnapshotOptions: {
+      captionTrackCountKnown: true,
+      captionTrackCount: 1,
+      availableTracks: [{ language: "en", kind: "manual" }],
+      pageDefaultTrack: { language: "en", kind: "manual" },
+    },
+    activeResult: {
+      status: "UNKNOWN",
+      errorCode: "NETWORK",
+      diagnostics: {
+        providerInitiated: {
+          youtubePlayer: 1,
+          youtubeTimedtext: 0,
+          thirdParty: 0,
+          loopback: 0,
+        },
+      },
+    },
+  });
+  const result = await worker.helpers.handleFetchYoutubeNativeTranscript(
+    VIDEO_ID,
+    "en",
+    1,
+    nativeOptions("active-miss"),
+  );
+  assert.equal(result.error, "YOUTUBE_CAPTIONS_REQUIRED");
+  assert.equal(result.requiresCaptionEnable, true);
+  assert.equal(result.supadataEligible, false);
+  assert.equal(result.diagnostics.providerInitiated.youtubePlayer, 1);
+  assert.equal(worker.counts.activeRun, 1);
+  assert.equal(worker.counts.panelRun, 0);
+  assert.equal(worker.counts.fetch, 0);
+});
+
+test("one Active 429 starts cooldown and never reaches CC, Panel, or Supadata", async () => {
+  const worker = loadBackground({
+    settings: { aiApiKey: "test", supadataApiKey: "optional-key" },
+    pageSnapshotOptions: {
+      captionTrackCountKnown: true,
+      captionTrackCount: 1,
+      availableTracks: [{ language: "en", kind: "manual" }],
+      pageDefaultTrack: { language: "en", kind: "manual" },
+    },
+    activeResult: {
+      status: "RATE_LIMITED",
+      errorCode: "RATE_LIMITED",
+      diagnostics: {
+        providerInitiated: {
+          youtubePlayer: 1,
+          youtubeTimedtext: 0,
+          thirdParty: 0,
+          loopback: 0,
+        },
+      },
+    },
+  });
+  const first = await worker.helpers.handleFetchYoutubeNativeTranscript(
+    VIDEO_ID,
+    "en",
+    1,
+    nativeOptions("active-429"),
+  );
+  assert.equal(first.error, "RATE_LIMITED");
+  assert.equal(first.routeOutcome, "RATE_LIMITED");
+  assert.equal(first.supadataEligible, false);
+  const second = await worker.helpers.handleFetchYoutubeNativeTranscript(
+    VIDEO_ID,
+    "en",
+    1,
+    nativeOptions("active-429-again"),
+  );
+  assert.equal(second.error, "RATE_LIMITED");
+  assert.equal(second.supadataEligible, false);
+  assert.equal(worker.counts.activeRun, 1);
+  assert.equal(worker.counts.panelRun, 0);
+  assert.equal(worker.counts.fetch, 0);
+});
+
+test("a stale Passive bridge stops before the transcript and provider routes", async () => {
+  const worker = loadBackground({
+    scriptingExecuteScript: async (details) => {
+      assert.equal(details.world, "ISOLATED");
+      return [
+        {
+          result: {
+            ready: false,
+            videoId: VIDEO_ID,
+          },
+        },
+      ];
+    },
+  });
+
+  const response = await worker.dispatch({
+    action: "relayToContent",
+    tabId: 1,
+    payload: { action: "getVideoInfo" },
+  });
+  assert.equal(response.success, false);
+  assert.equal(response.error, "PAGE_REFRESH_REQUIRED");
+  assert.match(response.message, /刷新当前 YouTube 页面/);
+  assert.equal(worker.counts.activeRun, 0);
+  assert.equal(worker.counts.panelRun, 0);
+  assert.equal(worker.counts.fetch, 0);
+});
+
+test("Passive bridge health requires a live runtime roundtrip, not only a stale marker", async (t) => {
+  for (const [label, pingResult, expectedReady] of [
+    ["live", true, true],
+    ["invalidated", false, false],
+  ]) {
+    await t.test(label, async () => {
+      const worker = loadBackground({
+        scriptingExecuteScript: async (details) => {
+          const context = {
+            URL,
+            String,
+            location: {
+              href: `https://www.youtube.com/watch?v=${VIDEO_ID}`,
+            },
+            __DIGESTDOCK_YOUTUBE_PASSIVE_BRIDGE_V1__: {
+              active: true,
+              pingRuntime: async () => pingResult,
+            },
+          };
+          const result = await vm.runInNewContext(
+            `(${details.func.toString()})()`,
+            context,
+          );
+          return [{ result }];
+        },
+      });
+      const health = await worker.helpers.readYoutubePassiveBridgeHealth(1);
+      assert.equal(health.ready, expectedReady);
+      assert.equal(health.videoId, VIDEO_ID);
+      assert.equal(worker.counts.fetch, 0);
+    });
+  }
+});
+
 test("an in-flight Passive response waits once and wins before the CC prompt", async () => {
   const worker = loadBackground();
   await worker.dispatch(
@@ -356,6 +820,123 @@ test("an in-flight Passive response waits once and wins before the CC prompt", a
   assert.equal(worker.counts.activeRun, 0);
 });
 
+test("an initially empty Passive gate accepts a capture that registers within the same bounded wait", async () => {
+  const worker = loadBackground();
+  const pending = worker.helpers.awaitYoutubePassiveGate({
+    tabId: 1,
+    videoId: VIDEO_ID,
+    preferredLanguage: "en",
+    trackKind: "manual-first",
+  });
+
+  // Let the first empty storage read complete. The old implementation returned
+  // null here immediately, before a just-starting page request could register.
+  await new Promise((resolve) => setImmediate(resolve));
+  await worker.dispatch(
+    {
+      action: "youtubePassiveState",
+      payload: {
+        type: "inflight",
+        videoId: VIDEO_ID,
+        language: "en",
+        kind: "manual",
+        status: 0,
+        inFlight: true,
+      },
+    },
+    { tab: { id: 1 } },
+  );
+  await worker.dispatch(
+    {
+      action: "youtubePassiveState",
+      payload: {
+        type: "capture",
+        videoId: VIDEO_ID,
+        language: "en",
+        kind: "manual",
+        status: 200,
+        inFlight: false,
+        body: json3Body("registered after the empty read"),
+      },
+    },
+    { tab: { id: 1 } },
+  );
+
+  const result = await pending;
+  assert.equal(result?.source, "youtube-passive");
+  assert.equal(result?.transcript?.[0]?.text, "registered after the empty read");
+  assert.equal(worker.counts.fetch, 0);
+});
+
+test("URL updates preserve the current video's Passive capture and clear only old video identities", async () => {
+  const worker = loadBackground();
+  const storeCapture = async (videoId, text) => {
+    await worker.dispatch(
+      {
+        action: "youtubePassiveState",
+        payload: {
+          type: "inflight",
+          videoId,
+          language: "en",
+          kind: "manual",
+          status: 0,
+          inFlight: true,
+        },
+      },
+      { tab: { id: 1 } },
+    );
+    await worker.dispatch(
+      {
+        action: "youtubePassiveState",
+        payload: {
+          type: "capture",
+          videoId,
+          language: "en",
+          kind: "manual",
+          status: 200,
+          inFlight: false,
+          body: json3Body(text),
+        },
+      },
+      { tab: { id: 1 } },
+    );
+  };
+
+  await storeCapture(VIDEO_ID, "same video capture");
+  worker.triggerTabUpdated(1, {
+    url: `https://www.youtube.com/watch?v=${VIDEO_ID}&t=30`,
+  });
+  const sameVideo = await worker.helpers.readYoutubePassiveGate({
+    tabId: 1,
+    videoId: VIDEO_ID,
+    preferredLanguage: "en",
+    trackKind: "manual-first",
+  });
+  assert.equal(sameVideo.capture?.transcript?.[0]?.text, "same video capture");
+
+  // A new video's request can finish before Chrome delivers onUpdated. The
+  // delayed cleanup must retain that new identity while removing the old one.
+  worker.tabVideoIds.set(1, OTHER_VIDEO_ID);
+  await storeCapture(OTHER_VIDEO_ID, "new video capture");
+  worker.triggerTabUpdated(1, {
+    url: `https://www.youtube.com/watch?v=${OTHER_VIDEO_ID}`,
+  });
+  const newVideo = await worker.helpers.readYoutubePassiveGate({
+    tabId: 1,
+    videoId: OTHER_VIDEO_ID,
+    preferredLanguage: "en",
+    trackKind: "manual-first",
+  });
+  const oldVideo = await worker.helpers.readYoutubePassiveGate({
+    tabId: 1,
+    videoId: VIDEO_ID,
+    preferredLanguage: "en",
+    trackKind: "manual-first",
+  });
+  assert.equal(newVideo.capture?.transcript?.[0]?.text, "new video capture");
+  assert.equal(oldVideo.capture, null);
+});
+
 test("an unsolicited Passive body is rejected and never enters the session buffer", async () => {
   const worker = loadBackground();
   const response = await worker.dispatch(
@@ -376,6 +957,63 @@ test("an unsolicited Passive body is rejected and never enters the session buffe
   assert.equal(response.ok, false);
   assert.equal(response.error, "PASSIVE_CAPTURE_NOT_INFLIGHT");
   assert.equal(worker.sessionState.youtube_passive_session_buffer, undefined);
+});
+
+test("empty Passive bodies close inflight state without becoming a transcript", async (t) => {
+  for (const testCase of [
+    { name: "zero bytes", body: "" },
+    { name: "empty events", body: JSON.stringify({ events: [] }) },
+  ]) {
+    await t.test(testCase.name, async () => {
+      const worker = loadBackground();
+      await worker.dispatch(
+        {
+          action: "youtubePassiveState",
+          payload: {
+            type: "inflight",
+            videoId: VIDEO_ID,
+            language: "en",
+            kind: "manual",
+            status: 0,
+            inFlight: true,
+          },
+        },
+        { tab: { id: 1 } },
+      );
+      const response = await worker.dispatch(
+        {
+          action: "youtubePassiveState",
+          payload: {
+            type: "capture",
+            videoId: VIDEO_ID,
+            language: "en",
+            kind: "manual",
+            status: 200,
+            inFlight: false,
+            body: testCase.body,
+          },
+        },
+        { tab: { id: 1 } },
+      );
+      assert.equal(response.ok, false);
+      assert.equal(response.error, "INVALID_PASSIVE_CAPTURE");
+      assert.deepEqual(
+        JSON.parse(
+          JSON.stringify(worker.sessionState.youtube_passive_session_buffer),
+        ),
+        [],
+      );
+      const gate = await worker.helpers.readYoutubePassiveGate({
+        tabId: 1,
+        videoId: VIDEO_ID,
+        preferredLanguage: "en",
+        trackKind: "manual-first",
+      });
+      assert.equal(gate.capture, null);
+      assert.equal(gate.inFlight, false);
+      assert.equal(worker.counts.fetch, 0);
+    });
+  }
 });
 
 test("an observed Passive 429 clears inflight state and blocks automatic routes", async (t) => {
@@ -427,8 +1065,8 @@ test("an observed Passive 429 clears inflight state and blocks automatic routes"
         1,
         nativeOptions(type === "clear" ? "81" : "82"),
       );
-      assert.equal(first.routeOutcome, "UNKNOWN");
-      assert.equal(first.error, "YOUTUBE_CAPTIONS_REQUIRED");
+      assert.equal(first.routeOutcome, "RATE_LIMITED");
+      assert.equal(first.error, "RATE_LIMITED");
       assert.equal(first.supadataEligible, false);
 
       const retry = await worker.helpers.handleFetchYoutubeNativeTranscript(
@@ -441,9 +1079,9 @@ test("an observed Passive 429 clears inflight state and blocks automatic routes"
           true,
         ),
       );
-      assert.equal(retry.routeOutcome, "UNKNOWN");
+      assert.equal(retry.routeOutcome, "RATE_LIMITED");
       assert.equal(retry.error, "RATE_LIMITED");
-      assert.equal(retry.supadataEligible, true);
+      assert.equal(retry.supadataEligible, false);
       assert.equal(worker.counts.activeRun, 0);
       assert.equal(worker.counts.panelRun, 0);
     });

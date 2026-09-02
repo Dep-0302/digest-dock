@@ -211,11 +211,13 @@ test("every settings nav item points at a section that exists in the markup", ()
   const navHrefs = [
     ...html.matchAll(/class="settings-nav-item[^"]*"[^>]*href="(#[^"]+)"/g),
   ].map((match) => match[1]);
-  // The final navigation is exactly the four destinations from the settings IA:
-  // services, notes backup, local data, privacy. The retired "字幕服务" entry is
-  // gone (Supadata stays as a card inside services) and so is "本地改造".
+  // The final navigation is exactly the five destinations from the settings IA:
+  // services, reading display, notes backup, local data, privacy. The retired
+  // "字幕服务" entry is gone (Supadata stays as a card inside services) and so
+  // is "本地改造".
   assert.deepEqual(navHrefs, [
     "#section-services",
+    "#section-reading",
     "#notesBackupCard",
     "#section-data",
     "#section-privacy",

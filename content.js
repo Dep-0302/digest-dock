@@ -288,8 +288,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.action === "seekTo") {
     // Jump the video to a specific timestamp
     debugLog("[DigestDock Content] Seeking to:", message.seconds);
-    seekToTimestamp(message.seconds);
-    sendResponse({ success: true });
+    sendResponse({ success: seekToTimestamp(message.seconds) });
     return false;
   }
 
@@ -1054,7 +1053,7 @@ function seekToTimestamp(seconds) {
   const video = document.querySelector("video.html5-main-video");
   if (!video) {
     console.error("[DigestDock Content] No video element found for seek");
-    return;
+    return false;
   }
 
   debugLog("[DigestDock Content] Seeking to:", seconds);
@@ -1063,6 +1062,7 @@ function seekToTimestamp(seconds) {
   if (video.paused) {
     video.play().catch(() => {}); // Ignore autoplay errors
   }
+  return true;
 }
 
 function escapeHtmlForContent(text) {

@@ -32,9 +32,9 @@ Depending on the feature you use, DigestDock handles:
 
 ### YouTube
 
-For a standard YouTube watch page, DigestDock first reuses a validated local transcript cache or passively observes a bounded `/api/timedtext` response that the page already requested. The Passive observer never constructs a request and never records or forwards the signed caption URL. If no zero-request result is available, the side panel asks the user to enable YouTube captions/CC and explicitly retry. The product flow does not automatically issue YouTube player/timedtext requests or open and scroll YouTube's Transcript panel. The extension does not read or export YouTube cookies, download audio, perform ASR or OCR, spoof request headers, or bypass access restrictions.
+For a standard YouTube watch page, DigestDock first reuses a validated local transcript cache or passively observes a bounded `/api/timedtext` response that the page already requested. The Passive observer never constructs a request and never records or forwards the signed caption URL. If no zero-request result is available, DigestDock may make one credential-free request to YouTube's player endpoint and one request to the selected existing json3 timedtext track. The fixed request body declares an IOS client with Apple/iPhone device metadata; it sends `credentials: omit`, no Cookie or authorization header, and no user-agent or origin override. The returned signed caption URL is used only in memory for that immediate timedtext request and is never returned to the background, stored, or logged. DigestDock does not open or scroll YouTube's Transcript panel, download audio, perform ASR or OCR, or bypass access restrictions.
 
-The Passive bridge keeps only bounded current-tab/video/language/track state in Chrome session storage. Successful transcripts are stored in the existing local positive cache for up to 30 days; failed or no-caption results are not cached. DigestDock does not automatically retry a failed page caption request.
+The Passive bridge keeps only bounded current-tab/video/language/track state in Chrome session storage. Successful Passive or fixed-Active transcripts are stored in the existing local positive cache for up to 30 days; failed or no-caption results are not cached. DigestDock does not automatically switch client or format after a failed Active request.
 
 ### Supadata
 
@@ -63,7 +63,7 @@ You select one provider from a preset list and provide that provider's API key; 
 
 The picker also shows a disabled Tencent Hunyuan Translation entry with its bundled official icon. It has no host permission and cannot receive or use a key because the official documentation does not yet verify `hunyuan-translation-lite` on the extension's single-key OpenAI-compatible route. DigestDock does not guess that configuration.
 
-Requests go directly from the extension to Bilibili, explicitly authorized Supadata, or your selected AI provider. On YouTube, the automatic free route only observes a caption response the page already requested after the user enables CC. Supadata and the AI provider are authenticated with the keys you supply; Bilibili uses the browser's current Bilibili session. DigestDock's developer does not proxy or receive these requests.
+Requests go directly from the extension to YouTube, Bilibili, explicitly authorized Supadata, or your selected AI provider. On YouTube, the free route may passively observe a page-issued caption response or make the bounded credential-free IOS/json3 request described above. Supadata and the AI provider are authenticated with the keys you supply; Bilibili uses the browser's current Bilibili session. DigestDock's developer does not proxy or receive these requests.
 
 YouTube, Bilibili, Supadata, and your selected AI provider process data under their own terms, privacy policies, retention practices, and account settings. Do not send confidential, personal, or regulated content unless their terms and your obligations permit it.
 
@@ -159,7 +159,7 @@ DigestDock uses Chrome permissions for these purposes:
   own entry and record-size limits.
 - `tabs`: identify and interact with the active supported video tab.
 - `scripting`: coordinate the extension's YouTube and Bilibili page controls.
-- YouTube host access: read the active video's URL, limited metadata, source language, and access status; observe a page-issued timedtext body without its signed URL; show the CC retry guidance; and provide timestamp controls. The retained Active/Panel experiment files are not product routes and are excluded from the candidate release allowlist.
+- YouTube host access: read the active video's URL, limited metadata, source language, access status, and sanitized track summaries; observe a page-issued timedtext body without its signed URL; or make the fixed credential-free IOS/json3 player-plus-timedtext attempt described above; show CC retry guidance; and provide timestamp controls. Panel remains outside the product route and release allowlist.
 - Bilibili and Bilibili subtitle-CDN host access: resolve the current part, read an existing subtitle track, and provide timestamp controls without requesting cookie values.
 - Supadata host access: retrieve a native YouTube transcript only after the user explicitly confirms that video attempt; clear access restrictions and unavailable videos stop before the request.
 - AI provider host access: provide AI overviews, explanations, translation, and note polishing through the provider you select. One fixed origin is granted per selectable provider: DeepSeek (`api.deepseek.com`), Zhipu GLM (`open.bigmodel.cn`), Alibaba Bailian Qwen (`dashscope.aliyuncs.com`), SiliconFlow (`api.siliconflow.cn`), and Fireworks (`api.fireworks.ai`).

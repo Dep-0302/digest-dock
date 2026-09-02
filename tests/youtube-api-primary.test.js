@@ -174,7 +174,9 @@ test("the page gate reads no signed caption URL", () => {
   assert.match(gate, /sourceLanguage/);
   assert.match(gate, /captionTrackCountKnown/);
   assert.match(gate, /captionTrackCount/);
+  assert.match(gate, /availableTracks/);
   assert.match(gate, /pageDefaultTrack/);
+  assert.match(gate, /pageCurrentTrack/);
 });
 
 function executePageGateWithResponse(response, { live = true } = {}) {
@@ -192,6 +194,29 @@ function executePageGateWithResponse(response, { live = true } = {}) {
       Array,
       Boolean,
       RegExp,
+    });
+    return [{ result }];
+  };
+}
+
+function executePlayerDetailsWithResponse(response, currentTrack = null) {
+  return async (details) => {
+    const source = `(${details.func.toString()})()`;
+    const result = vm.runInNewContext(source, {
+      document: {
+        getElementById: () => ({
+          getPlayerResponse: () => response,
+          getOption: () => currentTrack,
+        }),
+      },
+      window: { ytInitialPlayerResponse: response },
+      Object,
+      String,
+      Array,
+      Boolean,
+      RegExp,
+      Set,
+      Number,
     });
     return [{ result }];
   };
@@ -273,6 +298,10 @@ test("page gate returns one sanitized default track without signed fields", asyn
     JSON.parse(JSON.stringify(snapshot.pageDefaultTrack)),
     { language: "en-US", kind: "asr" },
   );
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(snapshot.availableTracks)),
+    [{ language: "en-US", kind: "asr" }],
+  );
   assert.doesNotMatch(
     JSON.stringify(snapshot),
     /baseUrl|signature|timedtext|secret/i,
@@ -302,6 +331,58 @@ test("page gate does not guess a default from multiple unranked tracks", async (
   assert.equal(snapshot.captionTrackCountKnown, true);
   assert.equal(snapshot.captionTrackCount, 2);
   assert.equal(snapshot.pageDefaultTrack, null);
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(snapshot.availableTracks)),
+    [
+      { language: "en", kind: "manual" },
+      { language: "de", kind: "manual" },
+    ],
+  );
+});
+
+test("video metadata exposes only the automatic caption selection and no signed fields", async () => {
+  const response = {
+    videoDetails: {
+      videoId: "jNQXAC9IVRw",
+      title: "title",
+      author: "author",
+      shortDescription: "description",
+      lengthSeconds: "10",
+      defaultAudioLanguage: "en",
+    },
+    captions: {
+      playerCaptionsTracklistRenderer: {
+        captionTracks: [
+          { languageCode: "en", vssId: ".en", baseUrl: "https://secret" },
+          { languageCode: "zh-Hans", kind: "asr", vssId: "a.zh" },
+          { languageCode: "zh-Hant", vssId: ".zh-Hant" },
+          { languageCode: "yue-HK", vssId: ".yue" },
+        ],
+      },
+    },
+  };
+  const helpers = loadBackground({
+    executeScript: executePlayerDetailsWithResponse(
+      response,
+      response.captions.playerCaptionsTracklistRenderer.captionTracks[0],
+    ),
+  }).helpers;
+  const details = await helpers.getPlayerVideoDetails(42);
+  assert.deepEqual(JSON.parse(JSON.stringify(details.captionSelection)), {
+    language: "zh-Hant",
+    kind: "manual",
+  });
+  assert.doesNotMatch(JSON.stringify(details), /baseUrl|https:\/\/secret/);
+
+  const merged = helpers.mergeYouTubeVideoInfo(
+    details,
+    { videoId: "jNQXAC9IVRw" },
+    "jNQXAC9IVRw",
+  );
+  assert.deepEqual(JSON.parse(JSON.stringify(merged.captionSelection)), {
+    language: "zh-Hant",
+    kind: "manual",
+  });
 });
 
 test("a new video without a Supadata key never touches the network", async () => {
@@ -1053,6 +1134,8 @@ test("a cache-hit YouTube note reuses the cached transcript with no provider cal
     "https://www.youtube.com/watch?v=jNQXAC9IVRw",
     42,
     "zh-CN",
+    "",
+    true,
   );
   assert.equal(result.success, true);
   assert.equal(savedNotes[0].text, "中文字幕。");
@@ -1188,8 +1271,8 @@ test("side panel and background stay wired to the Passive-first contract", () =>
   assert.doesNotMatch(panel, /重试 YouTube 原生字幕/);
   assert.doesNotMatch(panel, /formatLocalTranscriptDiagnostics/);
 
-  // v5 keeps old positive caches readable even though Active and Panel are now
-  // experiment-only rather than product execution routes.
+  // v5 keeps old positive caches readable. Active is the one fixed automatic
+  // route after Passive; Panel remains experiment-only.
   for (const source of [
     "youtube-passive",
     "youtube-active",
@@ -1205,10 +1288,15 @@ test("side panel and background stay wired to the Passive-first contract", () =>
   assert.ok(nativeHandler);
   assert.ok(
     nativeHandler.indexOf("awaitYoutubePassiveGate") <
+      nativeHandler.indexOf("chooseYoutubeAutomaticTrack") &&
+      nativeHandler.indexOf("chooseYoutubeAutomaticTrack") <
+        nativeHandler.indexOf("runYoutubeNativeSingleFlight") &&
+      nativeHandler.indexOf("runYoutubeNativeSingleFlight") <
       nativeHandler.indexOf("YOUTUBE_CAPTIONS_REQUIRED"),
   );
-  assert.doesNotMatch(nativeHandler, /runYoutubeNativeRouteLeader/);
-  assert.doesNotMatch(nativeHandler, /runYoutubeNativeSingleFlight/);
+  assert.match(nativeHandler, /runYoutubeNativeRouteLeader/);
+  assert.match(nativeHandler, /runYoutubeNativeSingleFlight/);
+  assert.doesNotMatch(background, /YOUTUBE_PANEL_PRODUCT_FILE/);
   assert.match(background, /if \(supadataConsent === true\)/);
   assert.match(background, /youtubeUnknownFallbackResult/);
 

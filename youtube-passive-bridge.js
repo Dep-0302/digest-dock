@@ -6,7 +6,9 @@
   const CONTROL_CHANNEL = "digestdock-youtube-passive-control-v1";
   const MAX_BODY_BYTES = 8 * 1024 * 1024;
   const existing = globalThis[GLOBAL_KEY];
-  if (existing?.destroy) existing.destroy({ disconnect: false });
+  if (existing?.destroy) {
+    existing.destroy({ disconnect: false, preserveKnown: true });
+  }
 
   const nonce = [...crypto.getRandomValues(new Uint8Array(16))]
     .map((value) => value.toString(16).padStart(2, "0"))
@@ -126,6 +128,18 @@
     }
   }
 
+  async function pingRuntime() {
+    if (destroyed) return false;
+    try {
+      const result = await chrome.runtime.sendMessage({
+        action: "youtubePassiveBridgePing",
+      });
+      return result?.ok === true;
+    } catch {
+      return false;
+    }
+  }
+
   function clearKnown() {
     for (const payload of knownIdentities.values()) {
       sendRuntime({
@@ -198,7 +212,10 @@
       }
       return;
     }
-    if (payload.type === "capture" && !knownIdentities.has(identity)) return;
+    // A bridge can be re-created while MAIN is already reading a response. In
+    // that case its local map has not seen the old `inflight`, but background's
+    // arrival-ordered session buffer has. Forward the nonce-bound, sanitized
+    // capture and let that durable gate accept or reject it.
     knownIdentities.set(identity, {
       videoId: payload.videoId,
       language: payload.language,
@@ -207,9 +224,9 @@
     sendRuntime(payload);
   }
 
-  function destroy({ disconnect = true } = {}) {
+  function destroy({ disconnect = true, preserveKnown = false } = {}) {
     if (destroyed) return;
-    clearKnown();
+    if (!preserveKnown) clearKnown();
     if (disconnect) {
       window.postMessage(
         { source: CONTROL_CHANNEL, action: "disconnect", nonce },
@@ -235,7 +252,12 @@
   window.addEventListener("yt-navigate-finish", scheduleVideoSync);
   window.addEventListener("popstate", scheduleVideoSync);
   window.addEventListener("pagehide", destroy, { once: true });
-  globalThis[GLOBAL_KEY] = { destroy };
+  // A MAIN-world player snapshot can remain readable after an unpacked
+  // extension is reloaded, while this isolated-world bridge belongs to the old
+  // invalidated extension context. Expose only readiness plus a same-extension
+  // liveness handshake so the background can distinguish that stale-page case
+  // without reading captions or starting any page/provider request.
+  globalThis[GLOBAL_KEY] = { active: true, pingRuntime, destroy };
   connect();
   for (const delay of [50, 250, 1000]) {
     connectTimers.push(setTimeout(connect, delay));

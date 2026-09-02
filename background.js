@@ -4,7 +4,8 @@
  * This is the "brain" of the extension. It runs in the background and handles:
  * 1. Opening the side panel when the user clicks the extension icon
  * 2. Fetching Bilibili captions and routing YouTube captions through local
- *    cache/Passive capture, a user-facing CC prompt, then optional Supadata
+ *    cache/Passive capture, one fixed Active attempt, a CC prompt, then
+ *    optional Supadata
  * 3. Calling DeepSeek to analyze the transcript
  * 4. Sending results back to the side panel
  *
@@ -25,6 +26,7 @@ importScripts("export-jobs.js");
 
 const DEBUG = false;
 const ANALYSIS_SCHEMA_VERSION = 3;
+const ANALYSIS_TIMESTAMP_ANCHOR_VERSION = 1;
 const RUNTIME_PROTOCOL_VERSION = 12;
 const ANALYSIS_BASE_LANGUAGE = "zh-Hans";
 const TRANSCRIPT_SOURCE_POLICY_VERSION = 5;
@@ -55,7 +57,6 @@ const YOUTUBE_PASSIVE_MAX_BODY_BYTES = 8 * 1024 * 1024;
 const YOUTUBE_PASSIVE_MAX_STATE_BYTES = 6 * 1024 * 1024;
 const YOUTUBE_PASSIVE_MAX_ENTRIES = 6;
 const YOUTUBE_ACTIVE_PRODUCT_FILE = "youtube-transcript-active.js";
-const YOUTUBE_PANEL_PRODUCT_FILE = "youtube-transcript-panel.js";
 const YOUTUBE_TRANSCRIPT_CACHE_SOURCES = new Set([
   "youtube-passive",
   "youtube-active",
@@ -73,7 +74,7 @@ const debugLog = (...args) => {
 // instead of each spending a separate Supadata credit.
 const youtubeSupadataInFlight = new Map();
 // The native free route is shared across tabs/windows by media identity. The
-// leader tab performs the bounded Active/Panel work; every waiter keeps its own
+// leader tab performs the bounded fixed-Active work; every waiter keeps its own
 // tab/run identity and independently revalidates the page before accepting the
 // shared result.
 const youtubeNativeInFlight = new Map();
@@ -970,13 +971,18 @@ async function handleYoutubePassiveState(payload, sender) {
   ) {
     return { ok: false, error: "INVALID_PASSIVE_STATE" };
   }
-  // A stale SPA identity is allowed to clear only its exact old entry. It may
-  // never create or replace a capture for the tab's newly active video.
-  if (type !== "clear" && !(await youtubeTabStillMatches(tabId, videoId))) {
-    return { ok: false, error: "PAGE_CONTEXT_CHANGED" };
-  }
-
   return queueYoutubePassiveMutation(async () => {
+    // Keep the tab/video validation inside the same arrival-order queue as the
+    // buffer mutation.  The bridge deliberately sends `inflight` and
+    // `capture` without blocking the page; if their independent tabs.get()
+    // checks resolve out of order, a valid capture must not overtake and get
+    // rejected before its matching inflight record exists.
+    //
+    // A stale SPA identity is still allowed to clear only its exact old entry.
+    // It may never create or replace a capture for the newly active video.
+    if (type !== "clear" && !(await youtubeTabStillMatches(tabId, videoId))) {
+      return { ok: false, error: "PAGE_CONTEXT_CHANGED" };
+    }
     const entries = await readYoutubePassiveEntries();
     const identity = passiveIdentity(tabId, videoId, language, trackKind);
     const previous = entries.find((entry) => entry.identity === identity);
@@ -1015,6 +1021,12 @@ async function handleYoutubePassiveState(payload, sender) {
       }
       const capture = normalizePassiveCapture(payload);
       if (!capture || capture.videoId !== videoId) {
+        // A completed page response with an empty or unusable body is not a
+        // transcript, but it must still close the matching inflight state.
+        // Leaving that state behind would make later gates wait on work that
+        // has already finished.
+        await writeYoutubePassiveEntries(next);
+        notifyYoutubePassiveWaiters();
         return { ok: false, error: "INVALID_PASSIVE_CAPTURE" };
       }
       next.push({
@@ -1040,11 +1052,16 @@ async function handleYoutubePassiveState(payload, sender) {
   });
 }
 
-async function clearYoutubePassiveTab(tabId) {
+async function clearYoutubePassiveTab(tabId, keepVideoId = "") {
   if (!Number.isInteger(tabId)) return;
+  const retainedVideoId = validYoutubeVideoId(keepVideoId) || "";
   return queueYoutubePassiveMutation(async () => {
     const entries = await readYoutubePassiveEntries();
-    const next = entries.filter((entry) => entry.tabId !== tabId);
+    const next = entries.filter(
+      (entry) =>
+        entry.tabId !== tabId ||
+        (retainedVideoId && entry.videoId === retainedVideoId),
+    );
     if (next.length !== entries.length) {
       await writeYoutubePassiveEntries(next);
       notifyYoutubePassiveWaiters();
@@ -1059,9 +1076,6 @@ function passiveEntryMatches(entry, request) {
   ) {
     return false;
   }
-  const requestedLanguage = youtubePrimaryLanguage(request.preferredLanguage);
-  const entryLanguage = youtubePrimaryLanguage(entry.language);
-  if (requestedLanguage && requestedLanguage !== entryLanguage) return false;
   const requestedKind = normalizeYoutubeTrackKind(request.trackKind);
   if (requestedKind === "manual" && entry.trackKind !== "manual") return false;
   if (requestedKind === "asr" && entry.trackKind !== "asr") return false;
@@ -1076,18 +1090,32 @@ async function readYoutubePassiveGate(request) {
       const requestedLanguage = normalizeLanguageCode(
         request.preferredLanguage,
       );
-      const exactLanguageRank = (entry) =>
-        requestedLanguage &&
-        normalizeLanguageCode(entry.language) !== requestedLanguage
-          ? 1
-          : 0;
+      const requestedPrimaryLanguage = youtubePrimaryLanguage(
+        requestedLanguage,
+      );
+      const languageRank = (entry) => {
+        if (!requestedLanguage) return 0;
+        const entryLanguage = normalizeLanguageCode(entry.language);
+        if (entryLanguage === requestedLanguage) return 0;
+        if (
+          requestedPrimaryLanguage &&
+          youtubePrimaryLanguage(entryLanguage) === requestedPrimaryLanguage
+        ) {
+          return 1;
+        }
+        // The requested/default-audio language remains the first choice, but a
+        // different language that the page actually fetched is still a valid
+        // Passive result. This is important for bilingual videos where the
+        // user is visibly reading a non-default caption track.
+        return 2;
+      };
       const manualRank = (entry) =>
         normalizeYoutubeTrackKind(request.trackKind) === "manual-first" &&
         entry.trackKind !== "manual"
           ? 1
           : 0;
       return (
-        exactLanguageRank(left) - exactLanguageRank(right) ||
+        languageRank(left) - languageRank(right) ||
         manualRank(left) - manualRank(right) ||
         Number(right.updatedAt) - Number(left.updatedAt)
       );
@@ -1107,21 +1135,26 @@ async function readYoutubePassiveGate(request) {
 
 async function awaitYoutubePassiveGate(request) {
   const startedAt = Date.now();
-  let gate = await readYoutubePassiveGate(request);
-  if (gate.capture || !gate.inFlight) return gate.capture;
-  while (gate.inFlight) {
+  while (true) {
+    let gate = await readYoutubePassiveGate(request);
+    if (gate.capture) return gate.capture;
     const remaining = YOUTUBE_PASSIVE_WAIT_MS - (Date.now() - startedAt);
     if (remaining <= 0) return null;
     const observedRevision = youtubePassiveRevision;
-    // Re-read before sleeping: if a capture arrived between the previous read
-    // and waiter registration, the revision check resolves immediately.
+    // Re-read before sleeping: if the first inflight/capture signal arrived
+    // between the previous read and waiter registration, the revision check
+    // resolves immediately. An initially empty buffer receives the same single
+    // bounded budget; it never starts a page request and never waits beyond the
+    // existing 1.5 second total.
     gate = await readYoutubePassiveGate(request);
-    if (gate.capture || !gate.inFlight) return gate.capture;
+    if (gate.capture) return gate.capture;
     await waitForYoutubePassiveChange(remaining, observedRevision);
     gate = await readYoutubePassiveGate(request);
     if (gate.capture) return gate.capture;
+    // No revision means the bounded waiter expired. A revision without a
+    // capture loops only for the time still left in the original total budget.
+    if (youtubePassiveRevision === observedRevision) return null;
   }
-  return null;
 }
 
 // ============================================================
@@ -1250,6 +1283,8 @@ function mergeYouTubeVideoInfo(playerInfo, contentInfo, expectedVideoId) {
     channelName: player?.channelName || content.channelName || "",
     duration: player?.duration || content.duration || 0,
     sourceLanguage: player?.sourceLanguage || content.sourceLanguage || "",
+    captionSelection:
+      player?.captionSelection || content.captionSelection || null,
     description: playerDescriptionIsExact
       ? String(player.description || "")
       : String(content.description || ""),
@@ -1489,7 +1524,13 @@ function updatePanelForTab(tabId, url) {
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   if (!changeInfo.url) return; // ignore title/favicon-only updates
   bumpYoutubeTabNavigationEpoch(tabId);
-  clearYoutubePassiveTab(tabId).catch(() => {});
+  // YouTube may update query parameters without changing the video, and a new
+  // video's Passive capture can arrive before this asynchronous event is
+  // handled. Keep only the identity proved by the new URL so neither case
+  // erases a valid current capture; leaving YouTube still clears the whole tab.
+  clearYoutubePassiveTab(tabId, youtubeVideoIdFromUrl(changeInfo.url)).catch(
+    () => {},
+  );
   updatePanelForTab(tabId, changeInfo.url);
 });
 
@@ -1517,6 +1558,14 @@ chrome.tabs.onActivated.addListener(async ({ tabId }) => {
  * This is like a switchboard — different "actions" trigger different handlers.
  */
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message.action === "youtubePassiveBridgePing") {
+    // Same-extension, page-local liveness handshake. It carries no page data
+    // and lets an isolated bridge prove its chrome.runtime context survived a
+    // service-worker restart or extension reload.
+    sendResponse({ ok: true });
+    return false;
+  }
+
   if (message.action === "youtubePassiveState") {
     handleYoutubePassiveState(message.payload, sender)
       .then(sendResponse)
@@ -1605,6 +1654,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       message.videoDuration,
       message.sourceLanguage,
       message.platform,
+      message.analysisCues,
     )
       .then(sendResponse)
       .catch((err) => sendResponse({ error: err.message }));
@@ -1952,6 +2002,28 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           let playerInfo = null;
           let response = null;
 
+          if (isYouTubeInfoRequest) {
+            const passiveBridgeHealth =
+              await readYoutubePassiveBridgeHealth(tabs[0].id);
+            if (
+              passiveBridgeHealth?.videoId &&
+              passiveBridgeHealth.videoId !== expectedVideoId
+            ) {
+              const pageChangedError = new Error(
+                "YouTube 页面已切换，正在等待当前视频加载完成。",
+              );
+              pageChangedError.code = "PAGE_CONTEXT_CHANGED";
+              throw pageChangedError;
+            }
+            if (passiveBridgeHealth?.ready === false) {
+              const refreshError = new Error(
+                "DigestDock 已更新，请刷新当前 YouTube 页面后重试。",
+              );
+              refreshError.code = "PAGE_REFRESH_REQUIRED";
+              throw refreshError;
+            }
+          }
+
           // The MAIN-world player response is canonical and does not depend on
           // a content script having reached document_idle. This matters when a
           // note opens a brand-new YouTube tab and metadata capture begins while
@@ -2106,7 +2178,81 @@ async function getPlayerVideoDetails(tabId) {
             defaultAudioTrack?.captionTrackIndices?.[0];
           const defaultCaptionTrack =
             captionTracks[defaultCaptionIndex] ||
-            null;
+            captionTracks.find((track) => track?.isDefault === true) ||
+            (captionTracks.length === 1 ? captionTracks[0] : null);
+          const summarizeCaptionTrack = (track) => {
+            const language = String(track?.languageCode || "")
+              .trim()
+              .replace(/_/g, "-")
+              .slice(0, 35);
+            if (
+              !/^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8}){0,3}$/.test(language)
+            ) {
+              return null;
+            }
+            return {
+              language,
+              kind:
+                track?.kind === "asr" ||
+                /^a\./i.test(String(track?.vssId || ""))
+                  ? "asr"
+                  : "manual",
+            };
+          };
+          let currentCaptionTrack = null;
+          try {
+            currentCaptionTrack =
+              player?.getOption?.("captions", "track") || null;
+          } catch (_error) {
+            currentCaptionTrack = null;
+          }
+          const availableTrackSummaries = captionTracks
+            .map(summarizeCaptionTrack)
+            .filter(Boolean);
+          const chineseCodes = new Set([
+            "zh",
+            "zho",
+            "chi",
+            "cmn",
+            "yue",
+            "wuu",
+            "gan",
+            "hak",
+            "nan",
+            "lzh",
+          ]);
+          const chineseTracks = availableTrackSummaries
+            .map((track, index) => ({ ...track, index }))
+            .filter((track) =>
+              chineseCodes.has(track.language.split("-")[0].toLowerCase()),
+            )
+            .sort(
+              (left, right) =>
+                Number(left.kind === "asr") -
+                  Number(right.kind === "asr") ||
+                left.index - right.index,
+            );
+          const currentTrackSummary = summarizeCaptionTrack(currentCaptionTrack);
+          const defaultTrackSummary = summarizeCaptionTrack(defaultCaptionTrack);
+          const isAvailable = (candidate) =>
+            Boolean(
+              candidate &&
+                availableTrackSummaries.some(
+                  (track) =>
+                    track.language === candidate.language &&
+                    track.kind === candidate.kind,
+                ),
+            );
+          const captionSelection = chineseTracks[0]
+            ? {
+                language: chineseTracks[0].language,
+                kind: chineseTracks[0].kind,
+              }
+            : isAvailable(currentTrackSummary)
+              ? currentTrackSummary
+              : isAvailable(defaultTrackSummary)
+                ? defaultTrackSummary
+                : null;
           return {
             videoId,
             title: details.title || "",
@@ -2125,6 +2271,7 @@ async function getPlayerVideoDetails(tabId) {
                 ?.defaultAudioLanguage ||
               defaultCaptionTrack?.languageCode ||
               "",
+            captionSelection,
           };
         } catch (e) {
           return null;
@@ -2138,10 +2285,70 @@ async function getPlayerVideoDetails(tabId) {
   }
 }
 
-// YouTube caption work is owned by the background router. Passive observations
-// are the only automatic free route. A miss asks the user to enable YouTube CC;
-// only a user-driven retry may reveal the explicit-consent Supadata fallback.
-// Active and Panel remain repository experiments and are not product routes.
+/**
+ * Read-only health check for the declarative Passive bridge in this document.
+ *
+ * Reloading an unpacked extension invalidates the old isolated-world context,
+ * but YouTube's MAIN-world player object can remain readable. Without this
+ * check, complete player metadata can mask the stale document and let the
+ * transcript route misreport an empty Passive buffer as a caption miss. The
+ * check performs only a same-extension liveness handshake and reads the current
+ * URL video id; it reads no caption data and initiates no page or provider
+ * request.
+ */
+async function readYoutubePassiveBridgeHealth(tabId) {
+  if (!Number.isInteger(tabId)) return null;
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      world: "ISOLATED",
+      func: async () => {
+        let videoId = "";
+        try {
+          const url = new URL(String(location.href || ""));
+          if (
+            url.protocol === "https:" &&
+            url.hostname === "www.youtube.com" &&
+            url.pathname === "/watch"
+          ) {
+            videoId = String(url.searchParams.get("v") || "");
+          }
+        } catch (_error) {
+          // The caller independently validates the tab URL and route identity.
+        }
+        const bridge =
+          globalThis.__DIGESTDOCK_YOUTUBE_PASSIVE_BRIDGE_V1__ || null;
+        const ready =
+          bridge?.active === true &&
+          typeof bridge.pingRuntime === "function" &&
+          (await bridge.pingRuntime()) === true;
+        return {
+          ready,
+          videoId,
+        };
+      },
+    });
+    const health = results?.[0]?.result;
+    // Test doubles and transient Chrome failures may return another result
+    // shape. Only an explicit marker result is authoritative.
+    if (typeof health?.ready !== "boolean") return null;
+    return {
+      ready: health.ready,
+      videoId: validYoutubeVideoId(health.videoId) || "",
+    };
+  } catch (error) {
+    debugLog(
+      "[DigestDock] Passive bridge health unavailable:",
+      error?.message,
+    );
+    return null;
+  }
+}
+
+// YouTube caption work is owned by the background router. Cache and Passive run
+// before one fixed IOS/json3 Active attempt. A miss asks the user to enable
+// YouTube CC; only a user-driven retry may reveal the explicit-consent Supadata
+// fallback. Panel remains a repository experiment and is not a product route.
 
 /**
  * Read-only, no-network YouTube page gate. Runs in the page MAIN world to
@@ -2190,6 +2397,13 @@ async function readYouTubePlayabilitySnapshot(tabId, expectedVideoId) {
             rawTracks[defaultCaptionIndex] ||
             rawTracks.find((track) => track?.isDefault === true) ||
             (rawTracks.length === 1 ? rawTracks[0] : null);
+          let currentCaptionTrack = null;
+          try {
+            currentCaptionTrack =
+              player?.getOption?.("captions", "track") || null;
+          } catch (_error) {
+            currentCaptionTrack = null;
+          }
           const playability = String(
             response?.playabilityStatus?.status || "",
           ).slice(0, 80);
@@ -2209,6 +2423,41 @@ async function readYouTubePlayabilitySnapshot(tabId, expectedVideoId) {
             /^a\./i.test(String(defaultCaptionTrack?.vssId || ""))
               ? "asr"
               : "manual";
+          const currentTrackLanguage = String(
+            currentCaptionTrack?.languageCode || "",
+          )
+            .trim()
+            .replace(/_/g, "-")
+            .slice(0, 35);
+          const currentTrackKind =
+            currentCaptionTrack?.kind === "asr" ||
+            /^a\./i.test(String(currentCaptionTrack?.vssId || ""))
+              ? "asr"
+              : "manual";
+          const availableTracks = rawTracks
+            .slice(0, 100)
+            .map((track) => {
+              const language = String(track?.languageCode || "")
+                .trim()
+                .replace(/_/g, "-")
+                .slice(0, 35);
+              if (
+                !/^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8}){0,3}$/.test(
+                  language,
+                )
+              ) {
+                return null;
+              }
+              return {
+                language,
+                kind:
+                  track?.kind === "asr" ||
+                  /^a\./i.test(String(track?.vssId || ""))
+                    ? "asr"
+                    : "manual",
+              };
+            })
+            .filter(Boolean);
           // Only the language code, never a signed caption request URL.
           const sourceLanguage =
             response?.videoDetails?.defaultAudioLanguage ||
@@ -2228,6 +2477,7 @@ async function readYouTubePlayabilitySnapshot(tabId, expectedVideoId) {
             captionTrackCount: captionTrackCountKnown
               ? rawTracks.length
               : null,
+            availableTracks: captionTrackCountKnown ? availableTracks : [],
             pageDefaultTrack:
               captionTrackCountKnown &&
               rawTracks.length > 0 &&
@@ -2235,6 +2485,15 @@ async function readYouTubePlayabilitySnapshot(tabId, expectedVideoId) {
                 ? {
                     language: defaultTrackLanguage,
                     kind: defaultTrackKind,
+                  }
+                : null,
+            pageCurrentTrack:
+              captionTrackCountKnown &&
+              rawTracks.length > 0 &&
+              currentTrackLanguage
+                ? {
+                    language: currentTrackLanguage,
+                    kind: currentTrackKind,
                   }
                 : null,
           };
@@ -2278,11 +2537,78 @@ function normalizeYoutubePageCaptionEvidence(snapshot) {
     (kind === "manual" || kind === "asr")
       ? { language, kind }
       : null;
+  const currentTrackLanguage = normalizeLanguageCode(
+    snapshot?.pageCurrentTrack?.language,
+  );
+  const currentTrackKind = snapshot?.pageCurrentTrack?.kind;
+  const currentTrack =
+    captionTrackCount > 0 &&
+    currentTrackLanguage &&
+    (currentTrackKind === "manual" || currentTrackKind === "asr")
+      ? { language: currentTrackLanguage, kind: currentTrackKind }
+      : null;
+  const availableTracks = (Array.isArray(snapshot?.availableTracks)
+    ? snapshot.availableTracks
+    : []
+  )
+    .slice(0, 100)
+    .map((track) => {
+      const trackLanguage = normalizeLanguageCode(track?.language);
+      const trackKind = track?.kind;
+      if (
+        !trackLanguage ||
+        (trackKind !== "manual" && trackKind !== "asr")
+      ) {
+        return null;
+      }
+      return { language: trackLanguage, kind: trackKind };
+    })
+    .filter(Boolean);
   return {
     captionTrackCountKnown: true,
     captionTrackCount,
     selectedTrack,
+    currentTrack,
+    availableTracks,
   };
+}
+
+function chooseYoutubeAutomaticTrack(pageCaptionEvidence) {
+  if (pageCaptionEvidence?.captionTrackCountKnown !== true) return null;
+  const tracks = Array.isArray(pageCaptionEvidence.availableTracks)
+    ? pageCaptionEvidence.availableTracks
+    : [];
+  const normalized = tracks
+    .map((track, index) => {
+      const language = normalizeLanguageCode(track?.language);
+      const kind = track?.kind === "asr" ? "asr" : "manual";
+      return language ? { language, kind, index } : null;
+    })
+    .filter(Boolean);
+  const chinese = normalized
+    .filter((track) => isChineseLanguage(track.language))
+    .sort(
+      (left, right) =>
+        Number(left.kind === "asr") - Number(right.kind === "asr") ||
+        left.index - right.index,
+    );
+  if (chinese[0]) {
+    return { language: chinese[0].language, kind: chinese[0].kind };
+  }
+
+  const exactAvailableTrack = (candidate) => {
+    const language = normalizeLanguageCode(candidate?.language);
+    const kind = candidate?.kind === "asr" ? "asr" : "manual";
+    return normalized.some(
+      (track) => track.language === language && track.kind === kind,
+    )
+      ? { language, kind }
+      : null;
+  };
+  return (
+    exactAvailableTrack(pageCaptionEvidence.currentTrack) ||
+    exactAvailableTrack(pageCaptionEvidence.selectedTrack)
+  );
 }
 
 /**
@@ -2579,7 +2905,7 @@ function normalizeYoutubeNativeProviderResult(result, route) {
       selectedTrack,
       providerVariant:
         result?.providerVariant ||
-        (route === "active" ? "isolated-tab" : "automatic-panel"),
+        (route === "active" ? "isolated-tab-ios-json3" : "automatic-panel"),
       diagnostics,
     });
     if (success) return success;
@@ -2615,7 +2941,7 @@ function normalizeYoutubeNativeProviderResult(result, route) {
         route === "active" ? "YOUTUBE_ACTIVE" : "YOUTUBE_PANEL",
       selectedTrack,
       diagnostics,
-      supadataEligible: true,
+      supadataEligible: false,
     };
   }
   const confirmedUnavailable = new Set([
@@ -2766,36 +3092,11 @@ async function runYoutubeNativeRouteLeader(request) {
     await startYoutubeNativeCooldown();
     return {
       ...active,
-      routeOutcome: "UNKNOWN",
-      skipPanel: true,
+      routeOutcome: "RATE_LIMITED",
+      supadataEligible: false,
     };
   }
-  if (active.routeOutcome !== "UNKNOWN") return active;
-
-  const panelRaw = await runYoutubeProductModule(
-    request.tabId,
-    YOUTUBE_PANEL_PRODUCT_FILE,
-    "DIGESTDOCK_YOUTUBE_PANEL",
-    {
-      ...request,
-      eligibility: {
-        activeFoundCaptionTrack:
-          active.diagnostics?.sawTracks === true,
-        captionTrackCount:
-          request.pageCaptionEvidence?.captionTrackCount ?? null,
-        selectedTrack:
-          active.selectedTrack ||
-          request.pageCaptionEvidence?.selectedTrack ||
-          null,
-        selectedTrackEvidence: active.selectedTrack
-          ? "active"
-          : request.pageCaptionEvidence?.selectedTrack
-            ? "page-default"
-            : null,
-      },
-    },
-  );
-  return normalizeYoutubeNativeProviderResult(panelRaw, "panel");
+  return active;
 }
 
 async function youtubeUnknownFallbackResult(nativeResult) {
@@ -2972,28 +3273,54 @@ async function handleFetchYoutubeNativeTranscript(
   request.pageCaptionEvidence = pageCaptionEvidence;
 
   const cooldownUntil = await readYoutubeNativeCooldownUntil();
-  if (options.captionRetry === true && Date.now() < cooldownUntil) {
+  if (Date.now() < cooldownUntil) {
     return withYoutubeRouteIdentity(
-      await youtubeUnknownFallbackResult({
+      {
         success: false,
         error: "RATE_LIMITED",
-        routeOutcome: "UNKNOWN",
-        skipPanel: true,
+        routeOutcome: "RATE_LIMITED",
         message:
-          "YouTube 原生字幕路线正在短暂冷却；本次不会自动重试。",
+          "YouTube 原生字幕路线正在短暂冷却，本次不会继续请求或进入第三方后备。",
         sourceAttempt: "YOUTUBE_ACTIVE",
-        supadataEligible: true,
-      }),
+        supadataEligible: false,
+      },
       routeIdentity,
     );
   }
 
-  // Product policy is deliberately simpler than the retained experiments:
-  // cache/Passive is the only automatic free route. A first miss asks the user
-  // to enable YouTube captions; only a user-driven retry may reveal Supadata.
-  // The Active and Panel modules remain in the repository as experiment
-  // evidence, but the shipping background never invokes them automatically.
+  // Cache and Passive remain first. The first task may then make exactly one
+  // fixed IOS player request and one json3 timedtext request for the track
+  // derived from the current page's text-free track list. A user-driven CC
+  // retry never repeats Active; it only gives Passive one more chance before
+  // the existing per-attempt Supadata choice. Panel remains experiment-only.
   if (options.captionRetry !== true) {
+    const automaticTrack = chooseYoutubeAutomaticTrack(pageCaptionEvidence);
+    let activeResult = null;
+    if (automaticTrack) {
+      request.language = automaticTrack.language;
+      request.trackKind = automaticTrack.kind;
+      const flightKey = [
+        request.videoId,
+        request.language,
+        request.trackKind,
+      ].join("::");
+      activeResult = await runYoutubeNativeSingleFlight(flightKey, () =>
+        runYoutubeNativeRouteLeader(request),
+      );
+      if (!(await requestStillCurrent())) {
+        return withYoutubeRouteIdentity(
+          {
+            ...pageContextChangedResult(),
+            routeOutcome: "PAGE_CONTEXT_CHANGED",
+            supadataEligible: false,
+          },
+          routeIdentity,
+        );
+      }
+      if (activeResult?.routeOutcome !== "UNKNOWN") {
+        return withYoutubeRouteIdentity(activeResult, routeIdentity);
+      }
+    }
     return withYoutubeRouteIdentity(
       {
         success: false,
@@ -3004,14 +3331,15 @@ async function handleFetchYoutubeNativeTranscript(
         sourceAttempt: "YOUTUBE_PASSIVE",
         requiresCaptionEnable: true,
         supadataEligible: false,
-        diagnostics: {
-          providerInitiated: {
-            youtubePlayer: 0,
-            youtubeTimedtext: 0,
-            thirdParty: 0,
-            loopback: 0,
+        diagnostics:
+          activeResult?.diagnostics || {
+            providerInitiated: {
+              youtubePlayer: 0,
+              youtubeTimedtext: 0,
+              thirdParty: 0,
+              loopback: 0,
+            },
           },
-        },
       },
       routeIdentity,
     );
@@ -3655,6 +3983,73 @@ function shouldUseBilibiliChinese(platform, sourceLanguage) {
   );
 }
 
+function shouldUseChineseNoteCleanup(platform, sourceLanguage) {
+  return platform === "bilibili"
+    ? isConfirmedSimplifiedChineseSource(sourceLanguage)
+    : isChineseLanguage(sourceLanguage);
+}
+
+function normalizeAnalysisCues(cues, transcriptText = "") {
+  const normalized = [];
+  const seenIds = new Set();
+  const append = (cueId, timestampSeconds, text) => {
+    const id = String(cueId || "").trim();
+    const seconds = Number(timestampSeconds);
+    const cleanText = String(text || "").trim();
+    if (
+      !/^cue-\d+$/.test(id) ||
+      seenIds.has(id) ||
+      !Number.isFinite(seconds) ||
+      seconds < 0 ||
+      !cleanText
+    ) {
+      return;
+    }
+    seenIds.add(id);
+    normalized.push({
+      cueId: id,
+      timestampSeconds: Math.floor(seconds),
+      text: cleanText.slice(0, 4000),
+    });
+  };
+
+  if (Array.isArray(cues)) {
+    cues.slice(0, 2000).forEach((cue) =>
+      append(cue?.cueId, cue?.timestampSeconds, cue?.text),
+    );
+  }
+
+  if (!normalized.length) {
+    const linePattern = /^\[(\d+):([0-5]\d)\]\s*(.+)$/gm;
+    let match;
+    let index = 0;
+    while ((match = linePattern.exec(String(transcriptText || "")))) {
+      append(
+        `cue-${index}`,
+        Number(match[1]) * 60 + Number(match[2]),
+        match[3],
+      );
+      index += 1;
+      if (index >= 2000) break;
+    }
+  }
+
+  return normalized.sort(
+    (left, right) =>
+      left.timestampSeconds - right.timestampSeconds ||
+      Number(left.cueId.slice(4)) - Number(right.cueId.slice(4)),
+  );
+}
+
+function analysisCueTranscriptText(cues) {
+  return cues
+    .map(
+      (cue) =>
+        `[${cue.cueId} @ ${formatYoutubeTranscriptTimestamp(cue.timestampSeconds)}] ${cue.text}`,
+    )
+    .join("\n");
+}
+
 /**
  * Sends the transcript to DeepSeek for analysis.
  *
@@ -3676,6 +4071,7 @@ async function handleAnalyzeTranscript(
   videoDuration,
   sourceLanguage = "",
   platform = "youtube",
+  analysisCues = [],
 ) {
   // Hoisted so the catch block can name the active provider in error copy.
   let settings;
@@ -3689,22 +4085,21 @@ async function handleAnalyzeTranscript(
       };
     }
 
-    // Convert duration to MM:SS format for context
-    // The transcript text is already prefixed with [M:SS] markers. Its LAST
-    // marker is the most reliable signal of where the content actually ends —
-    // more trustworthy than the duration metadata, which is sometimes missing
-    // or wrong. We use the larger of (metadata duration, last transcript stamp).
-    let lastTranscriptSeconds = 0;
-    const stampMatches = transcriptText.match(/\[(\d+):(\d{2})\]/g) || [];
-    if (stampMatches.length) {
-      const last =
-        stampMatches[stampMatches.length - 1].match(/\[(\d+):(\d{2})\]/);
-      lastTranscriptSeconds = parseInt(last[1]) * 60 + parseInt(last[2]);
+    const normalizedAnalysisCues = normalizeAnalysisCues(
+      analysisCues,
+      transcriptText,
+    );
+    if (!normalizedAnalysisCues.length) {
+      throw new Error("字幕没有可用于概览跳转的时间锚点。");
     }
-
+    const promptTranscriptText = analysisCueTranscriptText(
+      normalizedAnalysisCues,
+    );
+    // Chapters can only point at spoken content. Metadata duration may include
+    // a silent intro/outro or be stale, so the last real cue is authoritative.
     const effectiveSeconds = Math.max(
-      Math.floor(videoDuration || 0),
-      lastTranscriptSeconds,
+      0,
+      ...normalizedAnalysisCues.map((cue) => cue.timestampSeconds),
     );
     const durationMinutes = Math.floor(effectiveSeconds / 60);
     const durationSeconds = Math.floor(effectiveSeconds % 60);
@@ -3732,7 +4127,7 @@ async function handleAnalyzeTranscript(
       channelName: channelName || "Unknown",
       videoDescription: videoDescription || "No description available",
       sourceLanguage: normalizedSourceLanguage,
-      transcriptText,
+      transcriptText: promptTranscriptText,
       platform: normalizedPlatform,
     };
     const systemPrompt = await loadPromptSection(
@@ -3769,6 +4164,7 @@ async function handleAnalyzeTranscript(
       analysis,
       maxTimestampSeconds,
       normalizedSourceLanguage,
+      normalizedAnalysisCues,
     );
     if (!hasUsableChineseOverview(analysis)) {
       throw new Error(
@@ -3812,7 +4208,12 @@ async function handleAnalyzeTranscript(
  * @param {string} sourceLanguage - Trusted source caption language
  * @returns {Object} - Analysis with validated timestamps and language metadata
  */
-function validateAndFixTimestamps(analysis, maxSeconds, sourceLanguage) {
+function validateAndFixTimestamps(
+  analysis,
+  maxSeconds,
+  sourceLanguage,
+  analysisCues = [],
+) {
   const safeMax =
     Number.isFinite(Number(maxSeconds)) && Number(maxSeconds) > 0
       ? Number(maxSeconds)
@@ -3834,6 +4235,37 @@ function validateAndFixTimestamps(analysis, maxSeconds, sourceLanguage) {
     }
     return Math.floor(seconds);
   };
+  const cues = normalizeAnalysisCues(analysisCues).filter(
+    (cue) => safeSeconds(cue.timestampSeconds) !== null,
+  );
+  const cueById = new Map(cues.map((cue) => [cue.cueId, cue]));
+  const nearestCue = (seconds) => {
+    if (!cues.length || seconds === null) return null;
+    return cues.reduce((best, cue) => {
+      if (!best) return cue;
+      const distance = Math.abs(cue.timestampSeconds - seconds);
+      const bestDistance = Math.abs(best.timestampSeconds - seconds);
+      return distance < bestDistance ||
+        (distance === bestDistance && cue.timestampSeconds < best.timestampSeconds)
+        ? cue
+        : best;
+    }, null);
+  };
+  const resolveCue = (value) => {
+    const requestedId = String(
+      typeof value === "string" ? value : value?.cueId || "",
+    ).trim();
+    if (requestedId && cueById.has(requestedId)) {
+      return cueById.get(requestedId);
+    }
+    const seconds = safeSeconds(
+      typeof value === "number" ? value : value?.timestampSeconds,
+    );
+    if (cues.length) return nearestCue(seconds);
+    return seconds === null
+      ? null
+      : { cueId: "", timestampSeconds: seconds, text: "" };
+  };
   let normalizedSourceLanguage = resolveSourceLanguage(sourceLanguage);
   const detectedSourceLanguage = normalizeLanguageCode(
     analysis?.detectedSourceLanguage,
@@ -3852,17 +4284,18 @@ function validateAndFixTimestamps(analysis, maxSeconds, sourceLanguage) {
   const chapters = (Array.isArray(analysis?.chapters) ? analysis.chapters : [])
     .slice(0, 100)
     .map((chapter) => {
-      const seconds = safeSeconds(chapter?.timestampSeconds);
+      const cue = resolveCue(chapter);
       const titleZh = safeString(chapter?.titleZh, 300);
       const summaryZh = safeString(chapter?.summaryZh, 1500);
-      if (seconds === null || !titleZh || !summaryZh) {
+      if (!cue || !titleZh || !summaryZh) {
         return null;
       }
       return {
+        ...(cue.cueId ? { cueId: cue.cueId } : {}),
         titleZh,
         summaryZh,
-        timestampSeconds: seconds,
-        timestamp: formatTimestamp(seconds),
+        timestampSeconds: cue.timestampSeconds,
+        timestamp: formatTimestamp(cue.timestampSeconds),
       };
     })
     .filter(Boolean)
@@ -3873,18 +4306,19 @@ function validateAndFixTimestamps(analysis, maxSeconds, sourceLanguage) {
   )
     .slice(0, 50)
     .map((quote) => {
-      const seconds = safeSeconds(quote?.timestampSeconds);
+      const cue = resolveCue(quote);
       const quoteOriginal = safeString(quote?.quoteOriginal, 3000);
       const proposedQuoteZh = safeString(quote?.quoteZh, 3000);
       const quoteZh = sourceIsSimplifiedChinese
         ? quoteOriginal
         : proposedQuoteZh;
-      if (seconds === null || !quoteOriginal || !quoteZh) return null;
+      if (!cue || !quoteOriginal || !quoteZh) return null;
       return {
+        ...(cue.cueId ? { cueId: cue.cueId } : {}),
         quoteOriginal,
         quoteZh,
-        timestampSeconds: seconds,
-        timestamp: formatTimestamp(seconds),
+        timestampSeconds: cue.timestampSeconds,
+        timestamp: formatTimestamp(cue.timestampSeconds),
       };
     })
     .filter(Boolean)
@@ -3893,12 +4327,13 @@ function validateAndFixTimestamps(analysis, maxSeconds, sourceLanguage) {
   const keyMoments = (
     Array.isArray(analysis?.keyMoments) ? analysis.keyMoments : []
   )
-    .map(safeSeconds)
+    .map((value) => resolveCue(value)?.timestampSeconds ?? null)
     .filter((seconds) => seconds !== null)
     .slice(0, 100);
 
   return {
     schemaVersion: ANALYSIS_SCHEMA_VERSION,
+    timestampAnchorVersion: ANALYSIS_TIMESTAMP_ANCHOR_VERSION,
     baseLanguage: ANALYSIS_BASE_LANGUAGE,
     sourceLanguage: normalizedSourceLanguage,
     chapters,
@@ -4136,23 +4571,21 @@ async function handleSaveNote(
     const matchedLanguage = normalizeLanguageCode(matchedLine.language);
     const storedSourceLanguage =
       matchedLanguage.length <= 20 ? matchedLanguage : "";
-    const directBilibiliChineseNote = shouldUseBilibiliChinese(
+    const directChineseNote = shouldUseChineseNoteCleanup(
       mediaRef.platform,
       matchedLanguage,
     );
 
-    // YouTube's definitively Chinese captions already match the product's
-    // target language, so retain the mainline zero-cleanup behavior. Bilibili
-    // Chinese captions intentionally get one Chinese cleanup call to repair
-    // sentence boundaries and punctuation; the Notes panel remains the sole
-    // owner of any later translation work.
+    // A trusted Chinese source uses the same contextual cleanup contract on
+    // both platforms. With no AI key cleanupNoteText deterministically joins
+    // local context; skipAiCleanup remains a strict zero-provider path.
     await requireExactTabRoute(tabId, actionRouteKey);
     const combinedOriginalText = [beforeLine, matchedLine.text, afterLine]
       .filter(Boolean)
       .join(" ");
     const cleanedText = skipAiCleanup
       ? combinedOriginalText
-      : isChineseLanguage(matchedLanguage) && !directBilibiliChineseNote
+      : isChineseLanguage(matchedLanguage) && !directChineseNote
         ? String(matchedLine.text || "").trim()
       : await cleanupNoteText(
           matchedLine.text,
@@ -4164,16 +4597,22 @@ async function handleSaveNote(
           matchedLanguage,
         );
 
-    // Format timestamp as MM:SS
-    const minutes = Math.floor(safeTimestamp / 60);
-    const seconds = safeTimestamp % 60;
+    // Store the source cue that produced the note. The user's reaction-offset
+    // sample is only for choosing a cue and must not become a fake timestamp.
+    const matchedStart = Number(matchedLine?.start);
+    const noteTimestampSeconds = Math.max(
+      0,
+      Math.floor(Number.isFinite(matchedStart) ? matchedStart : safeTimestamp),
+    );
+    const minutes = Math.floor(noteTimestampSeconds / 60);
+    const seconds = noteTimestampSeconds % 60;
     const formattedTimestamp = `${minutes}:${String(seconds).padStart(2, "0")}`;
 
     // Create timestamped URL
     const timestampedUrl =
       mediaRef.platform === "bilibili"
-        ? BILIBILI_ADAPTER.timestampUrl(mediaRef, safeTimestamp)
-        : `${canonicalVideoUrl}&t=${safeTimestamp}s`;
+        ? BILIBILI_ADAPTER.timestampUrl(mediaRef, noteTimestampSeconds)
+        : `${canonicalVideoUrl}&t=${noteTimestampSeconds}s`;
     const normalizedNoteText = String(cleanedText || matchedLine.text || "")
       .trim()
       .slice(0, 3000);
@@ -4198,7 +4637,7 @@ async function handleSaveNote(
           ? resolvedChannelName.trim().slice(0, 300)
           : "",
       timestamp: formattedTimestamp,
-      timestampSeconds: safeTimestamp,
+      timestampSeconds: noteTimestampSeconds,
       timestampedUrl: timestampedUrl,
       text: normalizedNoteText,
       translatedText: "",
@@ -4207,7 +4646,7 @@ async function handleSaveNote(
       translatedUnchanged: false,
       rawText: String(matchedLine.text || "").trim().slice(0, 3000),
       sourceLanguage: storedSourceLanguage,
-      textLanguage: directBilibiliChineseNote ? "zh-CN" : "",
+      textLanguage: directChineseNote ? matchedLanguage : "",
       createdAt: Date.now(),
     };
 
@@ -4396,7 +4835,7 @@ async function cleanupNoteText(
     };
     const systemPrompt = await loadPromptSection(
       "note-cleanup.md",
-      shouldUseBilibiliChinese(platform, sourceLanguage)
+      shouldUseChineseNoteCleanup(platform, sourceLanguage)
         ? "Chinese system prompt"
         : "System prompt",
       variables,
@@ -5131,8 +5570,13 @@ function sameUnitKeyList(left, right) {
 }
 
 function exportStoredNoteOriginalText(note) {
+  const textLanguage = normalizeLanguageCode(note?.textLanguage);
+  const trustedChineseText =
+    note?.platform === "bilibili"
+      ? isConfirmedSimplifiedChineseSource(textLanguage)
+      : isChineseLanguage(textLanguage);
   if (
-    isConfirmedSimplifiedChineseSource(note?.textLanguage) &&
+    trustedChineseText &&
     typeof note?.text === "string" &&
     note.text.trim()
   ) {
@@ -8017,6 +8461,7 @@ globalThis.__YTD_TRANSLATION_TESTING__ = {
   looksLikeChineseTranscript,
   noteHasChineseSource,
   shouldUseBilibiliChinese,
+  shouldUseChineseNoteCleanup,
   normalizeLanguageCode,
   normalizeOverviewOriginalTranslation,
   normalizeNoteTranslation,
@@ -8037,15 +8482,21 @@ globalThis.__YTD_TRANSLATION_TESTING__ = {
   handleUpsertNoteSource,
   resolveSourceLanguage,
   saveNoteToStorage,
+  exportStoredNoteOriginalText,
   sendMessageToContentWithRecovery,
   validateAndFixTimestamps,
+  normalizeAnalysisCues,
+  analysisCueTranscriptText,
   validateOverviewOriginalTranslationRequest,
   validateNoteTranslationRequest,
   validateTranscriptBatchRequest,
   normalizeTranslatedSegmentBatch,
   handleTranslateContent,
   isSupportedVideoUrl,
+  getPlayerVideoDetails,
+  mergeYouTubeVideoInfo,
   readYouTubePlayabilitySnapshot,
+  readYoutubePassiveBridgeHealth,
   classifyYouTubePlayability,
   youtubeTabStillMatches,
   youtubeTabNavigationEpoch,
@@ -8054,6 +8505,8 @@ globalThis.__YTD_TRANSLATION_TESTING__ = {
   readYoutubePassiveGate,
   awaitYoutubePassiveGate,
   normalizePassiveCapture,
+  normalizeYoutubePageCaptionEvidence,
+  chooseYoutubeAutomaticTrack,
   normalizeYoutubeNativeProviderResult,
   runYoutubeProductModule,
   runYoutubeNativeRouteLeader,

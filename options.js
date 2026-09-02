@@ -12,6 +12,7 @@ const YTD_OPTIONS = (() => {
       navGroupSettings: "Settings",
       navGroupOther: "Other",
       navServices: "Service connections",
+      navReading: "Reading display",
       navNotes: "Notes & backup",
       navPrivacy: "Privacy",
       supadataTagline: "Optional provider for new YouTube transcripts",
@@ -52,6 +53,20 @@ const YTD_OPTIONS = (() => {
       providerPrivacyNote:
         "Keys are stored only in this Chrome profile. Saving an original note sends nothing; overviews, explanations, translation, or AI note polishing send the key and necessary content directly to the selected provider. Review that provider's terms and pricing first.",
       saveSettings: "Save settings",
+      readingDisplay: "Reading display",
+      readingDisplayHelp:
+        "Adjust transcript, overview-summary, note body, and related timecode sizes. Bold applies only to body copy; titles and action buttons stay unchanged. Changes apply immediately.",
+      readingImmediate: "Applies instantly",
+      readingSize: "Reading text size",
+      readingSizeSmall: "Small",
+      readingSizeStandard: "Standard",
+      readingSizeLarge: "Large",
+      readingSizeExtraLarge: "Extra large",
+      readingWeight: "Text weight",
+      readingWeightRegular: "Regular",
+      readingWeightBold: "Bold",
+      readingApplied: "Reading display updated in DigestDock.",
+      readingSaveFailed: "Could not save the reading display. The previous choice was restored.",
       notesBackup: "Notes backup",
       notesBackupHelp:
         "The JSON backup contains saved notes, stored language versions, and validated YouTube or Bilibili media identity and timestamps. It never includes API keys, settings, full transcripts, or digest caches. Import rebuilds safe timestamp links, merges with local notes, and skips duplicates.",
@@ -117,6 +132,7 @@ const YTD_OPTIONS = (() => {
       navGroupSettings: "设置",
       navGroupOther: "其他",
       navServices: "服务连接",
+      navReading: "阅读显示",
       navNotes: "笔记与备份",
       navPrivacy: "隐私说明",
       supadataTagline: "新 YouTube 视频的可选字幕服务",
@@ -156,6 +172,20 @@ const YTD_OPTIONS = (() => {
       providerPrivacyNote:
         "密钥只在当前 Chrome 个人资料中持久保存。保存原文笔记不会发送内容；生成概览、讲解、翻译或 AI 润色笔记时，密钥和必要内容会从扩展直接发送给所选服务。请先查看该服务的条款和价格。",
       saveSettings: "保存设置",
+      readingDisplay: "阅读显示",
+      readingDisplayHelp:
+        "调整字幕、概览摘要、笔记正文和对应时间码的大小。粗体只作用于正文，标题与操作按钮保持原样；选择后立即应用。",
+      readingImmediate: "即时应用",
+      readingSize: "阅读文字大小",
+      readingSizeSmall: "小",
+      readingSizeStandard: "标准",
+      readingSizeLarge: "大",
+      readingSizeExtraLarge: "特大",
+      readingWeight: "文字粗细",
+      readingWeightRegular: "常规",
+      readingWeightBold: "粗体",
+      readingApplied: "阅读显示已同步到 DigestDock。",
+      readingSaveFailed: "无法保存阅读显示，已恢复之前的选择。",
       notesBackup: "笔记备份",
       notesBackupHelp:
         "JSON 备份只包含已保存笔记、语言版本和经过校验的 YouTube 或 B 站媒体身份与时间戳，不包含 API 密钥、设置、完整字幕或摘要缓存。导入会重建安全时间戳链接，与本机笔记合并，并自动跳过重复项。",
@@ -584,6 +614,7 @@ const YTD_OPTIONS = (() => {
       getSafeLocalStorage(root),
     );
     const providersApi = root.YTD_AI_PROVIDERS;
+    const readingApi = root.YTD_READING_DISPLAY;
     const form = doc.getElementById("settingsForm");
     const aiApiKeyInput = doc.getElementById("aiApiKey");
     const supadataApiKeyInput = doc.getElementById("supadataApiKey");
@@ -599,6 +630,13 @@ const YTD_OPTIONS = (() => {
     const aiStatus = doc.getElementById("aiStatus");
     const supadataStatus = doc.getElementById("supadataStatus");
     const revealToggles = [...doc.querySelectorAll("[data-reveal]")];
+    const readingSizeInputs = [
+      ...doc.querySelectorAll('input[name="readingSize"]'),
+    ];
+    const readingWeightInputs = [
+      ...doc.querySelectorAll('input[name="readingWeight"]'),
+    ];
+    const readingDisplayStatus = doc.getElementById("readingDisplayStatus");
     const settingsScroll = doc.querySelector(".settings-scroll");
     const settingsNavItems = [...doc.querySelectorAll(".settings-nav-item")];
     const settingsNavTargets = settingsNavItems
@@ -680,6 +718,43 @@ const YTD_OPTIONS = (() => {
     function setStatus(element, key, params = {}) {
       statusStates.set(element, { key, params });
       renderStatus(element);
+    }
+
+    function syncReadingControls(value) {
+      if (!readingApi) return;
+      const normalized = readingApi.normalizeReadingDisplay(value);
+      for (const input of readingSizeInputs) {
+        input.checked = input.value === normalized.size;
+      }
+      for (const input of readingWeightInputs) {
+        input.checked = input.value === normalized.weight;
+      }
+    }
+
+    async function saveReadingDisplayChoice() {
+      if (!readingApi) return;
+      const size = readingSizeInputs.find((input) => input.checked)?.value;
+      const weight = readingWeightInputs.find((input) => input.checked)?.value;
+      try {
+        const saved = await readingApi.persistReadingDisplay({ size, weight });
+        syncReadingControls(saved);
+        readingDisplayStatus?.classList?.toggle("is-error", false);
+        if (readingDisplayStatus) setStatus(readingDisplayStatus, "readingApplied");
+      } catch (_error) {
+        syncReadingControls(readingApi.currentReadingDisplay());
+        readingDisplayStatus?.classList?.toggle("is-error", true);
+        if (readingDisplayStatus) {
+          setStatus(readingDisplayStatus, "readingSaveFailed");
+        }
+      }
+    }
+
+    async function initializeReadingDisplay() {
+      if (!readingApi) return false;
+      const applied = await readingApi.boot();
+      syncReadingControls(applied);
+      readingApi.watchStoredReadingDisplay(syncReadingControls);
+      return true;
     }
 
     // Presentation-only: reflect whether each key is present. Reads the loaded
@@ -1380,6 +1455,10 @@ const YTD_OPTIONS = (() => {
     for (const button of revealToggles) {
       button.addEventListener("click", () => toggleKeyReveal(button));
     }
+    for (const input of [...readingSizeInputs, ...readingWeightInputs]) {
+      input.addEventListener("change", () => void saveReadingDisplayChoice());
+    }
+    void initializeReadingDisplay();
 
     // Provider combobox wiring. Building the list, opening/closing, keyboard
     // navigation, and outside-click dismissal all stay local: no network call.

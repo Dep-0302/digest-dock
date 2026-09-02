@@ -9,6 +9,7 @@ const DEBUG = false;
 const REQUIRED_RUNTIME_PROTOCOL_VERSION = 12;
 const EXPORT_CONTENT_CONTRACT_VERSION = 4;
 const OVERVIEW_CACHE_SCHEMA_VERSION = 2;
+const ANALYSIS_TIMESTAMP_ANCHOR_VERSION = 1;
 const OVERVIEW_CACHE_PREFIX = "overview_";
 const OVERVIEW_CACHE_MAX_ENTRIES = 100;
 const debugLog = (...args) => {
@@ -105,6 +106,7 @@ let currentVideoDescriptionState = "unknown";
 let currentVideoDescriptionTruncated = false;
 let currentVideoDuration = 0;
 let currentVideoSourceLanguage = "";
+let currentVideoCaptionSelection = null;
 let isAnalysisLoading = false; // Track if analysis is in progress
 let videoTabId = null; // Exact supported video tab for seek/playback messaging.
 let currentConfigStatus = null;
@@ -956,9 +958,17 @@ function sendTranslationMessage(message) {
 }
 
 // --- Auto-scroll state (follow video playback in transcript) ---
+const FOLLOW_IDLE_RESUME_DELAY_MS = 5000;
+const FOLLOW_PLAYBACK_READ_TIMEOUT_MS = 900;
 let autoScrollEnabled = true; // True = scroll transcript to follow video playback
 let autoScrollInterval = null; // setInterval ID for polling video time
 let lastAutoScrollTime = 0; // Timestamp of last programmatic scroll (ignores scroll events within 1s)
+let playbackTrackingEpoch = 0;
+let playbackTrackingRequestToken = 0;
+let playbackTrackingRequestInFlight = false;
+let followIdleController = null;
+let followManualHoldTab = null;
+let followIntentRevision = 0;
 
 // ============================================================
 // TRANSCRIPT GROUPING
@@ -986,6 +996,17 @@ function normalizeCaptionText(text) {
     .replace(/([，。；：！？])\s+(?=[\u3400-\u9fff])/g, "$1")
     .replace(/\s+([,.;:!?，。；：！？])/g, "$1")
     .trim();
+}
+
+function needsVisualChineseQuotes(text) {
+  const value = String(text || "").trim();
+  if (!/[\u3400-\u9fff]/.test(value)) return false;
+  if (/[，。！？；：、,.!?;:]/.test(value)) return false;
+  return !/^[“「『\"]+[\s\S]*[”」』\"]+$/.test(value);
+}
+
+function chineseVisualQuoteClass(text) {
+  return needsVisualChineseQuotes(text) ? " chinese-visual-quote" : "";
 }
 
 /**
@@ -1030,7 +1051,7 @@ function transcriptSegmentProfile(text, fallback = TRANSCRIPT_SEGMENT_LIMITS) {
   return compactCjk ? COMPACT_CJK_SEGMENT_LIMITS : fallback;
 }
 
-function splitCaptionPiece(text, start, duration, profile) {
+function splitCaptionPiece(text, start, duration, profile, seekStart = start) {
   const normalized = normalizeCaptionText(text);
   if (!normalized) return [];
   const compactCjk = profile === COMPACT_CJK_SEGMENT_LIMITS;
@@ -1064,6 +1085,7 @@ function splitCaptionPiece(text, start, duration, profile) {
     return {
       text: part,
       start: start + duration * startRatio,
+      seekStart,
       end: start + duration * endRatio,
       semanticEnd:
         /[.!?。！？]["')\]”’）】」』]*$/.test(part) || parts.length > 1,
@@ -1106,8 +1128,13 @@ function groupTranscriptEntries(entries, limits = TRANSCRIPT_SEGMENT_LIMITS) {
         start + duration * ratio,
         sentenceDuration,
         profile,
+        start,
       ).forEach((piece, partIndex) => {
-        pieces.push({ ...piece, sourceOrder: `${entryIndex}:${partIndex}` });
+        pieces.push({
+          ...piece,
+          sourceEntryIndex: entryIndex,
+          sourceOrder: `${entryIndex}:${partIndex}`,
+        });
       });
       consumedChars += cleanPart.length;
     });
@@ -1120,11 +1147,15 @@ function groupTranscriptEntries(entries, limits = TRANSCRIPT_SEGMENT_LIMITS) {
     if (!current || !current.text.trim()) return;
     const index = grouped.length;
     const text = normalizeCaptionText(current.text);
+    const texts = current.visualFragments
+      .map((fragment) => normalizeCaptionText(fragment.text))
+      .filter(Boolean);
     grouped.push({
       id: `segment-${index}-${Math.round(current.start * 1000)}`,
       start: current.start,
+      seekStart: current.seekStart,
       text,
-      texts: [text],
+      texts: texts.length ? texts : [text],
     });
     current = null;
   };
@@ -1142,8 +1173,27 @@ function groupTranscriptEntries(entries, limits = TRANSCRIPT_SEGMENT_LIMITS) {
       }
     }
 
-    if (!current) current = { start: piece.start, end: piece.end, text: "" };
+    if (!current) {
+      current = {
+        start: piece.start,
+        seekStart: piece.seekStart,
+        end: piece.end,
+        text: "",
+        visualFragments: [],
+      };
+    }
     current.text = normalizeCaptionText(`${current.text} ${piece.text}`);
+    const previousFragment = current.visualFragments.at(-1);
+    if (previousFragment?.sourceEntryIndex === piece.sourceEntryIndex) {
+      previousFragment.text = normalizeCaptionText(
+        `${previousFragment.text} ${piece.text}`,
+      );
+    } else {
+      current.visualFragments.push({
+        sourceEntryIndex: piece.sourceEntryIndex,
+        text: piece.text,
+      });
+    }
     current.end = Math.max(current.end, piece.end);
     const profile = transcriptSegmentProfile(current.text, limits);
     const elapsed = Math.max(0, current.end - current.start);
@@ -1801,7 +1851,14 @@ function setupEventListeners() {
 
   // Tab switching
   document.querySelectorAll(".tab").forEach((tab) => {
-    tab.addEventListener("click", () => switchTab(tab.dataset.tab));
+    tab.addEventListener("click", () => {
+      followIntentRevision += 1;
+      const nextTab = tab.dataset.tab;
+      const previousTab = currentWorkspaceTab();
+      if (previousTab !== nextTab) followManualHoldTab = null;
+      cancelFollowIdleResume({ clearHold: true });
+      switchTab(nextTab);
+    });
   });
 
   // Error retry
@@ -1855,20 +1912,26 @@ function setupEventListeners() {
     });
   });
 
-  // Follow playback button — re-enables auto-scroll after user scrolled away
+  const contentArea = document.getElementById("contentArea");
+  for (const eventName of ["pointerdown", "touchstart", "wheel", "keydown", "focusin"]) {
+    contentArea?.addEventListener(eventName, onFollowWorkspaceInteraction);
+  }
+  contentArea?.addEventListener("scroll", onFollowWorkspaceInteraction, {
+    passive: true,
+  });
+  document.addEventListener("selectionchange", onFollowWorkspaceInteraction);
+
+  // Follow controls belong only to manual reading inside the Transcript tab.
   document
     .getElementById("followPlaybackBtn")
-    ?.addEventListener("click", () => {
-      autoScrollEnabled = true;
-      document.getElementById("followPlaybackBtn").style.display = "none";
-      // Jump straight back to the line currently being spoken. We scroll
-      // directly (not via playbackTrackingTick) because the tick skips
-      // entries that are already highlighted — and the current line almost
-      // always IS highlighted, which made this button appear to do nothing.
-      if (!scrollToActiveEntry()) {
-        playbackTrackingTick(); // No highlight yet — let a tick establish one
-      }
-    });
+    ?.addEventListener("click", () => void resumeFollowPlaybackNow());
+  document.getElementById("followStayBtn")?.addEventListener("click", () => {
+    if (currentWorkspaceTab() !== "transcript") return;
+    followManualHoldTab = currentWorkspaceTab();
+    cancelFollowIdleResume({ keepPrompt: true });
+    showFollowPlaybackPrompt({ held: true });
+    announceFollowPlayback("已暂停自动跟随。切回字幕或点击立即跟随即可恢复。");
+  });
 
   // Notes filter buttons
   document.getElementById("notesFilterThis")?.addEventListener("click", () => {
@@ -2063,6 +2126,7 @@ async function runCheckCurrentTab(generation, options = {}) {
     let nextVideoDescriptionTruncated = false;
     let nextVideoDuration = 0;
     let nextSourceLanguage = "";
+    let nextCaptionSelection = null;
 
     if (locator.platform === "bilibili") {
       const resolved = await chrome.runtime.sendMessage({
@@ -2127,6 +2191,9 @@ async function runCheckCurrentTab(generation, options = {}) {
       nextVideoDescriptionTruncated = videoInfo?.descriptionTruncated === true;
       nextVideoDuration = videoInfo?.duration || 0;
       nextSourceLanguage = normalizeLanguageCode(videoInfo?.sourceLanguage);
+      nextCaptionSelection = sanitizeTranscriptSelectedTrack(
+        videoInfo?.captionSelection,
+      );
     }
 
     // Resolve/relay crosses an async boundary. Re-read the exact tab and apply
@@ -2150,12 +2217,14 @@ async function runCheckCurrentTab(generation, options = {}) {
     currentVideoDescriptionZh = "";
     currentVideoDuration = nextVideoDuration;
     currentVideoSourceLanguage = nextSourceLanguage;
+    currentVideoCaptionSelection = nextCaptionSelection;
 
     await startDigest(
       nextMediaRef.mediaKey,
       nextVideoUrl,
       nextMediaRef,
       locator.routeKey,
+      nextCaptionSelection,
     );
   } catch (error) {
     if (!isLatestCheck()) return;
@@ -2188,6 +2257,8 @@ async function runCheckCurrentTab(generation, options = {}) {
 
 function resetDigestStateForVideo(videoId, videoUrl, mediaRef, routeKey) {
   const previousExportJobId = activeExportJobId;
+  stopPlaybackTracking();
+  cancelFollowIdleResume({ clearHold: true });
   digestGeneration += 1;
   translationGeneration += 1;
   exportTranslationGeneration += 1;
@@ -2212,6 +2283,7 @@ function resetDigestStateForVideo(videoId, videoUrl, mediaRef, routeKey) {
   currentTranscriptSource = "";
   currentTranscriptSelectedTrack = null;
   currentTranscriptSourceAttempt = "";
+  currentVideoCaptionSelection = null;
   currentPersistedNoteSource = null;
   activeExportJobId = "";
   if (previousExportJobId) {
@@ -2480,28 +2552,35 @@ async function enterNotesOnlyView(context, tab, locator) {
   return true;
 }
 
+function digestMediaIdentityChanged(
+  nextVideoId,
+  nextRouteKey,
+  activeVideoId,
+  activeRouteKey,
+) {
+  return nextVideoId !== activeVideoId || nextRouteKey !== activeRouteKey;
+}
+
 function startDigest(
   videoId,
   videoUrl,
   mediaRef = currentMediaRef,
   routeKey = currentRouteKey,
+  captionSelection = currentVideoCaptionSelection,
 ) {
   const nextMediaRef = mediaRef || currentMediaRef;
   const nextRouteKey = routeKey || currentRouteKey;
-  const sourceTrackChanged =
-    nextMediaRef?.platform !== "bilibili" &&
-    videoId === currentVideoId &&
-    currentVideoSourceLanguage &&
-    currentTranscript &&
-    (!currentTranscriptLanguage ||
-      !languagesSharePrimary(
-        currentVideoSourceLanguage,
-        currentTranscriptLanguage,
-      ));
-  const videoChanged =
-    videoId !== currentVideoId ||
-    nextRouteKey !== currentRouteKey ||
-    sourceTrackChanged;
+  // Media identity is video + route, never the default audio language. A
+  // Chinese subtitle selected for an English-audio video remains the same
+  // digest across tab activation, page-complete, and scheduled refresh events.
+  // A future track replacement must arrive as a new validated transcript
+  // artifact; it must not be guessed from metadata language drift here.
+  const videoChanged = digestMediaIdentityChanged(
+    videoId,
+    nextRouteKey,
+    currentVideoId,
+    currentRouteKey,
+  );
   if (videoChanged) {
     resetDigestStateForVideo(
       videoId,
@@ -2514,6 +2593,9 @@ function startDigest(
     currentMediaRef = nextMediaRef;
     currentRouteKey = nextRouteKey;
   }
+  currentVideoCaptionSelection = sanitizeTranscriptSelectedTrack(
+    captionSelection,
+  );
 
   if (SIDEPANEL_MVP_AVAILABLE && !videoChanged) {
     const transcriptStatus = sidepanelMvpState?.transcript?.status;
@@ -2616,24 +2698,13 @@ async function runDigestLoad(
     requestedLanguage: currentVideoSourceLanguage,
     trackKind: YOUTUBE_TRANSCRIPT_TRACK_KIND,
     routeKey,
+    selectedTrack: currentVideoCaptionSelection,
   });
   if (!ownsDigestLoad()) return;
   if (
     cached &&
     ((cached.routeKey && cached.routeKey !== routeKey) ||
       (cached.mediaRef?.mediaKey && cached.mediaRef.mediaKey !== videoId))
-  ) {
-    cached = null;
-  }
-  if (
-    cached &&
-    mediaRef?.platform === "youtube" &&
-    currentVideoSourceLanguage &&
-    (!cached.transcriptLanguage ||
-      !languagesSharePrimary(
-        currentVideoSourceLanguage,
-        cached.transcriptLanguage,
-      ))
   ) {
     cached = null;
   }
@@ -2649,6 +2720,8 @@ async function runDigestLoad(
     currentAnalysis =
       cached.analysisVideoId === videoId &&
       cached.analysis?.schemaVersion === 3 &&
+      cached.analysis?.timestampAnchorVersion ===
+        ANALYSIS_TIMESTAMP_ANCHOR_VERSION &&
       (!cachedTranscriptLanguage ||
         cachedAnalysisLanguage === cachedTranscriptLanguage) &&
       hasUsableChineseAnalysis(cached.analysis)
@@ -2960,10 +3033,18 @@ async function runDigestLoad(
       return;
     }
     if (transcriptResult.error === "RATE_LIMITED") {
-      showSupadataRateLimited(
-        transcriptResult.message ||
-          "Supadata 请求已达速率上限，请稍后再授权重试。",
-      );
+      if (supadataConsent === true) {
+        showSupadataRateLimited(
+          transcriptResult.message ||
+            "Supadata 请求已达速率上限，请稍后再授权重试。",
+        );
+      } else {
+        showError(
+          "YouTube 字幕暂时受限",
+          transcriptResult.message ||
+            "YouTube 原生字幕请求受到速率限制，本次已停止。",
+        );
+      }
       return;
     }
     if (transcriptResult.error === "INVALID_SUPADATA_KEY") {
@@ -3178,7 +3259,7 @@ function renderQuoteLanguageContent(
     normalizedSourceLanguage,
   );
   const renderBlock = (language, text, lang) => `
-    <span class="overview-language-block overview-language-block--${language}" lang="${lang}">${escapeHtml(text || "")}</span>
+    <span class="overview-language-block overview-language-block--${language}${language === "zh" ? chineseVisualQuoteClass(text) : ""}" lang="${lang}">${escapeHtml(text || "")}</span>
   `;
 
   const chinese = renderBlock("zh", quote.quoteZh, "zh-CN");
@@ -3339,14 +3420,22 @@ function renderAnalysisResults(analysis) {
         ${renderChapterLanguageContent(chapter, currentOverviewMode, analysis.sourceLanguage)}
       </div>
     `;
-    li.addEventListener("click", () => {
+    li.addEventListener("click", async () => {
       debugLog(
         "[DigestDock Panel] Chapter clicked:",
         chapterTime,
         chapter.timestampSeconds,
       );
-      setActiveChapter(li);
-      seekTo(chapter.timestampSeconds);
+      const moved = await seekTo(chapter.timestampSeconds);
+      if (moved) {
+        setActiveChapter(li);
+        setOverviewTranslationStatus();
+      } else {
+        setOverviewTranslationStatus(
+          "当前视频位置暂时无法跳转，请刷新视频页后重试。",
+          true,
+        );
+      }
     });
     chapterList.appendChild(li);
   });
@@ -3377,13 +3466,19 @@ function renderAnalysisResults(analysis) {
         </div>
       </div>
     `;
-    div.addEventListener("click", () => {
+    div.addEventListener("click", async () => {
       debugLog(
         "[DigestDock Panel] Quote clicked:",
         quoteTime,
         quote.timestampSeconds,
       );
-      seekTo(quote.timestampSeconds);
+      const moved = await seekTo(quote.timestampSeconds);
+      if (!moved) {
+        setOverviewTranslationStatus(
+          "当前视频位置暂时无法跳转，请刷新视频页后重试。",
+          true,
+        );
+      }
     });
 
     const quoteCopyBtn = div.querySelector(".quote-copy-btn");
@@ -3672,6 +3767,8 @@ function renderTranscript() {
 
   // Group entries using smart sentence-boundary + time-guardrail logic
   const grouped = groupTranscriptEntries(currentTranscript);
+  const originalIsChinese =
+    currentPlatformIsBilibili() || currentVideoIsChinese();
 
   grouped.forEach((group) => {
     const div = document.createElement("div");
@@ -3679,11 +3776,15 @@ function renderTranscript() {
     div.dataset.seconds = group.start;
 
     div.innerHTML = `
-      ${transcriptTimeCellMarkup(group.start)}
-      <span class="transcript-text">${renderSubtitleInlineMarkup(group.text)}</span>
+      ${transcriptTimeCellMarkup(group.seekStart ?? group.start)}
+      <span class="transcript-text">${
+        originalIsChinese
+          ? renderTranscriptVisualFragments(group.texts)
+          : renderSubtitleInlineMarkup(group.text)
+      }</span>
     `;
 
-    attachTranscriptTimeSeek(div, group.start);
+    attachTranscriptTimeSeek(div, group.seekStart ?? group.start);
     transcriptList.appendChild(div);
   });
 
@@ -6186,6 +6287,7 @@ function showState(state) {
   updateHeaderLanguageControlsVisibility();
 
   if (state !== "results") {
+    cancelFollowIdleResume({ clearHold: true });
     stopPlaybackTracking();
   }
 }
@@ -6480,7 +6582,56 @@ function resumeDigestFromNotesOnly(tabName) {
   return noteNavigationResumePromise;
 }
 
-function switchTab(tabName) {
+function saveWorkspaceTabSnapshot(tabName) {
+  if (
+    !SIDEPANEL_MVP_AVAILABLE ||
+    !sidepanelMvpState?.session?.videoId ||
+    !["transcript", "overview", "notes"].includes(tabName)
+  ) {
+    return;
+  }
+  const contentArea = document.getElementById("contentArea");
+  sidepanelMvpState = SIDEPANEL_STATE_API.reduceSidepanelState(
+    sidepanelMvpState,
+    {
+      type: SIDEPANEL_STATE_API.EVENTS.TAB_STATE_SAVED,
+      tab: tabName,
+      snapshot: {
+        scrollTop: Math.max(0, Number(contentArea?.scrollTop) || 0),
+        filter:
+          tabName === "notes" ? (notesFilterShowAll ? "all" : "current") : "",
+        follow:
+          tabName === "transcript"
+            ? {
+                mode: autoScrollEnabled ? "following" : "paused",
+                anchorTime: 0,
+              }
+            : undefined,
+      },
+    },
+  );
+}
+
+function restoreWorkspaceTabSnapshot(tabName) {
+  const scrollTop = Number(sidepanelMvpState?.tabs?.[tabName]?.scrollTop);
+  if (!Number.isFinite(scrollTop) || scrollTop < 0) return;
+  const restore = () => {
+    const contentArea = document.getElementById("contentArea");
+    if (contentArea) {
+      lastAutoScrollTime = Date.now();
+      contentArea.scrollTop = scrollTop;
+    }
+  };
+  if (typeof requestAnimationFrame === "function") requestAnimationFrame(restore);
+  else setTimeout(restore, 0);
+}
+
+function switchTab(tabName, { restoreScroll = true } = {}) {
+  const previousTab = currentWorkspaceTab();
+  if (tabName !== "transcript") {
+    cancelFollowIdleResume({ clearHold: true });
+  }
+  if (previousTab) saveWorkspaceTabSnapshot(previousTab);
   if (SIDEPANEL_MVP_AVAILABLE && sidepanelMvpState?.session?.videoId) {
     sidepanelMvpState = SIDEPANEL_STATE_API.reduceSidepanelState(
       sidepanelMvpState,
@@ -6497,6 +6648,7 @@ function switchTab(tabName) {
     panel.classList.toggle("active", panel.dataset.panel === tabName);
   });
   updateHeaderLanguageControlsVisibility();
+  if (restoreScroll) restoreWorkspaceTabSnapshot(tabName);
 
   // A saved-note jump intentionally performs no transcript acquisition. The
   // user's explicit switch to Transcript or Overview is the point at which we
@@ -6552,6 +6704,7 @@ async function triggerAnalysis() {
   const routeKey = currentRouteKey;
   const mediaRef = currentMediaRef;
   const transcriptTimestamped = currentTranscriptTimestamped;
+  const analysisCues = buildOverviewAnalysisCues(currentTranscript || []);
   const sourceLanguage = currentTranscriptLanguage;
   const videoTitle = currentVideoTitle;
   const channelName = currentChannelName;
@@ -6579,6 +6732,7 @@ async function triggerAnalysis() {
     const analysisResult = await chrome.runtime.sendMessage({
       action: "analyzeTranscript",
       transcriptText: transcriptTimestamped,
+      analysisCues,
       videoTitle,
       channelName,
       videoDescription,
@@ -6648,7 +6802,7 @@ async function seekTo(seconds) {
   debugLog("[DigestDock Panel] seekTo called with:", seconds);
   if (seconds === undefined || seconds === null) {
     debugLog("[DigestDock Panel] seekTo aborted - no seconds value");
-    return;
+    return false;
   }
 
   const payload = {
@@ -6657,29 +6811,19 @@ async function seekTo(seconds) {
   };
 
   try {
-    // Try direct messaging to the stored supported-video tab first.
-    if (videoTabId) {
-      try {
-        await chrome.tabs.sendMessage(videoTabId, payload);
-        debugLog("[DigestDock Panel] seekTo direct success");
-        return;
-      } catch (directErr) {
-        debugLog(
-          "[DigestDock Panel] Direct seekTo failed, falling back to relay:",
-          directErr.message,
-        );
-      }
-    }
-
-    // Fallback: route through background script
+    if (!Number.isInteger(videoTabId) || !currentRouteKey) return false;
+    // One exact-route relay owns both delivery and the post-response SPA check.
     const result = await chrome.runtime.sendMessage({
       action: "relayToContent",
       tabId: videoTabId,
+      expectedRouteKey: currentRouteKey,
       payload,
     });
     debugLog("[DigestDock Panel] seekTo relay result:", result);
+    return result?.success === true && result.response?.success === true;
   } catch (error) {
     console.error("[DigestDock Panel] seekTo error:", error);
+    return false;
   }
 }
 
@@ -6830,6 +6974,24 @@ function renderSubtitleInlineMarkup(text) {
     (_match, closing, tagName) =>
       tagName ? `<${closing}${tagName.toLowerCase()}>` : "<br>",
   );
+}
+
+/**
+ * Renders already-grouped subtitle pieces without changing their text. Each
+ * item is a real source-cue boundary retained by groupTranscriptEntries(); CSS
+ * turns those boundaries into visual line breaks while copy/export/cache keep
+ * using the canonical segment.text string.
+ */
+function renderTranscriptVisualFragments(fragments) {
+  const values = Array.isArray(fragments) ? fragments : [fragments];
+  return values
+    .map((fragment) => String(fragment ?? ""))
+    .filter((fragment) => fragment.trim())
+    .map(
+      (fragment) =>
+        `<span class="transcript-fragment-line">${renderSubtitleInlineMarkup(fragment)}</span>`,
+    )
+    .join("");
 }
 
 async function copyToClipboard(text) {
@@ -7066,6 +7228,11 @@ function buildOverviewCacheRecord(
   if (!mediaKey || !transcriptFingerprint || !hasUsableChineseAnalysis(analysis)) {
     return null;
   }
+  if (
+    analysis?.timestampAnchorVersion !== ANALYSIS_TIMESTAMP_ANCHOR_VERSION
+  ) {
+    return null;
+  }
   return {
     schemaVersion: OVERVIEW_CACHE_SCHEMA_VERSION,
     mediaKey,
@@ -7096,6 +7263,8 @@ function validateOverviewCacheRecord(
     (record.schemaVersion !== OVERVIEW_CACHE_SCHEMA_VERSION &&
       !legacyBilibiliV1) ||
     record.mediaKey !== mediaKey ||
+    record.analysis?.timestampAnchorVersion !==
+      ANALYSIS_TIMESTAMP_ANCHOR_VERSION ||
     !hasUsableChineseAnalysis(record.analysis)
   ) {
     return null;
@@ -7343,6 +7512,7 @@ function validateTranscriptCacheRecord(
     requestedLanguage = "",
     trackKind = YOUTUBE_TRANSCRIPT_TRACK_KIND,
     routeKey = "",
+    selectedTrack: expectedSelectedTrack = null,
   } = {},
 ) {
   if (!cached || typeof cached !== "object") return null;
@@ -7398,6 +7568,7 @@ function validateTranscriptCacheRecord(
   const selectedTrack = sanitizeTranscriptSelectedTrack(
     cached.transcriptSelectedTrack,
   );
+  const expectedTrack = sanitizeTranscriptSelectedTrack(expectedSelectedTrack);
   if (
     cached.transcriptSelectedTrack &&
     !["manual", "asr"].includes(cached.transcriptSelectedTrack.kind)
@@ -7407,6 +7578,14 @@ function validateTranscriptCacheRecord(
   if (
     cached.transcriptSelectedTrackIdentity !==
     transcriptSelectedTrackIdentity(selectedTrack)
+  ) {
+    return null;
+  }
+  if (
+    expectedTrack?.language &&
+    (!selectedTrack ||
+      selectedTrack.language !== expectedTrack.language ||
+      selectedTrack.kind !== expectedTrack.kind)
   ) {
     return null;
   }
@@ -7435,6 +7614,7 @@ function validateTranscriptCacheRecord(
     );
     if (
       expectedLanguage &&
+      cachedRequestedLanguage &&
       cachedRequestedLanguage !== expectedLanguage
     ) {
       return null;
@@ -7561,8 +7741,13 @@ function noteHasChineseSource(note) {
 }
 
 function noteHasPolishedChineseText(note) {
+  const textLanguage = normalizeLanguageCode(note?.textLanguage);
+  const trustedChineseText =
+    note?.platform === "bilibili"
+      ? isConfirmedSimplifiedChineseSource(textLanguage)
+      : isChineseLanguage(textLanguage);
   return Boolean(
-    isConfirmedSimplifiedChineseSource(note?.textLanguage) &&
+    trustedChineseText &&
     typeof note?.text === "string" &&
     note.text.trim()
   );
@@ -7781,7 +7966,9 @@ function renderNoteLanguageContent(note, mode = currentNotesMode) {
         block.lang === "zh" || (block.lang === "original" && originalIsChinese)
           ? "zh-CN"
           : "en";
-      return `<span class="note-language-block note-language-block--${block.lang}" lang="${contentLanguage}">“${escapeHtml(block.text)}”</span>`;
+      const text = String(block.text || "").trim();
+      const alreadyQuoted = /^[“「『\"]+[\s\S]*[”」』\"]+$/.test(text);
+      return `<span class="note-language-block note-language-block--${block.lang}" lang="${contentLanguage}">${alreadyQuoted ? escapeHtml(text) : `“${escapeHtml(text)}”`}</span>`;
     })
     .join("");
 }
@@ -8350,21 +8537,350 @@ async function deleteNote(noteId) {
 // (e.g., to read ahead), auto-scroll pauses and a "Follow playback" button
 // appears so they can resume it. Highlight always stays active regardless.
 
+function currentWorkspaceTab() {
+  return String(document.querySelector(".tab.active")?.dataset?.tab || "");
+}
+
+function followPlaybackSnapshot() {
+  const identity = sidepanelMvpCurrentIdentity();
+  if (
+    !identity ||
+    !currentVideoId ||
+    !currentRouteKey ||
+    !Number.isInteger(videoTabId)
+  ) {
+    return null;
+  }
+  return Object.freeze({
+    identity,
+    videoId: currentVideoId,
+    routeKey: currentRouteKey,
+    digestGeneration,
+    tabId: videoTabId,
+  });
+}
+
+function followPlaybackSnapshotIsCurrent(snapshot) {
+  return Boolean(
+    snapshot &&
+      snapshot.videoId === currentVideoId &&
+      snapshot.routeKey === currentRouteKey &&
+      snapshot.digestGeneration === digestGeneration &&
+      snapshot.tabId === videoTabId &&
+      SIDEPANEL_STATE_API?.sameIdentity?.(
+        snapshot.identity,
+        sidepanelMvpCurrentIdentity(),
+      ),
+  );
+}
+
+function followContextIsDeparted() {
+  return currentWorkspaceTab() === "transcript" && autoScrollEnabled === false;
+}
+
+function followResumeHasBlockingUi() {
+  if (document.hidden || !panelIsShowingResults()) return true;
+  if (!Array.isArray(currentTranscript) || currentTranscript.length === 0) {
+    return true;
+  }
+  if (
+    sidepanelMvpState?.transcript?.status !==
+    SIDEPANEL_STATE_API?.TRANSCRIPT_STATUSES?.READY
+  ) {
+    return true;
+  }
+  if (
+    isAnalysisLoading ||
+    isOverviewTranslationLoading ||
+    isNotesLoading ||
+    isNotesTranslationLoading ||
+    Boolean(activeExportJobId)
+  ) {
+    return true;
+  }
+  if (isActiveNotesOnlyContext() || notesFilterShowAll) return true;
+  if (String(window.getSelection?.()?.toString?.() || "").trim()) return true;
+
+  const contentArea = document.getElementById("contentArea");
+  const activeElement = document.activeElement;
+  if (
+    contentArea?.contains?.(activeElement) &&
+    activeElement?.matches?.("input, textarea, select, [contenteditable='true']")
+  ) {
+    return true;
+  }
+
+  return Boolean(
+    document.querySelector(
+      "#explainModal, .notes-export-menu:not([hidden]), .notes-export-picker:not([hidden]), .notes-export-precheck:not([hidden]), .theme-switch-menu:not([hidden])",
+    ),
+  );
+}
+
+function announceFollowPlayback(message) {
+  const status = document.getElementById("followPlaybackStatus");
+  if (!status) return;
+  status.textContent = message;
+  setTimeout(() => {
+    if (status.textContent === message) status.textContent = "";
+  }, 1800);
+}
+
+function showFollowPlaybackPrompt({ held = false, message = "" } = {}) {
+  if (currentWorkspaceTab() !== "transcript") {
+    hideFollowPlaybackPrompt();
+    return;
+  }
+  const bar = document.getElementById("followPlaybackBar");
+  const hint = document.getElementById("followPlaybackHint");
+  if (!bar || !hint) return;
+  bar.hidden = false;
+  bar.classList.toggle("is-held", held);
+  hint.textContent = held
+    ? "已暂停自动跟随"
+    : message || "静置 5 秒后回到字幕";
+}
+
+function hideFollowPlaybackPrompt() {
+  const bar = document.getElementById("followPlaybackBar");
+  if (!bar) return;
+  bar.hidden = true;
+  bar.classList?.remove?.("is-held");
+}
+
+function idleFollowController() {
+  if (!SIDEPANEL_EFFECTS_API?.createIdleFollowController) return null;
+  if (!followIdleController) {
+    followIdleController = SIDEPANEL_EFFECTS_API.createIdleFollowController({
+      delayMs: FOLLOW_IDLE_RESUME_DELAY_MS,
+      readPlayback: readFollowPlayback,
+      shouldResume: shouldAutoResumeFollow,
+      resume: resumeFollowPlaybackFromIdle,
+      onSettled: (snapshot, { resumed, playback }) => {
+        if (resumed || followManualHoldTab) return;
+        const shouldRetry =
+          followPlaybackSnapshotIsCurrent(snapshot) &&
+          followContextIsDeparted() &&
+          !isActiveNotesOnlyContext() &&
+          !notesFilterShowAll &&
+          (playback == null ||
+            playback?.paused === true ||
+            followResumeHasBlockingUi());
+        if (shouldRetry) {
+          showFollowPlaybackPrompt({
+            message:
+              playback?.paused === true
+                ? "视频暂停，播放后将回到字幕"
+                : playback == null
+                  ? "暂未读到播放位置，将继续重试"
+                : "阅读结束后静置 5 秒回到字幕",
+          });
+          followIdleController?.schedule(snapshot);
+        } else {
+          hideFollowPlaybackPrompt();
+        }
+      },
+    });
+  }
+  return followIdleController;
+}
+
+function cancelFollowIdleResume({ keepPrompt = false, clearHold = false } = {}) {
+  followIntentRevision += 1;
+  idleFollowController()?.cancel();
+  if (clearHold) followManualHoldTab = null;
+  if (!keepPrompt) hideFollowPlaybackPrompt();
+}
+
+function scheduleFollowIdleResume() {
+  const snapshot = followPlaybackSnapshot();
+  const activeTab = currentWorkspaceTab();
+  if (
+    !snapshot ||
+    activeTab !== "transcript" ||
+    !followContextIsDeparted() ||
+    followManualHoldTab === activeTab
+  ) {
+    return false;
+  }
+  showFollowPlaybackPrompt();
+  idleFollowController()?.schedule(snapshot);
+  return true;
+}
+
+function onFollowWorkspaceInteraction(event = {}) {
+  if (currentWorkspaceTab() !== "transcript") return;
+  if (
+    event.type === "scroll" &&
+    Date.now() - lastAutoScrollTime < 1000
+  ) {
+    return;
+  }
+  const selectedText = String(window.getSelection?.()?.toString?.() || "").trim();
+  const intentionalTranscriptInteraction =
+    currentWorkspaceTab() === "transcript" &&
+    autoScrollEnabled &&
+    autoScrollInterval &&
+    (event.type !== "selectionchange" || Boolean(selectedText));
+  if (intentionalTranscriptInteraction) {
+    autoScrollEnabled = false;
+  }
+  if (!followContextIsDeparted()) return;
+  followIntentRevision += 1;
+  scheduleFollowIdleResume();
+}
+
+function readFollowPlayback(
+  snapshot,
+  { timeoutMs = FOLLOW_PLAYBACK_READ_TIMEOUT_MS } = {},
+) {
+  if (!followPlaybackSnapshotIsCurrent(snapshot)) return Promise.resolve(null);
+  const boundedTimeout = Number.isFinite(Number(timeoutMs))
+    ? Math.max(0, Number(timeoutMs))
+    : FOLLOW_PLAYBACK_READ_TIMEOUT_MS;
+  return new Promise((resolve) => {
+    let settled = false;
+    let timerId = null;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      if (timerId !== null) clearTimeout(timerId);
+      resolve(value);
+    };
+    timerId = setTimeout(() => finish(null), boundedTimeout);
+
+    let messagePromise;
+    try {
+      messagePromise = chrome.runtime.sendMessage({
+        action: "relayToContent",
+        tabId: snapshot.tabId,
+        expectedRouteKey: snapshot.routeKey,
+        payload: { action: "getCurrentTime" },
+      });
+    } catch (_error) {
+      finish(null);
+      return;
+    }
+
+    Promise.resolve(messagePromise).then(
+      (result) => {
+        if (
+          !followPlaybackSnapshotIsCurrent(snapshot) ||
+          !result?.success ||
+          !result.response
+        ) {
+          finish(null);
+          return;
+        }
+        finish(result.response);
+      },
+      () => finish(null),
+    );
+  });
+}
+
+function shouldAutoResumeFollow(snapshot, playback) {
+  return Boolean(
+    followPlaybackSnapshotIsCurrent(snapshot) &&
+      followContextIsDeparted() &&
+      !followResumeHasBlockingUi() &&
+      playback?.paused === false &&
+      Number.isFinite(Number(playback.currentTime)),
+  );
+}
+
+function playbackScrollBehavior() {
+  return window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches
+    ? "auto"
+    : "smooth";
+}
+
+function restoreFollowAtTime(currentTime, { automatic = false } = {}) {
+  if (!Array.isArray(currentTranscript) || currentTranscript.length === 0) {
+    return false;
+  }
+  if (currentWorkspaceTab() !== "transcript") return false;
+  // A cue read started before this explicit restore must not arrive later and
+  // scroll the transcript back to an older playback position.
+  playbackTrackingRequestToken += 1;
+  playbackTrackingRequestInFlight = false;
+  cancelFollowIdleResume({ clearHold: true });
+  autoScrollEnabled = true;
+  startPlaybackTracking();
+  highlightActiveEntry(Number(currentTime) || 0, { forceScroll: true });
+  hideFollowPlaybackPrompt();
+  announceFollowPlayback(
+    automatic ? "已自动恢复跟随当前字幕。" : "已恢复跟随当前字幕。",
+  );
+  return true;
+}
+
+async function resumeFollowPlaybackFromIdle(snapshot, playback) {
+  if (!shouldAutoResumeFollow(snapshot, playback)) return false;
+  return restoreFollowAtTime(playback.currentTime, { automatic: true });
+}
+
+async function resumeFollowPlaybackNow() {
+  if (currentWorkspaceTab() !== "transcript") {
+    cancelFollowIdleResume({ clearHold: true });
+    return false;
+  }
+  if (!Array.isArray(currentTranscript) || currentTranscript.length === 0) {
+    showFollowPlaybackPrompt({ message: "当前字幕尚未准备好" });
+    announceFollowPlayback("当前视频尚未准备好，请稍后再试。");
+    return false;
+  }
+  cancelFollowIdleResume({ keepPrompt: true, clearHold: true });
+  const intentRevision = followIntentRevision;
+  showFollowPlaybackPrompt({ message: "正在回到当前字幕…" });
+  playbackTrackingRequestToken += 1;
+  playbackTrackingRequestInFlight = false;
+  autoScrollEnabled = true;
+  hideFollowPlaybackPrompt();
+  startPlaybackTracking();
+  const located = await playbackTrackingTick({ forceScroll: true });
+  if (
+    intentRevision !== followIntentRevision ||
+    currentWorkspaceTab() !== "transcript" ||
+    followManualHoldTab
+  ) {
+    return false;
+  }
+  announceFollowPlayback(
+    located
+      ? "已恢复跟随当前字幕。"
+      : "已回到字幕，播放位置暂未读取到，将继续自动重试。",
+  );
+  return true;
+}
+
 /**
  * Starts polling the video's current time and highlighting/scrolling
  * to the matching transcript entry.
  */
 function startPlaybackTracking() {
-  if (!currentTranscript || !currentTranscript.length) return;
+  if (
+    !currentTranscript ||
+    !currentTranscript.length ||
+    currentWorkspaceTab() !== "transcript"
+  ) {
+    return;
+  }
 
   // Don't restart if already tracking (preserves user's auto-scroll state)
   if (autoScrollInterval) return;
 
   autoScrollEnabled = true;
-  document.getElementById("followPlaybackBtn").style.display = "none";
+  hideFollowPlaybackPrompt();
+  playbackTrackingEpoch += 1;
+  const epoch = playbackTrackingEpoch;
 
   // Poll video time every 500ms
-  autoScrollInterval = setInterval(() => playbackTrackingTick(), 500);
+  autoScrollInterval = setInterval(
+    () => void playbackTrackingTick({ expectedEpoch: epoch }),
+    500,
+  );
+  void playbackTrackingTick({ expectedEpoch: epoch });
 
   // Listen for manual scrolls on the content area
   const contentArea = document.getElementById("contentArea");
@@ -8377,13 +8893,16 @@ function startPlaybackTracking() {
  * starting a new digest, or leaving results state.
  */
 function stopPlaybackTracking() {
+  playbackTrackingEpoch += 1;
+  playbackTrackingRequestToken += 1;
+  playbackTrackingRequestInFlight = false;
   if (autoScrollInterval) {
     clearInterval(autoScrollInterval);
     autoScrollInterval = null;
   }
   autoScrollEnabled = true; // Reset for next time
   lastAutoScrollTime = 0;
-  document.getElementById("followPlaybackBtn").style.display = "none";
+  hideFollowPlaybackPrompt();
 
   // Remove active highlights
   document
@@ -8397,20 +8916,44 @@ function stopPlaybackTracking() {
  * One tick of the playback tracker. Gets current video time from the
  * YouTube tab and highlights + scrolls to the matching transcript entry.
  */
-async function playbackTrackingTick() {
+async function playbackTrackingTick({
+  expectedEpoch = playbackTrackingEpoch,
+  forceScroll = false,
+} = {}) {
+  if (
+    expectedEpoch !== playbackTrackingEpoch ||
+    currentWorkspaceTab() !== "transcript"
+  ) {
+    return false;
+  }
+  if (playbackTrackingRequestInFlight && !forceScroll) return false;
+  const requestToken = ++playbackTrackingRequestToken;
+  const snapshot = followPlaybackSnapshot();
+  if (!snapshot) return false;
+  playbackTrackingRequestInFlight = true;
   try {
-    const result = await chrome.runtime.sendMessage({
-      action: "relayToContent",
-      tabId: videoTabId,
-      payload: { action: "getCurrentTime" },
-    });
+    const playback = await readFollowPlayback(snapshot);
 
-    if (!result.success || !result.response) return;
+    if (
+      requestToken !== playbackTrackingRequestToken ||
+      expectedEpoch !== playbackTrackingEpoch ||
+      !followPlaybackSnapshotIsCurrent(snapshot) ||
+      currentWorkspaceTab() !== "transcript" ||
+      !playback
+    ) {
+      return false;
+    }
 
-    const currentTime = result.response.currentTime || 0;
-    highlightActiveEntry(currentTime);
+    const currentTime = playback.currentTime || 0;
+    highlightActiveEntry(currentTime, { forceScroll });
+    return true;
   } catch (error) {
     // Silently ignore — YouTube tab might be closed or navigated away
+    return false;
+  } finally {
+    if (requestToken === playbackTrackingRequestToken) {
+      playbackTrackingRequestInFlight = false;
+    }
   }
 }
 
@@ -8428,7 +8971,10 @@ function scrollToActiveEntry() {
   if (!activeEntry) return false;
 
   lastAutoScrollTime = Date.now();
-  activeEntry.scrollIntoView({ behavior: "smooth", block: "center" });
+  activeEntry.scrollIntoView({
+    behavior: playbackScrollBehavior(),
+    block: "center",
+  });
   return true;
 }
 
@@ -8438,7 +8984,7 @@ function scrollToActiveEntry() {
  *
  * @param {number} currentSeconds - Current video playback time in seconds
  */
-function highlightActiveEntry(currentSeconds) {
+function highlightActiveEntry(currentSeconds, { forceScroll = false } = {}) {
   const transcriptList = document.getElementById("transcriptList");
   if (!transcriptList) return;
 
@@ -8462,7 +9008,10 @@ function highlightActiveEntry(currentSeconds) {
   if (!activeEntry) return;
 
   // Skip if this entry is already highlighted (no DOM thrashing)
-  if (activeEntry.classList.contains("active-playback")) return;
+  if (activeEntry.classList.contains("active-playback")) {
+    if (forceScroll && autoScrollEnabled) scrollToActiveEntry();
+    return;
+  }
 
   // Remove old highlight, add new one
   entries.forEach((e) => e.classList.remove("active-playback"));
@@ -8471,7 +9020,10 @@ function highlightActiveEntry(currentSeconds) {
   // Only scroll if auto-scroll is enabled
   if (autoScrollEnabled) {
     lastAutoScrollTime = Date.now();
-    activeEntry.scrollIntoView({ behavior: "smooth", block: "center" });
+    activeEntry.scrollIntoView({
+      behavior: playbackScrollBehavior(),
+      block: "center",
+    });
   }
 }
 
@@ -8488,7 +9040,8 @@ function onContentAreaScroll() {
   // User scrolled manually — disable auto-scroll and show the button
   if (autoScrollEnabled && autoScrollInterval) {
     autoScrollEnabled = false;
-    document.getElementById("followPlaybackBtn").style.display = "block";
+    followIntentRevision += 1;
+    scheduleFollowIdleResume();
   }
 }
 
@@ -8555,6 +9108,17 @@ function updateTranscriptModeAvailability() {
 
 function getActiveTranscriptSegments() {
   return groupTranscriptEntries(currentTranscript || []);
+}
+
+function buildOverviewAnalysisCues(entries = currentTranscript || []) {
+  return groupTranscriptEntries(entries).map((segment, index) => ({
+    cueId: `cue-${index}`,
+    timestampSeconds: Math.max(
+      0,
+      Number(segment.seekStart ?? segment.start) || 0,
+    ),
+    text: segment.text,
+  }));
 }
 
 function transcriptTranslationCachePrefix(videoId) {
@@ -8646,7 +9210,7 @@ function renderTranscriptSegmentContent(segment, mode, translated, error) {
   const original = renderSubtitleInlineMarkup(segment.text);
   let translationHtml = "";
   if (translated) {
-    translationHtml = renderSubtitleInlineMarkup(translated);
+    translationHtml = renderTranscriptVisualFragments([translated]);
   } else if (error) {
     translationHtml = `${escapeHtml(error)}<button class="translation-retry-btn" type="button">重试</button>`;
   } else {
@@ -8740,10 +9304,10 @@ function renderTranscriptModeRows(segments, mode) {
     div.dataset.segmentIndex = index;
 
     div.innerHTML = `
-      ${transcriptTimeCellMarkup(segment.start)}
+      ${transcriptTimeCellMarkup(segment.seekStart ?? segment.start)}
       ${renderTranscriptSegmentContent(segment, mode, cached, "")}
     `;
-    attachTranscriptTimeSeek(div, segment.start);
+    attachTranscriptTimeSeek(div, segment.seekStart ?? segment.start);
     transcriptList.appendChild(div);
     rows.push(div);
   });
@@ -9008,9 +9572,12 @@ globalThis.__YTD_TRANSCRIPT_TESTING__ = {
   transcriptContentFingerprint,
   transcriptArtifactIdentity,
   cachedTranscriptArtifactIdentity,
+  digestMediaIdentityChanged,
   validateTranscriptCacheRecord,
   sendTranslationMessage,
   groupTranscriptEntries,
+  buildOverviewAnalysisCues,
+  needsVisualChineseQuotes,
   splitOversizedThought,
   alignTranslatedSegmentBatch,
   loadNotes,
@@ -9052,6 +9619,7 @@ globalThis.__YTD_TRANSCRIPT_TESTING__ = {
   renderQuoteLanguageContent,
   overviewQuoteCopyText,
   renderSubtitleInlineMarkup,
+  renderTranscriptVisualFragments,
   renderTranscriptSegmentContent,
   extractMediaLocator,
   isDigestDockOptionsUrl,

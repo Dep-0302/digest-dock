@@ -19,7 +19,7 @@ DigestDock 是在 [Zara Zhang 原作 YouTube Digest](https://github.com/zarazhan
 
 扩展通过 GitHub 以本地方式安装，目前没有上架 Chrome 应用商店，不赠送 API 额度，也不依赖开发者运营的后端服务。
 
-> 免费版范围（2026 年 8 月 31 日）：无需 AI Key 即可阅读原字幕、跳转时间点、保存原文笔记、备份笔记和导出原文；概览、讲解、翻译与笔记润色属于可选 AI 增强。Active、Panel 只保留为实验证据，不进入产品路线。Chrome 应用商店分发尚未开始。
+> 免费版范围（2026 年 9 月 2 日）：无需 AI Key 即可阅读原字幕、跳转时间点、保存原文笔记、备份笔记和导出原文；概览、讲解、翻译与笔记润色属于可选 AI 增强。固定 IOS/json3 Active 只在缓存和 Passive miss 后运行；Panel 仍只保留为实验证据。Chrome 应用商店分发尚未开始。
 
 ## 让你的编程 Agent 帮你安装
 
@@ -61,7 +61,7 @@ DigestDock 会按扩展 ID 隔离注入到页面中的控件，因此旧版 YouT
 
 阅读原字幕、跳转时间点、保存原文笔记、备份笔记和导出原文都不需要 API Key。只有你需要概览、讲解、翻译或自动润色笔记时，才在 **设置** 中从预设列表选择 AI 服务商并填写对应 Key；DeepSeek 是默认服务商。正常安装和免费 YouTube 字幕路线都不要求 Supadata 账号或 Key。
 
-对于新视频或已经过期的 YouTube 缓存，DigestDock 先检查已验证的本地缓存和零请求 Passive 捕获。页面尚未加载字幕时，侧栏会提示你打开 YouTube **字幕／CC** 并明确重试；扩展不会自动发起 Active player/timedtext 请求，也不会自动打开和滚动 YouTube 文字稿面板。
+对于新视频或已经过期的 YouTube 缓存，DigestDock 先检查已验证的本地缓存和零请求 Passive 捕获；miss 后最多执行一次不携带凭据的固定 IOS player 请求和一次 json3 timedtext 请求，读取页面选定的已有字幕轨。有中文轨时把简体、繁体、粤语等中文变体同等视为中文，人工轨优先自动轨，同类型保持 YouTube 原顺序；没有中文时使用当前轨，否则使用默认轨。受限尝试仍失败后，侧栏才提示你打开 YouTube **字幕／CC** 并明确重试。扩展不会自动打开和滚动 YouTube 文字稿面板。
 
 ### 可选的 Supadata 后备
 
@@ -154,7 +154,7 @@ JSON 是用于恢复 DigestDock 笔记的数据备份格式，与阅读导出相
 - 标准的 `youtube.com/watch` 视频页面。
 - 标准的 `www.bilibili.com/video/BV...` 视频页面，每次只处理当前分P。
 - 当前 B 站浏览器会话可以访问的人工或 AI 字幕轨。B 站字幕读取不消耗 Supadata 额度。
-- YouTube 产品链先复用已验证的本地字幕或零请求 Passive 页面响应；miss 后提示用户打开 YouTube 字幕并重试，不自动运行保留的 Active 或 Panel 实验。
+- YouTube 产品链先复用已验证的本地字幕或零请求 Passive 页面响应；miss 后运行一次固定、无凭据的 IOS/json3 Active 尝试，Panel 仍不进入产品路线。
 - 在这条流程中，Supadata 是默认隐藏的可选后备，不是默认路线。保存 Supadata Key 不构成持续授权；只有显式 CC 重试仍 miss 且用户为当前视频、本次调用重新确认后才会调用。
 - 非中文字幕支持原文、简体中文和双语对照；中文字幕直接保留原文，并禁用无需使用的中文／双语翻译控件，不发送字幕翻译请求。
 - AI 概览直接生成简体中文底稿。非中文字幕只有在请求**原文**或**双语**时，才翻译章节标题和总结；重点引用会保留源字幕原句。中文字幕的三种模式复用同一份中文内容，不发起额外翻译。
@@ -167,7 +167,7 @@ JSON 是用于恢复 DigestDock 笔记的数据备份格式，与阅读导出相
 - 所有 AI 功能由你在设置中选择的预设服务商提供：DeepSeek V4 Flash（默认）、智谱 GLM-4.7-Flash、阿里云百炼 Qwen Flash、SiliconFlow Qwen3-8B 或 Fireworks DeepSeek V4 Flash。每个服务商的接口地址和模型固定，Key 分别保存，没有自定义接口地址字段。
 - 设置下拉同时显示腾讯混元翻译官方图标，但该项目前为“暂不可用”：官方没有确认 `hunyuan-translation-lite` 可通过本扩展当前的单 Key OpenAI-compatible 路径调用，因此不会猜测 Endpoint、模型路由或鉴权。
 
-YouTube 覆盖范围取决于页面是否为 Passive 加载了已有的人工／自动字幕轨，或本地是否存在兼容的正向缓存。新视频尚未加载字幕时，请打开 YouTube 字幕／CC 后重试。Shorts、直播、B 站番剧页、私密或受访问限制的视频、画面硬字幕，以及没有原生字幕轨的视频可能无法使用。目前没有测试 Firefox、Safari、移动浏览器或其他 Chromium 浏览器。
+YouTube 覆盖范围包括兼容的正向缓存、页面已经发起的 Passive 字幕响应，以及对已有人工／自动轨执行的固定无凭据 IOS/json3 Active 路线。以上路线 miss 后，请打开 YouTube 字幕／CC 并重试。Shorts、直播、B 站番剧页、私密或受访问限制的视频、画面硬字幕，以及没有原生字幕轨的视频可能无法使用。目前没有测试 Firefox、Safari、移动浏览器或其他 Chromium 浏览器。
 
 两个平台都只使用已经存在的字幕轨；可以读取平台已有的自动字幕轨，但不会下载音频、执行 ASR 或其他音频转录、请求生成式转录，也不会使用 OCR。只有用户打开 CC 并显式重试仍 miss 后选择 Supadata 时，DigestDock 才会强制使用其 `mode=native`。
 
@@ -205,7 +205,7 @@ DeepSeek 说明这些价格可能很快上调，因此使用此估算前必须�
 
 DigestDock 会直接从扩展发起网络请求：
 
-1. 对 YouTube，先读取本地缓存和 Passive 响应状态。miss 后提示你打开 YouTube 字幕／CC 并明确重试；DigestDock 不自动发起 player/timedtext 请求，也不操作文字稿面板。
+1. 对 YouTube，先读取本地缓存和 Passive 响应状态；miss 后可为页面选定的已有字幕轨发起一次固定 IOS player 请求和一次 json3 timedtext 请求。该请求不带 Cookie、Authorization、已保存凭据或 User-Agent 覆盖，但会在请求体中声明 IOS、Apple 和 iPhone 客户端信息。仍 miss 后才提示你打开 YouTube 字幕／CC 并明确重试；DigestDock 不操作文字稿面板。
 2. 只有该次显式免费重试仍 miss 时，侧边栏才显示可选 Supadata 后备。只有你点击该操作后，DigestDock 才会把标准化的视频地址和你的 Key 发送给 Supadata，并请求 `mode=native` 原生字幕；明确无字幕、登录、年龄、会员、地区、不可用或页面已切换的状态会在此前停止。
 3. 对 B 站，直接向 B 站请求当前视频元数据和已有字幕轨，复用浏览器当前会话但不读取或保存 Cookie 值。
 4. 当你使用 AI 功能时，把字幕和相关视频信息发送给你在设置中选择的 AI 服务商。翻译或讲解等功能只发送当前需要的内容，例如选中的文本和上下文，或少量字幕分段。

@@ -3602,6 +3602,7 @@ function installSidepanelDigestFixture(runtime) {
         analysis: {
           marker: videoId,
           schemaVersion: 3,
+          timestampAnchorVersion: 1,
           baseLanguage: "zh-Hans",
           sourceLanguage,
           chapters: [
@@ -3716,6 +3717,7 @@ function installSidepanelDigestFixture(runtime) {
         clickError: () => element("errorBtn").click(),
         clickErrorSecondary: () => element("errorSecondaryBtn").click(),
         overviewTranslationLoading: () => isOverviewTranslationLoading,
+        videoSourceLanguage: () => currentVideoSourceLanguage || null,
       };
     })()
   `);
@@ -3955,6 +3957,9 @@ function installNoteNavigationFixture(runtime, options = {}) {
       chrome.runtime.sendMessage = async (message) => {
         messages.push(JSON.parse(JSON.stringify(message)));
         if (message.action === "relayToContent") {
+          if (message.payload?.action === "seekTo") {
+            return { success: true, response: { success: true } };
+          }
           if (fixtureOptions.metadataRelayFailure) {
             return { ...fixtureOptions.metadataRelayFailure };
           }
@@ -4302,7 +4307,7 @@ test("Header exposes tab-specific transcript, overview, and notes language modes
   assert.match(html, /data-notes-mode="bilingual"[\s\S]*?aria-pressed="true"[\s\S]*?>双语</);
   assert.match(
     html,
-    /id="followPlaybackBtn"[\s\S]*?aria-label="跟随视频并回到当前播放位置"[\s\S]*?>[\s\S]*?跟随视频[\s\S]*?<\/button>/,
+    /id="followPlaybackBar"[\s\S]*?id="followPlaybackHint"[\s\S]*?静置 5 秒后回到字幕[\s\S]*?id="followStayBtn"[\s\S]*?留在这里[\s\S]*?id="followPlaybackBtn"[\s\S]*?aria-label="立即跟随视频并回到当前播放位置"[\s\S]*?>[\s\S]*?立即跟随[\s\S]*?<\/button>/,
   );
   assert.doesNotMatch(html, /followPlaybackTime|回到 <span class="follow-time"/);
   assert.match(css, /\.header-actions\s*\{[\s\S]*?display:\s*flex/);
@@ -4315,6 +4320,8 @@ test("Header exposes tab-specific transcript, overview, and notes language modes
     css,
     /\.follow-playback-btn:hover\s*\{[^}]*background:\s*var\(--accent-gradient-hover\)/,
   );
+  assert.match(css, /\.follow-playback-bar\s*\{[^}]*position:\s*fixed/);
+  assert.match(css, /\.follow-stay-btn\s*\{/);
   assert.doesNotMatch(css, /\.follow-playback-btn::before/);
   assert.match(
     css,
@@ -4348,7 +4355,7 @@ test("Header exposes tab-specific transcript, overview, and notes language modes
     /function transcriptOriginalBadgeText\(\)[\s\S]*?currentPlatformIsBilibili\(\)[\s\S]*?\$\{transcriptSourceLabel\(\)\}（\$\{language\}）/,
   );
   assert.match(js, /function showState\(state\)[\s\S]*?updateHeaderLanguageControlsVisibility\(\)/);
-  assert.match(js, /function switchTab\(tabName\)[\s\S]*?updateHeaderLanguageControlsVisibility\(\)/);
+  assert.match(js, /function switchTab\(tabName,[\s\S]*?updateHeaderLanguageControlsVisibility\(\)/);
   assert.match(js, /handleTranscriptModeChange\(button\.dataset\.transcriptMode\)/);
   assert.match(js, /handleOverviewModeChange\(button\.dataset\.overviewMode\)/);
   assert.match(js, /handleNotesModeChange\(button\.dataset\.notesMode\)/);
@@ -5004,8 +5011,9 @@ test("playing a saved note for the current video still seeks without opening a t
   const snapshot = JSON.parse(fixture.snapshot());
   assert.deepEqual(snapshot.openedUrls, []);
   assert.equal(snapshot.fetchCount, 0);
-  assert.equal(snapshot.tabSeekCount + snapshot.runtimeSeekCount, 1);
-  assert.deepEqual(snapshot.tabSeekTabIds, [303]);
+  assert.equal(snapshot.tabSeekCount, 0);
+  assert.equal(snapshot.runtimeSeekCount, 1);
+  assert.deepEqual(snapshot.tabSeekTabIds, []);
 });
 
 test("an active saved-note context survives side-panel reconstruction without fetching a transcript", async () => {
@@ -5154,7 +5162,8 @@ test("activating the same video in another tab clears note-only state and rebind
   await fixture.playTarget();
   await nextTurn();
   const afterPlay = JSON.parse(fixture.snapshot());
-  assert.deepEqual(afterPlay.tabSeekTabIds, [secondTabId]);
+  assert.deepEqual(afterPlay.tabSeekTabIds, []);
+  assert.equal(afterPlay.runtimeSeekCount, 1);
   assert.equal(afterPlay.openedUrls.length, 1);
 });
 
@@ -6196,6 +6205,7 @@ test("compact overview cache survives side-panel recreation with zero repeat pro
   const transcript = "[0:00] A stable transcript for the cached overview.";
   const analysis = {
     schemaVersion: 3,
+    timestampAnchorVersion: 1,
     baseLanguage: "zh-Hans",
     sourceLanguage: "en-US",
     chapters: [
@@ -6272,6 +6282,7 @@ test("digest loading restores the compact overview before an active tab can anal
   const analysis = {
     marker: "restored-overview",
     schemaVersion: 3,
+    timestampAnchorVersion: 1,
     baseLanguage: "zh-Hans",
     sourceLanguage: "en",
     chapters: [
@@ -6404,6 +6415,7 @@ test("overview cache invalidates a changed transcript fingerprint", async () => 
   const videoId = "overview-source-change";
   const analysis = {
     schemaVersion: 3,
+    timestampAnchorVersion: 1,
     baseLanguage: "zh-Hans",
     sourceLanguage: "en",
     chapters: [
@@ -6462,6 +6474,7 @@ test("overview cache persistence failure is observable to the caller", async () 
   });
   const analysis = {
     schemaVersion: 3,
+    timestampAnchorVersion: 1,
     baseLanguage: "zh-Hans",
     sourceLanguage: "en",
     chapters: [
@@ -6496,7 +6509,7 @@ test("overview cache persistence failure is observable to the caller", async () 
   );
 });
 
-test("a newly confirmed player language invalidates mismatched transcript state", async () => {
+test("a newly confirmed audio language does not reset the same video's validated transcript", async () => {
   const runtime = loadSidepanelRuntime();
   const fixture = installSidepanelDigestFixture(runtime);
   fixture.setVideoSourceLanguage("en");
@@ -6506,16 +6519,13 @@ test("a newly confirmed player language invalidates mismatched transcript state"
   await englishLoad;
 
   fixture.setVideoSourceLanguage("zh-CN");
-  const chineseLoad = fixture.start("video-a");
-  await nextTurn();
-  fixture.resolveCache(
-    "video-a",
-    fixture.makeCache("video-a", true, "zh-CN"),
-  );
-  await chineseLoad;
+  await fixture.start("video-a");
 
-  assert.equal(JSON.parse(fixture.snapshot()).sourceLanguage, "zh-CN");
-  assert.equal(JSON.parse(fixture.snapshot()).overviewMode, "zh");
+  const snapshot = JSON.parse(fixture.snapshot());
+  assert.equal(fixture.videoSourceLanguage(), "zh-CN");
+  assert.equal(snapshot.sourceLanguage, "en");
+  assert.equal(snapshot.transcriptText, "transcript-video-a");
+  assert.equal(snapshot.overviewMode, "zh");
 });
 
 test("an active Overview tab starts analysis for the newly selected video", async () => {
@@ -6529,6 +6539,7 @@ test("an active Overview tab starts analysis for the newly selected video", asyn
         analysis: {
           marker: "video-b",
           schemaVersion: 3,
+          timestampAnchorVersion: 1,
           baseLanguage: "zh-Hans",
           sourceLanguage: "en",
           chapters: [
@@ -7821,6 +7832,71 @@ test("overview analysis validation builds the v3 Chinese-base schema", () => {
   assert.equal(detected.sourceLanguage, "ja");
 });
 
+test("overview timestamps resolve from local cue ids, never model seconds", () => {
+  const background = loadBackgroundHelpers();
+  const cues = [
+    { cueId: "cue-0", timestampSeconds: 0, text: "Opening" },
+    { cueId: "cue-1", timestampSeconds: 20, text: "Main topic" },
+    { cueId: "cue-2", timestampSeconds: 55, text: "Closing" },
+  ];
+  const normalized = background.validateAndFixTimestamps(
+    {
+      chapters: [
+        {
+          cueId: "cue-1",
+          timestampSeconds: 7,
+          titleZh: "主题",
+          summaryZh: "进入主要内容。",
+        },
+      ],
+      keyQuotes: [
+        {
+          cueId: "unknown-cue",
+          timestampSeconds: 52,
+          quoteOriginal: "Closing",
+          quoteZh: "收尾。",
+        },
+      ],
+      keyMoments: ["cue-0", 19],
+    },
+    55,
+    "en",
+    cues,
+  );
+
+  assert.equal(normalized.timestampAnchorVersion, 1);
+  assert.equal(normalized.chapters[0].cueId, "cue-1");
+  assert.equal(normalized.chapters[0].timestampSeconds, 20);
+  assert.equal(normalized.keyQuotes[0].cueId, "cue-2");
+  assert.equal(normalized.keyQuotes[0].timestampSeconds, 55);
+  assert.deepEqual(normalized.keyMoments, [0, 20]);
+});
+
+test("overview cues share transcript display segments and canonical seek starts", () => {
+  const helpers = loadSidepanelHelpers();
+  const raw = [
+    {
+      start: 10,
+      duration: 30,
+      text: "这是一个没有标点而且足够长需要被拆成多个阅读段落的中文字幕内容用于验证时间显示不会再按字符比例伪造新的跳转时间这是同一个原始字幕块的后半部分",
+    },
+  ];
+  const segments = helpers.groupTranscriptEntries(raw);
+  const cues = helpers.buildOverviewAnalysisCues(raw);
+
+  assert.ok(segments.length > 1);
+  assert.ok(segments.some((segment) => segment.start > 10));
+  assert.ok(segments.every((segment) => segment.seekStart === 10));
+  assert.deepEqual(
+    cues.map((cue) => cue.timestampSeconds),
+    cues.map(() => 10),
+  );
+  assert.deepEqual(
+    cues.map((cue) => cue.text),
+    segments.map((segment) => segment.text),
+  );
+});
+
 test("overview repairs raw control characters inside model JSON strings", async () => {
   const malformedContent = `{
     "detectedSourceLanguage": "en",
@@ -8192,6 +8268,11 @@ test("Traditional Bilibili overview and notes keep source text distinct from Sim
   );
   assert.equal(background.shouldUseBilibiliChinese("bilibili", "zh-CN"), true);
   assert.equal(background.shouldUseBilibiliChinese("bilibili", "zh-TW"), false);
+  assert.equal(background.shouldUseChineseNoteCleanup("youtube", "zh-CN"), true);
+  assert.equal(background.shouldUseChineseNoteCleanup("youtube", "zh-TW"), true);
+  assert.equal(background.shouldUseChineseNoteCleanup("bilibili", "zh-CN"), true);
+  assert.equal(background.shouldUseChineseNoteCleanup("bilibili", "zh-TW"), false);
+  assert.equal(background.shouldUseChineseNoteCleanup("youtube", "ja"), false);
 });
 
 test("Bilibili Chinese note cleanup keeps the polished Chinese text", async () => {
@@ -8328,7 +8409,8 @@ test("Bilibili v4 cache note saves polished Chinese once without refetching", as
   assert.equal(result.note.cid, mediaRef.cid);
   assert.equal(result.note.page, mediaRef.page);
   assert.equal(result.note.canonicalUrl, mediaRef.canonicalUrl);
-  assert.match(result.note.timestampedUrl, /BV1zfg36ZEXi\/\?t=5$/);
+  assert.equal(result.note.timestampSeconds, 0);
+  assert.match(result.note.timestampedUrl, /BV1zfg36ZEXi\/\?t=0$/);
   assert.equal(storedNotes[0].text, result.note.text);
 });
 
@@ -10373,6 +10455,7 @@ test("YouTube getVideoInfo prefers exact player metadata and preserves completen
       descriptionTruncated: false,
       duration: 123,
       sourceLanguage: "en",
+      captionSelection: null,
     },
   });
 });
@@ -10415,7 +10498,17 @@ test("the real MAIN-world player callback emits complete present-description met
       },
     },
     scriptingImpl: {
-      async executeScript({ func }) {
+      async executeScript({ func, world }) {
+        if (world === "ISOLATED") {
+          return [
+            {
+              result: {
+                ready: true,
+                videoId: "real-player-callback",
+              },
+            },
+          ];
+        }
         return [{ result: func() }];
       },
     },
@@ -10434,6 +10527,7 @@ test("the real MAIN-world player callback emits complete present-description met
     channelName: "Real callback channel",
     duration: 321,
     sourceLanguage: "en",
+    captionSelection: null,
     description: "Real callback description",
     descriptionStatus: "present",
     descriptionTruncated: false,
@@ -10472,7 +10566,17 @@ test("the real MAIN-world callback recognizes a confirmed-empty window fallback"
       },
     },
     scriptingImpl: {
-      async executeScript({ func }) {
+      async executeScript({ func, world }) {
+        if (world === "ISOLATED") {
+          return [
+            {
+              result: {
+                ready: true,
+                videoId: "window-player-fallback",
+              },
+            },
+          ];
+        }
         return [{ result: func() }];
       },
     },
@@ -11065,6 +11169,58 @@ test("a short long-duration CJK caption remains one readable row", () => {
   assert.equal(segments[0].start, 5);
 });
 
+test("Chinese display fragments preserve raw cue boundaries and internal spaces", () => {
+  const { groupTranscriptEntries } = loadSidepanelHelpers();
+  const raw = [
+    { start: 0, text: "AI Agent Skill 保留 natural spaces" },
+    { start: 2, text: "第二个 cue 继续" },
+    { start: 4, text: "第三个 cue 结束" },
+  ];
+  const segments = groupTranscriptEntries(raw, {
+    minChars: 1,
+    idealChars: 999,
+    maxChars: 999,
+    maxSeconds: 999,
+  });
+
+  assert.equal(segments.length, 1);
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(segments[0].texts)),
+    raw.map((entry) => entry.text),
+  );
+  assert.match(segments[0].texts[0], /AI Agent Skill/);
+  assert.match(segments[0].texts[0], /保留 natural spaces/);
+  assert.doesNotMatch(segments[0].text, /\n|“|”/);
+});
+
+test("guardrail splits one oversized raw cue without inventing raw cue boundaries", () => {
+  const { groupTranscriptEntries } = loadSidepanelHelpers();
+  const text = Array.from({ length: 900 }, (_, index) => `word${index}`).join(" ");
+  const segments = groupTranscriptEntries([
+    { start: 12, duration: 90, text },
+  ]);
+
+  assert.ok(segments.length > 8);
+  assert.ok(segments.every((segment) => segment.texts.length === 1));
+  assert.equal(
+    segments.map((segment) => segment.text).join(" "),
+    segments.flatMap((segment) => segment.texts).join(" "),
+  );
+});
+
+test("sentence pieces from one raw cue remain one visual fragment", () => {
+  const { groupTranscriptEntries } = loadSidepanelHelpers();
+  const segments = groupTranscriptEntries(
+    [{ start: 0, text: "第一句。第二句。第三句。" }],
+    { minChars: 100, idealChars: 999, maxChars: 999, maxSeconds: 999 },
+  );
+
+  assert.equal(segments.length, 1);
+  assert.deepEqual(JSON.parse(JSON.stringify(segments[0].texts)), [
+    "第一句。第二句。第三句。",
+  ]);
+});
+
 test("transcript translation cache keys include v2 segmentation and source text", () => {
   const { transcriptTranslationCacheKey } = loadSidepanelHelpers();
   const first = transcriptTranslationCacheKey("video-1", {
@@ -11130,6 +11286,101 @@ test("translated-only omits English while bilingual renders aligned English and 
   assert.match(bilingual, /transcript-original/);
   assert.match(bilingual, /Original English sentence/);
   assert.match(bilingual, /\u4e2d\u6587\u8bd1\u6587/);
+});
+
+test("Chinese transcript fragments use block boundaries without invented delimiters", () => {
+  const helpers = loadSidepanelHelpers();
+  assert.equal(helpers.needsVisualChineseQuotes("这是一段没有标点的中文"), true);
+  assert.equal(helpers.needsVisualChineseQuotes("这是一段有标点的中文。"), false);
+  assert.equal(helpers.needsVisualChineseQuotes("“已经有引号”"), false);
+  assert.equal(helpers.needsVisualChineseQuotes("English without punctuation"), false);
+
+  const fragments = [
+    "第一段有标点。",
+    "第二个 cue 保留 internal spaces",
+    "“第三段已经有引号”",
+  ];
+  const renderedFragments = helpers.renderTranscriptVisualFragments(fragments);
+  assert.match(
+    renderedFragments,
+    /class="transcript-fragment-line">第一段有标点。<\/span>/,
+  );
+  assert.match(
+    renderedFragments,
+    /class="transcript-fragment-line">第二个 cue 保留 internal spaces<\/span>/,
+  );
+  assert.match(
+    renderedFragments,
+    /class="transcript-fragment-line">“第三段已经有引号”<\/span>/,
+  );
+  assert.equal(
+    (renderedFragments.match(/transcript-fragment-line/g) || []).length,
+    3,
+  );
+  assert.doesNotMatch(renderedFragments, /chinese-visual-quote/);
+  assert.doesNotMatch(renderedFragments, /“第一段|”第二个/);
+
+  const segment = {
+    id: "segment-0-0",
+    text: "第一段有标点。第二个 cue 保留 internal spaces",
+    texts: fragments.slice(0, 2),
+  };
+  const canonicalText = segment.text;
+  const cacheKey = helpers.transcriptTranslationCacheKey("video-1", segment);
+  helpers.renderTranscriptVisualFragments(segment.texts);
+  assert.equal(segment.text, canonicalText);
+  assert.equal(
+    helpers.transcriptTranslationCacheKey("video-1", segment),
+    cacheKey,
+  );
+
+  const rendered = helpers.renderTranscriptSegmentContent(
+    { text: "English source." },
+    "zh",
+    "这是一段有标点的中文。",
+    "",
+  );
+  assert.match(
+    rendered,
+    /transcript-translation[^"]*"><span class="transcript-fragment-line">这是一段有标点的中文。<\/span>/,
+  );
+  assert.doesNotMatch(rendered, /“这是一段有标点的中文。”/);
+  assert.doesNotMatch(rendered, /chinese-visual-quote/);
+  const renderTranscriptSource = read("sidepanel.js").match(
+    /function renderTranscript\(\)[\s\S]*?function copyTranscript\(/,
+  )?.[0];
+  assert.match(renderTranscriptSource || "", /renderTranscriptVisualFragments\(group\.texts\)/);
+  assert.doesNotMatch(renderTranscriptSource || "", /chineseVisualQuoteClass\(group\.text\)/);
+  assert.match(
+    read("sidepanel.css"),
+    /\.transcript-fragment-line\s*\{[\s\S]*?display:\s*block/,
+  );
+
+  const note = {
+    platform: "youtube",
+    sourceLanguage: "zh-CN",
+    textLanguage: "zh-CN",
+    text: "“已经有引号”",
+    rawText: "已经有引号",
+  };
+  assert.doesNotMatch(
+    helpers.renderNoteLanguageContent(note, "original"),
+    /““|””/,
+  );
+});
+
+test("transcript fragment rendering keeps safe subtitle formatting and escapes arbitrary HTML", () => {
+  const { renderTranscriptVisualFragments } = loadSidepanelHelpers();
+  const html = renderTranscriptVisualFragments([
+    "<i>第一 cue</i><br>保留行内换行",
+    '<strong>第二 cue</strong><img src=x onerror="alert(1)">',
+  ]);
+
+  assert.match(html, /<i>第一 cue<\/i><br>保留行内换行/);
+  assert.match(html, /<strong>第二 cue<\/strong>/);
+  assert.match(html, /&lt;img src=x onerror=&quot;alert\(1\)&quot;&gt;/);
+  assert.doesNotMatch(html, /<img\b/);
+  assert.equal((html.match(/transcript-fragment-line/g) || []).length, 2);
 });
 
 test("subtitle formatting tags render in original and translated segment text", () => {
@@ -11703,7 +11954,7 @@ test("overview starts from Chinese and keeps original-language translation lazy"
   assert.match(translationPrompt, /"unchangedKind":"proper_noun"/);
 });
 
-test("saving a note from a Chinese caption skips AI cleanup and keeps the original text", async () => {
+test("YouTube Chinese notes use the same contextual cleanup as Bilibili", async () => {
   const videoId = "vid_zh";
   const settings = {
     provider: "deepseek",
@@ -11737,19 +11988,29 @@ test("saving a note from a Chinese caption skips AI cleanup and keeps the origin
       storageSetImpl: async (items) => {
         if (items.ytd_notes) savedNote = items.ytd_notes[0];
       },
-      fetchImpl: async (url) => {
+      fetchImpl: async (url, options) => {
         if (url.startsWith("chrome-extension://")) {
           return { ok: true, text: async () => read("prompts/note-cleanup.md") };
         }
         // Only the DeepSeek cleanup endpoint reaches here.
         cleanupCalls += 1;
+        const request = JSON.parse(options.body);
+        const chinesePrompt = request.messages.some((message) =>
+          /整理成通顺、完整、可独立阅读的中文笔记/.test(message.content),
+        );
         return {
           ok: true,
           status: 200,
           json: async () => ({
             choices: [
               {
-                message: { content: JSON.stringify({ quote: "Cleaned English." }) },
+                message: {
+                  content: JSON.stringify({
+                    quote: chinesePrompt
+                      ? "整理后的中文笔记。"
+                      : "Cleaned English.",
+                  }),
+                },
               },
             ],
           }),
@@ -11760,16 +12021,16 @@ test("saving a note from a Chinese caption skips AI cleanup and keeps the origin
     return { result, savedNote, cleanupCalls };
   };
 
-  // Confirmed Chinese caption lines are shown from rawText, so the English
-  // cleanup call is pure waste and must be skipped for both simplified and
-  // traditional tags. The stored note.text stays the original caption text.
+  // Trusted YouTube Chinese tracks now share the contextual Chinese cleanup
+  // contract instead of storing a single raw caption fragment.
   for (const language of ["zh-CN", "zh-Hans", "zh-SG", "zh-Hant", "zh-TW"]) {
     const { result, savedNote, cleanupCalls } = await runSave(language);
     assert.equal(result.success, true, `${language} save should succeed`);
-    assert.equal(cleanupCalls, 0, `${language} must not call DeepSeek cleanup`);
-    assert.equal(savedNote.text, "第二句中文字幕内容。");
+    assert.equal(cleanupCalls, 1, `${language} must run one Chinese cleanup`);
+    assert.equal(savedNote.text, "整理后的中文笔记。");
     assert.equal(savedNote.rawText, "第二句中文字幕内容。");
     assert.equal(savedNote.sourceLanguage, language);
+    assert.equal(savedNote.textLanguage, language);
   }
 
   // The skip is decided by the language tag, never by "contains Han chars":
@@ -11783,6 +12044,70 @@ test("saving a note from a Chinese caption skips AI cleanup and keeps the origin
     assert.equal(savedNote.rawText, "第二句中文字幕内容。");
     assert.equal(savedNote.sourceLanguage, language);
   }
+});
+
+test("free YouTube Chinese notes keep local context and display it without AI", async () => {
+  const videoId = "youtube-zh-free-note";
+  let storedNote = null;
+  let providerCalls = 0;
+  const background = loadBackgroundHelpers({
+    storageGetImpl: async (key) => {
+      if (key === "ytd_settings") {
+        return {
+          ytd_settings: {
+            provider: "deepseek",
+            aiApiKeys: { deepseek: "configured-key" },
+          },
+        };
+      }
+      if (key === `digest_${videoId}`) {
+        return {
+          [`digest_${videoId}`]: {
+            transcriptSourcePolicyVersion: 5,
+            transcriptSource: "youtube-passive",
+            transcript: [
+              { start: 0, text: "我们先理解问题", language: "zh-CN" },
+              { start: 10, text: "再选择最小方案", language: "zh-CN" },
+              { start: 20, text: "最后开始实现", language: "zh-CN" },
+            ],
+          },
+        };
+      }
+      if (key === "ytd_notes") return { ytd_notes: [] };
+      return {};
+    },
+    storageSetImpl: async (items) => {
+      if (Array.isArray(items.ytd_notes)) storedNote = items.ytd_notes[0];
+    },
+    fetchImpl: async () => {
+      providerCalls += 1;
+      throw new Error("skipAiCleanup must not call the provider");
+    },
+  });
+
+  const result = await background.handleSaveNote(
+    videoId,
+    10,
+    "中文视频",
+    "频道",
+    `https://www.youtube.com/watch?v=${videoId}`,
+    null,
+    "zh-CN",
+    "",
+    true,
+  );
+
+  assert.equal(result.success, true);
+  assert.equal(providerCalls, 0);
+  assert.equal(storedNote.textLanguage, "zh-CN");
+  assert.equal(storedNote.rawText, "再选择最小方案");
+  assert.match(storedNote.text, /我们先理解问题.*再选择最小方案.*最后开始实现/);
+  assert.equal(storedNote.timestampSeconds, 10);
+  assert.equal(loadSidepanelHelpers().noteOriginalText(storedNote), storedNote.text);
+  assert.equal(
+    background.exportStoredNoteOriginalText(storedNote),
+    storedNote.text,
+  );
 });
 
 test("isConfirmedSimplifiedChineseSource matches only explicit Simplified tags", () => {

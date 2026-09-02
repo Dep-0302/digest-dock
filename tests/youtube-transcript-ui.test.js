@@ -198,6 +198,116 @@ test("cache validation rejects language, selected-track, and fingerprint drift",
     helpers.validateTranscriptCacheRecord(fingerprintDrift, expected),
     null,
   );
+
+  const exactTrack = youtubeCacheRecord(helpers);
+  assert.ok(
+    helpers.validateTranscriptCacheRecord(exactTrack, {
+      ...expected,
+      selectedTrack: { language: "en", kind: "manual" },
+    }),
+  );
+  assert.equal(
+    helpers.validateTranscriptCacheRecord(exactTrack, {
+      ...expected,
+      selectedTrack: { language: "de", kind: "manual" },
+    }),
+    null,
+    "a later explicit page track must invalidate a different cached track",
+  );
+});
+
+test("cross-language subtitles reuse an exact cache without treating audio language as track identity", () => {
+  const helpers = loadSidepanelHelpers();
+  const expected = {
+    videoId: "video-1",
+    mediaRef: { platform: "youtube", mediaKey: "video-1" },
+    requestedLanguage: "en-US",
+    trackKind: "manual-first",
+    routeKey: "youtube:video-1",
+  };
+  const record = youtubeCacheRecord(helpers, "youtube-passive");
+  const chineseTrack = {
+    index: 1,
+    language: "zh-Hant",
+    kind: "manual",
+    isGenerated: false,
+  };
+  record.transcriptLanguage = "zh-Hant";
+  record.transcriptSelectedTrack = chineseTrack;
+  record.transcriptSelectedTrackIdentity =
+    helpers.transcriptSelectedTrackIdentity(chineseTrack);
+  record.transcriptArtifactIdentity = helpers.transcriptArtifactIdentity({
+    source: record.transcriptSource,
+    language: record.transcriptLanguage,
+    requestedLanguage: record.transcriptRequestedLanguage,
+    selectedTrack: chineseTrack,
+    fingerprint: record.transcriptFingerprint,
+  });
+
+  assert.ok(helpers.validateTranscriptCacheRecord(record, expected));
+
+  const startupUnknownLanguage = {
+    ...record,
+    transcriptRequestedLanguage: null,
+    transcriptArtifactIdentity: helpers.transcriptArtifactIdentity({
+      source: record.transcriptSource,
+      language: record.transcriptLanguage,
+      requestedLanguage: "",
+      selectedTrack: chineseTrack,
+      fingerprint: record.transcriptFingerprint,
+    }),
+  };
+  assert.ok(
+    helpers.validateTranscriptCacheRecord(startupUnknownLanguage, expected),
+    "an initially unknown request language may adopt later exact page metadata",
+  );
+
+  const conflictingRequest = {
+    ...startupUnknownLanguage,
+    transcriptRequestedLanguage: "fr",
+    transcriptArtifactIdentity: helpers.transcriptArtifactIdentity({
+      source: record.transcriptSource,
+      language: record.transcriptLanguage,
+      requestedLanguage: "fr",
+      selectedTrack: chineseTrack,
+      fingerprint: record.transcriptFingerprint,
+    }),
+  };
+  assert.equal(
+    helpers.validateTranscriptCacheRecord(conflictingRequest, expected),
+    null,
+  );
+});
+
+test("digest resets only when the video or route identity actually changes", () => {
+  const { digestMediaIdentityChanged } = loadSidepanelHelpers();
+  assert.equal(
+    digestMediaIdentityChanged(
+      "video-1",
+      "youtube:video-1",
+      "video-1",
+      "youtube:video-1",
+    ),
+    false,
+  );
+  assert.equal(
+    digestMediaIdentityChanged(
+      "video-2",
+      "youtube:video-2",
+      "video-1",
+      "youtube:video-1",
+    ),
+    true,
+  );
+  assert.equal(
+    digestMediaIdentityChanged(
+      "bilibili:BV1:2",
+      "bilibili:BV1:p=2",
+      "bilibili:BV1:2",
+      "bilibili:BV1:p=1",
+    ),
+    true,
+  );
 });
 
 test("Bilibili cache source remains isolated from YouTube source policy", () => {
@@ -251,7 +361,7 @@ test("Bilibili cache source remains isolated from YouTube source policy", () => 
   assert.equal(helpers.validateTranscriptCacheRecord(record, expected), null);
 });
 
-test("Bilibili v1 overview survives while YouTube v1 overview expires", () => {
+test("legacy overviews without local cue anchors expire on every platform", () => {
   const helpers = loadSidepanelHelpers();
   const transcript = "[0:00] 你好";
   const analysis = {
@@ -281,7 +391,7 @@ test("Bilibili v1 overview survives while YouTube v1 overview expires", () => {
       "bilibili",
       null,
     ),
-    analysis,
+    null,
   );
   assert.equal(
     helpers.validateOverviewCacheRecord(

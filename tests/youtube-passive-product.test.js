@@ -551,13 +551,44 @@ test("bridge rejects stale SPA captures, clears the old identity, and accepts th
   assert.equal(harness.runtimeMessages.at(-1).payload.body, "current");
 });
 
-test("bridge reinitialization rotates its nonce without disconnecting the live MAIN observer", () => {
+test("bridge reinitialization rotates its nonce without disconnecting the live MAIN observer", async () => {
   const harness = loadBridge();
+  assert.equal(
+    vm.runInContext(
+      "globalThis.__DIGESTDOCK_YOUTUBE_PASSIVE_BRIDGE_V1__?.active",
+      harness.context,
+    ),
+    true,
+  );
+  assert.equal(
+    await vm.runInContext(
+      "globalThis.__DIGESTDOCK_YOUTUBE_PASSIVE_BRIDGE_V1__.pingRuntime()",
+      harness.context,
+    ),
+    true,
+  );
+  assert.equal(harness.runtimeMessages.at(-1).action, "youtubePassiveBridgePing");
+  harness.fromMain(inflight());
+  const clearCountBeforeReinit = harness.runtimeMessages.filter(
+    (message) => message.payload?.type === "clear",
+  ).length;
   vm.runInContext(bridgeSource, harness.context);
 
   const actions = harness.controls.map((entry) => entry.message.action);
   assert.equal(actions.filter((action) => action === "connect").length, 2);
   assert.equal(actions.filter((action) => action === "disconnect").length, 0);
+  assert.equal(
+    harness.runtimeMessages.filter(
+      (message) => message.payload?.type === "clear",
+    ).length,
+    clearCountBeforeReinit,
+    "bridge replacement must not erase the durable inflight state",
+  );
+  harness.fromMain(capture(VIDEO_A, "completed after bridge replacement"));
+  assert.equal(
+    harness.runtimeMessages.at(-1).payload.body,
+    "completed after bridge replacement",
+  );
   harness.events.dispatch("pagehide");
   assert.equal(harness.controls.at(-1).message.action, "disconnect");
 });
