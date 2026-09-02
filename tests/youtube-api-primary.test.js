@@ -1053,6 +1053,8 @@ test("a cache-hit YouTube note reuses the cached transcript with no provider cal
     "https://www.youtube.com/watch?v=jNQXAC9IVRw",
     42,
     "zh-CN",
+    "",
+    true,
   );
   assert.equal(result.success, true);
   assert.equal(savedNotes[0].text, "中文字幕。");

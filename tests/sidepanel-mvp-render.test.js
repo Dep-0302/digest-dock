@@ -46,6 +46,7 @@ class FakeElement {
     this._text = "";
     this._className = "";
     this._innerHTML = "";
+    this.scrollIntoViewCount = 0;
   }
 
   set className(value) {
@@ -96,11 +97,61 @@ class FakeElement {
   }
 
   addEventListener() {}
+
+  removeEventListener() {}
+
+  contains(target) {
+    return target === this || this.children.some((child) => child?.contains?.(target));
+  }
+
+  matches(selector) {
+    return String(selector)
+      .split(",")
+      .map((item) => item.trim())
+      .some((item) => {
+        if (item === "button") return this.tagName === "BUTTON";
+        if (item === "input") return this.tagName === "INPUT";
+        if (item === "textarea") return this.tagName === "TEXTAREA";
+        if (item === "select") return this.tagName === "SELECT";
+        if (item === "[contenteditable='true']") {
+          return this.getAttribute("contenteditable") === "true";
+        }
+        if (item.startsWith(".")) {
+          return item
+            .slice(1)
+            .split(".")
+            .every((className) => this.classList.contains(className));
+        }
+        return false;
+      });
+  }
+
+  querySelectorAll(selector) {
+    const matches = [];
+    const visit = (node) => {
+      for (const child of node?.children || []) {
+        if (child?.matches?.(selector)) matches.push(child);
+        visit(child);
+      }
+    };
+    visit(this);
+    return matches;
+  }
+
+  querySelector(selector) {
+    return this.querySelectorAll(selector)[0] || null;
+  }
+
+  scrollIntoView() {
+    this.scrollIntoViewCount += 1;
+  }
 }
 
 function createHarness({
   sendMessage = async () => ({}),
   storageGet = async () => ({}),
+  setTimeoutImpl = () => 1,
+  clearTimeoutImpl = () => {},
 } = {}) {
   const ids = new Map();
   const element = (id, tag = "div") => {
@@ -127,6 +178,13 @@ function createHarness({
   const stateRegion = element("transcriptStateRegion");
   stateRegion.hidden = true;
   const readyRegion = element("transcriptReadyRegion");
+  const contentArea = element("contentArea");
+  const transcriptList = element("transcriptList");
+  contentArea.append(transcriptList);
+  const followBar = element("followPlaybackBar");
+  followBar.hidden = true;
+  const followHint = element("followPlaybackHint");
+  const followStatus = element("followPlaybackStatus");
 
   const transcriptTab = new FakeElement("button", "transcriptTab");
   transcriptTab.dataset.tab = "transcript";
@@ -145,16 +203,24 @@ function createHarness({
   });
 
   const document = {
+    hidden: false,
+    activeElement: null,
     addEventListener() {},
     getElementById: (id) => ids.get(id) || null,
     querySelectorAll(selector) {
       if (selector === ".tab") return tabs;
       if (selector === ".tab-panel") return panels;
+      if (selector === ".transcript-entry.active-playback") {
+        return transcriptList.querySelectorAll(selector);
+      }
       return [];
     },
     querySelector(selector) {
       if (selector === ".tab.active") {
         return tabs.find((tab) => tab.classList.contains("active")) || null;
+      }
+      if (selector === "#transcriptList .transcript-entry.active-playback") {
+        return transcriptList.querySelector(".transcript-entry.active-playback");
       }
       return null;
     },
@@ -168,13 +234,17 @@ function createHarness({
     URL,
     TextDecoder,
     TextEncoder,
-    setTimeout: () => 1,
-    clearTimeout() {},
+    setTimeout: setTimeoutImpl,
+    clearTimeout: clearTimeoutImpl,
     setInterval: () => 1,
     clearInterval() {},
     IntersectionObserver: class {},
     CSS: { escape: (value) => value },
-    window: { getSelection: () => null, close() {} },
+    window: {
+      getSelection: () => null,
+      close() {},
+      matchMedia: () => ({ matches: true }),
+    },
     document,
     chrome: {
       runtime: {
@@ -212,6 +282,8 @@ function createHarness({
     helpers: sandbox.__YTD_TRANSCRIPT_TESTING__,
     stateApi: sandbox.DIGESTDOCK_SIDEPANEL_STATE,
     evaluate: (code) => vm.runInContext(code, context),
+    tabs,
+    transcriptList,
     elements: {
       welcome,
       loading,
@@ -221,6 +293,10 @@ function createHarness({
       videoInfo,
       stateRegion,
       readyRegion,
+      contentArea,
+      followBar,
+      followHint,
+      followStatus,
     },
   };
 }
@@ -244,6 +320,14 @@ function deferred() {
 function bindCurrentVideo(harness, videoId, generation) {
   harness.evaluate(`currentVideoId = ${JSON.stringify(videoId)}; currentRouteKey = ${JSON.stringify(`youtube:${videoId}`)}; currentMediaRef = { platform: "youtube", videoId: ${JSON.stringify(videoId)}, mediaKey: ${JSON.stringify(videoId)} }; digestGeneration = ${generation}; videoTabId = 7;`);
   return harness.helpers.sidepanelMvpBindSession(videoId, `youtube:${videoId}`);
+}
+
+function addTranscriptCue(harness, seconds) {
+  const entry = new FakeElement("article");
+  entry.className = "transcript-entry";
+  entry.dataset.seconds = String(seconds);
+  harness.transcriptList.append(entry);
+  return entry;
 }
 
 function moveToConsentChoice(harness, videoId, generation) {
@@ -611,4 +695,103 @@ test("consent, terminal, and error use distinct local structures", () => {
   assert.match(errorHarness.elements.stateRegion.className, /kind-error/);
   assert.equal(errorHarness.elements.stateRegion.getAttribute("role"), "alert");
   assert.match(errorHarness.elements.stateRegion.textContent, /网络暂时不可用/);
+});
+
+test("immediate follow clears a hold inside the transcript tab", async () => {
+  const playback = deferred();
+  const harness = createHarness({
+    sendMessage: (message) => {
+      assert.equal(message.action, "relayToContent");
+      assert.equal(message.expectedRouteKey, "youtube:video-follow");
+      assert.deepEqual(message.payload, { action: "getCurrentTime" });
+      return playback.promise;
+    },
+  });
+  bindCurrentVideo(harness, "video-follow", 1);
+  harness.evaluate(
+    'currentTranscript = [{ start: 0, text: "one" }]; sidepanelMvpState = { ...sidepanelMvpState, transcript: { ...sidepanelMvpState.transcript, status: DIGESTDOCK_SIDEPANEL_STATE.TRANSCRIPT_STATUSES.READY } };',
+  );
+  addTranscriptCue(harness, 0);
+  harness.evaluate(
+    'followManualHoldTab = currentWorkspaceTab(); showFollowPlaybackPrompt({ held: true });',
+  );
+
+  const pendingFollow = harness.evaluate("resumeFollowPlaybackNow()");
+  assert.equal(harness.tabs[0].classList.contains("active"), true);
+  assert.equal(harness.evaluate("followManualHoldTab"), null);
+  assert.equal(harness.elements.followBar.hidden, true);
+
+  playback.resolve({
+    success: true,
+    response: { currentTime: 0, paused: false },
+  });
+
+  assert.equal(await pendingFollow, true);
+  assert.equal(harness.evaluate("autoScrollEnabled"), true);
+});
+
+test("overview and notes never schedule or retain transcript follow UI", () => {
+  const harness = createHarness();
+  bindCurrentVideo(harness, "video-tabs", 4);
+  harness.evaluate(
+    'currentTranscript = [{ start: 0, text: "one" }]; autoScrollInterval = 1; autoScrollEnabled = false; scheduleFollowIdleResume();',
+  );
+  assert.equal(harness.elements.followBar.hidden, false);
+
+  harness.evaluate('switchTab("overview")');
+  assert.equal(harness.elements.followBar.hidden, true);
+  assert.equal(harness.evaluate("followManualHoldTab"), null);
+  assert.equal(harness.evaluate("scheduleFollowIdleResume()"), false);
+
+  harness.evaluate('switchTab("notes")');
+  assert.equal(harness.elements.followBar.hidden, true);
+  assert.equal(harness.evaluate("scheduleFollowIdleResume()"), false);
+});
+
+test("playback reads time out instead of leaving follow controls hung", async () => {
+  const harness = createHarness({
+    sendMessage: () => new Promise(() => {}),
+    setTimeoutImpl: setTimeout,
+    clearTimeoutImpl: clearTimeout,
+  });
+  bindCurrentVideo(harness, "video-timeout", 3);
+
+  const result = await harness.evaluate(
+    "readFollowPlayback(followPlaybackSnapshot(), { timeoutMs: 5 })",
+  );
+  assert.equal(result, null);
+});
+
+test("restoring a cue invalidates an older in-flight playback tick", async () => {
+  const playback = deferred();
+  const harness = createHarness({
+    sendMessage: (message) => {
+      assert.equal(message.action, "relayToContent");
+      return playback.promise;
+    },
+  });
+  bindCurrentVideo(harness, "video-cue", 2);
+  const oldCue = addTranscriptCue(harness, 10);
+  const restoredCue = addTranscriptCue(harness, 40);
+  harness.evaluate(
+    'currentTranscript = [{ start: 10, text: "old" }, { start: 40, text: "restored" }]; autoScrollInterval = 1; autoScrollEnabled = true; playbackTrackingEpoch = 5;',
+  );
+
+  const oldTick = harness.evaluate("playbackTrackingTick()");
+  assert.equal(
+    harness.evaluate("restoreFollowAtTime(40, { automatic: true })"),
+    true,
+  );
+  assert.equal(restoredCue.classList.contains("active-playback"), true);
+  assert.equal(restoredCue.scrollIntoViewCount, 1);
+
+  playback.resolve({
+    success: true,
+    response: { currentTime: 10, paused: false },
+  });
+  assert.equal(await oldTick, false);
+  assert.equal(restoredCue.classList.contains("active-playback"), true);
+  assert.equal(oldCue.classList.contains("active-playback"), false);
+  assert.equal(restoredCue.scrollIntoViewCount, 1);
+  assert.equal(oldCue.scrollIntoViewCount, 0);
 });

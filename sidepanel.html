@@ -7,6 +7,7 @@
     <link rel="stylesheet" href="sidepanel.css" />
     <link rel="stylesheet" href="ui-themes.css" />
     <script src="ui-themes.js"></script>
+    <script src="reading-display.js"></script>
   </head>
   <body>
     <!-- HEADER -->
@@ -575,16 +576,29 @@
       </div>
     </div>
 
-    <!-- Auto-scroll follow button — appears when user scrolls away from playback position -->
-    <button
-      class="follow-playback-btn"
-      id="followPlaybackBtn"
-      type="button"
-      style="display: none"
-      aria-label="跟随视频并回到当前播放位置"
-    >
-      跟随视频
-    </button>
+    <!-- Visible, cancellable recovery after manual scrolling in Transcript. -->
+    <div class="follow-playback-bar" id="followPlaybackBar" hidden>
+      <span class="follow-playback-hint" id="followPlaybackHint">
+        静置 5 秒后回到字幕
+      </span>
+      <button class="follow-stay-btn" id="followStayBtn" type="button">
+        留在这里
+      </button>
+      <button
+        class="follow-playback-btn"
+        id="followPlaybackBtn"
+        type="button"
+        aria-label="立即跟随视频并回到当前播放位置"
+      >
+        立即跟随
+      </button>
+    </div>
+    <p
+      class="sr-only"
+      id="followPlaybackStatus"
+      role="status"
+      aria-live="polite"
+    ></p>
 
     <script src="bilibili.js"></script>
     <script src="settings.js"></script>

@@ -83,6 +83,89 @@
     });
   }
 
+  function createIdleFollowController(options = {}) {
+    const delayMs = Number.isFinite(Number(options.delayMs))
+      ? Math.max(0, Number(options.delayMs))
+      : 5000;
+    const setTimer = options.setTimer || globalThis.setTimeout;
+    const clearTimer = options.clearTimer || globalThis.clearTimeout;
+    const readPlayback = options.readPlayback;
+    const shouldResume = options.shouldResume;
+    const resume = options.resume;
+    const onSettled =
+      typeof options.onSettled === "function" ? options.onSettled : () => {};
+    if (
+      typeof setTimer !== "function" ||
+      typeof clearTimer !== "function" ||
+      typeof readPlayback !== "function" ||
+      typeof shouldResume !== "function" ||
+      typeof resume !== "function"
+    ) {
+      throw new TypeError("idle follow controller requires timer and playback callbacks");
+    }
+
+    let timer = null;
+    let sequence = 0;
+    let pendingSnapshot = null;
+
+    function cancel() {
+      sequence += 1;
+      if (timer !== null) clearTimer(timer);
+      timer = null;
+      pendingSnapshot = null;
+      return sequence;
+    }
+
+    function schedule(snapshot) {
+      cancel();
+      const token = sequence;
+      pendingSnapshot = snapshot;
+      timer = setTimer(() => {
+        timer = null;
+        const scheduledSnapshot = pendingSnapshot;
+        pendingSnapshot = null;
+        let playbackResult = null;
+        Promise.resolve()
+          .then(() => readPlayback(scheduledSnapshot, token))
+          .then(async (playback) => {
+            playbackResult = playback;
+            if (token !== sequence) return false;
+            if (!shouldResume(scheduledSnapshot, playback, token)) return false;
+            await resume(scheduledSnapshot, playback, token);
+            return token === sequence;
+          })
+          .then((resumed) => {
+            if (token === sequence) {
+              onSettled(scheduledSnapshot, {
+                resumed: resumed === true,
+                token,
+                playback: playbackResult,
+              });
+            }
+          })
+          .catch((error) => {
+            if (token === sequence) {
+              onSettled(scheduledSnapshot, {
+                resumed: false,
+                token,
+                playback: playbackResult,
+                error,
+              });
+            }
+          });
+      }, delayMs);
+      return token;
+    }
+
+    return Object.freeze({
+      schedule,
+      cancel,
+      isPending: () => timer !== null,
+      token: () => sequence,
+      snapshot: () => pendingSnapshot,
+    });
+  }
+
   function createConsentTokenVault(options = {}) {
     const records = new Map();
     let sequence = 0;
@@ -306,6 +389,7 @@
     sameIdentity,
     taskFlightKey,
     createSingleFlight,
+    createIdleFollowController,
     createConsentTokenVault,
     normalizeTask,
     resultMatchesTask,

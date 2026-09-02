@@ -251,6 +251,22 @@ test("optional themes keep muted text, control edges, and focus rings visible", 
   assert.match(optionsCss, /\.provider-select-button[\s\S]*?var\(--control-border, var\(--line\)\)/);
 });
 
+test("reading-display status remains readable in the dark theme", () => {
+  const themeCss = read("ui-themes.css");
+  const optionsCss = read("options.css");
+  const foreground = themeToken(themeCss, "ink-night", "ink-secondary");
+  const background = themeToken(themeCss, "ink-night", "active-surface");
+
+  assert.ok(
+    contrastRatio(foreground, background) >= 4.5,
+    "the immediate-apply label must meet AA contrast in ink-night",
+  );
+  assert.match(
+    optionsCss,
+    /\.reading-display-live\s*\{[^}]*color:\s*var\(--ink-secondary\)/,
+  );
+});
+
 test("theme menu restores focus and supports standard directional keys", () => {
   const source = read("ui-themes.js");
   assert.match(source, /closeMenu\({ restoreFocus: true }\)/);

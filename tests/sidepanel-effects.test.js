@@ -10,11 +10,44 @@ const {
   sameIdentity,
   taskFlightKey,
   createSingleFlight,
+  createIdleFollowController,
   createConsentTokenVault,
   resultMatchesTask,
   createTaskGate,
   createSupadataDispatcher,
 } = effects;
+
+function createFakeClock() {
+  let now = 0;
+  let sequence = 0;
+  const timers = new Map();
+  return {
+    setTimer(callback, delay) {
+      sequence += 1;
+      timers.set(sequence, { callback, at: now + Number(delay || 0) });
+      return sequence;
+    },
+    clearTimer(id) {
+      timers.delete(id);
+    },
+    async advance(ms) {
+      now += ms;
+      const due = [...timers.entries()]
+        .filter(([, timer]) => timer.at <= now)
+        .sort((left, right) => left[1].at - right[1].at);
+      for (const [id, timer] of due) {
+        timers.delete(id);
+        timer.callback();
+        // The controller intentionally chains an async playback read, an async
+        // resume, and a final settled callback. Drain that bounded chain.
+        for (let index = 0; index < 8; index += 1) {
+          await Promise.resolve();
+        }
+      }
+    },
+    pending: () => timers.size,
+  };
+}
 
 const root = path.resolve(__dirname, "..");
 const IDENTITY = Object.freeze({
@@ -96,6 +129,130 @@ test("single-flight keeps different keys independent and clears rejected work", 
   );
   assert.equal(flight.has("broken"), false);
   assert.equal(await flight.run("broken", async () => "recovered"), "recovered");
+});
+
+test("idle follow waits five seconds and resumes one current playback", async () => {
+  const clock = createFakeClock();
+  const resumes = [];
+  const controller = createIdleFollowController({
+    delayMs: 5000,
+    setTimer: clock.setTimer,
+    clearTimer: clock.clearTimer,
+    readPlayback: async () => ({ currentTime: 42, paused: false }),
+    shouldResume: (_snapshot, playback) => playback.paused === false,
+    resume: async (snapshot, playback) => resumes.push({ snapshot, playback }),
+  });
+
+  controller.schedule({ videoId: "video-a" });
+  await clock.advance(4999);
+  assert.deepEqual(resumes, []);
+  await clock.advance(1);
+  assert.deepEqual(resumes, [
+    {
+      snapshot: { videoId: "video-a" },
+      playback: { currentTime: 42, paused: false },
+    },
+  ]);
+  assert.equal(controller.isPending(), false);
+});
+
+test("new activity replaces the old idle deadline and cancel prevents resume", async () => {
+  const clock = createFakeClock();
+  const resumes = [];
+  const controller = createIdleFollowController({
+    delayMs: 5000,
+    setTimer: clock.setTimer,
+    clearTimer: clock.clearTimer,
+    readPlayback: async (snapshot) => ({ currentTime: snapshot.time, paused: false }),
+    shouldResume: () => true,
+    resume: async (snapshot) => resumes.push(snapshot),
+  });
+
+  controller.schedule({ time: 1 });
+  await clock.advance(3000);
+  controller.schedule({ time: 2 });
+  assert.equal(clock.pending(), 1);
+  await clock.advance(4999);
+  assert.deepEqual(resumes, []);
+  controller.cancel();
+  await clock.advance(1);
+  assert.deepEqual(resumes, []);
+});
+
+test("paused playback and stale async results never resume idle follow", async () => {
+  const clock = createFakeClock();
+  const pending = deferred();
+  const resumes = [];
+  const settled = [];
+  const controller = createIdleFollowController({
+    delayMs: 5000,
+    setTimer: clock.setTimer,
+    clearTimer: clock.clearTimer,
+    readPlayback: () => pending.promise,
+    shouldResume: (_snapshot, playback) => playback?.paused === false,
+    resume: async (snapshot) => resumes.push(snapshot),
+    onSettled: (_snapshot, result) => settled.push(result),
+  });
+
+  controller.schedule({ videoId: "video-a" });
+  await clock.advance(5000);
+  controller.schedule({ videoId: "video-b" });
+  pending.resolve({ currentTime: 9, paused: false });
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.deepEqual(resumes, []);
+  assert.deepEqual(settled, []);
+  controller.cancel();
+
+  const pausedController = createIdleFollowController({
+    delayMs: 5000,
+    setTimer: clock.setTimer,
+    clearTimer: clock.clearTimer,
+    readPlayback: async () => ({ currentTime: 9, paused: true }),
+    shouldResume: (_snapshot, playback) => playback.paused === false,
+    resume: async (snapshot) => resumes.push(snapshot),
+    onSettled: (_snapshot, result) => settled.push(result),
+  });
+  pausedController.schedule({ videoId: "paused" });
+  await clock.advance(5000);
+  assert.deepEqual(resumes, []);
+  assert.equal(settled.length, 1);
+  assert.equal(settled[0].resumed, false);
+  assert.deepEqual(settled[0].playback, { currentTime: 9, paused: true });
+});
+
+test("sidepanel idle follow is exact-route, cancellable, and retries safe blockers", () => {
+  const source = fs.readFileSync(path.join(root, "sidepanel.js"), "utf8");
+  assert.match(source, /const FOLLOW_IDLE_RESUME_DELAY_MS = 5000/);
+  assert.match(source, /const FOLLOW_PLAYBACK_READ_TIMEOUT_MS = 900/);
+  assert.match(
+    source,
+    /function readFollowPlayback\([\s\S]*?expectedRouteKey:\s*snapshot\.routeKey[\s\S]*?action:\s*"getCurrentTime"/,
+  );
+  assert.match(
+    source,
+    /function shouldAutoResumeFollow\(snapshot, playback\)[\s\S]*?followPlaybackSnapshotIsCurrent\(snapshot\)[\s\S]*?playback\?\.paused === false/,
+  );
+  assert.match(
+    source,
+    /onSettled:\s*\(snapshot,[\s\S]*?playback\?\.paused === true[\s\S]*?followIdleController\?\.schedule\(snapshot\)/,
+  );
+  assert.match(
+    source,
+    /function followContextIsDeparted\(\)[\s\S]*?currentWorkspaceTab\(\) === "transcript"[\s\S]*?autoScrollEnabled === false/,
+  );
+  assert.match(
+    source,
+    /function resumeFollowPlaybackFromIdle\(snapshot, playback\)[\s\S]*?shouldAutoResumeFollow\(snapshot, playback\)/,
+  );
+  assert.match(
+    source,
+    /function restoreFollowAtTime\([\s\S]*?currentWorkspaceTab\(\) !== "transcript"\) return false/,
+  );
+  assert.doesNotMatch(
+    source,
+    /function restoreFollowAtTime\([\s\S]*?switchTab\("transcript"/,
+  );
 });
 
 test("consent token is exact-identity, one-time, and a wrong identity cannot consume it", () => {

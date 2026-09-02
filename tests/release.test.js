@@ -122,6 +122,15 @@ test("cross-platform runtime dependencies match the Passive-first release surfac
   const panelEffectsIndex = sidepanelPage.indexOf(
     '<script src="sidepanel-effects.js"></script>',
   );
+  const panelReadingIndex = sidepanelPage.indexOf(
+    '<script src="reading-display.js"></script>',
+  );
+  const optionsReadingIndex = optionsPage.indexOf(
+    '<script src="reading-display.js"></script>',
+  );
+  const optionsRuntimeIndex = optionsPage.indexOf(
+    '<script src="options.js"></script>',
+  );
 
   assert.doesNotMatch(background, /importScripts\("youtube-transcript\.js"\)/);
   assert.match(background, /importScripts\("notes-backup\.js"\)/);
@@ -136,7 +145,9 @@ test("cross-platform runtime dependencies match the Passive-first release surfac
       panelExportJobsIndex >= 0 &&
       panelStateIndex >= 0 &&
       panelEffectsIndex >= 0 &&
+      panelReadingIndex >= 0 &&
       panelRuntimeIndex >= 0 &&
+      panelReadingIndex < panelRuntimeIndex &&
       panelNoteSourcesIndex < panelExportJobsIndex &&
       panelExportJobsIndex < panelStateIndex &&
       panelStateIndex < panelEffectsIndex &&
@@ -144,9 +155,19 @@ test("cross-platform runtime dependencies match the Passive-first release surfac
     "sidepanel.html must load note/export dependencies, then state/effects, then sidepanel.js",
   );
   assert.ok(
+    optionsReadingIndex >= 0 &&
+      optionsRuntimeIndex >= 0 &&
+      optionsReadingIndex < optionsRuntimeIndex,
+    "options.html must apply reading preferences before options.js starts",
+  );
+  assert.ok(
     (releaseCheck.match(/"sidepanel-state\.js"/g) || []).length >= 2 &&
       (releaseCheck.match(/"sidepanel-effects\.js"/g) || []).length >= 2,
     "sidepanel state/effects must be allowlisted and required for release",
+  );
+  assert.ok(
+    (releaseCheck.match(/"reading-display\.js"/g) || []).length >= 2,
+    "reading-display.js must be allowlisted and required for release",
   );
   assert.ok(
     optionsPage.indexOf('<script src="notes-backup.js"></script>') <

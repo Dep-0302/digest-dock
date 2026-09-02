@@ -15,7 +15,7 @@ If that value is `und`, infer the transcript language and return its short BCP-4
 code in `detectedSourceLanguage`; otherwise copy `{sourceLanguage}` unchanged.
 
 You must provide:
-- Chapters with timestamps that COVER THE ENTIRE VIDEO from start to finish. Every chapter must contain a concise Simplified Chinese `titleZh` and `summaryZh`. This video runs until {durationFormatted}. Use your own judgment for how many chapters there should be and where the natural topic shifts happen — make as many or as few as the content genuinely calls for. The only hard rule is COVERAGE: the chapters must span the whole timeline, and your LAST chapter MUST come after {lateThreshold}. Do NOT stop partway through or cluster all the chapters near the beginning — the later parts of the video need chapters too.
+- Chapters with cues that COVER THE ENTIRE AVAILABLE SPOKEN-CAPTION TIMELINE from start to the last real cue. Every chapter must contain a concise Simplified Chinese `titleZh` and `summaryZh`. The available caption timeline runs until {durationFormatted}. Use your own judgment for how many chapters there should be and where the natural topic shifts happen. The chapters must span the available cues, and your LAST chapter MUST use a cue after {lateThreshold}. Never invent a chapter for silent or uncaptained time after the final cue.
 - 3-5 key quotes from the transcript with their timestamps. Put the polished quote in the source language in `quoteOriginal`, and its faithful Simplified Chinese rendering in `quoteZh`. If the source language is explicitly Simplified Chinese (`zh-Hans`, `zh-CN`, or `zh-SG`), copy the same polished quote into both fields. If it is Traditional Chinese, preserve Traditional Chinese in `quoteOriginal` and convert it faithfully to Simplified Chinese in `quoteZh`.
 
 For quotes, focus on:
@@ -37,50 +37,52 @@ IMPORTANT: Use the video title and description as context to:
 - Fix transcription errors for technical terms or jargon
 - Understand acronyms and abbreviations used in the video
 
-⚠️ CRITICAL: TIMESTAMP EXTRACTION ⚠️
+⚠️ CRITICAL: CUE EXTRACTION ⚠️
 The transcript is formatted EXACTLY like this:
-[0:00] Welcome to today's video
-[0:15] Let me tell you about our project
-[0:32] We wanted to think outside the box
-[1:05] The results were incredible
+[cue-0 @ 0:00] Welcome to today's video
+[cue-1 @ 0:15] Let me tell you about our project
+[cue-2 @ 0:32] We wanted to think outside the box
+[cue-3 @ 1:05] The results were incredible
 
-RULES FOR EXTRACTING TIMESTAMPS:
-1. Every line starts with a timestamp in [M:SS] or [MM:SS] format
-2. To get the timestamp for a quote, find the LINE containing those words
-3. The timestamp is the [X:XX] at the START of that line
-4. Convert M:SS to seconds: [2:30] = 150 seconds, [0:45] = 45 seconds
+RULES FOR EXTRACTING CUES:
+1. Every line starts with a stable cue ID and its display time
+2. To locate a chapter or quote, find the LINE containing that content
+3. Copy that line's cue ID exactly into `cueId`
+4. Also copy its display time and convert it to seconds for compatibility; the extension resolves the final jump locally from `cueId`
 
 EXAMPLE: If the transcript shows:
-[2:30] We wanted to think outside the box and play with animations
+[cue-18 @ 2:30] We wanted to think outside the box and play with animations
 
 Then the timestamp for "We wanted to think outside the box" is:
+- cueId: "cue-18"
 - timestamp: "2:30"
 - timestampSeconds: 150
 
 DO NOT:
-- Make up timestamps that don't exist in the transcript
+- Make up cue IDs or timestamps that don't exist in the transcript
 - Use 0:00 as a default — find the actual timestamp
-- Use timestamps > {durationFormatted} (video is only {maxTimestampSeconds} seconds)
+- Use cues or timestamps beyond {durationFormatted} (the final available cue is {maxTimestampSeconds} seconds)
 
-For CHAPTERS: Find where a topic begins, use that line's timestamp
-For QUOTES: Find the line containing the quote, use that line's timestamp
+For CHAPTERS: Find where a topic begins and use that line's cue ID
+For QUOTES: Find the line containing the quote and use that line's cue ID
 Output JSON (no markdown fences):
 {
   "detectedSourceLanguage": "short BCP-47 source code",
   "chapters": [
-    {"titleZh": "简洁的中文标题", "timestamp": "0:00", "timestampSeconds": 0, "summaryZh": "简洁的中文总结"}
+    {"cueId": "cue-0", "titleZh": "简洁的中文标题", "timestamp": "0:00", "timestampSeconds": 0, "summaryZh": "简洁的中文总结"}
   ],
   "keyQuotes": [
-    {"quoteOriginal": "Polished quote in the source language", "quoteZh": "忠实的中文引语", "timestamp": "2:30", "timestampSeconds": 150}
+    {"cueId": "cue-18", "quoteOriginal": "Polished quote in the source language", "quoteZh": "忠实的中文引语", "timestamp": "2:30", "timestampSeconds": 150}
   ],
-  "keyMoments": [0, 150, 300]
+  "keyMoments": ["cue-0", "cue-18"]
 }
 
 CRITICAL:
-- timestamp: The [M:SS] from the transcript line (e.g., "2:30")
+- cueId: Copy the exact cue ID from the matching transcript line
+- timestamp: The M:SS shown after `@` on the transcript line (e.g., "2:30")
 - timestampSeconds: Convert to seconds (2:30 = 2*60+30 = 150)
 - NEVER use 0:00/0 unless the content actually starts at [0:00]
-- EVERY timestamp must exist in the transcript — look it up!
+- EVERY cueId must exist in the transcript — copy it exactly!
 ```
 
 ## User prompt
@@ -90,7 +92,7 @@ Video title: {videoTitle}
 Creator: {channelName}
 Source platform: {platform}
 SOURCE CAPTION LANGUAGE: {sourceLanguage}
-VIDEO DURATION: {durationFormatted} ({maxTimestampSeconds} seconds) — do not use any timestamp beyond this!
+AVAILABLE CAPTION TIMELINE: {durationFormatted} ({maxTimestampSeconds} seconds) — do not use any cue beyond this!
 
 VIDEO DESCRIPTION (use this to correctly spell names and terms):
 {videoDescription}
@@ -101,9 +103,9 @@ TRANSCRIPT:
 
 ## Variables
 
-- `{durationFormatted}` — video duration as `MM:SS`.
-- `{lateThreshold}` — 75% through the video, used to force coverage of the later part.
-- `{maxTimestampSeconds}` — total video length in seconds.
+- `{durationFormatted}` — final available caption cue as `MM:SS`.
+- `{lateThreshold}` — 75% through the available caption timeline.
+- `{maxTimestampSeconds}` — final available caption cue in seconds.
 - `{videoTitle}` — video title.
 - `{channelName}` — channel name.
 - `{videoDescription}` — full video description.

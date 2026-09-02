@@ -251,7 +251,7 @@ test("Bilibili cache source remains isolated from YouTube source policy", () => 
   assert.equal(helpers.validateTranscriptCacheRecord(record, expected), null);
 });
 
-test("Bilibili v1 overview survives while YouTube v1 overview expires", () => {
+test("legacy overviews without local cue anchors expire on every platform", () => {
   const helpers = loadSidepanelHelpers();
   const transcript = "[0:00] 你好";
   const analysis = {
@@ -281,7 +281,7 @@ test("Bilibili v1 overview survives while YouTube v1 overview expires", () => {
       "bilibili",
       null,
     ),
-    analysis,
+    null,
   );
   assert.equal(
     helpers.validateOverviewCacheRecord(

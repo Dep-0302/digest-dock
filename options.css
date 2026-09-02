@@ -477,6 +477,183 @@ a {
 }
 
 /* ------------------------------------------------------------------ */
+/* Reading display                                                     */
+/* ------------------------------------------------------------------ */
+
+.reading-display-card {
+  scroll-margin-top: 24px;
+}
+
+.reading-display-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.reading-display-head .help {
+  max-width: 720px;
+}
+
+.reading-display-live {
+  flex: 0 0 auto;
+  padding: 4px 9px;
+  border: 1px solid var(--accent-border);
+  border-radius: 999px;
+  background: var(--active-surface);
+  color: var(--ink-secondary);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.reading-display-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.6fr) minmax(220px, 0.8fr);
+  gap: 22px;
+  margin-top: 22px;
+}
+
+.reading-choice-fieldset {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.reading-choice-fieldset legend {
+  margin-bottom: 9px;
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.reading-choice-list {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.reading-weight-list {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.reading-choice {
+  position: relative;
+  min-width: 0;
+}
+
+.reading-choice input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+  opacity: 0;
+}
+
+.reading-choice-card {
+  display: flex;
+  min-height: 48px;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--control-border, var(--line));
+  border-radius: var(--radius-control);
+  background: var(--surface-soft);
+  color: var(--ink-secondary);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  transition:
+    border-color 0.16s ease,
+    background 0.16s ease,
+    color 0.16s ease,
+    box-shadow 0.16s ease;
+}
+
+.reading-choice:hover .reading-choice-card {
+  border-color: var(--accent-border);
+  color: var(--ink);
+}
+
+.reading-choice input:checked + .reading-choice-card {
+  border-color: var(--accent);
+  background: var(--active-surface);
+  color: var(--ink);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.reading-choice input:focus-visible + .reading-choice-card {
+  outline: 3px solid var(--accent-focus);
+  outline-offset: 2px;
+}
+
+.reading-size-sample {
+  min-width: 24px;
+  color: var(--ink);
+  font-family: var(--font-reading, system-ui, sans-serif);
+  line-height: 1;
+  text-align: center;
+}
+
+.reading-size-sample--small {
+  font-size: 12.5px;
+}
+
+.reading-size-sample--standard {
+  font-size: 13.5px;
+}
+
+.reading-size-sample--large {
+  font-size: 15.5px;
+}
+
+.reading-size-sample--xlarge {
+  font-size: 17.5px;
+}
+
+.reading-weight-sample--regular {
+  font-weight: 400;
+}
+
+.reading-weight-sample--bold {
+  font-weight: 700;
+}
+
+.reading-display-status {
+  min-height: 20px;
+  margin: 12px 0 0;
+  color: var(--success);
+  font-size: 13px;
+}
+
+.reading-display-status.is-error {
+  color: var(--danger);
+}
+
+@media (max-width: 900px) {
+  .reading-display-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 560px) {
+  .reading-display-head {
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .reading-choice-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* Data + backup actions                                               */
 /* ------------------------------------------------------------------ */
 
