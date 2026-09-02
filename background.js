@@ -1021,6 +1021,12 @@ async function handleYoutubePassiveState(payload, sender) {
       }
       const capture = normalizePassiveCapture(payload);
       if (!capture || capture.videoId !== videoId) {
+        // A completed page response with an empty or unusable body is not a
+        // transcript, but it must still close the matching inflight state.
+        // Leaving that state behind would make later gates wait on work that
+        // has already finished.
+        await writeYoutubePassiveEntries(next);
+        notifyYoutubePassiveWaiters();
         return { ok: false, error: "INVALID_PASSIVE_CAPTURE" };
       }
       next.push({
@@ -2333,6 +2339,30 @@ async function readYouTubePlayabilitySnapshot(tabId, expectedVideoId) {
             /^a\./i.test(String(defaultCaptionTrack?.vssId || ""))
               ? "asr"
               : "manual";
+          const availableTracks = rawTracks
+            .slice(0, 100)
+            .map((track) => {
+              const language = String(track?.languageCode || "")
+                .trim()
+                .replace(/_/g, "-")
+                .slice(0, 35);
+              if (
+                !/^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8}){0,3}$/.test(
+                  language,
+                )
+              ) {
+                return null;
+              }
+              return {
+                language,
+                kind:
+                  track?.kind === "asr" ||
+                  /^a\./i.test(String(track?.vssId || ""))
+                    ? "asr"
+                    : "manual",
+              };
+            })
+            .filter(Boolean);
           // Only the language code, never a signed caption request URL.
           const sourceLanguage =
             response?.videoDetails?.defaultAudioLanguage ||
@@ -2352,6 +2382,7 @@ async function readYouTubePlayabilitySnapshot(tabId, expectedVideoId) {
             captionTrackCount: captionTrackCountKnown
               ? rawTracks.length
               : null,
+            availableTracks: captionTrackCountKnown ? availableTracks : [],
             pageDefaultTrack:
               captionTrackCountKnown &&
               rawTracks.length > 0 &&
@@ -2402,10 +2433,28 @@ function normalizeYoutubePageCaptionEvidence(snapshot) {
     (kind === "manual" || kind === "asr")
       ? { language, kind }
       : null;
+  const availableTracks = (Array.isArray(snapshot?.availableTracks)
+    ? snapshot.availableTracks
+    : []
+  )
+    .slice(0, 100)
+    .map((track) => {
+      const trackLanguage = normalizeLanguageCode(track?.language);
+      const trackKind = track?.kind;
+      if (
+        !trackLanguage ||
+        (trackKind !== "manual" && trackKind !== "asr")
+      ) {
+        return null;
+      }
+      return { language: trackLanguage, kind: trackKind };
+    })
+    .filter(Boolean);
   return {
     captionTrackCountKnown: true,
     captionTrackCount,
     selectedTrack,
+    availableTracks,
   };
 }
 

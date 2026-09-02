@@ -174,6 +174,7 @@ test("the page gate reads no signed caption URL", () => {
   assert.match(gate, /sourceLanguage/);
   assert.match(gate, /captionTrackCountKnown/);
   assert.match(gate, /captionTrackCount/);
+  assert.match(gate, /availableTracks/);
   assert.match(gate, /pageDefaultTrack/);
 });
 
@@ -273,6 +274,10 @@ test("page gate returns one sanitized default track without signed fields", asyn
     JSON.parse(JSON.stringify(snapshot.pageDefaultTrack)),
     { language: "en-US", kind: "asr" },
   );
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(snapshot.availableTracks)),
+    [{ language: "en-US", kind: "asr" }],
+  );
   assert.doesNotMatch(
     JSON.stringify(snapshot),
     /baseUrl|signature|timedtext|secret/i,
@@ -302,6 +307,13 @@ test("page gate does not guess a default from multiple unranked tracks", async (
   assert.equal(snapshot.captionTrackCountKnown, true);
   assert.equal(snapshot.captionTrackCount, 2);
   assert.equal(snapshot.pageDefaultTrack, null);
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(snapshot.availableTracks)),
+    [
+      { language: "en", kind: "manual" },
+      { language: "de", kind: "manual" },
+    ],
+  );
 });
 
 test("a new video without a Supadata key never touches the network", async () => {

@@ -60,6 +60,9 @@ function pageSnapshot(videoId = VIDEO_ID, options = {}) {
           options.captionTrackCountKnown === true
             ? Number(options.captionTrackCount || 0)
             : null,
+        availableTracks: Array.isArray(options.availableTracks)
+          ? options.availableTracks
+          : [],
         pageDefaultTrack: options.pageDefaultTrack || null,
       },
     },
@@ -739,6 +742,63 @@ test("an unsolicited Passive body is rejected and never enters the session buffe
   assert.equal(response.ok, false);
   assert.equal(response.error, "PASSIVE_CAPTURE_NOT_INFLIGHT");
   assert.equal(worker.sessionState.youtube_passive_session_buffer, undefined);
+});
+
+test("empty Passive bodies close inflight state without becoming a transcript", async (t) => {
+  for (const testCase of [
+    { name: "zero bytes", body: "" },
+    { name: "empty events", body: JSON.stringify({ events: [] }) },
+  ]) {
+    await t.test(testCase.name, async () => {
+      const worker = loadBackground();
+      await worker.dispatch(
+        {
+          action: "youtubePassiveState",
+          payload: {
+            type: "inflight",
+            videoId: VIDEO_ID,
+            language: "en",
+            kind: "manual",
+            status: 0,
+            inFlight: true,
+          },
+        },
+        { tab: { id: 1 } },
+      );
+      const response = await worker.dispatch(
+        {
+          action: "youtubePassiveState",
+          payload: {
+            type: "capture",
+            videoId: VIDEO_ID,
+            language: "en",
+            kind: "manual",
+            status: 200,
+            inFlight: false,
+            body: testCase.body,
+          },
+        },
+        { tab: { id: 1 } },
+      );
+      assert.equal(response.ok, false);
+      assert.equal(response.error, "INVALID_PASSIVE_CAPTURE");
+      assert.deepEqual(
+        JSON.parse(
+          JSON.stringify(worker.sessionState.youtube_passive_session_buffer),
+        ),
+        [],
+      );
+      const gate = await worker.helpers.readYoutubePassiveGate({
+        tabId: 1,
+        videoId: VIDEO_ID,
+        preferredLanguage: "en",
+        trackKind: "manual-first",
+      });
+      assert.equal(gate.capture, null);
+      assert.equal(gate.inFlight, false);
+      assert.equal(worker.counts.fetch, 0);
+    });
+  }
 });
 
 test("an observed Passive 429 clears inflight state and blocks automatic routes", async (t) => {
