@@ -3717,6 +3717,7 @@ function installSidepanelDigestFixture(runtime) {
         clickError: () => element("errorBtn").click(),
         clickErrorSecondary: () => element("errorSecondaryBtn").click(),
         overviewTranslationLoading: () => isOverviewTranslationLoading,
+        videoSourceLanguage: () => currentVideoSourceLanguage || null,
       };
     })()
   `);
@@ -6508,7 +6509,7 @@ test("overview cache persistence failure is observable to the caller", async () 
   );
 });
 
-test("a newly confirmed player language invalidates mismatched transcript state", async () => {
+test("a newly confirmed audio language does not reset the same video's validated transcript", async () => {
   const runtime = loadSidepanelRuntime();
   const fixture = installSidepanelDigestFixture(runtime);
   fixture.setVideoSourceLanguage("en");
@@ -6518,16 +6519,13 @@ test("a newly confirmed player language invalidates mismatched transcript state"
   await englishLoad;
 
   fixture.setVideoSourceLanguage("zh-CN");
-  const chineseLoad = fixture.start("video-a");
-  await nextTurn();
-  fixture.resolveCache(
-    "video-a",
-    fixture.makeCache("video-a", true, "zh-CN"),
-  );
-  await chineseLoad;
+  await fixture.start("video-a");
 
-  assert.equal(JSON.parse(fixture.snapshot()).sourceLanguage, "zh-CN");
-  assert.equal(JSON.parse(fixture.snapshot()).overviewMode, "zh");
+  const snapshot = JSON.parse(fixture.snapshot());
+  assert.equal(fixture.videoSourceLanguage(), "zh-CN");
+  assert.equal(snapshot.sourceLanguage, "en");
+  assert.equal(snapshot.transcriptText, "transcript-video-a");
+  assert.equal(snapshot.overviewMode, "zh");
 });
 
 test("an active Overview tab starts analysis for the newly selected video", async () => {

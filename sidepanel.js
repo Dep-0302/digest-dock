@@ -2544,6 +2544,15 @@ async function enterNotesOnlyView(context, tab, locator) {
   return true;
 }
 
+function digestMediaIdentityChanged(
+  nextVideoId,
+  nextRouteKey,
+  activeVideoId,
+  activeRouteKey,
+) {
+  return nextVideoId !== activeVideoId || nextRouteKey !== activeRouteKey;
+}
+
 function startDigest(
   videoId,
   videoUrl,
@@ -2552,20 +2561,17 @@ function startDigest(
 ) {
   const nextMediaRef = mediaRef || currentMediaRef;
   const nextRouteKey = routeKey || currentRouteKey;
-  const sourceTrackChanged =
-    nextMediaRef?.platform !== "bilibili" &&
-    videoId === currentVideoId &&
-    currentVideoSourceLanguage &&
-    currentTranscript &&
-    (!currentTranscriptLanguage ||
-      !languagesSharePrimary(
-        currentVideoSourceLanguage,
-        currentTranscriptLanguage,
-      ));
-  const videoChanged =
-    videoId !== currentVideoId ||
-    nextRouteKey !== currentRouteKey ||
-    sourceTrackChanged;
+  // Media identity is video + route, never the default audio language. A
+  // Chinese subtitle selected for an English-audio video remains the same
+  // digest across tab activation, page-complete, and scheduled refresh events.
+  // A future track replacement must arrive as a new validated transcript
+  // artifact; it must not be guessed from metadata language drift here.
+  const videoChanged = digestMediaIdentityChanged(
+    videoId,
+    nextRouteKey,
+    currentVideoId,
+    currentRouteKey,
+  );
   if (videoChanged) {
     resetDigestStateForVideo(
       videoId,
@@ -2686,18 +2692,6 @@ async function runDigestLoad(
     cached &&
     ((cached.routeKey && cached.routeKey !== routeKey) ||
       (cached.mediaRef?.mediaKey && cached.mediaRef.mediaKey !== videoId))
-  ) {
-    cached = null;
-  }
-  if (
-    cached &&
-    mediaRef?.platform === "youtube" &&
-    currentVideoSourceLanguage &&
-    (!cached.transcriptLanguage ||
-      !languagesSharePrimary(
-        currentVideoSourceLanguage,
-        cached.transcriptLanguage,
-      ))
   ) {
     cached = null;
   }
@@ -7589,6 +7583,7 @@ function validateTranscriptCacheRecord(
     );
     if (
       expectedLanguage &&
+      cachedRequestedLanguage &&
       cachedRequestedLanguage !== expectedLanguage
     ) {
       return null;
@@ -9546,6 +9541,7 @@ globalThis.__YTD_TRANSCRIPT_TESTING__ = {
   transcriptContentFingerprint,
   transcriptArtifactIdentity,
   cachedTranscriptArtifactIdentity,
+  digestMediaIdentityChanged,
   validateTranscriptCacheRecord,
   sendTranslationMessage,
   groupTranscriptEntries,
