@@ -1,6 +1,6 @@
 {
   "name": "digest-dock",
-  "version": "1.4.6",
+  "version": "1.4.7",
   "private": true,
   "description": "Turn supported media into learning resources with transcripts, AI overviews, and timestamped notes.",
   "license": "MIT",

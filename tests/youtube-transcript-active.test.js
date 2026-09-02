@@ -122,7 +122,7 @@ test("returns the frozen product contract after a typical 1 + 1 manual success",
 
   assert.equal(calls.length, 2);
   assert.equal(result.providerId, "youtube-active");
-  assert.equal(result.providerVariant, "isolated-tab");
+  assert.equal(result.providerVariant, "isolated-tab-ios-json3");
   assert.equal(result.runId, "generation-7");
   assert.equal(result.videoId, VIDEO_ID);
   assert.equal(result.status, "HAVE_TRANSCRIPT");
@@ -161,7 +161,7 @@ test("selects an ASR track without silently crossing the requested kind", async 
   assert.equal(result.timestamped, "[72:00] Generated");
 });
 
-test("falls back from an empty json3 body to bounded srv3 parsing", async () => {
+test("an empty json3 body stops without trying another format", async () => {
   let timedtextCalls = 0;
   const result = await active.run(
     { videoId: VIDEO_ID, language: "en", trackKind: "manual" },
@@ -171,19 +171,18 @@ test("falls back from an empty json3 body to bounded srv3 parsing", async () => 
           return response(playerBody([manualTrack()]));
         }
         timedtextCalls += 1;
-        return timedtextCalls === 1
-          ? response("")
-          : response('<p t="1500" d="500"><s>Fallback works</s></p>');
+        return response("");
       },
     },
   );
-  assert.equal(result.status, "HAVE_TRANSCRIPT");
-  assert.equal(result.text, "Fallback works");
-  assert.equal(result.transcript[0].start, 1.5);
-  assert.equal(result.diagnostics.providerInitiated.youtubeTimedtext, 2);
+  assert.equal(result.status, "UNKNOWN");
+  assert.equal(result.errorCode, "EMPTY_TRANSCRIPT");
+  assert.equal(result.transcript.length, 0);
+  assert.equal(result.diagnostics.providerInitiated.youtubeTimedtext, 1);
+  assert.equal(timedtextCalls, 1);
 });
 
-test("uses at most four player clients and confirms a missing language", async () => {
+test("uses only the first fixed player client and confirms a missing language", async () => {
   const clients = Array.from({ length: 6 }, (_, index) => ({
     id: `CLIENT_${index}`,
     clientName: "IOS",
@@ -202,19 +201,19 @@ test("uses at most four player clients and confirms a missing language", async (
   assert.equal(result.status, "CONFIRMED_UNAVAILABLE");
   assert.equal(result.errorCode, "TRACK_UNAVAILABLE");
   assert.equal(result.transcript.length, 0);
-  assert.equal(result.diagnostics.providerInitiated.youtubePlayer, 4);
+  assert.equal(result.diagnostics.providerInitiated.youtubePlayer, 1);
   assert.equal(result.diagnostics.providerInitiated.youtubeTimedtext, 0);
-  assert.equal(result.diagnostics.attempts.length, 4);
+  assert.equal(result.diagnostics.attempts.length, 1);
 });
 
-test("confirms no transcript only after all four bounded playable clients", async () => {
+test("confirms no transcript after the one fixed playable client", async () => {
   const result = await active.run(
     { videoId: VIDEO_ID, language: "en", trackKind: "manual-first" },
     { fetchImpl: async () => response(playerBody([])) },
   );
   assert.equal(result.status, "CONFIRMED_UNAVAILABLE");
   assert.equal(result.errorCode, "NO_TRANSCRIPT");
-  assert.equal(result.diagnostics.providerInitiated.youtubePlayer, 4);
+  assert.equal(result.diagnostics.providerInitiated.youtubePlayer, 1);
   assert.equal(result.diagnostics.providerInitiated.youtubeTimedtext, 0);
 });
 
@@ -230,11 +229,11 @@ test("does not use caption URLs returned with restricted playability", async () 
   );
   assert.equal(result.status, "CONFIRMED_UNAVAILABLE");
   assert.equal(result.errorCode, "LOGIN_REQUIRED");
-  assert.equal(result.diagnostics.providerInitiated.youtubePlayer, 4);
+  assert.equal(result.diagnostics.providerInitiated.youtubePlayer, 1);
   assert.equal(result.diagnostics.providerInitiated.youtubeTimedtext, 0);
 });
 
-test("chooses one track and stops after its three timedtext formats", async () => {
+test("chooses one track and stops after the one json3 timedtext request", async () => {
   const requestedUrls = [];
   const firstUrl = `${CAPTION_URL}&track=first`;
   const secondUrl = `${CAPTION_URL}&track=second`;
@@ -260,13 +259,13 @@ test("chooses one track and stops after its three timedtext formats", async () =
   assert.equal(result.errorCode, "EMPTY_TRANSCRIPT");
   assert.equal(result.selectedTrack.kind, "manual");
   assert.equal(result.diagnostics.providerInitiated.youtubePlayer, 1);
-  assert.equal(result.diagnostics.providerInitiated.youtubeTimedtext, 3);
-  assert.equal(requestedUrls.length, 3);
+  assert.equal(result.diagnostics.providerInitiated.youtubeTimedtext, 1);
+  assert.equal(requestedUrls.length, 1);
   assert.equal(requestedUrls.every((url) => url.includes("track=first")), true);
   assert.equal(requestedUrls.some((url) => url.includes("track=second")), false);
 });
 
-test("enforces the combined worst-case ceiling of four player plus three timedtext", async () => {
+test("never advances to another client when the fixed IOS track is unavailable", async () => {
   let playerCalls = 0;
   const result = await active.run(
     { videoId: VIDEO_ID, language: "fr", trackKind: "manual" },
@@ -275,19 +274,18 @@ test("enforces the combined worst-case ceiling of four player plus three timedte
         if (String(url).includes("/youtubei/v1/player")) {
           playerCalls += 1;
           return response(
-            playerBody([
-              playerCalls === 4 ? manualTrack("fr") : manualTrack("en"),
-            ]),
+            playerBody([manualTrack("en")]),
           );
         }
         return response("");
       },
     },
   );
-  assert.equal(result.status, "UNKNOWN");
-  assert.equal(result.errorCode, "EMPTY_TRANSCRIPT");
-  assert.equal(result.diagnostics.providerInitiated.youtubePlayer, 4);
-  assert.equal(result.diagnostics.providerInitiated.youtubeTimedtext, 3);
+  assert.equal(result.status, "CONFIRMED_UNAVAILABLE");
+  assert.equal(result.errorCode, "TRACK_UNAVAILABLE");
+  assert.equal(result.diagnostics.providerInitiated.youtubePlayer, 1);
+  assert.equal(result.diagnostics.providerInitiated.youtubeTimedtext, 0);
+  assert.equal(playerCalls, 1);
 });
 
 test("stops on a player 429 before headers or body are read", async () => {
@@ -395,7 +393,7 @@ test("enforces the 8 MiB response ceiling before text()", async () => {
   );
   assert.equal(result.status, "UNKNOWN");
   assert.equal(result.errorCode, "PROBE_FAILED");
-  assert.equal(result.diagnostics.providerInitiated.youtubePlayer, 4);
+  assert.equal(result.diagnostics.providerInitiated.youtubePlayer, 1);
   assert.equal(bodyReads, 0);
 });
 
@@ -427,8 +425,8 @@ test("uses a fixed 15 second abort timer and maps timeouts to a technical failur
 
   assert.equal(result.status, "UNKNOWN");
   assert.equal(result.errorCode, "PROBE_FAILED");
-  assert.equal(result.diagnostics.providerInitiated.youtubePlayer, 4);
-  assert.deepEqual(delays, [15_000, 15_000, 15_000, 15_000]);
+  assert.equal(result.diagnostics.providerInitiated.youtubePlayer, 1);
+  assert.deepEqual(delays, [15_000]);
 });
 
 test("a mid-run SPA change stops before any later Active request", async () => {
@@ -501,6 +499,44 @@ test("a newer run in the same tab cancels the older in-flight run", async () => 
   assert.equal(newResult.status, "HAVE_TRANSCRIPT");
   assert.equal(newResult.runId, "new");
   assert.equal(secondCalls, 2);
+});
+
+test("product Active is fixed to IOS plus json3 and preserves timer receivers", async () => {
+  const source = fs.readFileSync(
+    path.join(__dirname, "..", "youtube-transcript-active.js"),
+    "utf8",
+  );
+  assert.match(source, /clientName:\s*"IOS"/);
+  assert.match(source, /Object\.freeze\(\{ id: "json3", parser: parseJson3 \}\)/);
+  assert.doesNotMatch(source, /ANDROID_VR|clientName:\s*"MWEB"|clientName:\s*"ANDROID"/);
+  assert.doesNotMatch(source, /id:\s*"srv3"|id:\s*"classic"/);
+
+  let scheduled = 0;
+  let cleared = 0;
+  const deps = {
+    getCurrentVideoId: () => VIDEO_ID,
+    setTimeout(callback) {
+      assert.equal(this, deps);
+      scheduled += 1;
+      return setTimeout(callback, 1000);
+    },
+    clearTimeout(timerId) {
+      assert.equal(this, deps);
+      cleared += 1;
+      clearTimeout(timerId);
+    },
+    fetchImpl: async (url) =>
+      String(url).includes("/youtubei/v1/player")
+        ? response(playerBody([manualTrack()]))
+        : response(json3({ text: "fixed route", start: 0, duration: 1 })),
+  };
+  const result = await active.run(
+    { videoId: VIDEO_ID, language: "en", trackKind: "manual" },
+    deps,
+  );
+  assert.equal(result.status, "HAVE_TRANSCRIPT");
+  assert.equal(scheduled, 2);
+  assert.equal(cleared, 2);
 });
 
 test("invalid input performs no network work and source has no credential APIs", async () => {

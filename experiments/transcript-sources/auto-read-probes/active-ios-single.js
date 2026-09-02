@@ -1,19 +1,19 @@
 /**
- * DigestDock's credential-free YouTube Active transcript route.
+ * Stage-3 probe: one IOS player request plus one json3 caption request.
  *
  * This file is intentionally self-contained so Chrome can inject it into the
  * current tab's ISOLATED world. The caller owns page identity checks and route
  * fallback. This module only performs one bounded YouTube-native attempt.
  */
 (function installYouTubeActive(root, factory) {
-  const existing = root?.DIGESTDOCK_YOUTUBE_ACTIVE;
+  const existing = root?.DIGESTDOCK_YOUTUBE_ACTIVE_IOS_SINGLE_PROBE;
   const api = existing?.apiVersion === 1 ? existing : factory();
-  if (root) root.DIGESTDOCK_YOUTUBE_ACTIVE = api;
+  if (root) root.DIGESTDOCK_YOUTUBE_ACTIVE_IOS_SINGLE_PROBE = api;
   if (typeof module !== "undefined" && module.exports) module.exports = api;
 })(typeof globalThis !== "undefined" ? globalThis : this, function createApi() {
   "use strict";
 
-  const PROVIDER_ID = "youtube-active";
+  const PROVIDER_ID = "youtube-active-ios-single-probe";
   const PROVIDER_VARIANT = "isolated-tab-ios-json3";
   const PLAYER_ENDPOINT =
     "https://www.youtube.com/youtubei/v1/player?prettyPrint=false";
@@ -818,8 +818,8 @@
           }
         }
 
-        // A selected track belongs to the one fixed IOS/json3 attempt. Do not
-        // move to another client, track, or format after it fails.
+        // A selected track is the one and only track for this run. Do not move
+        // to another client, track, or format after json3 is exhausted.
         attempt.outcome = "empty-caption-body";
         fail("EMPTY_TRANSCRIPT");
       }

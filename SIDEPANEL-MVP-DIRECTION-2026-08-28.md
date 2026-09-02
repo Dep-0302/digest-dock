@@ -40,6 +40,8 @@ DigestDock 侧边栏是“当前视频的阅读、理解与笔记工作台”。
 
 ```text
 正缓存 / Passive
+  → 页面脱敏选轨：任一中文优先；无中文时当前轨优先，否则默认轨
+  → 固定 IOS + json3 Active，最多 1 player + 1 timedtext
   → 首次 UNKNOWN：提示打开 YouTube CC
   → 用户明确点击一次免费重试
   → 重试仍为 UNKNOWN：才可显示 Supadata
@@ -51,15 +53,16 @@ DigestDock 侧边栏是“当前视频的阅读、理解与笔记工作台”。
 - `supadataConsent` 只存在于当前一次调用，不进入持久状态；保存 Key 不构成授权。同意在 `USER_CONSENT` 时铸造一次性令牌，并在请求发出的瞬间消耗。
 - Provider 内部重试、重定向、429 冷却后的再次尝试、保存 Key、侧栏重开或页面/视频切换均不得复用旧令牌；必须重新显示授权卡并取得新的明确同意。
 - `CONFIRMED_UNAVAILABLE`、`NO_TRANSCRIPT`、登录/访问限制、视频不可用、`PAGE_CONTEXT_CHANGED` 均在 CC/Supadata 前停止。
-- Active 与 Panel 不进入产品消息路径；源码、测试与证据仅作为备用实验方案保留。
+- Active 只允许使用已实测的固定 IOS/json3 单次路线；Panel 不进入产品消息路径。
+- Active 首个 429 立即停止并进入冷却，不显示 CC 或 Supadata，不切换客户端或格式。
 - 同一视频的自动刷新、人工重试和授权请求继续服从 single-flight 与迟到结果防护。
 
 ### 3.2 既有产品语义
 
-- 保留 `原文 / 中文 / 双语` 的现有语义；本轮不修改多语言字幕优先级。
+- 保留 `原文 / 中文 / 双语` 的现有语义；有中文轨时中文变体同权、人工优先自动、同类型沿 YouTube 原顺序；无中文时读取当前轨，否则默认轨。
 - 从笔记进入字幕流程时必须保留“返回笔记”。
 - 字幕正文继续可选择；时间码或明确控件承担跳转。
-- 不新增 Provider，不恢复 Active/Panel 产品路线，不改变现有导出业务出口。
+- 不新增 Provider，不恢复 Panel 产品路线，不改变现有导出业务出口。
 - 不修改 Chrome 原生侧栏标题栏结构。
 - §7 的 CC、免费重试与 Supadata 链只适用于 YouTube。B 站及其他非 YouTube `routeKey` 沿用现有取得逻辑，只映射到本文的 Progress/Terminal/Error/Ready 结构，永不显示 Supadata。
 
@@ -416,8 +419,8 @@ state → allowed actions
 ### 不包含
 
 - 新 Provider
-- Active/Panel 进入产品路线
-- 字幕语言优先级调整
+- Panel 进入产品路线
+- 固定 IOS/json3 之外的客户端或字幕格式扩散
 - 设置页整体重设计
 - 富文本笔记
 - 跨设备同步
@@ -453,7 +456,7 @@ state → allowed actions
 - 免费重试的技术失败不构成解锁，回到 `needs_cc(retryUsed=false)`
 - terminal 状态零 Supadata
 - 非 YouTube 普通 UNKNOWN 进入 `terminal(unknown_reason)`，不出现 CC/Supadata
-- Active/Panel 产品调用为零
+- Passive 命中时 Active/Panel 产品调用为零；Passive miss 的 Active 最多 `1 player + 1 timedtext`，Panel 始终为零
 - 同一 `generation+epoch` 的 `ready` 丢弃后续降级结果
 - single-flight 与迟到结果丢弃
 - 程序滚动不暂停跟随
@@ -480,7 +483,7 @@ state → allowed actions
 ### 14.2 静态断言
 
 - §7 是规范文案来源，`state → action label/event` 快照是其机器编码和自动核验载体。
-- 产品源码静态断言不得从消息路径引用 Active/Panel 产品文件或实验消息名。
+- 产品源码静态断言只允许引用固定 IOS/json3 Active 文件；不得引用 Panel 产品文件或实验消息名。
 - `sidepanel-state.js` 不得出现 `chrome.*`。
 - MVP 验收时产品路径中的 `showError`、`errorAction`、`errorSecondaryAction` 调用数必须为零。
 - 错误色 token 只允许出现在 `kind=error` 组件的 CSS 允许列表。

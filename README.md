@@ -19,7 +19,7 @@ DigestDock is a personal derivative of [Zara Zhang's original YouTube Digest](ht
 
 The extension is installed locally from GitHub. It is not distributed through the Chrome Web Store, does not include API credits, and does not use a developer-operated backend.
 
-> Free-version scope, August 31, 2026: source transcripts, timestamp jumps, original-language notes, backups, and original exports work without an AI key. AI overviews, explanations, translation, and note polishing are optional enhancements. Active and Panel remain evidence-only experiments and are not product routes. Chrome Web Store distribution has not started.
+> Free-version scope, September 2, 2026: source transcripts, timestamp jumps, original-language notes, backups, and original exports work without an AI key. AI overviews, explanations, translation, and note polishing are optional enhancements. The fixed IOS/json3 Active route runs only after cache and Passive miss; Panel remains evidence-only. Chrome Web Store distribution has not started.
 
 ## Install with your coding agent
 
@@ -61,7 +61,7 @@ DigestDock namespaces its injected page controls by extension ID, so an older Yo
 
 No API key is required to read source transcripts, jump by timestamp, save original-language notes, create a notes backup, or export original content. If you want an overview, explanation, translation, or automatic note polishing, select one AI provider in **Settings** and paste that provider's API key. DeepSeek is the default provider. You do not need a Supadata account or key for normal setup or for the free YouTube transcript routes.
 
-For a new or expired YouTube cache entry, DigestDock checks its validated local cache and a zero-request Passive capture. If the page has not loaded captions, the side panel asks you to enable YouTube **CC** and explicitly retry. The extension does not automatically issue Active player/timedtext requests or open and scroll YouTube's Transcript panel. Clear no-caption, login, age, membership, region, unavailable, or changed-page states stop locally.
+For a new or expired YouTube cache entry, DigestDock checks its validated local cache and a zero-request Passive capture, then makes at most one credential-free IOS player request and one json3 timedtext request for the page-selected existing track. Chinese tracks are preferred as one group; manual tracks beat automatic tracks and equal kinds keep YouTube order. Without Chinese, the current track is used, otherwise the page default. If that bounded attempt still cannot read captions, the side panel asks you to enable YouTube **CC** and explicitly retry. DigestDock never opens or scrolls YouTube's Transcript panel. Clear no-caption, login, age, membership, region, unavailable, changed-page, or YouTube 429 states stop locally.
 
 ### Optional Supadata fallback
 
@@ -154,7 +154,7 @@ Original-language reading exports use local material only and make no AI or Supa
 - Standard `youtube.com/watch` video pages.
 - Standard `www.bilibili.com/video/BV...` pages, one current part at a time.
 - Human or AI subtitle tracks exposed by the current Bilibili browser session. Bilibili transcript retrieval does not use Supadata credits.
-- The YouTube product chain reuses a validated local transcript or a zero-request Passive page response. A miss asks the user to enable YouTube CC and retry; it does not automatically run the retained Active or Panel experiments.
+- The YouTube product chain reuses a validated local transcript or zero-request Passive page response, then runs one fixed credential-free IOS/json3 Active attempt for an existing page-selected track. It never runs Panel.
 - In this flow, Supadata is a hidden optional fallback, not a default route. A saved Supadata key is not standing consent; it is offered only after the explicit CC retry still misses, and every request requires a new one-call confirmation for the current video.
 - Original, Simplified Chinese, and aligned bilingual transcript views for non-Chinese subtitle tracks. Chinese subtitle tracks stay in Original and never trigger a Chinese-translation request.
 - AI overviews are generated directly in Simplified Chinese. For non-Chinese subtitle tracks, source-language chapter titles and summaries are translated only when **Original** or **Bilingual** is requested; key quotes preserve the source wording. Chinese-source overviews reuse Chinese in every mode without an extra translation call.
@@ -167,7 +167,7 @@ Original-language reading exports use local material only and make no AI or Supa
 - A preset AI provider you select in Settings powers all AI features: DeepSeek V4 Flash (default), Zhipu GLM-4.7-Flash, Alibaba Bailian Qwen Flash, SiliconFlow Qwen3-8B, or Fireworks DeepSeek V4 Flash. Each provider's endpoint and model are fixed, keys are stored per provider, and there is no custom-endpoint field.
 - The provider picker also shows the official Tencent Hunyuan Translation icon as unavailable. Tencent documents `hunyuan-translation-lite`, but does not document that model on the extension's current single-key OpenAI-compatible route, so DigestDock does not guess the endpoint, model routing, or authentication.
 
-YouTube coverage depends on the page loading an existing manual or automatic caption track for Passive capture, or on a compatible positive cache. When a new video has not loaded captions, enable YouTube CC and retry. Shorts, live streams, Bilibili bangumi pages, private or access-restricted videos, hardcoded image subtitles, and videos without an available native transcript may not work. Firefox, Safari, mobile browsers, and other Chromium browsers are not currently tested or supported.
+YouTube coverage uses a compatible positive cache, a page-issued Passive capture, or the fixed credential-free IOS/json3 Active route for an existing manual or automatic track. If those routes miss, enable YouTube CC and retry. Shorts, live streams, Bilibili bangumi pages, private or access-restricted videos, hardcoded image subtitles, and videos without an available native transcript may not work. Firefox, Safari, mobile browsers, and other Chromium browsers are not currently tested or supported.
 
 On both platforms DigestDock uses only subtitle tracks that already exist. It may read an existing automatic caption track, but it does not download audio, perform ASR or other audio transcription, request generated transcription, or use OCR. If the user explicitly chooses Supadata after the CC retry still misses, DigestDock forces Supadata `mode=native`.
 
@@ -205,7 +205,7 @@ Interactive translation is lazy and progressive. Cached segments are reused, and
 
 DigestDock makes network requests directly from the extension:
 
-1. For YouTube, it reads local cache and Passive response state. A miss asks you to enable YouTube CC and explicitly retry; DigestDock does not automatically issue YouTube player/timedtext requests or manipulate the Transcript panel.
+1. For YouTube, it reads local cache and Passive response state, then may issue one credential-free fixed-IOS player request and one json3 timedtext request for the selected existing track. It declares IOS, Apple, and iPhone client metadata but sends no Cookie, authorization header, stored credential, or user-agent override. A miss asks you to enable YouTube CC and explicitly retry; DigestDock never manipulates the Transcript panel.
 2. Only after that explicit free retry still misses does the side panel show the optional Supadata fallback. Only after you click that action may DigestDock send the canonical watch URL and your key to Supadata for a `mode=native` transcript request. Clear no-caption, login, age, membership, region, unavailable, or changed-page states stop before that request.
 3. For Bilibili, it requests the current video's metadata and existing subtitle track directly from Bilibili while reusing the browser's current session; it does not read or store cookie values.
 4. It sends the transcript and relevant video metadata to the AI provider you selected in Settings when you request AI features. Focused features send only the content they need, such as selected text with context or small transcript batches for translation.

@@ -198,6 +198,22 @@ test("cache validation rejects language, selected-track, and fingerprint drift",
     helpers.validateTranscriptCacheRecord(fingerprintDrift, expected),
     null,
   );
+
+  const exactTrack = youtubeCacheRecord(helpers);
+  assert.ok(
+    helpers.validateTranscriptCacheRecord(exactTrack, {
+      ...expected,
+      selectedTrack: { language: "en", kind: "manual" },
+    }),
+  );
+  assert.equal(
+    helpers.validateTranscriptCacheRecord(exactTrack, {
+      ...expected,
+      selectedTrack: { language: "de", kind: "manual" },
+    }),
+    null,
+    "a later explicit page track must invalidate a different cached track",
+  );
 });
 
 test("cross-language subtitles reuse an exact cache without treating audio language as track identity", () => {

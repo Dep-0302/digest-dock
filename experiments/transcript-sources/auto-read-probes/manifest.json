@@ -1,0 +1,12 @@
+{
+  "manifest_version": 3,
+  "name": "DigestDock Auto-read Probe",
+  "version": "0.1.0",
+  "minimum_chrome_version": "116",
+  "description": "实验性验证单 IOS、单 json3 字幕路线；不属于 DigestDock 产品扩展。",
+  "permissions": ["activeTab", "scripting"],
+  "action": {
+    "default_title": "运行 DigestDock 自动字幕探针",
+    "default_popup": "popup.html"
+  }
+}

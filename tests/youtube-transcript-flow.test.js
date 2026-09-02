@@ -64,6 +64,7 @@ function pageSnapshot(videoId = VIDEO_ID, options = {}) {
           ? options.availableTracks
           : [],
         pageDefaultTrack: options.pageDefaultTrack || null,
+        pageCurrentTrack: options.pageCurrentTrack || null,
       },
     },
   ];
@@ -498,6 +499,220 @@ test("Passive ranks exact language ahead of a manual non-preferred track", async
   assert.equal(result.transcript[0].text, "exact Chinese");
 });
 
+test("automatic track selection treats Chinese varieties equally and keeps manual source order", () => {
+  const worker = loadBackground();
+  const selected = worker.helpers.chooseYoutubeAutomaticTrack({
+    captionTrackCountKnown: true,
+    captionTrackCount: 5,
+    availableTracks: [
+      { language: "en", kind: "manual" },
+      { language: "zh-Hans", kind: "asr" },
+      { language: "yue-HK", kind: "manual" },
+      { language: "zh-Hant", kind: "manual" },
+      { language: "cmn-Hans", kind: "asr" },
+    ],
+    currentTrack: { language: "en", kind: "manual" },
+    selectedTrack: { language: "en", kind: "manual" },
+  });
+  assert.deepEqual(JSON.parse(JSON.stringify(selected)), {
+    language: "yue-HK",
+    kind: "manual",
+  });
+});
+
+test("without Chinese, automatic selection uses the current track then the page default", () => {
+  const worker = loadBackground();
+  const evidence = {
+    captionTrackCountKnown: true,
+    captionTrackCount: 2,
+    availableTracks: [
+      { language: "en", kind: "manual" },
+      { language: "de", kind: "manual" },
+    ],
+    selectedTrack: { language: "en", kind: "manual" },
+  };
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(worker.helpers.chooseYoutubeAutomaticTrack({
+      ...evidence,
+      currentTrack: { language: "de", kind: "manual" },
+    }))),
+    { language: "de", kind: "manual" },
+  );
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(worker.helpers.chooseYoutubeAutomaticTrack(evidence))),
+    { language: "en", kind: "manual" },
+  );
+});
+
+test("Passive miss runs one fixed Active request for the page-selected Chinese track", async () => {
+  const worker = loadBackground({
+    pageSnapshotOptions: {
+      captionTrackCountKnown: true,
+      captionTrackCount: 4,
+      availableTracks: [
+        { language: "en", kind: "manual" },
+        { language: "zh-Hans", kind: "asr" },
+        { language: "zh-Hant", kind: "manual" },
+        { language: "yue-HK", kind: "manual" },
+      ],
+      pageDefaultTrack: { language: "en", kind: "manual" },
+    },
+    activeRun: async (request) => {
+      assert.equal(request.language, "zh-Hant");
+      assert.equal(request.trackKind, "manual");
+      return {
+        ...transcriptResult("Chinese Active"),
+        language: "zh-Hant",
+        selectedTrack: { language: "zh-Hant", kind: "manual" },
+        transcript: [
+          { text: "中文", start: 0, duration: 2, language: "zh-Hant" },
+        ],
+      };
+    },
+  });
+  const result = await worker.helpers.handleFetchYoutubeNativeTranscript(
+    VIDEO_ID,
+    "en",
+    1,
+    nativeOptions("active-zh"),
+  );
+  assert.equal(result.success, true);
+  assert.equal(result.source, "youtube-active");
+  assert.equal(result.language, "zh-Hant");
+  assert.equal(result.selectedTrack.kind, "manual");
+  assert.equal(worker.counts.activeInject, 1);
+  assert.equal(worker.counts.activeRun, 1);
+  assert.equal(worker.counts.panelInject, 0);
+  assert.equal(worker.counts.panelRun, 0);
+});
+
+test("duplicate automatic requests share one Active flight and keep caller identities", async () => {
+  let releaseActive;
+  let markActiveStarted;
+  const activeStarted = new Promise((resolve) => {
+    markActiveStarted = resolve;
+  });
+  const activeGate = new Promise((resolve) => {
+    releaseActive = resolve;
+  });
+  const worker = loadBackground({
+    pageSnapshotOptions: {
+      captionTrackCountKnown: true,
+      captionTrackCount: 1,
+      availableTracks: [{ language: "en", kind: "manual" }],
+      pageDefaultTrack: { language: "en", kind: "manual" },
+    },
+    activeRun: async () => {
+      markActiveStarted();
+      await activeGate;
+      return transcriptResult("shared Active");
+    },
+  });
+  const first = worker.helpers.handleFetchYoutubeNativeTranscript(
+    VIDEO_ID,
+    "en",
+    1,
+    nativeOptions("active-shared-1"),
+  );
+  const second = worker.helpers.handleFetchYoutubeNativeTranscript(
+    VIDEO_ID,
+    "en",
+    2,
+    nativeOptions("active-shared-2"),
+  );
+  await activeStarted;
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  releaseActive();
+  const [firstResult, secondResult] = await Promise.all([first, second]);
+  assert.equal(firstResult.success, true);
+  assert.equal(secondResult.success, true);
+  assert.equal(firstResult.runId, "active-shared-1");
+  assert.equal(secondResult.runId, "active-shared-2");
+  assert.equal(worker.counts.activeRun, 1);
+  assert.equal(worker.counts.panelRun, 0);
+});
+
+test("an ordinary Active miss returns the first CC prompt without Panel or Supadata", async () => {
+  const worker = loadBackground({
+    settings: { aiApiKey: "test", supadataApiKey: "optional-key" },
+    pageSnapshotOptions: {
+      captionTrackCountKnown: true,
+      captionTrackCount: 1,
+      availableTracks: [{ language: "en", kind: "manual" }],
+      pageDefaultTrack: { language: "en", kind: "manual" },
+    },
+    activeResult: {
+      status: "UNKNOWN",
+      errorCode: "NETWORK",
+      diagnostics: {
+        providerInitiated: {
+          youtubePlayer: 1,
+          youtubeTimedtext: 0,
+          thirdParty: 0,
+          loopback: 0,
+        },
+      },
+    },
+  });
+  const result = await worker.helpers.handleFetchYoutubeNativeTranscript(
+    VIDEO_ID,
+    "en",
+    1,
+    nativeOptions("active-miss"),
+  );
+  assert.equal(result.error, "YOUTUBE_CAPTIONS_REQUIRED");
+  assert.equal(result.requiresCaptionEnable, true);
+  assert.equal(result.supadataEligible, false);
+  assert.equal(result.diagnostics.providerInitiated.youtubePlayer, 1);
+  assert.equal(worker.counts.activeRun, 1);
+  assert.equal(worker.counts.panelRun, 0);
+  assert.equal(worker.counts.fetch, 0);
+});
+
+test("one Active 429 starts cooldown and never reaches CC, Panel, or Supadata", async () => {
+  const worker = loadBackground({
+    settings: { aiApiKey: "test", supadataApiKey: "optional-key" },
+    pageSnapshotOptions: {
+      captionTrackCountKnown: true,
+      captionTrackCount: 1,
+      availableTracks: [{ language: "en", kind: "manual" }],
+      pageDefaultTrack: { language: "en", kind: "manual" },
+    },
+    activeResult: {
+      status: "RATE_LIMITED",
+      errorCode: "RATE_LIMITED",
+      diagnostics: {
+        providerInitiated: {
+          youtubePlayer: 1,
+          youtubeTimedtext: 0,
+          thirdParty: 0,
+          loopback: 0,
+        },
+      },
+    },
+  });
+  const first = await worker.helpers.handleFetchYoutubeNativeTranscript(
+    VIDEO_ID,
+    "en",
+    1,
+    nativeOptions("active-429"),
+  );
+  assert.equal(first.error, "RATE_LIMITED");
+  assert.equal(first.routeOutcome, "RATE_LIMITED");
+  assert.equal(first.supadataEligible, false);
+  const second = await worker.helpers.handleFetchYoutubeNativeTranscript(
+    VIDEO_ID,
+    "en",
+    1,
+    nativeOptions("active-429-again"),
+  );
+  assert.equal(second.error, "RATE_LIMITED");
+  assert.equal(second.supadataEligible, false);
+  assert.equal(worker.counts.activeRun, 1);
+  assert.equal(worker.counts.panelRun, 0);
+  assert.equal(worker.counts.fetch, 0);
+});
+
 test("a stale Passive bridge stops before the transcript and provider routes", async () => {
   const worker = loadBackground({
     scriptingExecuteScript: async (details) => {
@@ -850,8 +1065,8 @@ test("an observed Passive 429 clears inflight state and blocks automatic routes"
         1,
         nativeOptions(type === "clear" ? "81" : "82"),
       );
-      assert.equal(first.routeOutcome, "UNKNOWN");
-      assert.equal(first.error, "YOUTUBE_CAPTIONS_REQUIRED");
+      assert.equal(first.routeOutcome, "RATE_LIMITED");
+      assert.equal(first.error, "RATE_LIMITED");
       assert.equal(first.supadataEligible, false);
 
       const retry = await worker.helpers.handleFetchYoutubeNativeTranscript(
@@ -864,9 +1079,9 @@ test("an observed Passive 429 clears inflight state and blocks automatic routes"
           true,
         ),
       );
-      assert.equal(retry.routeOutcome, "UNKNOWN");
+      assert.equal(retry.routeOutcome, "RATE_LIMITED");
       assert.equal(retry.error, "RATE_LIMITED");
-      assert.equal(retry.supadataEligible, true);
+      assert.equal(retry.supadataEligible, false);
       assert.equal(worker.counts.activeRun, 0);
       assert.equal(worker.counts.panelRun, 0);
     });

@@ -70,7 +70,7 @@ test("manifest uses minimized install-time permissions", () => {
   assert.equal(passiveBridge?.world, "ISOLATED");
   assert.deepEqual(passiveBridge?.matches, ["https://www.youtube.com/*"]);
   assert.equal(Object.hasOwn(manifest, "optional_host_permissions"), false);
-  assert.equal(manifest.version, "1.4.6");
+  assert.equal(manifest.version, "1.4.7");
 });
 
 test("large local caches use explicit permission and remain user-clearable", () => {
@@ -94,7 +94,7 @@ test("large local caches use explicit permission and remain user-clearable", () 
   assert.match(chineseReadme, /`unlimitedStorage`/);
 });
 
-test("cross-platform runtime dependencies match the Passive-first release surface", () => {
+test("cross-platform runtime dependencies match the Passive-first then fixed-Active release surface", () => {
   const background = read("background.js");
   const sidepanelPage = read("sidepanel.html");
   const optionsPage = read("options.html");
@@ -192,6 +192,7 @@ test("cross-platform runtime dependencies match the Passive-first release surfac
   for (const file of [
     "youtube-passive-main.js",
     "youtube-passive-bridge.js",
+    "youtube-transcript-active.js",
   ]) {
     assert.ok(
       (releaseCheck.match(new RegExp(`"${file.replace(".", "\\.")}"`, "g")) || [])
@@ -199,7 +200,6 @@ test("cross-platform runtime dependencies match the Passive-first release surfac
       `${file} must be both allowlisted and required for release`,
     );
   }
-  assert.doesNotMatch(releaseCheck, /"youtube-transcript-active\.js"/);
   assert.doesNotMatch(releaseCheck, /"youtube-transcript-panel\.js"/);
   assert.doesNotMatch(releaseCheck, /"youtube-transcript\.js"/);
   assert.match(brandIcon, /#0A5FE9/);
@@ -217,7 +217,7 @@ test("cross-platform runtime dependencies match the Passive-first release surfac
     3,
     "only the icon-adjacent DigestDock brand word must emphasize D, D, and K",
   );
-  assert.match(optionsPage, /<p class="settings-version">DigestDock 1\.4\.6<\/p>/);
+  assert.match(optionsPage, /<p class="settings-version">DigestDock 1\.4\.7<\/p>/);
   assert.match(optionsPage, /<p class="eyebrow">DIGESTDOCK<\/p>/);
   assert.match(optionsStyles, /\.brand-letter\s*\{[^}]*font-weight:\s*750/);
   assert.doesNotMatch(optionsPage, /#1F2933|#F26A4F/);

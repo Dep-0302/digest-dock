@@ -106,6 +106,7 @@ let currentVideoDescriptionState = "unknown";
 let currentVideoDescriptionTruncated = false;
 let currentVideoDuration = 0;
 let currentVideoSourceLanguage = "";
+let currentVideoCaptionSelection = null;
 let isAnalysisLoading = false; // Track if analysis is in progress
 let videoTabId = null; // Exact supported video tab for seek/playback messaging.
 let currentConfigStatus = null;
@@ -2125,6 +2126,7 @@ async function runCheckCurrentTab(generation, options = {}) {
     let nextVideoDescriptionTruncated = false;
     let nextVideoDuration = 0;
     let nextSourceLanguage = "";
+    let nextCaptionSelection = null;
 
     if (locator.platform === "bilibili") {
       const resolved = await chrome.runtime.sendMessage({
@@ -2189,6 +2191,9 @@ async function runCheckCurrentTab(generation, options = {}) {
       nextVideoDescriptionTruncated = videoInfo?.descriptionTruncated === true;
       nextVideoDuration = videoInfo?.duration || 0;
       nextSourceLanguage = normalizeLanguageCode(videoInfo?.sourceLanguage);
+      nextCaptionSelection = sanitizeTranscriptSelectedTrack(
+        videoInfo?.captionSelection,
+      );
     }
 
     // Resolve/relay crosses an async boundary. Re-read the exact tab and apply
@@ -2212,12 +2217,14 @@ async function runCheckCurrentTab(generation, options = {}) {
     currentVideoDescriptionZh = "";
     currentVideoDuration = nextVideoDuration;
     currentVideoSourceLanguage = nextSourceLanguage;
+    currentVideoCaptionSelection = nextCaptionSelection;
 
     await startDigest(
       nextMediaRef.mediaKey,
       nextVideoUrl,
       nextMediaRef,
       locator.routeKey,
+      nextCaptionSelection,
     );
   } catch (error) {
     if (!isLatestCheck()) return;
@@ -2276,6 +2283,7 @@ function resetDigestStateForVideo(videoId, videoUrl, mediaRef, routeKey) {
   currentTranscriptSource = "";
   currentTranscriptSelectedTrack = null;
   currentTranscriptSourceAttempt = "";
+  currentVideoCaptionSelection = null;
   currentPersistedNoteSource = null;
   activeExportJobId = "";
   if (previousExportJobId) {
@@ -2558,6 +2566,7 @@ function startDigest(
   videoUrl,
   mediaRef = currentMediaRef,
   routeKey = currentRouteKey,
+  captionSelection = currentVideoCaptionSelection,
 ) {
   const nextMediaRef = mediaRef || currentMediaRef;
   const nextRouteKey = routeKey || currentRouteKey;
@@ -2584,6 +2593,9 @@ function startDigest(
     currentMediaRef = nextMediaRef;
     currentRouteKey = nextRouteKey;
   }
+  currentVideoCaptionSelection = sanitizeTranscriptSelectedTrack(
+    captionSelection,
+  );
 
   if (SIDEPANEL_MVP_AVAILABLE && !videoChanged) {
     const transcriptStatus = sidepanelMvpState?.transcript?.status;
@@ -2686,6 +2698,7 @@ async function runDigestLoad(
     requestedLanguage: currentVideoSourceLanguage,
     trackKind: YOUTUBE_TRANSCRIPT_TRACK_KIND,
     routeKey,
+    selectedTrack: currentVideoCaptionSelection,
   });
   if (!ownsDigestLoad()) return;
   if (
@@ -3020,10 +3033,18 @@ async function runDigestLoad(
       return;
     }
     if (transcriptResult.error === "RATE_LIMITED") {
-      showSupadataRateLimited(
-        transcriptResult.message ||
-          "Supadata 请求已达速率上限，请稍后再授权重试。",
-      );
+      if (supadataConsent === true) {
+        showSupadataRateLimited(
+          transcriptResult.message ||
+            "Supadata 请求已达速率上限，请稍后再授权重试。",
+        );
+      } else {
+        showError(
+          "YouTube 字幕暂时受限",
+          transcriptResult.message ||
+            "YouTube 原生字幕请求受到速率限制，本次已停止。",
+        );
+      }
       return;
     }
     if (transcriptResult.error === "INVALID_SUPADATA_KEY") {
@@ -7491,6 +7512,7 @@ function validateTranscriptCacheRecord(
     requestedLanguage = "",
     trackKind = YOUTUBE_TRANSCRIPT_TRACK_KIND,
     routeKey = "",
+    selectedTrack: expectedSelectedTrack = null,
   } = {},
 ) {
   if (!cached || typeof cached !== "object") return null;
@@ -7546,6 +7568,7 @@ function validateTranscriptCacheRecord(
   const selectedTrack = sanitizeTranscriptSelectedTrack(
     cached.transcriptSelectedTrack,
   );
+  const expectedTrack = sanitizeTranscriptSelectedTrack(expectedSelectedTrack);
   if (
     cached.transcriptSelectedTrack &&
     !["manual", "asr"].includes(cached.transcriptSelectedTrack.kind)
@@ -7555,6 +7578,14 @@ function validateTranscriptCacheRecord(
   if (
     cached.transcriptSelectedTrackIdentity !==
     transcriptSelectedTrackIdentity(selectedTrack)
+  ) {
+    return null;
+  }
+  if (
+    expectedTrack?.language &&
+    (!selectedTrack ||
+      selectedTrack.language !== expectedTrack.language ||
+      selectedTrack.kind !== expectedTrack.kind)
   ) {
     return null;
   }

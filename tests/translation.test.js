@@ -10455,6 +10455,7 @@ test("YouTube getVideoInfo prefers exact player metadata and preserves completen
       descriptionTruncated: false,
       duration: 123,
       sourceLanguage: "en",
+      captionSelection: null,
     },
   });
 });
@@ -10526,6 +10527,7 @@ test("the real MAIN-world player callback emits complete present-description met
     channelName: "Real callback channel",
     duration: 321,
     sourceLanguage: "en",
+    captionSelection: null,
     description: "Real callback description",
     descriptionStatus: "present",
     descriptionTruncated: false,
