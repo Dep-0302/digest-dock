@@ -165,11 +165,12 @@ function loadBackgroundHelpers({
   noteSourcesImpl = require("../note-sources.js"),
   exportJobsImpl = require("../export-jobs.js"),
   runtimeSendMessageImpl = () => Promise.resolve({ success: true }),
+  consoleImpl = console,
 } = {}) {
   const listeners = { addListener() {} };
   const runtimeMessageListeners = [];
   const sandbox = {
-    console,
+    console: consoleImpl,
     URL,
     TextDecoder,
     TextEncoder,
@@ -7986,6 +7987,149 @@ test("AI entry points fail closed with free-core guidance when no key is saved",
   assert.equal(transcript.actualProviderCalls, 0);
   assert.match(transcript.error, /字幕阅读、时间跳转和原文笔记仍可使用/);
   assert.equal(providerCalls, 0);
+});
+
+test("handled overview provider failures stay out of Chrome extension errors", async () => {
+  const cases = [
+    { status: 401, error: "INVALID_AI_KEY", message: /拒绝了该 API 密钥/ },
+    { status: 403, error: "INVALID_AI_KEY", message: /拒绝了该 API 密钥/ },
+    { status: 408, error: "PROVIDER_TIMEOUT", message: /请求超时.*稍后重试/ },
+    { status: 429, error: "RATE_LIMITED", message: /限制了本次请求.*稍后重试/ },
+    { status: 503, error: "PROVIDER_UNAVAILABLE", message: /暂时不可用.*稍后重试/ },
+  ];
+
+  for (const expected of cases) {
+    let providerCalls = 0;
+    let loggedErrors = 0;
+    const background = loadBackgroundHelpers({
+      consoleImpl: {
+        error() {
+          loggedErrors += 1;
+        },
+      },
+      fetchImpl: async (url) => {
+        if (url.startsWith("chrome-extension://")) {
+          return { ok: true, text: async () => read("prompts/analysis.md") };
+        }
+        providerCalls += 1;
+        return streamingResponse(
+          [encode('{"error":{"message":"temporary provider failure"}}')],
+          { ok: false, status: expected.status },
+        );
+      },
+    });
+
+    const result = await background.handleAnalyzeTranscript(
+      "[0:00] Hello world.",
+      "Example video",
+      "Example channel",
+      "Example description",
+      60,
+      "en",
+      "youtube",
+      [{ cueId: "cue-0", timestampSeconds: 0, text: "Hello world." }],
+    );
+
+    assert.equal(result.success, false);
+    assert.equal(result.error, expected.error);
+    assert.match(result.message, expected.message);
+    assert.equal(providerCalls, 1, `status ${expected.status} must not retry`);
+    assert.equal(loggedErrors, 0, `status ${expected.status} is handled`);
+  }
+});
+
+test("overview idle timeout stays retryable without logging or retrying", async () => {
+  const timers = createFakeTimers();
+  let providerCalls = 0;
+  let loggedErrors = 0;
+  const background = loadBackgroundHelpers({
+    setTimeoutImpl: timers.setTimeout,
+    clearTimeoutImpl: timers.clearTimeout,
+    consoleImpl: {
+      error() {
+        loggedErrors += 1;
+      },
+    },
+    fetchImpl: async (url, { signal } = {}) => {
+      if (url.startsWith("chrome-extension://")) {
+        return { ok: true, text: async () => read("prompts/analysis.md") };
+      }
+      providerCalls += 1;
+      return {
+        ok: true,
+        status: 200,
+        body: {
+          getReader: () => ({
+            read: () =>
+              new Promise((_resolve, reject) => {
+                signal.addEventListener(
+                  "abort",
+                  () => {
+                    const error = new Error("aborted");
+                    error.name = "AbortError";
+                    reject(error);
+                  },
+                  { once: true },
+                );
+              }),
+          }),
+        },
+      };
+    },
+  });
+
+  const request = background.handleAnalyzeTranscript(
+    "[0:00] Hello world.",
+    "Example video",
+    "Example channel",
+    "Example description",
+    60,
+    "en",
+    "youtube",
+    [{ cueId: "cue-0", timestampSeconds: 0, text: "Hello world." }],
+  );
+  await nextTurn();
+  await nextTurn();
+  timers.fireActive(50_000);
+  const result = await request;
+
+  assert.equal(result.success, false);
+  assert.equal(result.error, "PROVIDER_TIMEOUT");
+  assert.match(result.message, /请求超时.*稍后重试/);
+  assert.equal(providerCalls, 1);
+  assert.equal(loggedErrors, 0);
+  assert.equal(timers.activeCount(120_000), 0);
+});
+
+test("uncategorized overview failures remain visible as extension errors", async () => {
+  let loggedErrors = 0;
+  const background = loadBackgroundHelpers({
+    consoleImpl: {
+      error() {
+        loggedErrors += 1;
+      },
+    },
+    fetchImpl: async (url) => {
+      if (url.startsWith("chrome-extension://")) {
+        return { ok: true, text: async () => read("prompts/analysis.md") };
+      }
+      return streamingResponse([encode('{"choices":')]);
+    },
+  });
+
+  const result = await background.handleAnalyzeTranscript(
+    "[0:00] Hello world.",
+    "Example video",
+    "Example channel",
+    "Example description",
+    60,
+    "en",
+    "youtube",
+    [{ cueId: "cue-0", timestampSeconds: 0, text: "Hello world." }],
+  );
+
+  assert.equal(result.success, false);
+  assert.equal(loggedErrors, 1);
 });
 
 test("overview generates Chinese first and translates chapters to the source language on demand", async () => {
