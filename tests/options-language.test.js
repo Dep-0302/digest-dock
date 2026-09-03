@@ -34,6 +34,8 @@ test("Settings copy covers English and Simplified Chinese", () => {
   assert.equal(options.translate("zh-CN", "pageTitle"), "DigestDock 设置");
   assert.equal(options.translate("en", "saveSettings"), "Save settings");
   assert.equal(options.translate("zh-CN", "saveSettings"), "保存设置");
+  assert.equal(options.translate("en", "navServices"), "Optional services");
+  assert.equal(options.translate("zh-CN", "navServices"), "扩展服务");
   assert.equal(
     options.translate("zh-CN", "clearedDigests", { count: 2 }),
     "已清除 2 条缓存摘要。",

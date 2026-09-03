@@ -11,7 +11,7 @@ const YTD_OPTIONS = (() => {
       navAriaLabel: "Settings navigation",
       navGroupSettings: "Settings",
       navGroupOther: "Other",
-      navServices: "Service connections",
+      navServices: "Optional services",
       navReading: "Reading display",
       navNotes: "Notes & backup",
       navPrivacy: "Privacy",
@@ -131,7 +131,7 @@ const YTD_OPTIONS = (() => {
       navAriaLabel: "设置导航",
       navGroupSettings: "设置",
       navGroupOther: "其他",
-      navServices: "服务连接",
+      navServices: "扩展服务",
       navReading: "阅读显示",
       navNotes: "笔记与备份",
       navPrivacy: "隐私说明",
@@ -781,7 +781,7 @@ const YTD_OPTIONS = (() => {
       setServiceBadge(supadataStatus, Boolean(supadataApiKeyInput.value.trim()));
     }
 
-    // Sticky save bar hint. Guarded so a keystroke does not re-announce the
+    // Service-card save hint. Guarded so a keystroke does not re-announce the
     // same polite status on every character.
     function markUnsaved() {
       if (statusStates.get(saveStatus)?.key === "unsavedChanges") return;
@@ -930,7 +930,7 @@ const YTD_OPTIONS = (() => {
       if (!providerSelectList || providerListOpen || !selectableProviderList.length) return;
       const triggerRect = providerSelectButton.getBoundingClientRect?.();
       const saveBarTop = doc
-        .querySelector(".settings-savebar")
+        .querySelector(".service-savebar")
         ?.getBoundingClientRect?.().top;
       const topBarBottom = doc
         .querySelector(".settings-topbar")

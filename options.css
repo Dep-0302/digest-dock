@@ -275,7 +275,7 @@ h2 {
 }
 
 /* ------------------------------------------------------------------ */
-/* Service connections (two columns on wide screens)                   */
+/* Optional services (two columns on wide screens)                     */
 /* ------------------------------------------------------------------ */
 
 .service-grid {
@@ -917,33 +917,36 @@ button.danger:hover {
 }
 
 /* ------------------------------------------------------------------ */
-/* Sticky save bar                                                     */
+/* Service-card save action                                            */
 /* ------------------------------------------------------------------ */
 
-.settings-savebar {
+.service-savebar {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  padding: 16px 32px;
-  background: var(--surface);
+  margin-top: 20px;
+  padding-top: 18px;
   border-top: 1px solid var(--line);
 }
 
 .savebar-status {
+  flex: 1 1 auto;
+  min-width: 0;
   color: var(--ink-muted);
   font-size: 14px;
 }
 
-.settings-savebar .primary {
+.service-savebar .primary {
+  flex: 0 0 auto;
   padding: 11px 22px;
 }
 
 /* ------------------------------------------------------------------ */
 /* Narrow layout: nav becomes a top region; services stack.            */
 /* The viewport-locked model is kept: .settings-app stays 100vh, the   */
-/* nav region and topbar pin above, the savebar pins below, and        */
-/* .settings-scroll remains the only vertical scroller. Verified free   */
+/* nav region and topbar pin above, while .settings-scroll remains the */
+/* only vertical scroller. Verified free                               */
 /* of horizontal overflow at ~420px.                                    */
 /* ------------------------------------------------------------------ */
 
@@ -985,8 +988,7 @@ button.danger:hover {
   }
 
   .settings-topbar,
-  .settings-scroll,
-  .settings-savebar {
+  .settings-scroll {
     padding-left: 20px;
     padding-right: 20px;
   }
@@ -1000,6 +1002,16 @@ button.danger:hover {
   .settings-topbar {
     flex-direction: column;
     gap: 12px;
+  }
+
+  .service-savebar {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .service-savebar .primary {
+    width: 100%;
   }
 }
 

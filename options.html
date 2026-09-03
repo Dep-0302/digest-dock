@@ -44,7 +44,7 @@
         >
           <p class="settings-nav-group" data-i18n="navGroupSettings">设置</p>
           <a class="settings-nav-item is-active" href="#section-services" aria-current="location" data-i18n="navServices"
-            >服务连接</a
+            >扩展服务</a
           >
           <a class="settings-nav-item" href="#section-reading" data-i18n="navReading"
             >阅读显示</a
@@ -61,7 +61,7 @@
           >
         </nav>
 
-        <p class="settings-version">DigestDock 1.4.7</p>
+        <p class="settings-version">DigestDock 1.4.8</p>
       </aside>
 
       <main class="settings-content">
@@ -102,7 +102,7 @@
 
           <form id="settingsForm">
             <section id="section-services" class="settings-section">
-              <h2 class="settings-section-title" data-i18n="navServices">服务连接</h2>
+              <h2 class="settings-section-title" data-i18n="navServices">扩展服务</h2>
               <div class="service-grid">
                 <section class="card service-card" id="section-ai" aria-labelledby="aiProviderName">
                   <div class="service-head">
@@ -213,6 +213,19 @@
                     <div class="privacy-note" data-i18n="providerPrivacyNote">
                       密钥只在当前 Chrome 个人资料中持久保存。保存原文笔记不会发送内容；生成概览、讲解、翻译或 AI 润色笔记时，密钥和必要内容会从扩展直接发送给所选服务。请先查看该服务的条款和价格。
                     </div>
+                  </div>
+
+                  <div class="service-savebar">
+                    <span id="saveStatus" class="savebar-status" role="status" aria-live="polite"></span>
+                    <button
+                      class="primary"
+                      id="saveSettingsBtn"
+                      type="submit"
+                      data-i18n="saveSettings"
+                      disabled
+                    >
+                      保存设置
+                    </button>
                   </div>
                 </section>
 
@@ -434,19 +447,6 @@
           </section>
         </div>
 
-        <div class="settings-savebar">
-          <span id="saveStatus" class="savebar-status" role="status" aria-live="polite"></span>
-          <button
-            class="primary"
-            id="saveSettingsBtn"
-            type="submit"
-            form="settingsForm"
-            data-i18n="saveSettings"
-            disabled
-          >
-            保存设置
-          </button>
-        </div>
       </main>
     </div>
 

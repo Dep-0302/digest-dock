@@ -4050,6 +4050,81 @@ function analysisCueTranscriptText(cues) {
     .join("\n");
 }
 
+const ANALYSIS_OPERATIONAL_FAILURE_CODES = new Set([
+  "INVALID_KEY",
+  "RATE_LIMITED",
+  "PROVIDER_TIMEOUT",
+  "PROVIDER_UNAVAILABLE",
+  "OUTPUT_TRUNCATED",
+  "CONTENT_FILTERED",
+  "UNEXPECTED_FINISH_REASON",
+  "EMPTY_AI_RESPONSE",
+  "AI_IDLE_TIMEOUT",
+  "AI_HARD_TIMEOUT",
+  "AI_RESPONSE_TOO_LARGE",
+]);
+
+function analysisOperationalFailure(error, settings) {
+  const status = Number(error?.status);
+  let code = String(error?.code || "");
+  if (!code) {
+    if (status === 401 || status === 403) code = "INVALID_KEY";
+    else if (status === 429) code = "RATE_LIMITED";
+    else if (status === 408) code = "PROVIDER_TIMEOUT";
+    else if (Number.isFinite(status) && status >= 500) {
+      code = "PROVIDER_UNAVAILABLE";
+    }
+  }
+  if (!ANALYSIS_OPERATIONAL_FAILURE_CODES.has(code)) return null;
+
+  const providerLabel = providerDisplayLabel(settings);
+  if (code === "INVALID_KEY") {
+    return {
+      success: false,
+      error: "INVALID_AI_KEY",
+      message: `${providerLabel} 拒绝了该 API 密钥。`,
+    };
+  }
+  if (code === "RATE_LIMITED") {
+    return {
+      success: false,
+      error: "RATE_LIMITED",
+      message: `${providerLabel} 限制了本次请求，请稍后重试。`,
+    };
+  }
+  if (
+    code === "PROVIDER_TIMEOUT" ||
+    code === "AI_IDLE_TIMEOUT" ||
+    code === "AI_HARD_TIMEOUT"
+  ) {
+    return {
+      success: false,
+      error: "PROVIDER_TIMEOUT",
+      message: `${providerLabel} 请求超时，请稍后重试。`,
+    };
+  }
+  if (code === "PROVIDER_UNAVAILABLE") {
+    return {
+      success: false,
+      error: "PROVIDER_UNAVAILABLE",
+      message: `${providerLabel} 暂时不可用，请稍后重试。`,
+    };
+  }
+
+  const messageByCode = {
+    OUTPUT_TRUNCATED: `${providerLabel} 输出未完成，请重试。`,
+    CONTENT_FILTERED: `${providerLabel} 未返回该内容，请调整内容或稍后重试。`,
+    UNEXPECTED_FINISH_REASON: `${providerLabel} 未正常完成响应，请重试。`,
+    EMPTY_AI_RESPONSE: `${providerLabel} 未返回有效内容，请重试。`,
+    AI_RESPONSE_TOO_LARGE: `${providerLabel} 返回内容过大，请缩短视频内容后重试。`,
+  };
+  return {
+    success: false,
+    error: code,
+    message: messageByCode[code] || `${providerLabel} 请求失败，请重试。`,
+  };
+}
+
 /**
  * Sends the transcript to DeepSeek for analysis.
  *
@@ -4177,21 +4252,20 @@ async function handleAnalyzeTranscript(
       analysis: analysis,
     };
   } catch (error) {
+    const operationalFailure = analysisOperationalFailure(error, settings);
+    if (operationalFailure) {
+      debugLog("[DigestDock] Analysis request handled", {
+        code: operationalFailure.error,
+        status: Number.isFinite(Number(error?.status))
+          ? Number(error.status)
+          : undefined,
+      });
+      return operationalFailure;
+    }
+    // Only uncategorized failures reach Chrome's extension-error surface.
+    // Provider congestion, auth rejection, and bounded timeouts are normal
+    // product outcomes already rendered with a recovery message in the panel.
     console.error("Analysis error:", error);
-    if (error.status === 401) {
-      return {
-        success: false,
-        error: "INVALID_AI_KEY",
-        message: `${providerDisplayLabel(settings)} 拒绝了该 API 密钥。`,
-      };
-    }
-    if (error.status === 429) {
-      return {
-        success: false,
-        error: "RATE_LIMITED",
-        message: `${providerDisplayLabel(settings)} 限制了本次请求，请稍后重试。`,
-      };
-    }
     return {
       success: false,
       error: error.message || "分析字幕失败",

@@ -257,9 +257,19 @@ test("settings page locks to the viewport with a single internal scroller", () =
   assert.match(css, /\.settings-scroll\s*\{[^}]*overflow-y:\s*auto/);
   assert.match(css, /\.settings-scroll\s*\{[^}]*min-height:\s*0/);
 
-  // The sticky save bar stays a flex sibling (continuously visible), not a
-  // scrolled-away block.
-  assert.match(css, /\.settings-savebar\s*\{[^}]*border-top:\s*1px/);
+  // Saving belongs to the optional-service card instead of occupying a
+  // page-wide fixed footer below unrelated immediate-apply settings.
+  assert.match(css, /\.service-savebar\s*\{[^}]*margin-top:\s*20px[^}]*border-top:\s*1px/);
+  assert.doesNotMatch(css, /\.settings-savebar\s*\{/);
+
+  const html = read("options.html");
+  const aiCard = html.match(
+    /<section class="card service-card" id="section-ai"[\s\S]*?<\/section>/,
+  )?.[0];
+  assert.ok(aiCard, "Expected the AI service card");
+  assert.match(aiCard, /class="service-savebar"/);
+  assert.match(aiCard, /id="saveStatus"/);
+  assert.match(aiCard, /id="saveSettingsBtn"[\s\S]*?type="submit"/);
 
   // The narrow layout keeps a top nav region and stacks services to one column.
   assert.match(
