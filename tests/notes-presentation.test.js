@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
+const noteExport = require("../note-export.js");
 
 const root = path.resolve(__dirname, "..");
 const read = (file) => fs.readFileSync(path.join(root, file), "utf8");
@@ -178,4 +179,77 @@ test("source metadata shows channel, platform and note count", () => {
     "B 站 · 1 条笔记",
     "missing channel is omitted, not rendered blank",
   );
+});
+
+// --- Phase 0: "original" must be the verbatim caption line ------------------
+
+test("original mode returns the verbatim caption line, not the AI cleanup", () => {
+  const { helpers } = loadRuntime();
+
+  // `text` is what cleanupNoteText() produced; `rawText` is the caption as it
+  // was actually spoken. Recall depends on the verbatim line, so it wins.
+  const note = {
+    rawText: "we shipped it on a Friday and it broke",
+    text: "We shipped the release on a Friday, and it broke.",
+  };
+
+  assert.equal(
+    helpers.noteOriginalText(note),
+    "we shipped it on a Friday and it broke",
+  );
+});
+
+test("original mode falls back to text for legacy notes without rawText", () => {
+  const { helpers } = loadRuntime();
+
+  assert.equal(
+    helpers.noteOriginalText({ text: "A note saved before rawText existed." }),
+    "A note saved before rawText existed.",
+  );
+  assert.equal(
+    helpers.noteOriginalText({ rawText: "", text: "Empty rawText falls back." }),
+    "Empty rawText falls back.",
+  );
+  assert.equal(
+    helpers.noteOriginalText({
+      rawText: "   ",
+      text: "Blank rawText falls back.",
+    }),
+    "Blank rawText falls back.",
+  );
+});
+
+test("trusted Chinese rawText stays original in display and TXT export", () => {
+  const { helpers } = loadRuntime();
+  const note = {
+    platform: "youtube",
+    sourceLanguage: "zh-CN",
+    textLanguage: "zh-CN",
+    timestampSeconds: 12,
+    rawText: "RAW: 这是字幕原话。",
+    text: "CLEANED: 这是整理后的中文正文。",
+  };
+
+  assert.equal(helpers.noteOriginalText(note), "RAW: 这是字幕原话。");
+
+  const rendered = helpers.renderNoteLanguageContent(note, "original");
+  assert.match(rendered, /RAW: 这是字幕原话。/);
+  assert.doesNotMatch(rendered, /CLEANED:/);
+
+  const resolved = helpers.resolveNoteExportEntry(note);
+  const txt = noteExport.buildAllNotesText(
+    [
+      {
+        platform: "youtube",
+        sourceLanguage: "zh-CN",
+        titleOriginal: "测试视频",
+        descriptionStatus: "confirmed-empty",
+        notes: [{ timestampSeconds: note.timestampSeconds, ...resolved }],
+      },
+    ],
+    "original",
+    { date: "2026-09-04T00:00:00.000Z" },
+  );
+  assert.match(txt, /RAW: 这是字幕原话。/);
+  assert.doesNotMatch(txt, /CLEANED:/);
 });

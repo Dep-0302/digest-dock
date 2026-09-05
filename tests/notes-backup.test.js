@@ -59,6 +59,27 @@ function clone(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
+function createAsyncGate() {
+  let enteredResolve;
+  let releaseResolve;
+  const entered = new Promise((resolve) => {
+    enteredResolve = resolve;
+  });
+  const released = new Promise((resolve) => {
+    releaseResolve = resolve;
+  });
+  return {
+    entered,
+    enter() {
+      enteredResolve();
+      return released;
+    },
+    release() {
+      releaseResolve();
+    },
+  };
+}
+
 function validBackupObject(notes = [makeNote(1)]) {
   return notesBackup.createBackup(notes, {
     exportedAt: "2026-08-18T12:34:56.000Z",
@@ -92,7 +113,13 @@ function loadBackgroundBackupHelpers({
   setImpl,
   removeImpl,
   clearImpl,
+  sessionGetImpl,
+  sessionSetImpl,
+  sessionClearImpl,
+  sessionClearAvailable = true,
+  tabsGetImpl = async () => ({ url: "https://www.youtube.com/" }),
   fetchImpl = fetch,
+  notesBackupImpl = notesBackup,
 } = {}) {
   let storedValues = clone(initialStorage);
   if (initialNotes.length || !Object.hasOwn(storedValues, "ytd_notes")) {
@@ -115,14 +142,15 @@ function loadBackgroundBackupHelpers({
           .map((storageKey) => [storageKey, clone(storedValues[storageKey])]),
       );
     });
-  const storageSet =
-    setImpl ||
-    (async (items) => {
-      writes.push(clone(items));
-      for (const [key, value] of Object.entries(items)) {
-        storedValues[key] = clone(value);
-      }
-    });
+  const defaultStorageSet = async (items) => {
+    writes.push(clone(items));
+    for (const [key, value] of Object.entries(items)) {
+      storedValues[key] = clone(value);
+    }
+  };
+  const storageSet = setImpl
+    ? (items) => setImpl(items, defaultStorageSet)
+    : defaultStorageSet;
   const storageRemove =
     removeImpl ||
     (async (keys) => {
@@ -130,13 +158,48 @@ function loadBackgroundBackupHelpers({
       removals.push(...normalizedKeys);
       for (const key of normalizedKeys) delete storedValues[key];
     });
-  const storageClear =
-    clearImpl ||
-    (async () => {
-      clearCount += 1;
-      storedValues = {};
-    });
+  const defaultStorageClear = async () => {
+    clearCount += 1;
+    storedValues = {};
+  };
+  const storageClear = clearImpl
+    ? () => clearImpl(defaultStorageClear)
+    : defaultStorageClear;
 
+  let sessionValues = {};
+  let sessionClearCount = 0;
+  const defaultSessionGet = async (key) => {
+    if (key === null || key === undefined) return clone(sessionValues);
+    const keys = Array.isArray(key) ? key : [key];
+    return Object.fromEntries(
+      keys
+        .filter((storageKey) => Object.hasOwn(sessionValues, storageKey))
+        .map((storageKey) => [storageKey, clone(sessionValues[storageKey])]),
+    );
+  };
+  const defaultSessionSet = async (items) => {
+    sessionValues = { ...sessionValues, ...clone(items) };
+  };
+  const sessionStorage = {
+    get: sessionGetImpl
+      ? (key) => sessionGetImpl(key, defaultSessionGet)
+      : defaultSessionGet,
+    set: sessionSetImpl
+      ? (items) => sessionSetImpl(items, defaultSessionSet)
+      : defaultSessionSet,
+    remove: async (keys) => {
+      for (const key of Array.isArray(keys) ? keys : [keys]) {
+        delete sessionValues[key];
+      }
+    },
+  };
+  if (sessionClearAvailable) {
+    sessionStorage.clear = async () => {
+      sessionClearCount += 1;
+      if (sessionClearImpl) return sessionClearImpl();
+      sessionValues = {};
+    };
+  }
   const sandbox = {
     console,
     URL,
@@ -147,7 +210,7 @@ function loadBackgroundBackupHelpers({
     setTimeout,
     clearTimeout,
     importScripts() {},
-    YTD_NOTES_BACKUP: notesBackup,
+    YTD_NOTES_BACKUP: notesBackupImpl,
     YTD_NOTE_SOURCES: noteSources,
     YTD_EXPORT_JOBS: exportJobs,
     YTD_SETTINGS: {
@@ -166,6 +229,9 @@ function loadBackgroundBackupHelpers({
           remove: storageRemove,
           clear: storageClear,
         },
+        // MV3 exposes session storage; the Passive bridge keeps bounded
+        // per-tab caption state there, so a reset must reach it too.
+        session: sessionStorage,
       },
       action: { onClicked: listeners },
       sidePanel: {
@@ -187,7 +253,7 @@ function loadBackgroundBackupHelpers({
       tabs: {
         onUpdated: listeners,
         onActivated: listeners,
-        get: async () => ({ url: "https://www.youtube.com/" }),
+        get: tabsGetImpl,
       },
       scripting: { executeScript: async () => [] },
     },
@@ -199,10 +265,17 @@ function loadBackgroundBackupHelpers({
     helpers: sandbox.__YTD_TRANSLATION_TESTING__,
     notifications,
     readStorage: () => clone(storedValues),
+    readSessionStorage: () => clone(sessionValues),
+    seedSessionStorage: (items) => {
+      sessionValues = { ...sessionValues, ...clone(items) };
+    },
     readStoredNotes: () => clone(storedValues.ytd_notes || []),
     removals,
     get clearCount() {
       return clearCount;
+    },
+    get sessionClearCount() {
+      return sessionClearCount;
     },
     writes,
   };
@@ -478,6 +551,82 @@ test("backup parsing rejects damaged JSON, newer versions, oversized input, and 
   }
 });
 
+test("note-count and serialized-backup limits are fixed at the Phase 0 contract", () => {
+  assert.equal(notesBackup.MAX_NOTES, 500);
+  assert.equal(notesBackup.MAX_BACKUP_BYTES, 32 * 1024 * 1024);
+});
+
+test("the exact serialized byte boundary is accepted and one extra byte is rejected", () => {
+  const backup = validBackupObject([makeNote(1)]);
+  const withEmptyPadding = { ...backup, padding: "" };
+  const baseText = notesBackup.serializeBackup(withEmptyPadding);
+  const paddingBytes = notesBackup.MAX_BACKUP_BYTES - notesBackup.byteLength(baseText);
+  const exactText = notesBackup.serializeBackup({
+    ...withEmptyPadding,
+    padding: "x".repeat(paddingBytes),
+  });
+
+  assert.equal(notesBackup.byteLength(exactText), notesBackup.MAX_BACKUP_BYTES);
+  assert.equal(notesBackup.parseBackupText(exactText).length, 1);
+  assertBackupError(
+    () => notesBackup.parseBackupText(`${exactText} `),
+    "NOTES_BACKUP_TOO_LARGE",
+  );
+});
+
+test("500 maximum product-generated notes serialize and restore below 32 MiB", () => {
+  // JSON.stringify must escape an isolated surrogate as six ASCII bytes. Using
+  // it for every bounded product field is stricter than ordinary UTF-8 CJK and
+  // protects the headroom calculation from a truncation splitting a pair.
+  const worstCodeUnit = "\ud800";
+  const text = worstCodeUnit.repeat(3000);
+  const title = worstCodeUnit.repeat(500);
+  const channel = worstCodeUnit.repeat(300);
+  const notes = Array.from({ length: notesBackup.MAX_NOTES }, (_, index) => {
+    const bvid = "BV1zfg36ZEXi";
+    const cid = 40_830_435_549 + index;
+    const mediaKey = `bilibili:${bvid}:${cid}`;
+    return {
+      id: `note_${String(index).padStart(12, "0")}`,
+      platform: "bilibili",
+      mediaKey,
+      videoId: mediaKey,
+      bvid,
+      cid,
+      page: 1,
+      textLanguage: "zh-CN",
+      videoTitle: title,
+      videoTitleZh: title,
+      videoTitleZhValidated: true,
+      videoTitleZhValidationVersion: 1,
+      channelName: channel,
+      timestampSeconds: index,
+      text,
+      translatedText: text,
+      translatedValidated: true,
+      translatedValidationVersion: 1,
+      translatedUnchanged: false,
+      rawText: text,
+      sourceLanguage: "zh-CN",
+      createdAt: 1_700_000_000_000 + index,
+    };
+  });
+
+  const backup = validBackupObject(notes);
+  const textOnDisk = notesBackup.serializeBackup(backup);
+
+  assert.ok(
+    notesBackup.byteLength(textOnDisk) < notesBackup.MAX_BACKUP_BYTES,
+    "the defensive maximum product dataset must retain 32 MiB headroom",
+  );
+  const restored = notesBackup.parseBackupText(textOnDisk);
+  assert.equal(restored.length, notesBackup.MAX_NOTES);
+  assert.deepEqual(
+    restored.map((note) => note.id),
+    notes.map((note) => note.id),
+  );
+});
+
 test("schema v3 round-trips validated Chinese video titles", () => {
   const source = makeNote(30, {
     videoTitle: "The Future of AI",
@@ -739,7 +888,7 @@ test("a reused note ID with different identity content fails without mutating in
   assert.deepEqual(imported, importedBefore);
 });
 
-test("the 100-note capacity check rejects the whole merge atomically", () => {
+test("the configured note-capacity check rejects the whole merge atomically", () => {
   const existing = Array.from({ length: notesBackup.MAX_NOTES }, (_, index) =>
     makeNote(index),
   );
@@ -807,11 +956,25 @@ test("background reset clears extension data and restores the selected UI langua
   });
 
   const result = await state.helpers.handleResetAllExtensionData("en");
+  const runtimeInstanceId = state.helpers.getRuntimeInstanceId();
 
   assert.equal(result.success, true);
   assert.equal(state.clearCount, 1);
   assert.deepEqual(state.readStorage(), { ytd_options_language: "en" });
-  assert.deepEqual(state.notifications, [{ action: "notesChanged" }]);
+  assert.deepEqual(state.notifications, [
+    {
+      action: "extensionDataResetStarted",
+      runtimeInstanceId,
+      dataGeneration: 1,
+    },
+    {
+      action: "extensionDataResetCompleted",
+      runtimeInstanceId,
+      dataGeneration: 2,
+      success: true,
+    },
+    { action: "notesChanged" },
+  ]);
 });
 
 test("clear and reset reject slow saves captured under an older generation", async () => {
@@ -905,9 +1068,64 @@ test("background import failures perform zero storage writes", async () => {
   assert.equal(overCapacity.success, false);
   assert.equal(overCapacity.code, "NOTES_CAPACITY_EXCEEDED");
   assert.equal(overCapacity.overBy, 1);
+  assert.equal(overCapacity.limit, notesBackup.MAX_NOTES);
+  assert.equal(overCapacity.maxBytes, notesBackup.MAX_BACKUP_BYTES);
   assert.equal(state.writes.length, 0);
   assert.deepEqual(state.readStoredNotes(), existingBefore);
   assert.deepEqual(state.notifications, []);
+});
+
+test("an accepted legacy backup can immediately be exported and restored", async () => {
+  const legacy = validV1BackupObject([
+    makeNote(70, {
+      text: "Legacy source text",
+      rawText: "Legacy verbatim text",
+    }),
+  ]);
+  const state = loadBackgroundBackupHelpers();
+
+  const imported = await state.helpers.handleImportNotesBackup(
+    notesBackup.serializeBackup(legacy),
+  );
+  assert.equal(imported.success, true);
+
+  const exported = await state.helpers.handleExportNotesBackup();
+  assert.equal(exported.success, true);
+  const exportedText = notesBackup.serializeBackup(exported.backup);
+  const restored = notesBackup.parseBackupText(exportedText);
+  assert.equal(restored.length, 1);
+  assert.equal(restored[0].text, "Legacy source text");
+  assert.equal(restored[0].rawText, "Legacy verbatim text");
+});
+
+test("import rejects a merged state that could not be exported", async () => {
+  const constrainedBackup = {
+    ...notesBackup,
+    createBackup(notes, options) {
+      if (notes.length > 1) {
+        throw new notesBackup.NotesBackupError("NOTES_BACKUP_TOO_LARGE", {
+          maxBytes: notesBackup.MAX_BACKUP_BYTES,
+        });
+      }
+      return notesBackup.createBackup(notes, options);
+    },
+  };
+  const existing = makeNote(80);
+  const importedNote = makeNote(81);
+  const state = loadBackgroundBackupHelpers({
+    initialNotes: [existing],
+    notesBackupImpl: constrainedBackup,
+  });
+
+  const result = await state.helpers.handleImportNotesBackup(
+    notesBackup.serializeBackup(validBackupObject([importedNote])),
+  );
+
+  assert.equal(result.success, false);
+  assert.equal(result.code, "NOTES_BACKUP_TOO_LARGE");
+  assert.equal(result.maxBytes, notesBackup.MAX_BACKUP_BYTES);
+  assert.deepEqual(state.readStoredNotes(), [existing]);
+  assert.equal(state.writes.length, 0);
 });
 
 test("the JSON download helper uses an object URL and cleans it up", () => {
@@ -970,8 +1188,11 @@ test("the JSON download helper uses an object URL and cleans it up", () => {
   assert.equal(link.hidden, true);
   assert.equal(createdBlob.type, "application/json");
   assert.deepEqual(createdBlob.parts, [result.text]);
-  assert.equal(result.text.endsWith("\n"), true);
+  assert.equal(result.text, notesBackup.serializeBackup(backup));
   assert.deepEqual(JSON.parse(result.text), backup);
+  assert.deepEqual(notesBackup.parseBackupText(result.text), backup.notes.map(
+    (note, index) => notesBackup.normalizeNote(note, index),
+  ));
   assert.deepEqual(actions, [
     "create-url",
     "append",
@@ -996,4 +1217,664 @@ test("new note saves retain the current 3000-character and 20-character limits",
     background,
     /const storedSourceLanguage =[\s\S]*?matchedLanguage\.length <= 20[\s\S]*?sourceLanguage: storedSourceLanguage/,
   );
+});
+
+// --- Phase 0: saved notes are never silently evicted -----------------------
+
+test("a full note library refuses the new save and keeps every existing note", async () => {
+  const limit = notesBackup.MAX_NOTES;
+  const initialNotes = Array.from({ length: limit }, (_, index) =>
+    makeNote(index + 1),
+  );
+  const state = loadBackgroundBackupHelpers({ initialNotes });
+
+  const result = await state.helpers.saveNoteToStorage(makeNote(9999));
+
+  assert.equal(result.code, "NOTE_STORAGE_FULL");
+  assert.equal(result.limit, limit);
+  assert.equal(result.count, limit);
+
+  const stored = state.readStoredNotes();
+  assert.equal(stored.length, limit);
+  assert.ok(
+    !stored.some((note) => note.id === "note-9999"),
+    "the refused note must not be stored",
+  );
+  assert.deepEqual(
+    stored.map((note) => note.id),
+    initialNotes.map((note) => note.id),
+    "no existing note may be evicted to make room",
+  );
+  assert.equal(state.writes.length, 0, "a refused save must not write");
+});
+
+test("a save below the ceiling still succeeds and keeps newest-first order", async () => {
+  const initialNotes = [makeNote(1), makeNote(2)];
+  const state = loadBackgroundBackupHelpers({ initialNotes });
+
+  assert.equal(await state.helpers.saveNoteToStorage(makeNote(3)), true);
+  assert.deepEqual(
+    state.readStoredNotes().map((note) => note.id),
+    ["note-3", "note-1", "note-2"],
+  );
+});
+
+test("a save cannot make an exportable legacy library exceed the backup bound", async () => {
+  const constrainedBackup = {
+    ...notesBackup,
+    createBackup(notes, options) {
+      if (notes.length > 1) {
+        throw new notesBackup.NotesBackupError("NOTES_BACKUP_TOO_LARGE", {
+          maxBytes: notesBackup.MAX_BACKUP_BYTES,
+        });
+      }
+      return notesBackup.createBackup(notes, options);
+    },
+  };
+  const existing = makeNote(1);
+  const state = loadBackgroundBackupHelpers({
+    initialNotes: [existing],
+    notesBackupImpl: constrainedBackup,
+  });
+
+  const result = await state.helpers.saveNoteToStorage(makeNote(2));
+
+  assert.equal(result.code, "NOTES_BACKUP_TOO_LARGE");
+  assert.equal(result.maxBytes, notesBackup.MAX_BACKUP_BYTES);
+  assert.equal(result.count, 1);
+  assert.deepEqual(state.readStoredNotes(), [existing]);
+  assert.equal(state.writes.length, 0);
+});
+
+test("two saves that preflight at 499 still serialize the final slot", async () => {
+  const initialNotes = Array.from(
+    { length: notesBackup.MAX_NOTES - 1 },
+    (_, index) => makeNote(index + 1),
+  );
+  const state = loadBackgroundBackupHelpers({ initialNotes });
+  const generation = state.helpers.getNoteStorageGeneration();
+
+  const preflights = await Promise.all([
+    state.helpers.preflightNoteStorageCapacity(generation),
+    state.helpers.preflightNoteStorageCapacity(generation),
+  ]);
+  assert.deepEqual(preflights, [true, true]);
+
+  const results = await Promise.all([
+    state.helpers.saveNoteToStorage(makeNote(9001), generation),
+    state.helpers.saveNoteToStorage(makeNote(9002), generation),
+  ]);
+  assert.equal(results.filter((result) => result === true).length, 1);
+  const rejected = results.find((result) => result !== true);
+  assert.equal(rejected.code, "NOTE_STORAGE_FULL");
+  assert.equal(rejected.limit, notesBackup.MAX_NOTES);
+  assert.equal(rejected.count, notesBackup.MAX_NOTES);
+  assert.equal(state.readStoredNotes().length, notesBackup.MAX_NOTES);
+  assert.equal(state.writes.length, 1, "only the winning save may write");
+});
+
+test("a capacity preflight never survives a later clear generation", async () => {
+  const state = loadBackgroundBackupHelpers({ initialNotes: [makeNote(1)] });
+  const generation = state.helpers.getNoteStorageGeneration();
+
+  assert.equal(
+    await state.helpers.preflightNoteStorageCapacity(generation),
+    true,
+  );
+  await state.helpers.handleClearAllNotes();
+
+  assert.equal(
+    await state.helpers.preflightNoteStorageCapacity(generation),
+    false,
+  );
+  assert.equal(
+    await state.helpers.saveNoteToStorage(makeNote(2), generation),
+    false,
+  );
+  assert.deepEqual(state.readStoredNotes(), []);
+});
+
+test("the storage ceiling has exactly one source of truth", () => {
+  const source = read("background.js");
+  assert.match(
+    source,
+    /function maxSavedNotes\(\)\s*\{\s*return YTD_NOTES_BACKUP\.MAX_NOTES;/,
+    "background must read the ceiling from notes-backup.js",
+  );
+  assert.doesNotMatch(
+    source,
+    /MAX_SAVED_NOTES\s*=\s*\d/,
+    "background must not redeclare a numeric note ceiling",
+  );
+});
+
+test("getNotes reports whole-library capacity alongside the filtered notes", async () => {
+  const state = loadBackgroundBackupHelpers({
+    initialNotes: [
+      makeNote(1, { videoId: "video_a" }),
+      makeNote(2, { videoId: "video_b" }),
+    ],
+  });
+
+  const filtered = await state.helpers.handleGetNotes("video_a");
+  assert.equal(filtered.success, true);
+  assert.equal(filtered.notes.length, 1);
+  assert.equal(
+    filtered.totalCount,
+    2,
+    "capacity describes the library, not the filtered view",
+  );
+  assert.equal(filtered.limit, notesBackup.MAX_NOTES);
+});
+
+test("resetting all extension data also clears session storage", async () => {
+  const state = loadBackgroundBackupHelpers({
+    initialNotes: [makeNote(1)],
+    initialStorage: { ytd_options_language: "zh-CN" },
+  });
+  state.seedSessionStorage({ digestdock_passive_state: { videoId: "abc" } });
+
+  const result = await state.helpers.handleResetAllExtensionData("zh-CN");
+
+  assert.equal(result.success, true);
+  assert.equal(state.sessionClearCount, 1);
+  assert.deepEqual(
+    state.readSessionStorage(),
+    {},
+    "Passive bridge session state must not survive a full reset",
+  );
+  assert.deepEqual(state.readStorage(), { ytd_options_language: "zh-CN" });
+});
+
+test("reset fails closed before local deletion when session clear rejects", async () => {
+  const initialStorage = {
+    ytd_settings: { aiApiKey: "fake" },
+    ytd_options_language: "en",
+    digest_video_001: { cached: true },
+  };
+  const initialNotes = [makeNote(1)];
+  const state = loadBackgroundBackupHelpers({
+    initialNotes,
+    initialStorage,
+    sessionClearImpl: async () => {
+      throw new Error("simulated session clear failure");
+    },
+  });
+  state.seedSessionStorage({
+    youtube_passive_session_buffer: [{ videoId: "abcdefghijk" }],
+  });
+
+  const result = await state.helpers.handleResetAllExtensionData("en");
+  const runtimeInstanceId = state.helpers.getRuntimeInstanceId();
+
+  assert.equal(result.success, false);
+  assert.equal(result.code, "RESET_DATA_FAILED");
+  assert.equal(state.sessionClearCount, 1);
+  assert.equal(state.clearCount, 0, "local.clear must not run after session failure");
+  assert.deepEqual(state.removals, []);
+  assert.deepEqual(state.readStorage(), {
+    ...initialStorage,
+    ytd_notes: initialNotes,
+  });
+  assert.deepEqual(state.readSessionStorage(), {
+    youtube_passive_session_buffer: [{ videoId: "abcdefghijk" }],
+  });
+  assert.deepEqual(state.notifications, [
+    {
+      action: "extensionDataResetStarted",
+      runtimeInstanceId,
+      dataGeneration: 1,
+    },
+    {
+      action: "extensionDataResetCompleted",
+      runtimeInstanceId,
+      dataGeneration: 2,
+      success: false,
+    },
+  ]);
+});
+
+test("reset fails closed before local deletion when session clear is unavailable", async () => {
+  const initialStorage = {
+    ytd_settings: { aiApiKey: "fake" },
+    ytd_options_language: "zh-CN",
+  };
+  const initialNotes = [makeNote(2)];
+  const state = loadBackgroundBackupHelpers({
+    initialNotes,
+    initialStorage,
+    sessionClearAvailable: false,
+  });
+
+  const result = await state.helpers.handleResetAllExtensionData("zh-CN");
+
+  assert.equal(result.success, false);
+  assert.equal(result.code, "RESET_DATA_FAILED");
+  assert.equal(state.sessionClearCount, 0);
+  assert.equal(state.clearCount, 0);
+  assert.deepEqual(state.removals, []);
+  assert.deepEqual(state.readStorage(), {
+    ...initialStorage,
+    ytd_notes: initialNotes,
+  });
+  assert.deepEqual(state.notifications, []);
+});
+
+test("reset waits for an in-flight Passive write before clearing session", async () => {
+  const gate = createAsyncGate();
+  let blockNextSessionRead = true;
+  const state = loadBackgroundBackupHelpers({
+    initialNotes: [makeNote(3)],
+    initialStorage: { ytd_options_language: "zh-CN" },
+    sessionGetImpl: async (key, readDefault) => {
+      if (blockNextSessionRead) {
+        blockNextSessionRead = false;
+        await gate.enter();
+      }
+      return readDefault(key);
+    },
+  });
+  const videoId = "abcdefghijk";
+  const tabId = 7;
+  state.seedSessionStorage({
+    youtube_passive_session_buffer: [
+      {
+        identity: `${tabId}:${videoId}:en:manual`,
+        tabId,
+        videoId,
+        language: "en",
+        trackKind: "manual",
+        state: "inflight",
+        inFlight: true,
+        updatedAt: 1,
+      },
+    ],
+  });
+
+  const passiveMutation = state.helpers.handleYoutubePassiveState(
+    {
+      type: "clear",
+      videoId,
+      language: "en",
+      kind: "manual",
+      status: 0,
+      inFlight: false,
+    },
+    { tab: { id: tabId } },
+  );
+  await gate.entered;
+
+  const reset = state.helpers.handleResetAllExtensionData("zh-CN");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(
+    state.sessionClearCount,
+    0,
+    "reset must queue behind the in-flight Passive mutation",
+  );
+  assert.equal(
+    state.clearCount,
+    0,
+    "durable local data must stay intact while session clear is waiting",
+  );
+
+  gate.release();
+  const [passiveResult, resetResult] = await Promise.all([
+    passiveMutation,
+    reset,
+  ]);
+
+  assert.equal(passiveResult.ok, true);
+  assert.equal(resetResult.success, true);
+  assert.equal(state.sessionClearCount, 1);
+  assert.deepEqual(
+    state.readSessionStorage(),
+    {},
+    "the earlier Passive write must not resurrect session data after reset",
+  );
+  assert.deepEqual(state.readStorage(), { ytd_options_language: "zh-CN" });
+});
+
+test("Passive writes arriving inside reset cannot cross its full transaction", async () => {
+  const localClearGate = createAsyncGate();
+  const videoId = "abcdefghijk";
+  const tabId = 9;
+  const state = loadBackgroundBackupHelpers({
+    initialNotes: [makeNote(4)],
+    initialStorage: { ytd_options_language: "zh-CN" },
+    clearImpl: async (clearDefault) => {
+      await localClearGate.enter();
+      return clearDefault();
+    },
+    tabsGetImpl: async () => ({
+      id: tabId,
+      url: `https://www.youtube.com/watch?v=${videoId}`,
+    }),
+  });
+  state.seedSessionStorage({ before_reset: true });
+
+  const reset = state.helpers.handleResetAllExtensionData("zh-CN");
+  await localClearGate.entered;
+  assert.equal(state.sessionClearCount, 1);
+  assert.equal(state.helpers.getExtensionDataGeneration(), 1);
+  assert.deepEqual(state.readSessionStorage(), {});
+
+  const duringReset = state.helpers.handleYoutubePassiveState(
+    {
+      type: "inflight",
+      videoId,
+      language: "en",
+      kind: "manual",
+      status: 0,
+      inFlight: true,
+    },
+    { tab: { id: tabId } },
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(
+    state.readSessionStorage(),
+    {},
+    "a Passive write queued after session.clear must not enter reset",
+  );
+
+  localClearGate.release();
+  const resetResult = await reset;
+  assert.equal(resetResult.success, true);
+  assert.equal(state.helpers.getExtensionDataGeneration(), 2);
+  assert.deepEqual(state.readSessionStorage(), {});
+
+  const staleResult = await duringReset;
+  assert.equal(staleResult.ok, false);
+  assert.equal(staleResult.error, "EXTENSION_DATA_RESET");
+  assert.deepEqual(state.readSessionStorage(), {});
+
+  const afterReset = await state.helpers.handleYoutubePassiveState(
+    {
+      type: "inflight",
+      videoId,
+      language: "en",
+      kind: "manual",
+      status: 0,
+      inFlight: true,
+    },
+    { tab: { id: tabId } },
+  );
+  assert.equal(afterReset.ok, true);
+  assert.equal(
+    state.readSessionStorage().youtube_passive_session_buffer.length,
+    1,
+    "a genuinely post-reset page event may create fresh session state",
+  );
+});
+
+test("pre-reset cooldown completions cannot recreate session state", async (t) => {
+  const cases = [
+    {
+      label: "Supadata",
+      helper: "startYoutubeSupadataCooldown",
+      key: "digestdock_supadata_cooldown_until",
+    },
+    {
+      label: "YouTube native",
+      helper: "startYoutubeNativeCooldown",
+      key: "youtube_native_cooldown_until",
+    },
+  ];
+
+  for (const scenario of cases) {
+    await t.test(scenario.label, async () => {
+      const providerGate = createAsyncGate();
+      const state = loadBackgroundBackupHelpers({
+        initialStorage: { ytd_options_language: "zh-CN" },
+      });
+      const requestGeneration = state.helpers.getExtensionDataGeneration();
+      const lateCooldown = providerGate
+        .enter()
+        .then(() => state.helpers[scenario.helper](requestGeneration));
+      await providerGate.entered;
+
+      const reset = await state.helpers.handleResetAllExtensionData("zh-CN");
+      assert.equal(reset.success, true);
+      assert.deepEqual(state.readSessionStorage(), {});
+
+      providerGate.release();
+      assert.equal(await lateCooldown, 0);
+      assert.deepEqual(
+        state.readSessionStorage(),
+        {},
+        "an old 429 completion must not restore a cooldown after reset",
+      );
+
+      const freshCooldown = await state.helpers[scenario.helper]();
+      assert.ok(freshCooldown > 0);
+      assert.equal(
+        state.readSessionStorage()[scenario.key],
+        freshCooldown,
+        "a post-reset request may create a fresh cooldown",
+      );
+    });
+  }
+});
+
+test("a stale side-panel cache commit is rejected after reset", async () => {
+  const state = loadBackgroundBackupHelpers({
+    initialStorage: { ytd_options_language: "zh-CN" },
+  });
+  const staleGeneration = state.helpers.getExtensionDataGeneration();
+
+  const reset = await state.helpers.handleResetAllExtensionData("zh-CN");
+  assert.equal(reset.success, true);
+
+  const stale = await state.helpers.handlePersistResetFencedCache({
+    key: "overview_reset-video",
+    record: { marker: "must-not-return" },
+    dataGeneration: staleGeneration,
+  });
+  assert.equal(stale.success, false);
+  assert.equal(stale.code, "EXTENSION_DATA_RESET");
+  assert.deepEqual(state.readStorage(), { ytd_options_language: "zh-CN" });
+
+  const fresh = await state.helpers.handlePersistResetFencedCache({
+    key: "overview_reset-video",
+    record: { marker: "fresh" },
+    dataGeneration: state.helpers.getExtensionDataGeneration(),
+  });
+  assert.equal(fresh.success, true);
+  assert.deepEqual(state.readStorage()["overview_reset-video"], {
+    marker: "fresh",
+  });
+});
+
+test("reset waits for an already-started side-panel cache commit", async () => {
+  const cacheSetGate = createAsyncGate();
+  const state = loadBackgroundBackupHelpers({
+    initialStorage: { ytd_options_language: "zh-CN" },
+    setImpl: async (items, setDefault) => {
+      if (Object.hasOwn(items, "digest_reset-video")) {
+        await cacheSetGate.enter();
+      }
+      return setDefault(items);
+    },
+  });
+  const generation = state.helpers.getExtensionDataGeneration();
+  const cacheWrite = state.helpers.handlePersistResetFencedCache({
+    key: "digest_reset-video",
+    record: { marker: "started-before-reset" },
+    dataGeneration: generation,
+  });
+  await cacheSetGate.entered;
+
+  const reset = state.helpers.handleResetAllExtensionData("zh-CN");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(
+    state.clearCount,
+    0,
+    "local.clear must wait for the earlier fenced cache commit",
+  );
+
+  cacheSetGate.release();
+  const [cacheResult, resetResult] = await Promise.all([cacheWrite, reset]);
+  assert.equal(cacheResult.success, true);
+  assert.equal(resetResult.success, true);
+  assert.deepEqual(state.readStorage(), { ytd_options_language: "zh-CN" });
+});
+
+test("reset-fenced settings reject stale generations and accept a fresh user save", async () => {
+  const state = loadBackgroundBackupHelpers({
+    initialStorage: { ytd_options_language: "zh-CN" },
+  });
+  const staleGeneration = state.helpers.getExtensionDataGeneration();
+
+  const reset = await state.helpers.handleResetAllExtensionData("zh-CN");
+  assert.equal(reset.success, true);
+
+  const settings = {
+    provider: "deepseek",
+    aiApiKeys: {},
+    supadataApiKey: "",
+  };
+  const stale = await state.helpers.handlePersistResetFencedSettings({
+    settings,
+    dataGeneration: staleGeneration,
+  });
+  assert.equal(stale.success, false);
+  assert.equal(stale.code, "EXTENSION_DATA_RESET");
+  assert.deepEqual(state.readStorage(), { ytd_options_language: "zh-CN" });
+
+  const fresh = await state.helpers.handlePersistResetFencedSettings({
+    settings,
+    dataGeneration: state.helpers.getExtensionDataGeneration(),
+  });
+  assert.equal(fresh.success, true);
+  assert.deepEqual(state.readStorage(), {
+    ytd_options_language: "zh-CN",
+    ytd_settings: settings,
+  });
+});
+
+test("reset waits for an in-flight settings set and then clears it", async () => {
+  const settingsSetGate = createAsyncGate();
+  let blockSettingsWrite = true;
+  const state = loadBackgroundBackupHelpers({
+    initialStorage: { ytd_options_language: "zh-CN" },
+    setImpl: async (items, setDefault) => {
+      if (blockSettingsWrite && Object.hasOwn(items, "ytd_settings")) {
+        blockSettingsWrite = false;
+        await settingsSetGate.enter();
+      }
+      return setDefault(items);
+    },
+  });
+  const settingsWrite = state.helpers.handlePersistResetFencedSettings({
+    settings: {
+      provider: "deepseek",
+      aiApiKeys: {},
+      supadataApiKey: "",
+    },
+    dataGeneration: state.helpers.getExtensionDataGeneration(),
+  });
+  await settingsSetGate.entered;
+
+  const reset = state.helpers.handleResetAllExtensionData("zh-CN");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(
+    state.clearCount,
+    0,
+    "reset must wait behind a settings write that already owns the mutation queue",
+  );
+
+  settingsSetGate.release();
+  const [writeResult, resetResult] = await Promise.all([settingsWrite, reset]);
+  assert.equal(writeResult.success, true);
+  assert.equal(resetResult.success, true);
+  assert.deepEqual(
+    state.readStorage(),
+    { ytd_options_language: "zh-CN" },
+    "the reset that follows an earlier set must leave no settings behind",
+  );
+});
+
+test("a pre-reset note-navigation write cannot recreate session state", async () => {
+  const requestGate = createAsyncGate();
+  const state = loadBackgroundBackupHelpers({
+    initialStorage: { ytd_options_language: "zh-CN" },
+  });
+  const staleGeneration = state.helpers.getExtensionDataGeneration();
+  const lateWrite = requestGate.enter().then(() =>
+    state.helpers.handleResetFencedSessionMutation({
+      operation: "set",
+      value: { token: "stale-note-navigation" },
+      dataGeneration: staleGeneration,
+    }),
+  );
+  await requestGate.entered;
+
+  const reset = await state.helpers.handleResetAllExtensionData("zh-CN");
+  assert.equal(reset.success, true);
+  requestGate.release();
+
+  const staleResult = await lateWrite;
+  assert.equal(staleResult.success, false);
+  assert.equal(staleResult.code, "EXTENSION_DATA_RESET");
+  assert.deepEqual(state.readSessionStorage(), {});
+
+  const freshResult = await state.helpers.handleResetFencedSessionMutation({
+    operation: "set",
+    value: { token: "fresh-note-navigation" },
+    dataGeneration: state.helpers.getExtensionDataGeneration(),
+  });
+  assert.equal(freshResult.success, true);
+  assert.deepEqual(state.readSessionStorage().ytd_note_navigation, {
+    token: "fresh-note-navigation",
+  });
+});
+
+test("reset waits for an already-started note-navigation session write", async () => {
+  const sessionSetGate = createAsyncGate();
+  const state = loadBackgroundBackupHelpers({
+    initialStorage: { ytd_options_language: "zh-CN" },
+    sessionSetImpl: async (items, setDefault) => {
+      if (Object.hasOwn(items, "ytd_note_navigation")) {
+        await sessionSetGate.enter();
+      }
+      return setDefault(items);
+    },
+  });
+  const generation = state.helpers.getExtensionDataGeneration();
+  const write = state.helpers.handleResetFencedSessionMutation({
+    operation: "set",
+    value: { token: "started-before-reset" },
+    dataGeneration: generation,
+  });
+  await sessionSetGate.entered;
+
+  const reset = state.helpers.handleResetAllExtensionData("zh-CN");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(
+    state.sessionClearCount,
+    0,
+    "session.clear must wait for the earlier session mutation",
+  );
+
+  sessionSetGate.release();
+  const [writeResult, resetResult] = await Promise.all([write, reset]);
+  assert.equal(writeResult.success, true);
+  assert.equal(resetResult.success, true);
+  assert.deepEqual(state.readSessionStorage(), {});
+});
+
+test("concurrent reset requests serialize without exposing an odd generation", async () => {
+  const state = loadBackgroundBackupHelpers({
+    initialStorage: { ytd_options_language: "zh-CN" },
+  });
+
+  const [first, second] = await Promise.all([
+    state.helpers.handleResetAllExtensionData("en"),
+    state.helpers.handleResetAllExtensionData("zh-CN"),
+  ]);
+
+  assert.equal(first.success, true);
+  assert.equal(second.success, true);
+  assert.equal(state.helpers.getExtensionDataGeneration(), 4);
+  assert.deepEqual(state.readStorage(), { ytd_options_language: "zh-CN" });
+  assert.deepEqual(state.readSessionStorage(), {});
 });

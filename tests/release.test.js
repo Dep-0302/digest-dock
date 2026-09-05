@@ -435,8 +435,12 @@ test("release copy documents current scope without em dashes", () => {
   assert.match(optionsPage, /id="providerSelectButton"[\s\S]*?role="combobox"/);
   assert.match(optionsPage, /id="providerSelectList"[\s\S]*?role="listbox"/);
   assert.doesNotMatch(optionsStyles, /\.data-card\s*\{[^}]*margin-top/);
-  // A one-time legacy-shape migration is still persisted exactly once.
-  assert.match(optionsScript, /migration\.migrated[\s\S]*storage\.set/);
+  // A stored legacy shape is migrated through the reset-fenced background
+  // write. An absent post-reset settings record must remain absent.
+  assert.match(
+    optionsScript,
+    /hadStoredSettings\s*&&\s*migration\.migrated[\s\S]*persistResetFencedSettings/,
+  );
   assert.doesNotMatch(optionsPage, /~\/Documents\/(?:youtube-digest|digest-dock)/);
   assert.doesNotMatch(optionsPage, /%USERPROFILE%\\Documents\\(?:youtube-digest|digest-dock)/);
 

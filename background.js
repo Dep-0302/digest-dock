@@ -27,13 +27,18 @@ importScripts("export-jobs.js");
 const DEBUG = false;
 const ANALYSIS_SCHEMA_VERSION = 3;
 const ANALYSIS_TIMESTAMP_ANCHOR_VERSION = 1;
-const RUNTIME_PROTOCOL_VERSION = 12;
+const RUNTIME_PROTOCOL_VERSION = 14;
 const ANALYSIS_BASE_LANGUAGE = "zh-Hans";
 const TRANSCRIPT_SOURCE_POLICY_VERSION = 5;
 const AI_PROVIDER_IDLE_TIMEOUT_MS = 50_000;
 const AI_PROVIDER_HARD_TIMEOUT_MS = 120_000;
 const AI_PROVIDER_MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
-const MAX_SAVED_NOTES = 100;
+// The saved-note ceiling lives in notes-backup.js so the storage path and the
+// backup/import path can never drift apart. Read it lazily: importScripts
+// globals are not available while this module is being evaluated.
+function maxSavedNotes() {
+  return YTD_NOTES_BACKUP.MAX_NOTES;
+}
 const NOTE_TRANSLATION_JOB_TIMEOUT_MS = 110_000;
 const EXPORT_SOURCE_BATCH_MAX_UNITS = 4;
 const EXPORT_SOURCE_BATCH_MAX_CHARACTERS = 12_000;
@@ -90,6 +95,218 @@ const exportSourceBatchInFlight = new Map();
 let exportSourceBatchQueueTail = Promise.resolve();
 let exportSourceStorageGeneration = 0;
 let youtubeSupadataCooldownUntil = 0;
+// `extensionDataGeneration` is intentionally process-local, so it returns to
+// zero whenever Chrome restarts the MV3 service worker. Pair it with a unique
+// boot identity: an old UI request carrying `{ old-id, 0 }` must never be
+// accepted by a new worker that also happens to be at generation zero.
+const runtimeInstanceId = (() => {
+  try {
+    const value = globalThis.crypto?.randomUUID?.();
+    if (typeof value === "string" && value) return value;
+  } catch (_error) {
+    // Tests and older runtimes can use the bounded fallback below.
+  }
+  return `runtime-${Date.now().toString(36)}-${Math.random()
+    .toString(36)
+    .slice(2, 14)}`;
+})();
+// Even values are stable writable epochs. A reset holds an odd epoch for its
+// whole destructive transaction, then advances to the next even epoch. Work
+// captured before or during reset can therefore never commit afterward.
+let extensionDataGeneration = 0;
+let extensionDataMutationQueue = Promise.resolve();
+
+function extensionDataGenerationIsWritable(expectedGeneration) {
+  return (
+    Number.isSafeInteger(expectedGeneration) &&
+    expectedGeneration === extensionDataGeneration &&
+    expectedGeneration % 2 === 0
+  );
+}
+
+function extensionDataFenceIsWritable(
+  expectedRuntimeInstanceId,
+  expectedGeneration,
+) {
+  return (
+    typeof expectedRuntimeInstanceId === "string" &&
+    expectedRuntimeInstanceId === runtimeInstanceId &&
+    extensionDataGenerationIsWritable(expectedGeneration)
+  );
+}
+
+function getRuntimeInstanceId() {
+  return runtimeInstanceId;
+}
+
+function getExtensionDataGeneration() {
+  return extensionDataGeneration;
+}
+
+function queueExtensionDataMutation(operation) {
+  const task = extensionDataMutationQueue.then(operation, operation);
+  extensionDataMutationQueue = task.catch(() => {});
+  return task;
+}
+
+function extensionDataMutationResult(success, code = "OK", extra = {}) {
+  return {
+    success,
+    code,
+    runtimeInstanceId,
+    dataGeneration: extensionDataGeneration,
+    ...extra,
+  };
+}
+
+function validResetFencedCacheKey(value) {
+  const key = String(value || "");
+  return /^(?:digest_|overview_)[A-Za-z0-9:_-]{1,220}$/.test(key)
+    ? key
+    : "";
+}
+
+function handlePersistResetFencedCache(
+  message,
+  expectedRuntimeInstanceId = runtimeInstanceId,
+) {
+  const key = validResetFencedCacheKey(message?.key);
+  const record = message?.record;
+  const expectedGeneration = Number(message?.dataGeneration);
+  if (!key || !record || typeof record !== "object" || Array.isArray(record)) {
+    return Promise.resolve(
+      extensionDataMutationResult(false, "INVALID_CACHE_RECORD"),
+    );
+  }
+  return queueExtensionDataMutation(async () => {
+    if (
+      !extensionDataFenceIsWritable(
+        expectedRuntimeInstanceId,
+        expectedGeneration,
+      )
+    ) {
+      return extensionDataMutationResult(false, "EXTENSION_DATA_RESET");
+    }
+    await chrome.storage.local.set({ [key]: record });
+    return extensionDataMutationResult(true);
+  });
+}
+
+function handlePersistResetFencedSettings(
+  message,
+  expectedRuntimeInstanceId = runtimeInstanceId,
+) {
+  const settings = message?.settings;
+  const expectedGeneration = message?.dataGeneration;
+  if (!settings || typeof settings !== "object" || Array.isArray(settings)) {
+    return Promise.resolve(
+      extensionDataMutationResult(false, "INVALID_SETTINGS"),
+    );
+  }
+  return queueExtensionDataMutation(async () => {
+    if (
+      !extensionDataFenceIsWritable(
+        expectedRuntimeInstanceId,
+        expectedGeneration,
+      )
+    ) {
+      return extensionDataMutationResult(false, "EXTENSION_DATA_RESET");
+    }
+    const normalizedSettings = YTD_SETTINGS.normalize(settings);
+    await chrome.storage.local.set({
+      [YTD_SETTINGS.STORAGE_KEY]: normalizedSettings,
+    });
+    return extensionDataMutationResult(true);
+  });
+}
+
+const READING_DISPLAY_SIZES = new Set([
+  "small",
+  "standard",
+  "large",
+  "xlarge",
+]);
+const READING_DISPLAY_WEIGHTS = new Set(["regular", "bold"]);
+
+function normalizeResetFencedReadingDisplay(value) {
+  return {
+    size: READING_DISPLAY_SIZES.has(value?.size) ? value.size : "standard",
+    weight: READING_DISPLAY_WEIGHTS.has(value?.weight)
+      ? value.weight
+      : "regular",
+  };
+}
+
+function handlePersistResetFencedReadingDisplay(
+  message,
+  expectedRuntimeInstanceId = runtimeInstanceId,
+) {
+  const readingDisplay = message?.readingDisplay;
+  const expectedGeneration = Number(message?.dataGeneration);
+  if (
+    !readingDisplay ||
+    typeof readingDisplay !== "object" ||
+    Array.isArray(readingDisplay)
+  ) {
+    return Promise.resolve(
+      extensionDataMutationResult(false, "INVALID_READING_DISPLAY"),
+    );
+  }
+  return queueExtensionDataMutation(async () => {
+    if (
+      !extensionDataFenceIsWritable(
+        expectedRuntimeInstanceId,
+        expectedGeneration,
+      )
+    ) {
+      return extensionDataMutationResult(false, "EXTENSION_DATA_RESET");
+    }
+    await chrome.storage.local.set({
+      ytd_reading_display:
+        normalizeResetFencedReadingDisplay(readingDisplay),
+    });
+    return extensionDataMutationResult(true);
+  });
+}
+
+function handleResetFencedSessionMutation(
+  message,
+  expectedRuntimeInstanceId = runtimeInstanceId,
+) {
+  const operation = String(message?.operation || "");
+  const expectedGeneration = Number(message?.dataGeneration);
+  if (!["set", "remove"].includes(operation)) {
+    return Promise.resolve(
+      extensionDataMutationResult(false, "INVALID_SESSION_MUTATION"),
+    );
+  }
+  return queueYoutubePassiveMutation(async () => {
+    if (
+      !extensionDataFenceIsWritable(
+        expectedRuntimeInstanceId,
+        expectedGeneration,
+      )
+    ) {
+      return extensionDataMutationResult(false, "EXTENSION_DATA_RESET");
+    }
+    const storage = chrome.storage?.session;
+    if (!storage) {
+      return extensionDataMutationResult(false, "SESSION_STORAGE_UNAVAILABLE");
+    }
+    if (operation === "set") {
+      if (typeof storage.set !== "function") {
+        return extensionDataMutationResult(false, "SESSION_STORAGE_UNAVAILABLE");
+      }
+      await storage.set({ ytd_note_navigation: message.value });
+    } else {
+      if (typeof storage.remove !== "function") {
+        return extensionDataMutationResult(false, "SESSION_STORAGE_UNAVAILABLE");
+      }
+      await storage.remove("ytd_note_navigation");
+    }
+    return extensionDataMutationResult(true);
+  });
+}
 
 function youtubeTabNavigationEpoch(tabId) {
   return Number.isInteger(tabId)
@@ -126,6 +343,7 @@ function runYoutubeSupadataSingleFlight(key, task) {
 }
 
 async function readYoutubeSupadataCooldownUntil() {
+  const dataGeneration = extensionDataGeneration;
   let cooldownUntil = youtubeSupadataCooldownUntil;
   const now = Date.now();
   try {
@@ -144,11 +362,15 @@ async function readYoutubeSupadataCooldownUntil() {
   } catch (_error) {
     // A transient storage failure must not bypass the in-memory cooldown.
   }
+  if (!extensionDataGenerationIsWritable(dataGeneration)) {
+    return youtubeSupadataCooldownUntil;
+  }
   youtubeSupadataCooldownUntil = cooldownUntil;
   return cooldownUntil;
 }
 
-async function startYoutubeSupadataCooldown() {
+async function commitYoutubeSupadataCooldown(expectedGeneration) {
+  if (!extensionDataGenerationIsWritable(expectedGeneration)) return 0;
   const cooldownUntil = Date.now() + SUPADATA_RATE_LIMIT_COOLDOWN_MS;
   youtubeSupadataCooldownUntil = cooldownUntil;
   try {
@@ -162,6 +384,14 @@ async function startYoutubeSupadataCooldown() {
     // The in-memory value still protects the current worker lifetime.
   }
   return cooldownUntil;
+}
+
+function startYoutubeSupadataCooldown(
+  expectedGeneration = extensionDataGeneration,
+) {
+  return queueYoutubePassiveMutation(() =>
+    commitYoutubeSupadataCooldown(expectedGeneration),
+  );
 }
 
 function runYoutubeNativeSingleFlight(key, task) {
@@ -179,6 +409,7 @@ function runYoutubeNativeSingleFlight(key, task) {
 }
 
 async function readYoutubeNativeCooldownUntil() {
+  const dataGeneration = extensionDataGeneration;
   let cooldownUntil = youtubeNativeCooldownUntil;
   const now = Date.now();
   try {
@@ -201,11 +432,15 @@ async function readYoutubeNativeCooldownUntil() {
   } catch (_error) {
     // The in-memory timestamp still protects this worker lifetime.
   }
+  if (!extensionDataGenerationIsWritable(dataGeneration)) {
+    return youtubeNativeCooldownUntil;
+  }
   youtubeNativeCooldownUntil = cooldownUntil;
   return cooldownUntil;
 }
 
-async function startYoutubeNativeCooldown() {
+async function commitYoutubeNativeCooldown(expectedGeneration) {
+  if (!extensionDataGenerationIsWritable(expectedGeneration)) return 0;
   const cooldownUntil = Date.now() + YOUTUBE_NATIVE_RATE_LIMIT_COOLDOWN_MS;
   youtubeNativeCooldownUntil = cooldownUntil;
   try {
@@ -219,6 +454,17 @@ async function startYoutubeNativeCooldown() {
     // The in-memory timestamp still protects this worker lifetime.
   }
   return cooldownUntil;
+}
+
+function startYoutubeNativeCooldown(
+  expectedGeneration = extensionDataGeneration,
+  { alreadyQueued = false } = {},
+) {
+  return alreadyQueued
+    ? commitYoutubeNativeCooldown(expectedGeneration)
+    : queueYoutubePassiveMutation(() =>
+        commitYoutubeNativeCooldown(expectedGeneration),
+      );
 }
 
 const CHINESE_LANGUAGE_CODES = new Set([
@@ -959,6 +1205,7 @@ function waitForYoutubePassiveChange(maxWaitMs, observedRevision) {
 }
 
 async function handleYoutubePassiveState(payload, sender) {
+  const dataGeneration = extensionDataGeneration;
   const type = String(payload?.type || "");
   const tabId = sender?.tab?.id;
   const videoId = validYoutubeVideoId(payload?.videoId);
@@ -972,6 +1219,9 @@ async function handleYoutubePassiveState(payload, sender) {
     return { ok: false, error: "INVALID_PASSIVE_STATE" };
   }
   return queueYoutubePassiveMutation(async () => {
+    if (!extensionDataGenerationIsWritable(dataGeneration)) {
+      return { ok: false, error: "EXTENSION_DATA_RESET" };
+    }
     // Keep the tab/video validation inside the same arrival-order queue as the
     // buffer mutation.  The bridge deliberately sends `inflight` and
     // `capture` without blocking the page; if their independent tabs.get()
@@ -994,7 +1244,7 @@ async function handleYoutubePassiveState(payload, sender) {
       previous
     ) {
       await writeYoutubePassiveEntries(next);
-      await startYoutubeNativeCooldown();
+      await startYoutubeNativeCooldown(dataGeneration, { alreadyQueued: true });
       notifyYoutubePassiveWaiters();
       return { ok: true, state: "rate-limited" };
     }
@@ -1054,8 +1304,10 @@ async function handleYoutubePassiveState(payload, sender) {
 
 async function clearYoutubePassiveTab(tabId, keepVideoId = "") {
   if (!Number.isInteger(tabId)) return;
+  const dataGeneration = extensionDataGeneration;
   const retainedVideoId = validYoutubeVideoId(keepVideoId) || "";
   return queueYoutubePassiveMutation(async () => {
+    if (!extensionDataGenerationIsWritable(dataGeneration)) return;
     const entries = await readYoutubePassiveEntries();
     const next = entries.filter(
       (entry) =>
@@ -1673,9 +1925,38 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.action === "translateNotes") {
-    handleTranslateNotes({ notes: message.notes, titles: message.titles })
-      .then(sendResponse)
-      .catch((err) => sendResponse({ success: false, error: err.message }));
+    if (
+      !extensionDataFenceIsWritable(
+        message.runtimeInstanceId,
+        message.dataGeneration,
+      )
+    ) {
+      sendResponse(extensionDataMutationResult(false, "EXTENSION_DATA_RESET"));
+      return false;
+    }
+    handleTranslateNotes(
+      { notes: message.notes, titles: message.titles },
+      {
+        dataGeneration: message.dataGeneration,
+        runtimeInstanceId: message.runtimeInstanceId,
+      },
+    )
+      .then((result) =>
+        sendResponse(
+          extensionDataMutationResult(
+            result?.success === true,
+            result?.code || (result?.success ? "OK" : "PROVIDER_ERROR"),
+            result,
+          ),
+        ),
+      )
+      .catch((err) =>
+        sendResponse(
+          extensionDataMutationResult(false, err.code || "PROVIDER_ERROR", {
+            error: err.message,
+          }),
+        ),
+      );
     return true;
   }
 
@@ -1719,7 +2000,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message.action === "deleteNote") {
     // Delete a specific note
-    handleDeleteNote(message.noteId)
+    handleDeleteNote(
+      message.noteId,
+      Number(message.dataGeneration),
+      String(message.runtimeInstanceId || ""),
+    )
       .then(sendResponse)
       .catch((err) => sendResponse({ success: false, error: err.message }));
     return true;
@@ -1735,7 +2020,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.action === "importNotesBackup") {
-    handleImportNotesBackup(message.backupText)
+    handleImportNotesBackup(
+      message.backupText,
+      message.dataGeneration,
+      String(message.runtimeInstanceId || ""),
+    )
       .then(sendResponse)
       .catch((err) =>
         sendResponse({ success: false, code: err.code || "NOTES_IMPORT_FAILED" }),
@@ -1757,6 +2046,62 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       .then(sendResponse)
       .catch((err) =>
         sendResponse({ success: false, code: err.code || "RESET_DATA_FAILED" }),
+      );
+    return true;
+  }
+
+  if (message.action === "persistResetFencedCache") {
+    handlePersistResetFencedCache(
+      message,
+      String(message.runtimeInstanceId || ""),
+    )
+      .then(sendResponse)
+      .catch(() =>
+        sendResponse(
+          extensionDataMutationResult(false, "CACHE_PERSIST_FAILED"),
+        ),
+      );
+    return true;
+  }
+
+  if (message.action === "persistResetFencedSettings") {
+    handlePersistResetFencedSettings(
+      message,
+      String(message.runtimeInstanceId || ""),
+    )
+      .then(sendResponse)
+      .catch(() =>
+        sendResponse(
+          extensionDataMutationResult(false, "SETTINGS_PERSIST_FAILED"),
+        ),
+      );
+    return true;
+  }
+
+  if (message.action === "persistResetFencedReadingDisplay") {
+    handlePersistResetFencedReadingDisplay(
+      message,
+      String(message.runtimeInstanceId || ""),
+    )
+      .then(sendResponse)
+      .catch(() =>
+        sendResponse(
+          extensionDataMutationResult(false, "READING_DISPLAY_PERSIST_FAILED"),
+        ),
+      );
+    return true;
+  }
+
+  if (message.action === "mutateResetFencedSession") {
+    handleResetFencedSessionMutation(
+      message,
+      String(message.runtimeInstanceId || ""),
+    )
+      .then(sendResponse)
+      .catch(() =>
+        sendResponse(
+          extensionDataMutationResult(false, "SESSION_MUTATION_FAILED"),
+        ),
       );
     return true;
   }
@@ -1793,13 +2138,26 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message.action === "translateExportNotesBatch") {
     handleTranslateExportNotesBatch(message)
-      .then(sendResponse)
+      .then((result) =>
+        sendResponse(
+          extensionDataMutationResult(
+            result?.success === true,
+            result?.code ||
+              (result?.success ? "OK" : "EXPORT_SOURCE_BATCH_FAILED"),
+            result,
+          ),
+        ),
+      )
       .catch((error) => sendResponse(exportSourceBatchFailure(error)));
     return true;
   }
 
   if (message.action === "cancelExportTranslationJob") {
-    handleCancelExportTranslationJob(message.jobId)
+    handleCancelExportTranslationJob(
+      message.jobId,
+      message.dataGeneration,
+      String(message.runtimeInstanceId || ""),
+    )
       .then(sendResponse)
       .catch((error) => sendResponse(exportSourceBatchFailure(error)));
     return true;
@@ -1820,14 +2178,23 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.action === "createOrResumeExportJob") {
-    handleCreateOrResumeExportJob(message.job)
+    handleCreateOrResumeExportJob(
+      message.job,
+      message.dataGeneration,
+      String(message.runtimeInstanceId || ""),
+    )
       .then(sendResponse)
       .catch((error) => sendResponse(exportSourceBatchFailure(error)));
     return true;
   }
 
   if (message.action === "checkpointExportJob") {
-    handleCheckpointExportJob(message.jobId, message.patch)
+    handleCheckpointExportJob(
+      message.jobId,
+      message.patch,
+      message.dataGeneration,
+      String(message.runtimeInstanceId || ""),
+    )
       .then(sendResponse)
       .catch((error) => sendResponse(exportSourceBatchFailure(error)));
     return true;
@@ -1837,9 +2204,57 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     message.action === "upsertNoteSource" ||
     message.action === "persistNoteSource"
   ) {
-    handleUpsertNoteSource(message.source)
+    handleUpsertNoteSource(
+      message.source,
+      message.dataGeneration,
+      String(message.runtimeInstanceId || ""),
+    )
       .then(sendResponse)
       .catch((error) => sendResponse(exportSourceBatchFailure(error)));
+    return true;
+  }
+
+  if (message.action === "readNoteSource") {
+    handleReadNoteSource(
+      message.mediaKey,
+      message.dataGeneration,
+      String(message.runtimeInstanceId || ""),
+    )
+      .then(sendResponse)
+      .catch(() =>
+        sendResponse(
+          extensionDataMutationResult(false, "NOTE_SOURCE_READ_FAILED"),
+        ),
+      );
+    return true;
+  }
+
+  if (message.action === "readAllNoteSources") {
+    handleReadAllNoteSources(
+      message.dataGeneration,
+      String(message.runtimeInstanceId || ""),
+    )
+      .then(sendResponse)
+      .catch(() =>
+        sendResponse(
+          extensionDataMutationResult(false, "NOTE_SOURCE_READ_FAILED"),
+        ),
+      );
+    return true;
+  }
+
+  if (message.action === "removeNoteSources") {
+    handleRemoveNoteSources(
+      message.mediaKeys,
+      message.dataGeneration,
+      String(message.runtimeInstanceId || ""),
+    )
+      .then(sendResponse)
+      .catch(() =>
+        sendResponse(
+          extensionDataMutationResult(false, "NOTE_SOURCE_REMOVE_FAILED"),
+        ),
+      );
     return true;
   }
 
@@ -1863,6 +2278,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 routeKey: `${provider?.id || ""}:${provider?.model || ""}`,
               }
             : null,
+          runtimeInstanceId,
+          dataGeneration: extensionDataGeneration,
           runtimeProtocolVersion: RUNTIME_PROTOCOL_VERSION,
         });
       })
@@ -2687,6 +3104,7 @@ async function handleFetchYoutubeSupadataTranscript(
   tabId = null,
   supadataConsent = false,
 ) {
+  const dataGeneration = extensionDataGeneration;
   // Read-only, no-network page gate. Binds the current tab to this exact video
   // so an SPA navigation cannot send an old video to Supadata, and surfaces
   // clear login/age/members/unavailable states before any provider request.
@@ -2769,7 +3187,7 @@ async function handleFetchYoutubeSupadataTranscript(
 
   // Collapse duplicate authorized requests (init, button, page-complete,
   // multi-window) for the same tab+video+language into one provider call.
-  const flightKey = `${Number.isInteger(tabId) ? tabId : "no-tab"}::${videoId}::${requestedLanguage}`;
+  const flightKey = `${dataGeneration}::${Number.isInteger(tabId) ? tabId : "no-tab"}::${videoId}::${requestedLanguage}`;
   const result = await runYoutubeSupadataSingleFlight(flightKey, () =>
     handleFetchTranscript(videoId, requestedLanguage, () =>
       youtubeTabStillMatches(tabId, videoId),
@@ -2781,7 +3199,7 @@ async function handleFetchYoutubeSupadataTranscript(
   // provider cooldown must prevent another paid request from starting.
   const rateLimitCooldownUntil =
     result?.error === "RATE_LIMITED"
-      ? await startYoutubeSupadataCooldown()
+      ? await startYoutubeSupadataCooldown(dataGeneration)
       : 0;
 
   // Supadata (or its async job polling) can outlast a YouTube SPA navigation.
@@ -3089,7 +3507,7 @@ async function runYoutubeNativeRouteLeader(request) {
   );
   const active = normalizeYoutubeNativeProviderResult(activeRaw, "active");
   if (active.routeOutcome === "RATE_LIMITED") {
-    await startYoutubeNativeCooldown();
+    await startYoutubeNativeCooldown(request.dataGeneration);
     return {
       ...active,
       routeOutcome: "RATE_LIMITED",
@@ -3142,6 +3560,7 @@ async function handleFetchYoutubeNativeTranscript(
     trackKind: routeIdentity.trackKind,
     tabId,
     runId: routeIdentity.runId,
+    dataGeneration: extensionDataGeneration,
   };
   request.language = request.preferredLanguage;
   if (!request.videoId || !Number.isInteger(tabId)) {
@@ -3300,6 +3719,7 @@ async function handleFetchYoutubeNativeTranscript(
       request.language = automaticTrack.language;
       request.trackKind = automaticTrack.kind;
       const flightKey = [
+        request.dataGeneration,
         request.videoId,
         request.language,
         request.trackKind,
@@ -4469,6 +4889,10 @@ async function handleSaveNote(
 ) {
   const saveGeneration = noteStorageGeneration;
   const sourceStorageGeneration = exportSourceStorageGeneration;
+  const dataGeneration = extensionDataGeneration;
+  if (!extensionDataGenerationIsWritable(dataGeneration)) {
+    return noteSaveFailureResponse(false);
+  }
   try {
     const mediaRef = await resolveMediaRef(mediaInput, sourceUrl);
     const mediaKey = mediaRef.mediaKey || mediaRef.videoId;
@@ -4486,6 +4910,19 @@ async function handleSaveNote(
       throw pageChangedError;
     }
     await requireExactTabRoute(tabId, actionRouteKey);
+
+    // Capacity is independent of transcript content. Check it before reading or
+    // fetching a transcript and before a configured provider can receive note
+    // cleanup input. This is only an early rejection: the final queued write
+    // below repeats the check because another save may take the last slot.
+    const capacityPreflight = await preflightNoteStorageCapacity(
+      saveGeneration,
+      dataGeneration,
+    );
+    if (capacityPreflight !== true) {
+      return noteSaveFailureResponse(capacityPreflight);
+    }
+
     const resolvedVideoTitle = videoTitle || mediaRef.title || "Untitled Video";
     const resolvedChannelName = channelName || mediaRef.channelName || "";
     const safeTimestamp = Math.max(0, Math.floor(Number(timestamp) || 0));
@@ -4726,13 +5163,13 @@ async function handleSaveNote(
 
     // Save to storage
     await requireExactTabRoute(tabId, actionRouteKey);
-    const saved = await saveNoteToStorage(note, saveGeneration);
-    if (!saved) {
-      return {
-        success: false,
-        code: "NOTE_SAVE_CANCELED",
-        error: "笔记保存已因清空或重置操作取消。",
-      };
+    const saved = await saveNoteToStorage(
+      note,
+      saveGeneration,
+      dataGeneration,
+    );
+    if (saved !== true) {
+      return noteSaveFailureResponse(saved);
     }
 
     // A note and the material needed to export it belong to the same user
@@ -4984,24 +5421,145 @@ function getNoteStorageGeneration() {
   return noteStorageGeneration;
 }
 
+function assertNoteStorageGeneration(
+  expectedGeneration,
+  expectedDataGeneration,
+  expectedRuntimeInstanceId = runtimeInstanceId,
+) {
+  if (
+    expectedGeneration === noteStorageGeneration &&
+    extensionDataFenceIsWritable(
+      expectedRuntimeInstanceId,
+      expectedDataGeneration,
+    )
+  ) {
+    return;
+  }
+  const error = new Error("笔记存储已被重置，本次旧任务不会写入。");
+  error.code = "NOTE_STORAGE_RESET";
+  throw error;
+}
+
 function withNoteStorageWrite(task) {
   const run = noteStorageWriteQueue.then(task);
   noteStorageWriteQueue = run.catch(() => {});
   return run;
 }
 
-function saveNoteToStorage(note, expectedGeneration = noteStorageGeneration) {
+function noteStorageCapacityResult(notes) {
+  const limit = maxSavedNotes();
+  return notes.length >= limit
+    ? { code: "NOTE_STORAGE_FULL", limit, count: notes.length }
+    : true;
+}
+
+/**
+ * Serial read-only capacity check used to avoid transcript/provider work that
+ * cannot result in a saved note. The final write remains authoritative.
+ */
+function preflightNoteStorageCapacity(
+  expectedGeneration = noteStorageGeneration,
+  expectedDataGeneration = extensionDataGeneration,
+) {
   return withNoteStorageWrite(async () => {
-    if (expectedGeneration !== noteStorageGeneration) return false;
+    if (
+      expectedGeneration !== noteStorageGeneration ||
+      !extensionDataGenerationIsWritable(expectedDataGeneration)
+    ) {
+      return false;
+    }
     const result = await chrome.storage.local.get("ytd_notes");
     const notes = Array.isArray(result.ytd_notes) ? result.ytd_notes : [];
-    notes.unshift(note); // Add to beginning (newest first)
+    return noteStorageCapacityResult(notes);
+  });
+}
 
-    // Keep only the newest notes to prevent storage bloat.
-    if (notes.length > MAX_SAVED_NOTES) {
-      notes.splice(MAX_SAVED_NOTES);
+function noteSaveFailureResponse(result) {
+  if (result && result.code === "NOTE_STORAGE_FULL") {
+    return {
+      success: false,
+      code: "NOTE_STORAGE_FULL",
+      limit: result.limit,
+      count: result.count,
+      error: `笔记已达 ${result.limit} 条上限。请先导出备份并删除不再需要的笔记，已保存的笔记不会被自动删除。`,
+    };
+  }
+  if (result && result.code === "NOTES_BACKUP_TOO_LARGE") {
+    const maxMiB = result.maxBytes / (1024 * 1024);
+    return {
+      success: false,
+      code: "NOTES_BACKUP_TOO_LARGE",
+      maxBytes: result.maxBytes,
+      count: result.count,
+      error: `笔记库已达到 ${maxMiB} MiB 可备份容量。请先导出备份并删除不再需要的笔记，已保存的笔记不会被自动删除。`,
+    };
+  }
+  return {
+    success: false,
+    code: "NOTE_SAVE_CANCELED",
+    error: "笔记保存已因清空或重置操作取消。",
+  };
+}
+
+function assertNotesRemainBackupable(notes, { allowInvalidStored = false } = {}) {
+  try {
+    const extensionVersion = chrome.runtime.getManifest?.().version || "";
+    YTD_NOTES_BACKUP.createBackup(notes, { extensionVersion });
+  } catch (error) {
+    // Some isolated test fixtures and very old local records predate the full
+    // backup identity schema. Their validity is handled elsewhere; this guard
+    // owns only the byte-cap invariant and must never hide that failure.
+    if (allowInvalidStored && error?.code === "INVALID_NOTES_BACKUP") return;
+    throw error;
+  }
+}
+
+function saveNoteToStorage(
+  note,
+  expectedGeneration = noteStorageGeneration,
+  expectedDataGeneration = extensionDataGeneration,
+) {
+  return withNoteStorageWrite(async () => {
+    if (
+      expectedGeneration !== noteStorageGeneration ||
+      !extensionDataGenerationIsWritable(expectedDataGeneration)
+    ) {
+      return false;
     }
+    const result = await chrome.storage.local.get("ytd_notes");
+    const notes = Array.isArray(result.ytd_notes) ? result.ytd_notes : [];
 
+    // A saved note is the user's own material and must never be discarded to
+    // make room for a newer one. At capacity the save is refused and reported,
+    // leaving every existing note intact.
+    const capacity = noteStorageCapacityResult(notes);
+    if (capacity !== true) return capacity;
+
+    // The note produced by the current save must satisfy the current backup
+    // schema on its own. The merged check below may tolerate an older local
+    // record, but must never hide a defect introduced by this write.
+    assertNotesRemainBackupable([note]);
+    notes.unshift(note); // Add to beginning (newest first)
+    try {
+      assertNotesRemainBackupable(notes, { allowInvalidStored: true });
+    } catch (error) {
+      if (error?.code === "NOTES_BACKUP_TOO_LARGE") {
+        return {
+          code: error.code,
+          maxBytes:
+            Number(error?.details?.maxBytes) ||
+            YTD_NOTES_BACKUP.MAX_BACKUP_BYTES,
+          count: notes.length - 1,
+        };
+      }
+      throw error;
+    }
+    if (
+      expectedGeneration !== noteStorageGeneration ||
+      !extensionDataGenerationIsWritable(expectedDataGeneration)
+    ) {
+      return false;
+    }
     await chrome.storage.local.set({ ytd_notes: notes });
     return true;
   });
@@ -5012,6 +5570,9 @@ function notesBackupFailure(error, fallbackCode) {
     success: false,
     code: error?.code || fallbackCode,
     overBy: Number(error?.details?.overBy) || 0,
+    limit: Number(error?.details?.limit) || maxSavedNotes(),
+    maxBytes:
+      Number(error?.details?.maxBytes) || YTD_NOTES_BACKUP.MAX_BACKUP_BYTES,
   };
 }
 
@@ -5021,6 +5582,19 @@ function notifyNotesChanged() {
     notification?.catch?.(() => {});
   } catch (_error) {
     // The next Notes-tab load will still read the current storage state.
+  }
+}
+
+async function notifyExtensionDataReset(action, dataGeneration, success) {
+  try {
+    await chrome.runtime.sendMessage?.({
+      action,
+      runtimeInstanceId,
+      dataGeneration,
+      ...(typeof success === "boolean" ? { success } : {}),
+    });
+  } catch (_error) {
+    // A reset remains authoritative when no side panel is currently open.
   }
 }
 
@@ -5045,9 +5619,31 @@ function handleExportNotesBackup() {
  * Validates and atomically merges an uploaded backup through the shared note
  * storage queue. A failure never partially updates the stored notes.
  */
-function handleImportNotesBackup(backupText) {
+function handleImportNotesBackup(
+  backupText,
+  expectedDataGeneration = extensionDataGeneration,
+  expectedRuntimeInstanceId = runtimeInstanceId,
+) {
+  if (
+    !extensionDataFenceIsWritable(
+      expectedRuntimeInstanceId,
+      expectedDataGeneration,
+    )
+  ) {
+    return Promise.resolve(
+      extensionDataMutationResult(false, "EXTENSION_DATA_RESET"),
+    );
+  }
   return withNoteStorageWrite(async () => {
     try {
+      if (
+        !extensionDataFenceIsWritable(
+          expectedRuntimeInstanceId,
+          expectedDataGeneration,
+        )
+      ) {
+        return extensionDataMutationResult(false, "EXTENSION_DATA_RESET");
+      }
       const importedNotes = YTD_NOTES_BACKUP.parseBackupText(backupText);
       const stored = await chrome.storage.local.get("ytd_notes");
       const existingNotes = Array.isArray(stored.ytd_notes)
@@ -5055,15 +5651,33 @@ function handleImportNotesBackup(backupText) {
         : [];
       const result = YTD_NOTES_BACKUP.mergeNotes(existingNotes, importedNotes);
 
+      // A legacy schema can normalize to a slightly larger current schema, and
+      // merging two individually valid files can exceed the bounded export.
+      // Prove the exact post-import state can be exported before writing any of
+      // it, preserving import atomicity and the recovery contract.
+      assertNotesRemainBackupable(result.notes);
+
       if (result.changed) {
+        if (
+          !extensionDataFenceIsWritable(
+            expectedRuntimeInstanceId,
+            expectedDataGeneration,
+          )
+        ) {
+          return extensionDataMutationResult(false, "EXTENSION_DATA_RESET");
+        }
         await chrome.storage.local.set({ ytd_notes: result.notes });
         notifyNotesChanged();
       }
 
       const { notes: _notes, ...summary } = result;
-      return { success: true, ...summary };
+      return extensionDataMutationResult(true, "OK", summary);
     } catch (error) {
-      return notesBackupFailure(error, "NOTES_IMPORT_FAILED");
+      return extensionDataMutationResult(
+        false,
+        error?.code || "NOTES_IMPORT_FAILED",
+        notesBackupFailure(error, "NOTES_IMPORT_FAILED"),
+      );
     }
   });
 }
@@ -5096,32 +5710,73 @@ function handleClearAllNotes() {
 }
 
 function handleResetAllExtensionData(preferredLanguage) {
-  return withNoteStorageWrite(async () => {
-    try {
-      await preflightExportTranslationStorage();
-      noteStorageGeneration += 1;
-      exportSourceStorageGeneration += 1;
-      if (
-        typeof YTD_EXPORT_JOBS !== "undefined" &&
-        typeof YTD_EXPORT_JOBS.clearExportJobs === "function"
-      ) {
-        await YTD_EXPORT_JOBS.clearExportJobs(chrome.storage.local);
-      }
-      if (
-        typeof YTD_NOTE_SOURCES !== "undefined" &&
-        typeof YTD_NOTE_SOURCES.clearNoteSources === "function"
-      ) {
-        await YTD_NOTE_SOURCES.clearNoteSources(chrome.storage.local);
-      }
-      const safeLanguage = preferredLanguage === "en" ? "en" : "zh-CN";
-      await chrome.storage.local.clear();
-      await chrome.storage.local.set({ ytd_options_language: safeLanguage });
-      notifyNotesChanged();
-      return { success: true };
-    } catch (error) {
-      return notesBackupFailure(error, "RESET_DATA_FAILED");
-    }
-  });
+  return withNoteStorageWrite(() =>
+    queueYoutubePassiveMutation(() =>
+      queueExtensionDataMutation(async () => {
+        let resetGeneration = null;
+        let result;
+        try {
+          await preflightExportTranslationStorage();
+          const sessionStorage = chrome.storage?.session;
+          if (typeof sessionStorage?.clear !== "function") {
+            throw new Error("Session storage reset is unavailable.");
+          }
+
+          noteStorageGeneration += 1;
+          exportSourceStorageGeneration += 1;
+          extensionDataGeneration += 1;
+          resetGeneration = extensionDataGeneration;
+          await notifyExtensionDataReset(
+            "extensionDataResetStarted",
+            resetGeneration,
+          );
+
+          // Both storage queues stay held until the complete reset transaction
+          // has restored its one allowed local preference and returned.
+          await sessionStorage.clear();
+          youtubeSupadataCooldownUntil = 0;
+          youtubeNativeCooldownUntil = 0;
+
+          if (
+            typeof YTD_EXPORT_JOBS !== "undefined" &&
+            typeof YTD_EXPORT_JOBS.clearExportJobs === "function"
+          ) {
+            await YTD_EXPORT_JOBS.clearExportJobs(chrome.storage.local);
+          }
+          if (
+            typeof YTD_NOTE_SOURCES !== "undefined" &&
+            typeof YTD_NOTE_SOURCES.clearNoteSources === "function"
+          ) {
+            await YTD_NOTE_SOURCES.clearNoteSources(chrome.storage.local);
+          }
+          const safeLanguage = preferredLanguage === "en" ? "en" : "zh-CN";
+          await chrome.storage.local.clear();
+          await chrome.storage.local.set({ ytd_options_language: safeLanguage });
+          result = { success: true };
+        } catch (error) {
+          result = notesBackupFailure(error, "RESET_DATA_FAILED");
+        }
+
+        if (resetGeneration !== null) {
+          extensionDataGeneration += 1;
+          await notifyExtensionDataReset(
+            "extensionDataResetCompleted",
+            extensionDataGeneration,
+            result.success === true,
+          );
+        }
+        if (result.success) {
+          notifyYoutubePassiveWaiters();
+          notifyNotesChanged();
+        }
+        return extensionDataMutationResult(
+          result.success === true,
+          result.success === true ? "OK" : result.code || "RESET_DATA_FAILED",
+          result,
+        );
+      }),
+    ),
+  );
 }
 
 /**
@@ -5132,11 +5787,15 @@ async function handleGetNotes(videoId) {
     const result = await chrome.storage.local.get("ytd_notes");
     let notes = Array.isArray(result.ytd_notes) ? result.ytd_notes : [];
 
+    const totalCount = notes.length;
+
     if (videoId) {
       notes = notes.filter((n) => n.videoId === videoId);
     }
 
-    return { success: true, notes };
+    // The capacity band reports the whole library, not the filtered view, so
+    // the totals travel with every notes read.
+    return { success: true, notes, totalCount, limit: maxSavedNotes() };
   } catch (error) {
     return { success: false, error: error.message };
   }
@@ -5145,18 +5804,50 @@ async function handleGetNotes(videoId) {
 /**
  * Deletes a note by ID
  */
-async function handleDeleteNote(noteId) {
+async function handleDeleteNote(
+  noteId,
+  expectedDataGeneration = extensionDataGeneration,
+  expectedRuntimeInstanceId = runtimeInstanceId,
+) {
+  if (
+    !extensionDataFenceIsWritable(
+      expectedRuntimeInstanceId,
+      expectedDataGeneration,
+    )
+  ) {
+    return extensionDataMutationResult(false, "EXTENSION_DATA_RESET");
+  }
   try {
     return await withNoteStorageWrite(async () => {
+      if (
+        !extensionDataFenceIsWritable(
+          expectedRuntimeInstanceId,
+          expectedDataGeneration,
+        )
+      ) {
+        return extensionDataMutationResult(false, "EXTENSION_DATA_RESET");
+      }
       const result = await chrome.storage.local.get("ytd_notes");
       const notes = Array.isArray(result.ytd_notes) ? result.ytd_notes : [];
-      await chrome.storage.local.set({
-        ytd_notes: notes.filter((note) => note.id !== noteId),
-      });
-      return { success: true };
+      const nextNotes = notes.filter((note) => note.id !== noteId);
+      if (nextNotes.length === notes.length) {
+        return extensionDataMutationResult(true, "OK", { changed: false });
+      }
+      if (
+        !extensionDataFenceIsWritable(
+          expectedRuntimeInstanceId,
+          expectedDataGeneration,
+        )
+      ) {
+        return extensionDataMutationResult(false, "EXTENSION_DATA_RESET");
+      }
+      await chrome.storage.local.set({ ytd_notes: nextNotes });
+      return extensionDataMutationResult(true, "OK", { changed: true });
     });
   } catch (error) {
-    return { success: false, error: error.message };
+    return extensionDataMutationResult(false, "NOTE_DELETE_FAILED", {
+      error: error.message,
+    });
   }
 }
 
@@ -5225,6 +5916,7 @@ function exportSourceBatchError(code, message, details = {}) {
 }
 
 const EXPORT_SOURCE_SAFE_ERROR_CODES = new Set([
+  "EXTENSION_DATA_RESET",
   "INVALID_EXPORT_SOURCE_BATCH",
   "INVALID_EXPORT_JOB",
   "INVALID_EXPORT_JOB_PATCH",
@@ -5260,6 +5952,7 @@ function normalizeExportSourceBatchCode(value) {
 
 function exportSourceBatchSafeMessage(code) {
   const messages = {
+    EXTENSION_DATA_RESET: "扩展数据正在重置，本次补译任务未保存，请稍后重试。",
     INVALID_EXPORT_SOURCE_BATCH: "补译批次无效，请刷新后重试。",
     EXPORT_JOB_NOT_FOUND: "补译任务不存在或已被清理，请重新开始导出。",
     EXPORT_JOB_NOT_RUNNING: "补译任务当前未运行，不会启动新的翻译请求。",
@@ -5297,6 +5990,8 @@ function exportSourceBatchFailure(error, overrides = {}) {
   return {
     success: false,
     code,
+    runtimeInstanceId,
+    dataGeneration: extensionDataGeneration,
     error: message,
     jobState: overrides.jobState || error?.jobState || "",
     completedUnitKeys: Array.isArray(overrides.completedUnitKeys)
@@ -5365,6 +6060,42 @@ function assertExportSourceStorageGeneration(expectedGeneration) {
       "Export translation state was cleared before this request could commit.",
     );
   }
+}
+
+function assertExtensionDataGeneration(
+  expectedGeneration,
+  expectedRuntimeInstanceId = runtimeInstanceId,
+) {
+  if (
+    extensionDataFenceIsWritable(
+      expectedRuntimeInstanceId,
+      expectedGeneration,
+    )
+  ) {
+    return;
+  }
+  throw exportSourceBatchError(
+    "EXPORT_JOB_NOT_FOUND",
+    "Extension data was reset before this request could commit.",
+  );
+}
+
+function assertExtensionDataMutationGeneration(
+  expectedGeneration,
+  expectedRuntimeInstanceId = runtimeInstanceId,
+) {
+  if (
+    extensionDataFenceIsWritable(
+      expectedRuntimeInstanceId,
+      expectedGeneration,
+    )
+  ) {
+    return;
+  }
+  throw exportSourceBatchError(
+    "EXTENSION_DATA_RESET",
+    "Extension data is being reset; this mutation will not be persisted.",
+  );
 }
 
 function normalizeExportBatchToken(value, maxLength) {
@@ -5502,7 +6233,7 @@ function validateExportSourceBatchRequest(message) {
 }
 
 function exportSourceBatchFlightKey(request) {
-  return `${request.jobId}\u0000${[...request.unitKeys].sort().join("\u0001")}`;
+  return `${request.runtimeInstanceId}\u0000${request.dataGeneration}\u0000${request.jobId}\u0000${[...request.unitKeys].sort().join("\u0001")}`;
 }
 
 function shortExportBatchHash(value) {
@@ -5544,6 +6275,9 @@ function runExportSourceBatchSingleFlight(request) {
         checkpointedJob = await checkpointExportBatchError(
           request.jobId,
           error,
+          request.storageGeneration,
+          request.dataGeneration,
+          request.runtimeInstanceId,
         );
       }
       return exportSourceBatchFailure(error, {
@@ -5644,22 +6378,11 @@ function sameUnitKeyList(left, right) {
 }
 
 function exportStoredNoteOriginalText(note) {
-  const textLanguage = normalizeLanguageCode(note?.textLanguage);
-  const trustedChineseText =
-    note?.platform === "bilibili"
-      ? isConfirmedSimplifiedChineseSource(textLanguage)
-      : isChineseLanguage(textLanguage);
-  if (
-    trustedChineseText &&
-    typeof note?.text === "string" &&
-    note.text.trim()
-  ) {
-    return note.text.trim();
-  }
-  if (noteHasChineseSource(note)) {
-    return String(note?.rawText || note?.text || "").trim();
-  }
-  return String(note?.text || note?.rawText || "").trim();
+  // "Original" must be the verbatim caption line. `text` may have been
+  // rewritten by an AI cleanup pass, so it is only a fallback for legacy
+  // notes saved before rawText existed.
+  const rawText = String(note?.rawText || "").trim();
+  return rawText || String(note?.text || "").trim();
 }
 
 function exportStoredNoteTitle(note) {
@@ -5690,8 +6413,17 @@ function exportStoredTitleUnitKey(mediaKey, title) {
   return `title:${YTD_NOTE_SOURCES.hashSourceText(mediaKey)}:${YTD_NOTE_SOURCES.hashSourceText(title)}`;
 }
 
-async function assertExportNotesJobCurrent(jobId, storageGeneration) {
+async function assertExportNotesJobCurrent(
+  jobId,
+  storageGeneration,
+  dataGeneration = extensionDataGeneration,
+  expectedRuntimeInstanceId = runtimeInstanceId,
+) {
   assertExportSourceStorageGeneration(storageGeneration);
+  assertExtensionDataMutationGeneration(
+    dataGeneration,
+    expectedRuntimeInstanceId,
+  );
   const job = await YTD_EXPORT_JOBS.readExportJob(chrome.storage.local, jobId);
   if (!job || job.state !== "running") {
     throw exportSourceBatchError(
@@ -5724,6 +6456,10 @@ async function assertExportNotesJobCurrent(jobId, storageGeneration) {
   }
   const settings = await getSettings();
   assertExportSourceStorageGeneration(storageGeneration);
+  assertExtensionDataMutationGeneration(
+    dataGeneration,
+    expectedRuntimeInstanceId,
+  );
   assertExportProviderSnapshot(job, settings);
   return { job, notes, settings };
 }
@@ -5731,6 +6467,14 @@ async function assertExportNotesJobCurrent(jobId, storageGeneration) {
 async function handleTranslateExportNotesBatch(message) {
   requireExportSourceModules();
   const storageGeneration = exportSourceStorageGeneration;
+  const dataGeneration = message?.dataGeneration;
+  const expectedRuntimeInstanceId = String(
+    message?.runtimeInstanceId || "",
+  );
+  assertExtensionDataMutationGeneration(
+    dataGeneration,
+    expectedRuntimeInstanceId,
+  );
   if (!message || typeof message !== "object" || Array.isArray(message)) {
     throw exportSourceBatchError(
       "INVALID_EXPORT_SOURCE_BATCH",
@@ -5774,7 +6518,12 @@ async function handleTranslateExportNotesBatch(message) {
     );
   }
 
-  let frozen = await assertExportNotesJobCurrent(jobId, storageGeneration);
+  let frozen = await assertExportNotesJobCurrent(
+    jobId,
+    storageGeneration,
+    dataGeneration,
+    expectedRuntimeInstanceId,
+  );
   const ordered = new Set(frozen.job.orderedUnitKeys || []);
   const completed = new Set(frozen.job.completedUnitKeys || []);
   if (requestedKeys.some((key) => !ordered.has(key) || completed.has(key))) {
@@ -5843,7 +6592,12 @@ async function handleTranslateExportNotesBatch(message) {
   }
 
   const beforeProviderCall = async () => {
-    frozen = await assertExportNotesJobCurrent(jobId, storageGeneration);
+    frozen = await assertExportNotesJobCurrent(
+      jobId,
+      storageGeneration,
+      dataGeneration,
+      expectedRuntimeInstanceId,
+    );
     if (requestedKeys.some((key) => frozen.job.completedUnitKeys.includes(key))) {
       throw exportSourceBatchError(
         "EXPORT_BATCH_PROGRESS_STALE",
@@ -5855,7 +6609,12 @@ async function handleTranslateExportNotesBatch(message) {
   };
   const result = await handleTranslateNotes(
     { notes: canonicalNotes, titles: canonicalTitles },
-    { settings: frozen.settings, beforeProviderCall },
+    {
+      settings: frozen.settings,
+      beforeProviderCall,
+      dataGeneration,
+      runtimeInstanceId: expectedRuntimeInstanceId,
+    },
   );
   const translatedCount =
     (Array.isArray(result?.translations) ? result.translations.length : 0) +
@@ -5923,6 +6682,10 @@ async function authorizeExportSourceProviderCall(
   batchId,
   storageGeneration,
 ) {
+  assertExtensionDataGeneration(
+    request.dataGeneration,
+    request.runtimeInstanceId,
+  );
   if (storageGeneration !== exportSourceStorageGeneration) {
     throw exportSourceBatchError(
       "EXPORT_JOB_NOT_FOUND",
@@ -5969,11 +6732,23 @@ async function authorizeExportSourceProviderCall(
       { jobState: job.state, checkpoint: true },
     );
   }
+  assertExtensionDataGeneration(
+    request.dataGeneration,
+    request.runtimeInstanceId,
+  );
   return assertExportProviderSnapshot(job, settings);
 }
 
-async function checkpointExportBatchError(jobId, error) {
+async function checkpointExportBatchError(
+  jobId,
+  error,
+  storageGeneration,
+  dataGeneration,
+  expectedRuntimeInstanceId = runtimeInstanceId,
+) {
   try {
+    assertExportSourceStorageGeneration(storageGeneration);
+    assertExtensionDataGeneration(dataGeneration, expectedRuntimeInstanceId);
     const job = await YTD_EXPORT_JOBS.readExportJob(
       chrome.storage.local,
       jobId,
@@ -5994,6 +6769,8 @@ async function checkpointExportBatchError(jobId, error) {
         nextState = "failed";
       }
     }
+    assertExportSourceStorageGeneration(storageGeneration);
+    assertExtensionDataGeneration(dataGeneration, expectedRuntimeInstanceId);
     const result = await YTD_EXPORT_JOBS.checkpointExportJob(
       chrome.storage.local,
       jobId,
@@ -6018,7 +6795,10 @@ async function checkpointExportBatchError(jobId, error) {
 
 async function executeExportSourceBatch(request) {
   requireExportSourceModules();
-  const storageGeneration = exportSourceStorageGeneration;
+  const storageGeneration = request.storageGeneration;
+  const dataGeneration = request.dataGeneration;
+  assertExportSourceStorageGeneration(storageGeneration);
+  assertExtensionDataGeneration(dataGeneration, request.runtimeInstanceId);
   let job = assertExportJobMatchesRequest(
     await YTD_EXPORT_JOBS.readExportJob(chrome.storage.local, request.jobId),
     request,
@@ -6097,6 +6877,8 @@ async function executeExportSourceBatch(request) {
         { jobState: job.state },
       );
     }
+    assertExportSourceStorageGeneration(storageGeneration);
+    assertExtensionDataGeneration(dataGeneration, request.runtimeInstanceId);
     const checkpoint = await YTD_EXPORT_JOBS.checkpointExportJob(
       chrome.storage.local,
       request.jobId,
@@ -6135,6 +6917,8 @@ async function executeExportSourceBatch(request) {
   const batchId = `source-batch-${shortExportBatchHash(
     request.unitKeys.join("\u0000"),
   )}`;
+  assertExportSourceStorageGeneration(storageGeneration);
+  assertExtensionDataGeneration(dataGeneration, request.runtimeInstanceId);
   const claim = await YTD_EXPORT_JOBS.checkpointExportJob(
     chrome.storage.local,
     request.jobId,
@@ -6207,6 +6991,9 @@ async function executeExportSourceBatch(request) {
     const failedJob = await checkpointExportBatchError(
       request.jobId,
       error,
+      storageGeneration,
+      dataGeneration,
+      request.runtimeInstanceId,
     );
     return exportSourceBatchFailure(error, {
       jobState: failedJob?.state || job.state,
@@ -6236,6 +7023,9 @@ async function executeExportSourceBatch(request) {
     const failedJob = await checkpointExportBatchError(
       request.jobId,
       error,
+      storageGeneration,
+      dataGeneration,
+      request.runtimeInstanceId,
     );
     return exportSourceBatchFailure(error, {
       jobState: failedJob?.state || job.state,
@@ -6268,17 +7058,8 @@ async function executeExportSourceBatch(request) {
       },
     );
   }
-  if (storageGeneration !== exportSourceStorageGeneration) {
-    throw exportSourceBatchError(
-      "EXPORT_JOB_NOT_FOUND",
-      "Export source storage was cleared while the request was in flight.",
-      {
-        actualProviderCalls,
-        jobState: latestJob.state,
-        checkpoint: true,
-      },
-    );
-  }
+  assertExportSourceStorageGeneration(storageGeneration);
+  assertExtensionDataGeneration(dataGeneration, request.runtimeInstanceId);
 
   const commit = await YTD_NOTE_SOURCES.commitExportSourceTranslationBatch(
     chrome.storage.local,
@@ -6323,6 +7104,8 @@ async function executeExportSourceBatch(request) {
     ...(latestJob.completedUnitKeys || []),
     ...request.unitKeys,
   ];
+  assertExportSourceStorageGeneration(storageGeneration);
+  assertExtensionDataGeneration(dataGeneration, request.runtimeInstanceId);
   const checkpoint = await YTD_EXPORT_JOBS.checkpointExportJob(
     chrome.storage.local,
     request.jobId,
@@ -6349,67 +7132,98 @@ async function executeExportSourceBatch(request) {
 async function handleTranslateExportSourceBatch(message) {
   let request;
   try {
-    request = validateExportSourceBatchRequest(message);
+    request = {
+      ...validateExportSourceBatchRequest(message),
+      storageGeneration: exportSourceStorageGeneration,
+      dataGeneration: message?.dataGeneration,
+      runtimeInstanceId: String(message?.runtimeInstanceId || ""),
+    };
+    assertExtensionDataMutationGeneration(
+      request.dataGeneration,
+      request.runtimeInstanceId,
+    );
   } catch (error) {
     return exportSourceBatchFailure(error);
   }
-  return runExportSourceBatchSingleFlight(request);
+  const result = await runExportSourceBatchSingleFlight(request);
+  return extensionDataMutationResult(
+    result?.success === true,
+    result?.code || (result?.success ? "OK" : "EXPORT_SOURCE_BATCH_FAILED"),
+    result,
+  );
 }
 
-async function handleCancelExportTranslationJob(jobId) {
+async function handleCancelExportTranslationJob(
+  jobId,
+  expectedDataGeneration = extensionDataGeneration,
+  expectedRuntimeInstanceId = runtimeInstanceId,
+) {
   requireExportSourceModules();
+  assertExtensionDataMutationGeneration(
+    expectedDataGeneration,
+    expectedRuntimeInstanceId,
+  );
+  const storageGeneration = exportSourceStorageGeneration;
   const normalizedJobId = normalizeExportBatchToken(jobId, 80);
   if (!normalizedJobId) {
     return exportSourceBatchFailure(
       exportSourceBatchError("INVALID_EXPORT_SOURCE_BATCH", "Invalid job id."),
     );
   }
-  const job = await YTD_EXPORT_JOBS.readExportJob(
-    chrome.storage.local,
-    normalizedJobId,
-  );
-  if (!job) {
-    return exportSourceBatchFailure(
-      exportSourceBatchError("EXPORT_JOB_NOT_FOUND", "Export job not found."),
+  return queueExtensionDataMutation(async () => {
+    assertExtensionDataMutationGeneration(
+      expectedDataGeneration,
+      expectedRuntimeInstanceId,
     );
-  }
-  if (job.state === "cancelled") {
-    return {
-      success: true,
-      code: "EXPORT_JOB_CANCELLED",
-      jobState: job.state,
-      completedUnitKeys: job.completedUnitKeys,
-      remainingCount: exportJobRemainingCount(job),
-      actualProviderCalls: 0,
-    };
-  }
-  if (!["planned", "running", "paused", "failed"].includes(job.state)) {
-    return exportSourceBatchFailure(
-      exportSourceBatchError(
-        "EXPORT_JOB_NOT_RUNNING",
-        `Export job cannot be cancelled from ${job.state}.`,
-        { jobState: job.state },
-      ),
-      {
+    assertExportSourceStorageGeneration(storageGeneration);
+    const job = await YTD_EXPORT_JOBS.readExportJob(
+      chrome.storage.local,
+      normalizedJobId,
+    );
+    if (!job) {
+      return exportSourceBatchFailure(
+        exportSourceBatchError("EXPORT_JOB_NOT_FOUND", "Export job not found."),
+      );
+    }
+    if (job.state === "cancelled") {
+      return extensionDataMutationResult(true, "EXPORT_JOB_CANCELLED", {
         jobState: job.state,
         completedUnitKeys: job.completedUnitKeys,
         remainingCount: exportJobRemainingCount(job),
-      },
+        actualProviderCalls: 0,
+      });
+    }
+    if (!["planned", "running", "paused", "failed"].includes(job.state)) {
+      return exportSourceBatchFailure(
+        exportSourceBatchError(
+          "EXPORT_JOB_NOT_RUNNING",
+          `Export job cannot be cancelled from ${job.state}.`,
+          { jobState: job.state },
+        ),
+        {
+          jobState: job.state,
+          completedUnitKeys: job.completedUnitKeys,
+          remainingCount: exportJobRemainingCount(job),
+        },
+      );
+    }
+    assertExtensionDataMutationGeneration(
+      expectedDataGeneration,
+      expectedRuntimeInstanceId,
     );
-  }
-  const checkpoint = await YTD_EXPORT_JOBS.checkpointExportJob(
-    chrome.storage.local,
-    normalizedJobId,
-    { state: "cancelled", currentBatch: null, exportClaim: null },
-  );
-  return {
-    success: true,
-    code: "EXPORT_JOB_CANCELLED",
-    jobState: checkpoint.job.state,
-    completedUnitKeys: checkpoint.job.completedUnitKeys,
-    remainingCount: exportJobRemainingCount(checkpoint.job),
-    actualProviderCalls: 0,
-  };
+    assertExportSourceStorageGeneration(storageGeneration);
+    const checkpoint = await YTD_EXPORT_JOBS.checkpointExportJob(
+      chrome.storage.local,
+      normalizedJobId,
+      { state: "cancelled", currentBatch: null, exportClaim: null },
+    );
+    return extensionDataMutationResult(true, "EXPORT_JOB_CANCELLED", {
+      jobState: checkpoint.job.state,
+      completedUnitKeys: checkpoint.job.completedUnitKeys,
+      remainingCount: exportJobRemainingCount(checkpoint.job),
+      actualProviderCalls: 0,
+    });
+  });
 }
 
 async function handleGetExportTranslationJob(jobId) {
@@ -6483,9 +7297,17 @@ const EXPORT_JOB_PATCH_FIELDS = [
   "lastError",
 ];
 
-async function handleCreateOrResumeExportJob(jobInput) {
+async function handleCreateOrResumeExportJob(
+  jobInput,
+  expectedDataGeneration = extensionDataGeneration,
+  expectedRuntimeInstanceId = runtimeInstanceId,
+) {
   requireExportSourceModules();
   const storageGeneration = exportSourceStorageGeneration;
+  assertExtensionDataMutationGeneration(
+    expectedDataGeneration,
+    expectedRuntimeInstanceId,
+  );
   assertOnlyExportJobFields(
     jobInput,
     EXPORT_JOB_INPUT_FIELDS,
@@ -6498,62 +7320,88 @@ async function handleCreateOrResumeExportJob(jobInput) {
     candidate.jobId,
   );
   assertExportSourceStorageGeneration(storageGeneration);
-  let result = await YTD_EXPORT_JOBS.upsertExportJob(
-    chrome.storage.local,
-    candidate,
-  );
-  assertExportSourceStorageGeneration(storageGeneration);
-  const stored = result.job;
-  if (stored && existing) {
-    // Never clear a running job's durable lease/claim from a duplicate resume.
-    // Resuming a stopped job is an explicit state transition after the frozen
-    // fields have been revalidated by upsertExportJob above.
-    if (stored.state === "running") {
-      return {
-        success: true,
-        code: "OK",
-        changed: result.changed === true,
-        job: stored,
-      };
-    }
-    if (["ready_to_export", "completed", "stale"].includes(stored.state)) {
-      if (candidate.state !== stored.state) {
-        throw exportSourceBatchError(
-          "EXPORT_JOB_NOT_RESUMABLE",
-          `Export job cannot resume from ${stored.state}.`,
-          { jobState: stored.state },
-        );
+  return queueExtensionDataMutation(async () => {
+    assertExtensionDataMutationGeneration(
+      expectedDataGeneration,
+      expectedRuntimeInstanceId,
+    );
+    assertExportSourceStorageGeneration(storageGeneration);
+    let result = await YTD_EXPORT_JOBS.upsertExportJob(
+      chrome.storage.local,
+      candidate,
+    );
+    assertExtensionDataMutationGeneration(
+      expectedDataGeneration,
+      expectedRuntimeInstanceId,
+    );
+    assertExportSourceStorageGeneration(storageGeneration);
+    const stored = result.job;
+    if (stored && existing) {
+      // Never clear a running job's durable lease/claim from a duplicate resume.
+      // Resuming a stopped job is an explicit state transition after the frozen
+      // fields have been revalidated by upsertExportJob above.
+      if (stored.state === "running") {
+        return extensionDataMutationResult(true, "OK", {
+          changed: result.changed === true,
+          job: stored,
+        });
       }
-    } else if (
-      ["planned", "paused", "failed", "cancelled"].includes(stored.state) &&
-      ["planned", "running", "paused"].includes(candidate.state)
-    ) {
-      assertExportSourceStorageGeneration(storageGeneration);
-      result = await YTD_EXPORT_JOBS.checkpointExportJob(
-        chrome.storage.local,
-        candidate.jobId,
-        {
-          state: candidate.state,
-          completedUnitKeys: candidate.completedUnitKeys,
-          currentBatch: null,
-          cursor: candidate.cursor,
-          exportClaim: null,
-          lastError: null,
-        },
-        { allowCancelledResume: stored.state === "cancelled" },
-      );
+      if (["ready_to_export", "completed", "stale"].includes(stored.state)) {
+        if (candidate.state !== stored.state) {
+          throw exportSourceBatchError(
+            "EXPORT_JOB_NOT_RESUMABLE",
+            `Export job cannot resume from ${stored.state}.`,
+            { jobState: stored.state },
+          );
+        }
+      } else if (
+        ["planned", "paused", "failed", "cancelled"].includes(stored.state) &&
+        ["planned", "running", "paused"].includes(candidate.state)
+      ) {
+        assertExtensionDataMutationGeneration(
+          expectedDataGeneration,
+          expectedRuntimeInstanceId,
+        );
+        assertExportSourceStorageGeneration(storageGeneration);
+        result = await YTD_EXPORT_JOBS.checkpointExportJob(
+          chrome.storage.local,
+          candidate.jobId,
+          {
+            state: candidate.state,
+            completedUnitKeys: candidate.completedUnitKeys,
+            currentBatch: null,
+            cursor: candidate.cursor,
+            exportClaim: null,
+            lastError: null,
+          },
+          { allowCancelledResume: stored.state === "cancelled" },
+        );
+        assertExtensionDataMutationGeneration(
+          expectedDataGeneration,
+          expectedRuntimeInstanceId,
+        );
+        assertExportSourceStorageGeneration(storageGeneration);
+      }
     }
-  }
-  return {
-    success: true,
-    code: "OK",
-    changed: result.changed === true,
-    job: result.job,
-  };
+    return extensionDataMutationResult(true, "OK", {
+      changed: result.changed === true,
+      job: result.job,
+    });
+  });
 }
 
-async function handleCheckpointExportJob(jobId, patchInput) {
+async function handleCheckpointExportJob(
+  jobId,
+  patchInput,
+  expectedDataGeneration = extensionDataGeneration,
+  expectedRuntimeInstanceId = runtimeInstanceId,
+) {
   requireExportSourceModules();
+  assertExtensionDataMutationGeneration(
+    expectedDataGeneration,
+    expectedRuntimeInstanceId,
+  );
+  const storageGeneration = exportSourceStorageGeneration;
   const normalizedJobId = normalizeExportBatchToken(jobId, 80);
   if (!normalizedJobId) {
     throw exportSourceBatchError("INVALID_EXPORT_JOB", "Invalid export job id.");
@@ -6581,67 +7429,151 @@ async function handleCheckpointExportJob(jobId, patchInput) {
           : Date.now(),
     };
   }
-  const result = await YTD_EXPORT_JOBS.checkpointExportJob(
-    chrome.storage.local,
-    normalizedJobId,
-    patch,
-    {
-      requireEmptyExportClaim:
-        patch.state === "ready_to_export" && !!patch.exportClaim,
-    },
-  );
-  return {
-    success: true,
-    code: "OK",
-    changed: result.changed === true,
-    job: result.job,
-  };
+  return queueExtensionDataMutation(async () => {
+    assertExtensionDataMutationGeneration(
+      expectedDataGeneration,
+      expectedRuntimeInstanceId,
+    );
+    assertExportSourceStorageGeneration(storageGeneration);
+    const result = await YTD_EXPORT_JOBS.checkpointExportJob(
+      chrome.storage.local,
+      normalizedJobId,
+      patch,
+      {
+        requireEmptyExportClaim:
+          patch.state === "ready_to_export" && !!patch.exportClaim,
+      },
+    );
+    return extensionDataMutationResult(true, "OK", {
+      changed: result.changed === true,
+      job: result.job,
+    });
+  });
 }
 
-async function handleUpsertNoteSource(sourceInput) {
-  requireExportSourceModules();
-  const storageGeneration = exportSourceStorageGeneration;
-  const source = YTD_NOTE_SOURCES.normalizeNoteSource(sourceInput);
-  if (!source) {
-    return exportSourceBatchFailure(
-      exportSourceBatchError(
-        "INVALID_EXPORT_SOURCE_BATCH",
-        "Note source is invalid.",
-      ),
+async function handleUpsertNoteSource(
+  sourceInput,
+  expectedDataGeneration = extensionDataGeneration,
+  expectedRuntimeInstanceId = runtimeInstanceId,
+) {
+  return queueExtensionDataMutation(async () => {
+    requireExportSourceModules();
+    if (
+      !extensionDataFenceIsWritable(
+        expectedRuntimeInstanceId,
+        expectedDataGeneration,
+      )
+    ) {
+      return extensionDataMutationResult(false, "EXTENSION_DATA_RESET");
+    }
+    const storageGeneration = exportSourceStorageGeneration;
+    const source = YTD_NOTE_SOURCES.normalizeNoteSource(sourceInput);
+    if (!source) {
+      return exportSourceBatchFailure(
+        exportSourceBatchError(
+          "INVALID_EXPORT_SOURCE_BATCH",
+          "Note source is invalid.",
+        ),
+      );
+    }
+    const stored = await chrome.storage.local.get("ytd_notes");
+    assertExportSourceStorageGeneration(storageGeneration);
+    const protectedKeys = new Set(
+      (Array.isArray(stored?.ytd_notes) ? stored.ytd_notes : [])
+        .map((note) => String(note?.mediaKey || note?.videoId || "").trim())
+        .filter(Boolean),
     );
-  }
-  const stored = await chrome.storage.local.get("ytd_notes");
-  assertExportSourceStorageGeneration(storageGeneration);
-  const protectedKeys = new Set(
-    (Array.isArray(stored?.ytd_notes) ? stored.ytd_notes : [])
-      .map((note) => String(note?.mediaKey || note?.videoId || "").trim())
-      .filter(Boolean),
-  );
-  protectedKeys.add(source.mediaKey);
-  const result = await YTD_NOTE_SOURCES.writeNoteSource(
-    chrome.storage.local,
-    source,
-    { protectedKeys },
-  );
-  assertExportSourceStorageGeneration(storageGeneration);
-  const persisted = await YTD_NOTE_SOURCES.readNoteSource(
-    chrome.storage.local,
-    source.mediaKey,
-  );
-  if (!persisted) {
-    throw exportSourceBatchError(
-      "EXPORT_SOURCE_BATCH_COMMIT_FAILED",
-      "Note source was not persisted.",
+    protectedKeys.add(source.mediaKey);
+    const result = await YTD_NOTE_SOURCES.writeNoteSource(
+      chrome.storage.local,
+      source,
+      { protectedKeys },
     );
-  }
-  return {
-    success: true,
-    code: "OK",
-    changed: result?.changed === true,
-    mediaKey: persisted.mediaKey,
-    sourceRevision: persisted.sourceRevision,
-    source: persisted,
-  };
+    assertExportSourceStorageGeneration(storageGeneration);
+    const persisted = await YTD_NOTE_SOURCES.readNoteSource(
+      chrome.storage.local,
+      source.mediaKey,
+    );
+    if (!persisted) {
+      throw exportSourceBatchError(
+        "EXPORT_SOURCE_BATCH_COMMIT_FAILED",
+        "Note source was not persisted.",
+      );
+    }
+    return extensionDataMutationResult(true, "OK", {
+      changed: result?.changed === true,
+      mediaKey: persisted.mediaKey,
+      sourceRevision: persisted.sourceRevision,
+      source: persisted,
+    });
+  });
+}
+
+function handleReadNoteSource(
+  mediaKey,
+  expectedDataGeneration = extensionDataGeneration,
+  expectedRuntimeInstanceId = runtimeInstanceId,
+) {
+  return queueExtensionDataMutation(async () => {
+    requireExportSourceModules();
+    if (
+      !extensionDataFenceIsWritable(
+        expectedRuntimeInstanceId,
+        expectedDataGeneration,
+      )
+    ) {
+      return extensionDataMutationResult(false, "EXTENSION_DATA_RESET");
+    }
+    const source = await YTD_NOTE_SOURCES.readNoteSource(
+      chrome.storage.local,
+      mediaKey,
+    );
+    return extensionDataMutationResult(true, "OK", { source: source || null });
+  });
+}
+
+function handleReadAllNoteSources(
+  expectedDataGeneration = extensionDataGeneration,
+  expectedRuntimeInstanceId = runtimeInstanceId,
+) {
+  return queueExtensionDataMutation(async () => {
+    requireExportSourceModules();
+    if (
+      !extensionDataFenceIsWritable(
+        expectedRuntimeInstanceId,
+        expectedDataGeneration,
+      )
+    ) {
+      return extensionDataMutationResult(false, "EXTENSION_DATA_RESET");
+    }
+    const sources = await YTD_NOTE_SOURCES.readAllSources(chrome.storage.local);
+    return extensionDataMutationResult(true, "OK", { sources });
+  });
+}
+
+function handleRemoveNoteSources(
+  mediaKeys,
+  expectedDataGeneration = extensionDataGeneration,
+  expectedRuntimeInstanceId = runtimeInstanceId,
+) {
+  return queueExtensionDataMutation(async () => {
+    requireExportSourceModules();
+    if (
+      !extensionDataFenceIsWritable(
+        expectedRuntimeInstanceId,
+        expectedDataGeneration,
+      )
+    ) {
+      return extensionDataMutationResult(false, "EXTENSION_DATA_RESET");
+    }
+    const result = await YTD_NOTE_SOURCES.removeNoteSources(
+      chrome.storage.local,
+      mediaKeys,
+    );
+    return extensionDataMutationResult(true, "OK", {
+      changed: result?.changed === true,
+    });
+  });
 }
 
 // ============================================================
@@ -7207,6 +8139,12 @@ function validateNoteTranslationCandidate(candidate, source) {
   let textZh =
     typeof candidate?.textZh === "string" ? candidate.textZh.trim() : "";
   if (!textZh) return { textZh: "", failureCode: "EMPTY_RESPONSE" };
+  // A generated translation must stay within the same durable note-body bound
+  // as the source and cleanup paths. Besides keeping the UI useful, this makes
+  // the maximum size of a 500-note product-generated backup provable.
+  if (textZh.length > 3000) {
+    return { textZh: "", unchanged: false, failureCode: "INVALID_TRANSLATION" };
+  }
   if (hasExplicitBilingualLabels(textZh)) {
     return { textZh: "", unchanged: false, failureCode: "INVALID_TRANSLATION" };
   }
@@ -7425,6 +8363,11 @@ function noteTranslationUserContent(notes) {
 
 function persistNoteTranslations(translatedById, job) {
   return withNoteStorageWrite(async () => {
+    assertNoteStorageGeneration(
+      job?.storageGeneration,
+      job?.dataGeneration,
+      job?.runtimeInstanceId,
+    );
     const stored = job
       ? await waitForNoteJobDeadline(
           job,
@@ -7454,6 +8397,12 @@ function persistNoteTranslations(translatedById, job) {
     // Once the commit starts it must remain inside the shared storage queue.
     // Chrome Storage has no cancellation API; releasing the queue early could
     // let a later delete/save race with a late translation write.
+    assertNotesRemainBackupable(updatedNotes, { allowInvalidStored: true });
+    assertNoteStorageGeneration(
+      job?.storageGeneration,
+      job?.dataGeneration,
+      job?.runtimeInstanceId,
+    );
     await chrome.storage.local.set({ ytd_notes: updatedNotes });
   });
 }
@@ -7504,6 +8453,9 @@ function createNoteTranslationJob(dependencies = {}) {
     rateLimitRetries: 0,
     emptyFallbacks: 0,
     stopCode: "",
+    storageGeneration: dependencies.storageGeneration,
+    dataGeneration: dependencies.dataGeneration,
+    runtimeInstanceId: dependencies.runtimeInstanceId || runtimeInstanceId,
     settings: dependencies.settings || null,
     beforeProviderCall:
       typeof dependencies.beforeProviderCall === "function"
@@ -7589,6 +8541,20 @@ async function callNoteTranslationProvider(
     };
   }
 
+  try {
+    assertExtensionDataMutationGeneration(
+      job.dataGeneration,
+      job.runtimeInstanceId,
+    );
+  } catch (error) {
+    job.stopCode = "EXTENSION_DATA_RESET";
+    return {
+      success: false,
+      code: job.stopCode,
+      error: exportSourceBatchSafeMessage(job.stopCode),
+    };
+  }
+
   if (job.beforeProviderCall) {
     try {
       const settings = await waitForNoteJobDeadline(job, () =>
@@ -7643,6 +8609,19 @@ async function callNoteTranslationProvider(
     );
     if (!waited) return stopNoteJobForTimeout(job);
     if (noteJobRemainingMs(job) <= 0) return stopNoteJobForTimeout(job);
+    try {
+      assertExtensionDataMutationGeneration(
+        job.dataGeneration,
+        job.runtimeInstanceId,
+      );
+    } catch (_error) {
+      job.stopCode = "EXTENSION_DATA_RESET";
+      return {
+        success: false,
+        code: job.stopCode,
+        error: exportSourceBatchSafeMessage(job.stopCode),
+      };
+    }
     job.providerCalls += 1;
     result = await waitForNoteJobDeadline(
       job,
@@ -7841,15 +8820,22 @@ function normalizeNoteTitleTranslation(parsed, sourceTitles) {
 
 function persistNoteTitleTranslations(titleByMediaKey, job) {
   return withNoteStorageWrite(async () => {
+    assertNoteStorageGeneration(
+      job?.storageGeneration,
+      job?.dataGeneration,
+      job?.runtimeInstanceId,
+    );
     const stored = job
       ? await waitForNoteJobDeadline(job, () =>
           chrome.storage.local.get("ytd_notes"),
         )
       : await chrome.storage.local.get("ytd_notes");
     const storedNotes = Array.isArray(stored.ytd_notes) ? stored.ytd_notes : [];
+    const matchedMediaKeys = new Set();
     const updatedNotes = storedNotes.map((note) => {
       const key = noteTitleMediaKey(note);
       if (!key || !titleByMediaKey.has(key)) return note;
+      matchedMediaKeys.add(key);
       const translated = titleByMediaKey.get(key);
       return {
         ...note,
@@ -7865,7 +8851,15 @@ function persistNoteTitleTranslations(titleByMediaKey, job) {
       job.stopCode = error.code;
       throw error;
     }
+    assertNoteStorageGeneration(
+      job?.storageGeneration,
+      job?.dataGeneration,
+      job?.runtimeInstanceId,
+    );
+    if (!matchedMediaKeys.size) return [];
+    assertNotesRemainBackupable(updatedNotes, { allowInvalidStored: true });
     await chrome.storage.local.set({ ytd_notes: updatedNotes });
+    return [...matchedMediaKeys];
   });
 }
 
@@ -7979,6 +8973,16 @@ function handleTranslateNotes(request, dependencies = {}) {
   const requestDependencies = {
     ...dependencies,
     now,
+    storageGeneration: Number.isSafeInteger(dependencies.storageGeneration)
+      ? dependencies.storageGeneration
+      : noteStorageGeneration,
+    dataGeneration: Number.isSafeInteger(dependencies.dataGeneration)
+      ? dependencies.dataGeneration
+      : extensionDataGeneration,
+    runtimeInstanceId:
+      typeof dependencies.runtimeInstanceId === "string"
+        ? dependencies.runtimeInstanceId
+        : runtimeInstanceId,
     deadlineAt: Number.isFinite(dependencies.deadlineAt)
       ? dependencies.deadlineAt
       : now() + NOTE_TRANSLATION_JOB_TIMEOUT_MS,
@@ -7999,6 +9003,7 @@ async function runTranslateNotes(notes, titles, dependencies = {}) {
   if (!normalizedTitles.length) return bodyResult;
 
   let titleOutcome = { titles: [], failureByKey: new Map() };
+  let titlePersistenceStarted = false;
   try {
     if (!job.settings) {
       const settings = await waitForNoteJobDeadline(job, () => getSettings());
@@ -8007,23 +9012,37 @@ async function runTranslateNotes(notes, titles, dependencies = {}) {
     if (job.settings && YTD_SETTINGS.hasActiveApiKey(job.settings)) {
       titleOutcome = await translateNoteTitlesInJob(job, normalizedTitles);
       if (titleOutcome.titles.length) {
+        titlePersistenceStarted = true;
         const sourceByMediaKey = new Map(
           normalizedTitles.map((title) => [title.mediaKey, title.title]),
         );
-        await persistNoteTitleTranslations(
-          new Map(
-            titleOutcome.titles.map((translated) => [
-              translated.mediaKey,
-              {
-                titleZh: translated.titleZh,
-                sourceHash: YTD_NOTE_SOURCES.hashSourceText(
-                  sourceByMediaKey.get(translated.mediaKey) || "",
-                ),
-              },
-            ]),
+        const persistedTitleKeys = new Set(
+          await persistNoteTitleTranslations(
+            new Map(
+              titleOutcome.titles.map((translated) => [
+                translated.mediaKey,
+                {
+                  titleZh: translated.titleZh,
+                  sourceHash: YTD_NOTE_SOURCES.hashSourceText(
+                    sourceByMediaKey.get(translated.mediaKey) || "",
+                  ),
+                },
+              ]),
+            ),
+            job,
           ),
-          job,
         );
+        titleOutcome.titles = titleOutcome.titles.filter((title) => {
+          if (persistedTitleKeys.has(title.mediaKey)) return true;
+          // A note may be deleted while its title provider call is in flight.
+          // Do not report a title that never reached durable note storage.
+          titleOutcome.failureByKey.set(
+            title.mediaKey,
+            "NOTE_TITLE_PERSIST_FAILED",
+          );
+          return false;
+        });
+        titlePersistenceStarted = false;
       }
     } else {
       normalizedTitles.forEach((t) =>
@@ -8032,9 +9051,20 @@ async function runTranslateNotes(notes, titles, dependencies = {}) {
     }
   } catch (error) {
     // A title failure must never corrupt the body result.
+    const failureCode = error?.code ||
+      (titlePersistenceStarted ? "NOTE_TITLE_PERSIST_FAILED" : "PROVIDER_ERROR");
+    if (titlePersistenceStarted) {
+      titleOutcome.titles.forEach((title) => {
+        titleOutcome.failureByKey.set(title.mediaKey, failureCode);
+      });
+      // Only titles that reached durable storage may be returned as successes.
+      // Otherwise the side panel would render a translation that disappears on
+      // the next load and could mistake it for persisted user data.
+      titleOutcome.titles = [];
+    }
     normalizedTitles.forEach((t) => {
       if (!titleOutcome.failureByKey.has(t.mediaKey)) {
-        titleOutcome.failureByKey.set(t.mediaKey, error?.code || "PROVIDER_ERROR");
+        titleOutcome.failureByKey.set(t.mediaKey, failureCode);
       }
     });
   }
@@ -8042,9 +9072,10 @@ async function runTranslateNotes(notes, titles, dependencies = {}) {
   const successfulTitleKeys = new Set(
     titleOutcome.titles.map((t) => t.mediaKey),
   );
+  const bodySucceeded = (notes || []).length > 0 && bodyResult.success === true;
   return {
     ...bodyResult,
-    success: bodyResult.success || titleOutcome.titles.length > 0,
+    success: bodySucceeded || titleOutcome.titles.length > 0,
     titles: titleOutcome.titles,
     titleFailures: normalizedTitles
       .filter((t) => !successfulTitleKeys.has(t.mediaKey))
@@ -8315,7 +9346,11 @@ async function runTranslateNoteBodies(notes, job) {
         providerDisplayLabel(job.settings),
       );
     }
-    return { success: false, error: error.message || "中文笔记生成失败" };
+    return {
+      success: false,
+      code: error?.code,
+      error: error.message || "中文笔记生成失败",
+    };
   }
 }
 
@@ -8519,6 +9554,14 @@ globalThis.__YTD_TRANSLATION_TESTING__ = {
   handleResetAllExtensionData,
   createNoteId,
   getNoteStorageGeneration,
+  getRuntimeInstanceId,
+  getExtensionDataGeneration,
+  getRuntimeInstanceId,
+  handlePersistResetFencedCache,
+  handlePersistResetFencedSettings,
+  handlePersistResetFencedReadingDisplay,
+  handleResetFencedSessionMutation,
+  preflightNoteStorageCapacity,
   handleSaveNote,
   persistSavedNoteSourceBestEffort,
   handleTranslateOverviewOriginal,
@@ -8554,9 +9597,13 @@ globalThis.__YTD_TRANSLATION_TESTING__ = {
   handleCreateOrResumeExportJob,
   handleCheckpointExportJob,
   handleUpsertNoteSource,
+  handleReadNoteSource,
+  handleReadAllNoteSources,
+  handleRemoveNoteSources,
   resolveSourceLanguage,
   saveNoteToStorage,
   exportStoredNoteOriginalText,
+  exportStoredNotesRevision,
   sendMessageToContentWithRecovery,
   validateAndFixTimestamps,
   normalizeAnalysisCues,

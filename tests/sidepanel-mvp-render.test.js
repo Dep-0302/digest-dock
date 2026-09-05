@@ -537,7 +537,12 @@ test("Supadata consent cannot move to another video during config refresh", asyn
     secondRetryTask,
   );
 
-  configGate.resolve({ runtimeProtocolVersion: 12, hasSupadataKey: true });
+  configGate.resolve({
+    runtimeProtocolVersion: 14,
+    runtimeInstanceId: "runtime-mvp-test",
+    dataGeneration: 0,
+    hasSupadataKey: true,
+  });
   await consentRequest;
 
   const state = helpers.getSidepanelMvpState();
@@ -581,7 +586,12 @@ test("old consent cannot authorize a renewed prompt for the same identity", asyn
     stateApi.TRANSCRIPT_STATUSES.NEEDS_SUPADATA_CHOICE,
   );
 
-  configGate.resolve({ runtimeProtocolVersion: 12, hasSupadataKey: true });
+  configGate.resolve({
+    runtimeProtocolVersion: 14,
+    runtimeInstanceId: "runtime-mvp-test",
+    dataGeneration: 0,
+    hasSupadataKey: true,
+  });
   await consentRequest;
 
   assert.equal(

@@ -6,7 +6,7 @@
  */
 
 const DEBUG = false;
-const REQUIRED_RUNTIME_PROTOCOL_VERSION = 12;
+const REQUIRED_RUNTIME_PROTOCOL_VERSION = 14;
 const EXPORT_CONTENT_CONTRACT_VERSION = 4;
 const OVERVIEW_CACHE_SCHEMA_VERSION = 2;
 const ANALYSIS_TIMESTAMP_ANCHOR_VERSION = 1;
@@ -114,6 +114,281 @@ let errorAction = null;
 let errorSecondaryAction = null;
 let tabCheckGeneration = 0;
 let digestGeneration = 0;
+let extensionDataGeneration = 0;
+let extensionDataRuntimeInstanceId = "";
+let extensionDataFenceRevision = 0;
+let extensionDataResetInProgress = false;
+
+function extensionDataFenceSnapshot() {
+  return {
+    runtimeInstanceId: extensionDataRuntimeInstanceId,
+    dataGeneration: extensionDataGeneration,
+    revision: extensionDataFenceRevision,
+  };
+}
+
+function captureExtensionDataFence() {
+  const snapshot = extensionDataFenceSnapshot();
+  return !extensionDataResetInProgress &&
+    snapshot.runtimeInstanceId &&
+    Number.isSafeInteger(snapshot.dataGeneration) &&
+    snapshot.dataGeneration % 2 === 0
+    ? snapshot
+    : null;
+}
+
+function extensionDataFenceIsCurrent(token) {
+  return Boolean(
+    token &&
+      !extensionDataResetInProgress &&
+      token.revision === extensionDataFenceRevision &&
+      token.runtimeInstanceId === extensionDataRuntimeInstanceId &&
+      token.dataGeneration === extensionDataGeneration &&
+      token.dataGeneration % 2 === 0,
+  );
+}
+
+function adoptExtensionDataFence(
+  nextRuntimeInstanceId,
+  value,
+  { requestFence = null, resetNotification = false } = {},
+) {
+  const nextId = String(nextRuntimeInstanceId || "");
+  const generation = Number(value);
+  if (!nextId || !Number.isSafeInteger(generation) || generation < 0) {
+    return false;
+  }
+  if (requestFence) {
+    const localUnchanged =
+      requestFence.revision === extensionDataFenceRevision &&
+      requestFence.runtimeInstanceId === extensionDataRuntimeInstanceId &&
+      requestFence.dataGeneration === extensionDataGeneration;
+    if (!localUnchanged) return false;
+  } else if (resetNotification) {
+    // A reset-start event is the only unsolicited authority allowed to switch
+    // worker identity. Completion must belong to the worker whose start we
+    // accepted, so a delayed old completion cannot release a newer fence.
+    if (
+      generation % 2 === 0 &&
+      extensionDataRuntimeInstanceId &&
+      nextId !== extensionDataRuntimeInstanceId
+    ) {
+      return false;
+    }
+  } else if (
+    extensionDataRuntimeInstanceId &&
+    nextId !== extensionDataRuntimeInstanceId
+  ) {
+    return false;
+  }
+  if (
+    nextId !== extensionDataRuntimeInstanceId ||
+    generation !== extensionDataGeneration
+  ) {
+    extensionDataFenceRevision += 1;
+  }
+  extensionDataRuntimeInstanceId = nextId;
+  extensionDataGeneration = generation;
+  extensionDataResetInProgress = generation % 2 === 1;
+  return true;
+}
+
+function extensionDataGenerationIsCurrent(expectedDataGeneration) {
+  return (
+    !extensionDataResetInProgress &&
+    Number.isSafeInteger(expectedDataGeneration) &&
+    expectedDataGeneration === extensionDataGeneration &&
+    expectedDataGeneration % 2 === 0
+  );
+}
+
+function assertCurrentExtensionDataGeneration(expectedDataGeneration) {
+  if (extensionDataGenerationIsCurrent(expectedDataGeneration)) return;
+  const error = new Error("扩展数据已重置，请重试。");
+  error.code = "EXTENSION_DATA_RESET";
+  throw error;
+}
+
+function assertCurrentExtensionDataFence(expectedFence) {
+  if (extensionDataFenceIsCurrent(expectedFence)) return;
+  const error = new Error("扩展后台已重启或数据已重置，请重试。");
+  error.code = "EXTENSION_DATA_RESET";
+  throw error;
+}
+
+function applyExtensionDataResetFence(runtimeInstanceId, dataGeneration) {
+  if (
+    String(runtimeInstanceId || "") === extensionDataRuntimeInstanceId &&
+    Number(dataGeneration) === extensionDataGeneration &&
+    extensionDataResetInProgress
+  ) {
+    return false;
+  }
+  if (
+    !adoptExtensionDataFence(runtimeInstanceId, dataGeneration, {
+      resetNotification: true,
+    })
+  ) {
+    return false;
+  }
+  extensionDataResetInProgress = true;
+  tabCheckGeneration += 1;
+  digestGeneration += 1;
+  translationGeneration += 1;
+  exportTranslationGeneration += 1;
+  notesLoadGeneration += 1;
+  notesTranslationGeneration += 1;
+  noteExportAuthorizationGeneration += 1;
+  activeNoteExportAuthorization = null;
+  activeExportJobId = "";
+  pendingNoteNavigation = null;
+  activeNotesOnlyContext = null;
+  currentAnalysis = null;
+  currentNotes = [];
+  currentPersistedNoteSource = null;
+  transcriptParagraphCache.clear();
+  activeTranslationQueue = null;
+  isAnalysisLoading = false;
+  isOverviewTranslationLoading = false;
+  isNotesLoading = false;
+  isNotesTranslationLoading = false;
+  if (transcriptScrollObserver) transcriptScrollObserver.disconnect();
+  transcriptScrollObserver = null;
+  sidepanelMvpTaskGate?.clear?.();
+  sidepanelMvpConsentVault?.clear?.();
+  return true;
+}
+
+function resetFailureCanRefreshWorker(result, expectedFence, adopted) {
+  return Boolean(
+    adopted &&
+      result?.success !== true &&
+      result?.code === "EXTENSION_DATA_RESET" &&
+      typeof result.runtimeInstanceId === "string" &&
+      result.runtimeInstanceId &&
+      result.runtimeInstanceId !== expectedFence?.runtimeInstanceId &&
+      Number.isSafeInteger(result.dataGeneration) &&
+      result.dataGeneration % 2 === 0,
+  );
+}
+
+async function sendResetFencedStorageMessageOnce(
+  message,
+  expectedFence,
+  allowWorkerRefreshRetry,
+) {
+  if (!extensionDataFenceIsCurrent(expectedFence)) {
+    return {
+      success: false,
+      code: "EXTENSION_DATA_RESET",
+      runtimeInstanceId: extensionDataRuntimeInstanceId,
+      dataGeneration: extensionDataGeneration,
+    };
+  }
+  const requestFence = { ...expectedFence };
+  const result = await chrome.runtime.sendMessage({
+    ...message,
+    runtimeInstanceId: requestFence.runtimeInstanceId,
+    dataGeneration: requestFence.dataGeneration,
+  });
+  const adopted = adoptExtensionDataFence(
+    result?.runtimeInstanceId,
+    result?.dataGeneration,
+    { requestFence },
+  );
+  if (
+    allowWorkerRefreshRetry &&
+    resetFailureCanRefreshWorker(result, requestFence, adopted)
+  ) {
+    const refreshedFence = captureExtensionDataFence();
+    if (
+      refreshedFence?.runtimeInstanceId === result.runtimeInstanceId &&
+      refreshedFence.dataGeneration === result.dataGeneration
+    ) {
+      Object.assign(expectedFence, refreshedFence);
+      return sendResetFencedStorageMessageOnce(
+        message,
+        refreshedFence,
+        false,
+      );
+    }
+  }
+  if (result?.success && !extensionDataFenceIsCurrent(requestFence)) {
+    return {
+      success: false,
+      code: "EXTENSION_DATA_RESET",
+      runtimeInstanceId: extensionDataRuntimeInstanceId,
+      dataGeneration: extensionDataGeneration,
+    };
+  }
+  return result;
+}
+
+function sendResetFencedStorageMessage(
+  message,
+  expectedFence = captureExtensionDataFence(),
+) {
+  return sendResetFencedStorageMessageOnce(message, expectedFence, true);
+}
+
+function sendResetFencedTranslationMessageOnce(
+  message,
+  expectedFence,
+  allowWorkerRefreshRetry,
+) {
+  if (!extensionDataFenceIsCurrent(expectedFence)) {
+    return Promise.resolve({
+      success: false,
+      code: "EXTENSION_DATA_RESET",
+      runtimeInstanceId: extensionDataRuntimeInstanceId,
+      dataGeneration: extensionDataGeneration,
+    });
+  }
+  const requestFence = { ...expectedFence };
+  return sendTranslationMessage({
+    ...message,
+    runtimeInstanceId: requestFence.runtimeInstanceId,
+    dataGeneration: requestFence.dataGeneration,
+  }).then((result) => {
+    const adopted = adoptExtensionDataFence(
+      result?.runtimeInstanceId,
+      result?.dataGeneration,
+      { requestFence },
+    );
+    if (
+      allowWorkerRefreshRetry &&
+      resetFailureCanRefreshWorker(result, requestFence, adopted)
+    ) {
+      const refreshedFence = captureExtensionDataFence();
+      if (
+        refreshedFence?.runtimeInstanceId === result.runtimeInstanceId &&
+        refreshedFence.dataGeneration === result.dataGeneration
+      ) {
+        Object.assign(expectedFence, refreshedFence);
+        return sendResetFencedTranslationMessageOnce(
+          message,
+          refreshedFence,
+          false,
+        );
+      }
+    }
+    return result?.success && !extensionDataFenceIsCurrent(requestFence)
+      ? {
+          success: false,
+          code: "EXTENSION_DATA_RESET",
+          runtimeInstanceId: extensionDataRuntimeInstanceId,
+          dataGeneration: extensionDataGeneration,
+        }
+      : result;
+  });
+}
+
+function sendResetFencedTranslationMessage(
+  message,
+  expectedFence = captureExtensionDataFence(),
+) {
+  return sendResetFencedTranslationMessageOnce(message, expectedFence, true);
+}
 
 function hasConfiguredAiService(config = currentConfigStatus) {
   return config?.hasAiKey === true;
@@ -716,9 +991,18 @@ function renderSidepanelMvpTranscriptState() {
 }
 
 async function sidepanelMvpRefreshConfig() {
+  const requestFence = extensionDataFenceSnapshot();
   const config = await chrome.runtime.sendMessage({ action: "checkConfig" });
   if (config?.runtimeProtocolVersion === REQUIRED_RUNTIME_PROTOCOL_VERSION) {
-    currentConfigStatus = config;
+    if (
+      adoptExtensionDataFence(
+        config.runtimeInstanceId,
+        config.dataGeneration,
+        { requestFence },
+      )
+    ) {
+      currentConfigStatus = config;
+    }
   }
   return currentConfigStatus || {};
 }
@@ -1235,9 +1519,19 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
   await evictOldCacheEntries(20);
 
-  currentConfigStatus = await chrome.runtime.sendMessage({
+  const configRequestFence = extensionDataFenceSnapshot();
+  const initialConfig = await chrome.runtime.sendMessage({
     action: "checkConfig",
   });
+  if (
+    adoptExtensionDataFence(
+      initialConfig?.runtimeInstanceId,
+      initialConfig?.dataGeneration,
+      { requestFence: configRequestFence },
+    )
+  ) {
+    currentConfigStatus = initialConfig;
+  }
 
   if (
     currentConfigStatus?.runtimeProtocolVersion !==
@@ -1252,6 +1546,27 @@ document.addEventListener("DOMContentLoaded", async () => {
 
 // Listen for messages from the Digest button on YouTube page
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message.action === "extensionDataResetStarted") {
+    applyExtensionDataResetFence(
+      message.runtimeInstanceId,
+      message.dataGeneration,
+    );
+    sendResponse({ success: true });
+    return false;
+  }
+  if (message.action === "extensionDataResetCompleted") {
+    if (
+      adoptExtensionDataFence(
+        message.runtimeInstanceId,
+        message.dataGeneration,
+        { resetNotification: true },
+      )
+    ) {
+      extensionDataResetInProgress = false;
+    }
+    sendResponse({ success: true });
+    return false;
+  }
   if (message.action === "startDigestFromButton") {
     // Load the digest for the current video. Served from cache when we've
     // seen this video before (no API calls); fetched fresh otherwise.
@@ -1475,7 +1790,11 @@ function normalizeNoteNavigationState(value) {
   };
 }
 
-async function persistNoteNavigationState(state) {
+async function persistNoteNavigationState(
+  state,
+  dataFence = captureExtensionDataFence(),
+) {
+  if (!extensionDataFenceIsCurrent(dataFence)) return false;
   const normalized = normalizeNoteNavigationState(state);
   if (!normalized) return false;
   if (normalized.phase === "active") {
@@ -1485,11 +1804,19 @@ async function persistNoteNavigationState(state) {
     pendingNoteNavigation = normalized;
     activeNotesOnlyContext = null;
   }
-  const storage = noteNavigationStorage();
-  if (!storage?.set) return true;
   await queueNoteNavigationStorage(async () => {
     try {
-      await storage.set({ [NOTE_NAVIGATION_SESSION_KEY]: normalized });
+      const result = await sendResetFencedStorageMessage(
+        {
+          action: "mutateResetFencedSession",
+          operation: "set",
+          value: normalized,
+        },
+        dataFence,
+      );
+      if (!result?.success && result?.code !== "EXTENSION_DATA_RESET") {
+        throw new Error(result?.code || "SESSION_MUTATION_FAILED");
+      }
     } catch (error) {
       // The in-memory state still protects the current global panel instance.
       console.warn("[DigestDock] Could not persist note navigation:", error);
@@ -1502,17 +1829,37 @@ async function hydrateNoteNavigationState() {
   if (activeNotesOnlyContext || pendingNoteNavigation) return;
   const storage = noteNavigationStorage();
   if (!storage?.get) return;
+  const dataFence = captureExtensionDataFence();
+  if (!dataFence) return;
   await queueNoteNavigationStorage(async () => {
-    if (activeNotesOnlyContext || pendingNoteNavigation) return;
+    if (
+      activeNotesOnlyContext ||
+      pendingNoteNavigation ||
+      !extensionDataFenceIsCurrent(dataFence)
+    ) {
+      return;
+    }
     try {
       const stored = await storage.get(NOTE_NAVIGATION_SESSION_KEY);
-      if (activeNotesOnlyContext || pendingNoteNavigation) return;
+      if (
+        activeNotesOnlyContext ||
+        pendingNoteNavigation ||
+        !extensionDataFenceIsCurrent(dataFence)
+      ) {
+        return;
+      }
       const normalized = normalizeNoteNavigationState(
         stored?.[NOTE_NAVIGATION_SESSION_KEY],
       );
       if (!normalized) {
-        if (stored?.[NOTE_NAVIGATION_SESSION_KEY] && storage.remove) {
-          await storage.remove(NOTE_NAVIGATION_SESSION_KEY);
+        if (stored?.[NOTE_NAVIGATION_SESSION_KEY]) {
+          await sendResetFencedStorageMessage(
+            {
+              action: "mutateResetFencedSession",
+              operation: "remove",
+            },
+            dataFence,
+          );
         }
         return;
       }
@@ -1528,6 +1875,7 @@ async function hydrateNoteNavigationState() {
 }
 
 async function clearNoteNavigationState(expectedToken = "") {
+  const dataFence = captureExtensionDataFence();
   const token = String(expectedToken || "");
   if (
     token &&
@@ -1539,17 +1887,25 @@ async function clearNoteNavigationState(expectedToken = "") {
   activeNotesOnlyContext = null;
   pendingNoteNavigation = null;
   const storage = noteNavigationStorage();
-  if (!storage?.remove) return true;
   return queueNoteNavigationStorage(async () => {
     try {
-      if (token && storage.get) {
+      if (token && storage?.get) {
         const stored = await storage.get(NOTE_NAVIGATION_SESSION_KEY);
         const storedToken = String(
           stored?.[NOTE_NAVIGATION_SESSION_KEY]?.token || "",
         );
         if (storedToken && storedToken !== token) return false;
       }
-      await storage.remove(NOTE_NAVIGATION_SESSION_KEY);
+      const result = await sendResetFencedStorageMessage(
+        {
+          action: "mutateResetFencedSession",
+          operation: "remove",
+        },
+        dataFence,
+      );
+      if (!result?.success && result?.code !== "EXTENSION_DATA_RESET") {
+        throw new Error(result?.code || "SESSION_MUTATION_FAILED");
+      }
     } catch (error) {
       console.warn("[DigestDock] Could not clear note navigation:", error);
     }
@@ -1885,6 +2241,13 @@ function setupEventListeners() {
   document.getElementById("settingsBtn")?.addEventListener("click", () => {
     chrome.runtime.sendMessage({ action: "openOptions" });
   });
+
+  // The capacity band's recovery route: notes backup lives in Options.
+  document
+    .getElementById("notesCapacityBackup")
+    ?.addEventListener("click", () => {
+      chrome.runtime.sendMessage({ action: "openOptions" });
+    });
 
   // Transcript actions
   document
@@ -2287,8 +2650,7 @@ function resetDigestStateForVideo(videoId, videoUrl, mediaRef, routeKey) {
   currentPersistedNoteSource = null;
   activeExportJobId = "";
   if (previousExportJobId) {
-    chrome.runtime
-      .sendMessage({
+    sendResetFencedStorageMessage({
         action: "cancelExportTranslationJob",
         jobId: previousExportJobId,
       })
@@ -2305,17 +2667,19 @@ async function captureNotesOnlyMetadata(
   locator,
   { requireActiveContext = true } = {},
 ) {
+  const dataFence = captureExtensionDataFence();
   if (!context?.captureMetadata || !noteNavigationMatches(context, tab, locator)) {
     return null;
   }
   return runMetadataCaptureSingleFlight(context.token, async () => {
     const ownsCapture = () =>
-      requireActiveContext
+      extensionDataFenceIsCurrent(dataFence) &&
+      (requireActiveContext
         ? activeNotesOnlyContext?.token === context.token &&
           isActiveNotesOnlyContext()
         : currentVideoId === context.mediaKey &&
           videoTabId === context.tabId &&
-          currentRouteKey === context.routeKey;
+          currentRouteKey === context.routeKey);
     if (!ownsCapture()) return null;
 
     try {
@@ -2413,28 +2777,31 @@ async function captureNotesOnlyMetadata(
         metadata.sourceLanguage || context.sourceLanguage,
       );
 
-      const stored = await YTD_NOTE_SOURCES.readNoteSource(
-        chrome.storage.local,
+      const stored = await readNoteSourceFromBackground(
         context.mediaKey,
+        dataFence,
       );
       if (!ownsCapture()) return null;
-      const persisted = await upsertNoteSourceInBackground({
-        mediaKey: context.mediaKey,
-        platform: context.platform,
-        canonicalUrl: currentMediaRef.canonicalUrl || "",
-        titleOriginal: currentVideoTitle,
-        titleZh: stored?.titleZh || currentVideoTitleZh(),
-        channelName: currentChannelName,
-        descriptionOriginal: currentVideoDescription,
-        descriptionStatus: currentVideoDescriptionState,
-        descriptionTruncated: currentVideoDescriptionTruncated,
-        descriptionZh: stored?.descriptionZh || "",
-        sourceLanguage:
-          stored?.sourceLanguage || currentVideoSourceLanguage || "",
-        transcriptOriginal: stored?.transcriptOriginal || [],
-        transcriptZh: stored?.transcriptZh || [],
-        transcriptTruncated: stored?.transcriptTruncated === true,
-      });
+      const persisted = await upsertNoteSourceInBackground(
+        {
+          mediaKey: context.mediaKey,
+          platform: context.platform,
+          canonicalUrl: currentMediaRef.canonicalUrl || "",
+          titleOriginal: currentVideoTitle,
+          titleZh: stored?.titleZh || currentVideoTitleZh(),
+          channelName: currentChannelName,
+          descriptionOriginal: currentVideoDescription,
+          descriptionStatus: currentVideoDescriptionState,
+          descriptionTruncated: currentVideoDescriptionTruncated,
+          descriptionZh: stored?.descriptionZh || "",
+          sourceLanguage:
+            stored?.sourceLanguage || currentVideoSourceLanguage || "",
+          transcriptOriginal: stored?.transcriptOriginal || [],
+          transcriptZh: stored?.transcriptZh || [],
+          transcriptTruncated: stored?.transcriptTruncated === true,
+        },
+        dataFence,
+      );
       if (!ownsCapture()) return persisted;
 
       applyPersistedSourceToCurrentVideo(persisted);
@@ -2448,16 +2815,19 @@ async function captureNotesOnlyMetadata(
         currentVideoDescriptionState !== "unknown" &&
         !currentVideoDescriptionTruncated;
       if (requireActiveContext) {
-        await persistNoteNavigationState({
-          ...context,
-          phase: "active",
-          captureMetadata: !metadataComplete,
-          videoTitle: currentVideoTitle,
-          channelName: currentChannelName,
-          duration: currentVideoDuration,
-          sourceLanguage: currentVideoSourceLanguage,
-          canonicalUrl: currentMediaRef.canonicalUrl || context.canonicalUrl,
-        });
+        await persistNoteNavigationState(
+          {
+            ...context,
+            phase: "active",
+            captureMetadata: !metadataComplete,
+            videoTitle: currentVideoTitle,
+            channelName: currentChannelName,
+            duration: currentVideoDuration,
+            sourceLanguage: currentVideoSourceLanguage,
+            canonicalUrl: currentMediaRef.canonicalUrl || context.canonicalUrl,
+          },
+          dataFence,
+        );
       }
       setNoteExportStatus(
         metadataComplete
@@ -2666,12 +3036,14 @@ async function runDigestLoad(
   captionRetry = false,
   mvpOptions = {},
 ) {
+  const dataFence = captureExtensionDataFence();
   if (!isCurrentDigest(videoId, generation, routeKey)) return;
   const mvpTask = SIDEPANEL_MVP_AVAILABLE
     ? mvpOptions.mvpTask || sidepanelMvpState?.transcript?.activeTask
     : null;
   const mvpEnvelope = sidepanelMvpTaskResultEnvelope(mvpTask);
   const ownsDigestLoad = () =>
+    extensionDataFenceIsCurrent(dataFence) &&
     isCurrentDigest(videoId, generation, routeKey) &&
     (!SIDEPANEL_MVP_AVAILABLE ||
       (mvpTask && sidepanelMvpTaskGate.isCurrent(mvpEnvelope)));
@@ -2760,6 +3132,7 @@ async function runDigestLoad(
         currentTranscriptLanguage,
         currentTranscriptSource,
         currentTranscriptSelectedTrack,
+        dataFence,
       );
       if (!ownsDigestLoad()) return;
     }
@@ -3134,7 +3507,7 @@ async function runDigestLoad(
   if (currentTranscriptMode !== "original") translateTranscript();
 
   // Save transcript to cache (without analysis)
-  await saveToCache(videoId);
+  await saveToCache(videoId, dataFence);
   if (!ownsDigestLoad()) return;
 
   refreshOverviewForCurrentVideoIfVisible();
@@ -3318,6 +3691,7 @@ async function ensureOverviewOriginal() {
   }
 
   const sourceAnalysis = currentAnalysis;
+  const dataFence = captureExtensionDataFence();
   const videoId = currentVideoId;
   const generation = digestGeneration;
   const sourceLanguage = normalizeLanguageCode(sourceAnalysis.sourceLanguage);
@@ -3334,6 +3708,7 @@ async function ensureOverviewOriginal() {
   }
   let appliedAnalysis = null;
   const ownsRequest = () =>
+    extensionDataFenceIsCurrent(dataFence) &&
     isCurrentDigest(videoId, generation) &&
     (currentAnalysis === sourceAnalysis || currentAnalysis === appliedAnalysis);
   setOverviewTranslationLoading(true);
@@ -3383,8 +3758,11 @@ async function ensureOverviewOriginal() {
       currentAnalysis,
       currentTranscriptTimestamped,
       currentTranscriptLanguage,
+      currentTranscriptSource,
+      currentTranscriptSelectedTrack,
+      dataFence,
     );
-    const digestSaved = await saveToCache(videoId);
+    const digestSaved = await saveToCache(videoId, dataFence);
     if (!overviewSaved && !digestSaved) {
       setOverviewTranslationStatus(
         "概览已生成，但本地保存失败；再次打开可能会重新生成并消耗 AI 额度。",
@@ -3893,14 +4271,20 @@ function applyPersistedSourceToCurrentVideo(source) {
 }
 
 async function hydrateCurrentVideoNoteSource() {
+  const dataFence = captureExtensionDataFence();
   const key = currentVideoId || currentMediaRef?.mediaKey || "";
-  if (!key || !currentTranscript?.length) return null;
+  if (!key || !currentTranscript?.length || !dataFence) return null;
   try {
-    const source = await YTD_NOTE_SOURCES.readNoteSource(
-      chrome.storage.local,
+    const source = await readNoteSourceFromBackground(
       key,
+      dataFence,
     );
-    if (key !== currentVideoId) return null;
+    if (
+      !extensionDataFenceIsCurrent(dataFence) ||
+      key !== currentVideoId
+    ) {
+      return null;
+    }
     if (source) applyPersistedSourceToCurrentVideo(source);
     return source || null;
   } catch (error) {
@@ -3909,11 +4293,17 @@ async function hydrateCurrentVideoNoteSource() {
   }
 }
 
-async function upsertNoteSourceInBackground(source) {
-  const result = await chrome.runtime.sendMessage({
-    action: "upsertNoteSource",
-    source,
-  });
+async function upsertNoteSourceInBackground(
+  source,
+  expectedFence = captureExtensionDataFence(),
+) {
+  const result = await sendResetFencedStorageMessage(
+    {
+      action: "upsertNoteSource",
+      source,
+    },
+    expectedFence,
+  );
   if (!result?.success) {
     const error = new Error(result?.message || "视频资料保存失败。");
     error.code = result?.code || "SOURCE_WRITE_FAILED";
@@ -3924,6 +4314,59 @@ async function upsertNoteSourceInBackground(source) {
     currentPersistedNoteSource = result.source;
   }
   return result.source || source;
+}
+
+async function readNoteSourceFromBackground(
+  mediaKey,
+  expectedFence = captureExtensionDataFence(),
+) {
+  const result = await sendResetFencedStorageMessage(
+    {
+      action: "readNoteSource",
+      mediaKey,
+    },
+    expectedFence,
+  );
+  if (!result?.success) {
+    const error = new Error(result?.code || "NOTE_SOURCE_READ_FAILED");
+    error.code = result?.code || "NOTE_SOURCE_READ_FAILED";
+    throw error;
+  }
+  return result.source || null;
+}
+
+async function readAllNoteSourcesFromBackground(
+  expectedFence = captureExtensionDataFence(),
+) {
+  const result = await sendResetFencedStorageMessage(
+    { action: "readAllNoteSources" },
+    expectedFence,
+  );
+  if (!result?.success) {
+    const error = new Error(result?.code || "NOTE_SOURCE_READ_FAILED");
+    error.code = result?.code || "NOTE_SOURCE_READ_FAILED";
+    throw error;
+  }
+  return result.sources || {};
+}
+
+async function removeNoteSourcesInBackground(
+  mediaKeys,
+  expectedFence = captureExtensionDataFence(),
+) {
+  const result = await sendResetFencedStorageMessage(
+    {
+      action: "removeNoteSources",
+      mediaKeys,
+    },
+    expectedFence,
+  );
+  if (!result?.success) {
+    const error = new Error(result?.code || "NOTE_SOURCE_REMOVE_FAILED");
+    error.code = result?.code || "NOTE_SOURCE_REMOVE_FAILED";
+    throw error;
+  }
+  return result.changed === true;
 }
 
 /**
@@ -4155,10 +4598,7 @@ async function exportTranscript() {
           await exportTranscript();
           return;
         }
-        const latestSource = await YTD_NOTE_SOURCES.readNoteSource(
-          chrome.storage.local,
-          mediaKey,
-        );
+        const latestSource = await readNoteSourceFromBackground(mediaKey);
         assertFrozenExportOutcome(outcome, {
           mediaKeys: [mediaKey],
           mode,
@@ -4305,11 +4745,18 @@ function buildCurrentVideoSourceRecord() {
  * references it. Idempotent (the library no-ops when nothing changed), so it is
  * safe to call after saves, translations and cache writes.
  */
-async function persistCurrentVideoNoteSourceIfNoted() {
+async function persistCurrentVideoNoteSourceIfNoted(
+  expectedFence = captureExtensionDataFence(),
+) {
   const key = currentVideoId || currentMediaRef?.mediaKey || "";
-  if (!key) return null;
+  if (!key || !extensionDataFenceIsCurrent(expectedFence)) {
+    return null;
+  }
   try {
     const stored = await chrome.storage.local.get("ytd_notes");
+    if (!extensionDataFenceIsCurrent(expectedFence)) {
+      return null;
+    }
     const notes = Array.isArray(stored.ytd_notes) ? stored.ytd_notes : [];
     const hasNote = notes.some(
       (note) => String(note?.mediaKey || note?.videoId || "") === key,
@@ -4317,6 +4764,7 @@ async function persistCurrentVideoNoteSourceIfNoted() {
     if (!hasNote) return null;
     const persisted = await upsertNoteSourceInBackground(
       buildCurrentVideoSourceRecord(),
+      expectedFence,
     );
     applyPersistedSourceToCurrentVideo(persisted);
     return persisted;
@@ -4404,10 +4852,13 @@ function resolveDigestTranscriptMaterial(mediaKey, digest) {
  * ask to re-translate an already-translated title.
  */
 async function collectAllNotesExport(mediaKeys = null) {
+  const dataFence = captureExtensionDataFence();
+  assertCurrentExtensionDataFence(dataFence);
   const result = await chrome.runtime.sendMessage({
     action: "getNotes",
     videoId: null,
   });
+  assertCurrentExtensionDataFence(dataFence);
   const notes = result?.success && Array.isArray(result.notes) ? result.notes : [];
   const allGroups = sortNoteGroups(
     groupNotesBySource(notes),
@@ -4415,9 +4866,8 @@ async function collectAllNotesExport(mediaKeys = null) {
       noteVideoTitleSortKey(representative, currentNotesMode),
   );
   const groups = filterNoteGroupsByMediaKeys(allGroups, mediaKeys);
-  const storedSources = await YTD_NOTE_SOURCES.readAllSources(
-    chrome.storage.local,
-  );
+  const storedSources = await readAllNoteSourcesFromBackground(dataFence);
+  assertCurrentExtensionDataFence(dataFence);
   const sourcesByKey = {};
   for (const group of groups) {
     const rep = group.representative || group.notes[0] || {};
@@ -4428,6 +4878,7 @@ async function collectAllNotesExport(mediaKeys = null) {
       try {
         const cacheKey = `digest_${group.mediaKey}`;
         const cached = await chrome.storage.local.get(cacheKey);
+        assertCurrentExtensionDataFence(dataFence);
         const digest = cached[cacheKey];
         if (digest) {
           const backfilled = YTD_NOTE_SOURCES.sourceFromDigest(
@@ -4438,10 +4889,13 @@ async function collectAllNotesExport(mediaKeys = null) {
           if (backfilled) {
             sourcesByKey[group.mediaKey] = await upsertNoteSourceInBackground(
               backfilled,
+              dataFence,
             );
+            assertCurrentExtensionDataFence(dataFence);
           }
         }
       } catch (error) {
+        if (error?.code === "EXTENSION_DATA_RESET") throw error;
         console.error("[DigestDock] Backfill source error:", error);
       }
     }
@@ -4466,9 +4920,11 @@ async function collectAllNotesExport(mediaKeys = null) {
     source.channelName = source.channelName || rep.channelName || "";
     source.canonicalUrl = source.canonicalUrl || noteCanonicalUrl(rep);
     sourcesByKey[group.mediaKey] = sourceWasAvailable
-      ? await upsertNoteSourceInBackground(source)
+      ? await upsertNoteSourceInBackground(source, dataFence)
       : source;
+    assertCurrentExtensionDataFence(dataFence);
   }
+  assertCurrentExtensionDataFence(dataFence);
   return {
     notes: groups.flatMap((group) => group.notes),
     groups,
@@ -4664,9 +5120,20 @@ async function grantNoteExportAuthorization(
     (effectivePrecheck.hasBlocking || effectivePrecheck.hasTranslationGaps);
   let providerSnapshot = null;
   if (providerRequired) {
+    const requestFence = captureExtensionDataFence();
+    if (!requestFence) return null;
     const config = await chrome.runtime.sendMessage({ action: "checkConfig" });
     if (noteExportAuthorizationGeneration !== generation) return null;
-    currentConfigStatus = config;
+    if (
+      adoptExtensionDataFence(
+        config?.runtimeInstanceId,
+        config?.dataGeneration,
+        { requestFence },
+      )
+    ) {
+      currentConfigStatus = config;
+    }
+    if (!extensionDataFenceIsCurrent(requestFence)) return null;
     providerSnapshot = exportProviderSnapshot(config);
   }
   if (noteExportAuthorizationGeneration !== generation) return null;
@@ -4711,6 +5178,11 @@ async function validateNoteExportAuthorization(
   }
 
   if (authorization.providerRequired) {
+    const requestFence = captureExtensionDataFence();
+    if (!requestFence) {
+      revokeNoteExportAuthorization(authorization);
+      return false;
+    }
     const config = await chrome.runtime.sendMessage({ action: "checkConfig" });
     if (
       activeNoteExportAuthorization !== authorization ||
@@ -4718,7 +5190,19 @@ async function validateNoteExportAuthorization(
     ) {
       throw noteExportAuthorizationCancelledError();
     }
-    currentConfigStatus = config;
+    if (
+      adoptExtensionDataFence(
+        config?.runtimeInstanceId,
+        config?.dataGeneration,
+        { requestFence },
+      )
+    ) {
+      currentConfigStatus = config;
+    }
+    if (!extensionDataFenceIsCurrent(requestFence)) {
+      revokeNoteExportAuthorization(authorization);
+      return false;
+    }
     if (
       !sameProviderSnapshot(
         exportProviderSnapshot(config),
@@ -4842,8 +5326,10 @@ function abandonActiveExportTranslation() {
   activeExportJobId = "";
   exportTranslationGeneration += 1;
   if (jobId) {
-    chrome.runtime
-      .sendMessage({ action: "cancelExportTranslationJob", jobId })
+    sendResetFencedStorageMessage({
+      action: "cancelExportTranslationJob",
+      jobId,
+    })
       .catch(() => {});
   }
 }
@@ -4870,8 +5356,10 @@ function renderExportTranslationProgress(panel, message, generation, setStatus) 
     summary.textContent = "正在停止；已经发送的当前批次可能仍会完成，但不会继续后续批次。";
     setStatus("正在取消补译…");
     if (jobId) {
-      chrome.runtime
-        .sendMessage({ action: "cancelExportTranslationJob", jobId })
+      sendResetFencedStorageMessage({
+        action: "cancelExportTranslationJob",
+        jobId,
+      })
         .catch(() => {});
     }
   });
@@ -4974,7 +5462,7 @@ function exportJobCursor(job, additionalCompleted = []) {
   return cursor;
 }
 
-function exportRunOwner(scope, mode, generation) {
+function exportRunOwner(scope, mode, generation, dataFence) {
   return {
     scope,
     mode,
@@ -4982,12 +5470,14 @@ function exportRunOwner(scope, mode, generation) {
     videoId: currentVideoId || "",
     routeKey: currentRouteKey || "",
     digestGeneration,
+    dataFence,
   };
 }
 
 function exportRunIsCurrent(owner) {
   if (
     !owner ||
+    !extensionDataFenceIsCurrent(owner.dataFence) ||
     owner.generation !== exportTranslationGeneration ||
     owner.videoId !== (currentVideoId || "") ||
     owner.routeKey !== (currentRouteKey || "") ||
@@ -5017,12 +5507,19 @@ async function readExportJobFromBackground(jobId, { allowMissing = false } = {})
   throw exportJobError(result, "无法读取补译进度。");
 }
 
-async function checkpointExportJobInBackground(jobId, patch) {
-  const result = await chrome.runtime.sendMessage({
-    action: "checkpointExportJob",
-    jobId,
-    patch,
-  });
+async function checkpointExportJobInBackground(
+  jobId,
+  patch,
+  expectedFence = captureExtensionDataFence(),
+) {
+  const result = await sendResetFencedStorageMessage(
+    {
+      action: "checkpointExportJob",
+      jobId,
+      patch,
+    },
+    expectedFence,
+  );
   if (!result?.success || !result.job) {
     throw exportJobError(result, "无法保存补译进度。");
   }
@@ -5137,9 +5634,22 @@ function sameProviderSnapshot(left, right) {
   ].every((field) => String(left?.[field] || "") === String(right?.[field] || ""));
 }
 
-async function assertExportProviderStillCurrent(providerSnapshot) {
+async function assertExportProviderStillCurrent(
+  providerSnapshot,
+  expectedFence,
+) {
+  assertCurrentExtensionDataFence(expectedFence);
   const config = await chrome.runtime.sendMessage({ action: "checkConfig" });
-  currentConfigStatus = config;
+  if (
+    adoptExtensionDataFence(
+      config?.runtimeInstanceId,
+      config?.dataGeneration,
+      { requestFence: expectedFence },
+    )
+  ) {
+    currentConfigStatus = config;
+  }
+  assertCurrentExtensionDataFence(expectedFence);
   if (!config?.hasAiKey) {
     throw new Error("尚未配置当前 AI 服务商的 API 密钥，请先打开设置。");
   }
@@ -5157,6 +5667,7 @@ async function createOrResumeExportJobForRound({
   sourcesByKey,
   groups,
   providerSnapshot,
+  dataFence,
 }) {
   let activeIntent = intent;
   let jobId = YTD_EXPORT_JOBS.jobIdForIntent(activeIntent);
@@ -5224,22 +5735,29 @@ async function createOrResumeExportJobForRound({
       lastError: null,
     });
   }
-  const result = await chrome.runtime.sendMessage({
-    action: "createOrResumeExportJob",
-    job: candidate,
-  });
+  const result = await sendResetFencedStorageMessage(
+    {
+      action: "createOrResumeExportJob",
+      job: candidate,
+    },
+    dataFence,
+  );
   if (!result?.success || !result.job) {
     throw exportJobError(result, "无法创建或恢复补译任务。");
   }
   if (result.job.state !== "running") {
-    return checkpointExportJobInBackground(result.job.jobId, {
-      state: "running",
-      completedUnitKeys: candidate.completedUnitKeys,
-      currentBatch: null,
-      cursor: exportJobCursor(result.job, candidate.completedUnitKeys),
-      exportClaim: null,
-      lastError: null,
-    });
+    return checkpointExportJobInBackground(
+      result.job.jobId,
+      {
+        state: "running",
+        completedUnitKeys: candidate.completedUnitKeys,
+        currentBatch: null,
+        cursor: exportJobCursor(result.job, candidate.completedUnitKeys),
+        exportClaim: null,
+        lastError: null,
+      },
+      dataFence,
+    );
   }
   return result.job;
 }
@@ -5276,6 +5794,8 @@ async function runConfirmedExportTranslationRound({
     digestGeneration,
     mode,
   };
+  const roundDataFence = captureExtensionDataFence();
+  assertCurrentExtensionDataFence(roundDataFence);
   const config = await chrome.runtime.sendMessage({ action: "checkConfig" });
   assertNoteExportAuthorizationCurrent(noteAuthorization);
   const modeStillCurrent =
@@ -5290,7 +5810,16 @@ async function runConfirmedExportTranslationRound({
   ) {
     throw exportCancelledError();
   }
-  currentConfigStatus = config;
+  if (
+    adoptExtensionDataFence(
+      config?.runtimeInstanceId,
+      config?.dataGeneration,
+      { requestFence: roundDataFence },
+    )
+  ) {
+    currentConfigStatus = config;
+  }
+  assertCurrentExtensionDataFence(roundDataFence);
   if (!config?.hasAiKey) {
     throw new Error("尚未配置当前 AI 服务商的 API 密钥，请先打开设置。");
   }
@@ -5299,7 +5828,7 @@ async function runConfirmedExportTranslationRound({
   }
 
   const generation = ++exportTranslationGeneration;
-  const owner = exportRunOwner(scope, mode, generation);
+  const owner = exportRunOwner(scope, mode, generation, roundDataFence);
   const providerSnapshot = exportProviderSnapshot(config);
   if (
     expectedProviderSnapshot &&
@@ -5354,6 +5883,7 @@ async function runConfirmedExportTranslationRound({
       sourcesByKey,
       groups,
       providerSnapshot,
+      dataFence: roundDataFence,
     });
     assertNoteExportAuthorizationCurrent(noteAuthorization);
     const previousJobId = activeExportJobId;
@@ -5363,24 +5893,31 @@ async function runConfirmedExportTranslationRound({
     // cancellation path below can never leave that job running.
     assertExportRunCurrent(owner);
     if (previousJobId && previousJobId !== job.jobId) {
-      await chrome.runtime
-        .sendMessage({
+      await sendResetFencedStorageMessage(
+        {
           action: "cancelExportTranslationJob",
           jobId: previousJobId,
-        })
-        .catch(() => null);
+        },
+        roundDataFence,
+      ).catch(() => null);
     }
     showProgress("准备补译");
     for (const notes of round.noteBatches) {
       assertExportRunCurrent(owner);
-      await assertExportProviderStillCurrent(providerSnapshot);
-      const result = await sendTranslationMessage({
-        action: "translateExportNotesBatch",
-        jobId: job.jobId,
-        unitKeys: notes.map(exportNoteUnitKey),
-        notes,
-        titles: [],
-      });
+      await assertExportProviderStillCurrent(
+        providerSnapshot,
+        roundDataFence,
+      );
+      const result = await sendResetFencedTranslationMessage(
+        {
+          action: "translateExportNotesBatch",
+          jobId: job.jobId,
+          unitKeys: notes.map(exportNoteUnitKey),
+          notes,
+          titles: [],
+        },
+        roundDataFence,
+      );
       assertExportRunCurrent(owner);
       const translatedIds = new Set(
         (result?.translations || [])
@@ -5391,11 +5928,15 @@ async function runConfirmedExportTranslationRound({
         .filter((note) => translatedIds.has(String(note.id || "")))
         .map(exportNoteUnitKey);
       if (completedUnitKeys.length) {
-        job = await checkpointExportJobInBackground(job.jobId, {
-          completedUnitKeys,
-          cursor: exportJobCursor(job, completedUnitKeys),
-          lastError: null,
-        });
+        job = await checkpointExportJobInBackground(
+          job.jobId,
+          {
+            completedUnitKeys,
+            cursor: exportJobCursor(job, completedUnitKeys),
+            lastError: null,
+          },
+          roundDataFence,
+        );
       }
       if (completedUnitKeys.length !== notes.length) {
         throw new Error(result?.error || "笔记补译失败。");
@@ -5406,14 +5947,20 @@ async function runConfirmedExportTranslationRound({
 
     for (const titles of round.titleBatches) {
       assertExportRunCurrent(owner);
-      await assertExportProviderStillCurrent(providerSnapshot);
-      const result = await sendTranslationMessage({
-        action: "translateExportNotesBatch",
-        jobId: job.jobId,
-        unitKeys: titles.map(exportTitleUnitKey),
-        notes: [],
-        titles,
-      });
+      await assertExportProviderStillCurrent(
+        providerSnapshot,
+        roundDataFence,
+      );
+      const result = await sendResetFencedTranslationMessage(
+        {
+          action: "translateExportNotesBatch",
+          jobId: job.jobId,
+          unitKeys: titles.map(exportTitleUnitKey),
+          notes: [],
+          titles,
+        },
+        roundDataFence,
+      );
       assertExportRunCurrent(owner);
       const translatedKeys = new Set(
         (result?.titles || [])
@@ -5424,11 +5971,15 @@ async function runConfirmedExportTranslationRound({
         .filter((title) => translatedKeys.has(String(title.mediaKey || "")))
         .map(exportTitleUnitKey);
       if (completedUnitKeys.length) {
-        job = await checkpointExportJobInBackground(job.jobId, {
-          completedUnitKeys,
-          cursor: exportJobCursor(job, completedUnitKeys),
-          lastError: null,
-        });
+        job = await checkpointExportJobInBackground(
+          job.jobId,
+          {
+            completedUnitKeys,
+            cursor: exportJobCursor(job, completedUnitKeys),
+            lastError: null,
+          },
+          roundDataFence,
+        );
       }
       if (completedUnitKeys.length !== titles.length) {
         throw new Error(result?.error || "标题补译失败。");
@@ -5439,8 +5990,9 @@ async function runConfirmedExportTranslationRound({
 
     for (const units of round.sourceBatches) {
       assertExportRunCurrent(owner);
-      const result = await sendTranslationMessage(
+      const result = await sendResetFencedTranslationMessage(
         sourceBatchMessage(job.jobId, units),
+        roundDataFence,
       );
       assertExportRunCurrent(owner);
       if (!result?.success) {
@@ -5450,9 +6002,9 @@ async function runConfirmedExportTranslationRound({
         throw exportCancelledError();
       }
       job = await readExportJobFromBackground(job.jobId);
-      const storedSource = await YTD_NOTE_SOURCES.readNoteSource(
-        chrome.storage.local,
+      const storedSource = await readNoteSourceFromBackground(
         units[0].mediaKey,
+        roundDataFence,
       );
       assertExportRunCurrent(owner);
       if (storedSource) updateCurrentExportTranslations(storedSource);
@@ -5466,14 +6018,18 @@ async function runConfirmedExportTranslationRound({
       0,
       job.orderedUnitKeys.length - job.completedUnitKeys.length,
     );
-    job = await checkpointExportJobInBackground(job.jobId, {
-      // Final file assembly owns the ready/claim/completed transition. Keep a
-      // fully translated job paused until latest storage has been revalidated.
-      state: "paused",
-      currentBatch: null,
-      cursor: exportJobCursor(job),
-      lastError: null,
-    });
+    job = await checkpointExportJobInBackground(
+      job.jobId,
+      {
+        // Final file assembly owns the ready/claim/completed transition. Keep a
+        // fully translated job paused until latest storage has been revalidated.
+        state: "paused",
+        currentBatch: null,
+        cursor: exportJobCursor(job),
+        lastError: null,
+      },
+      roundDataFence,
+    );
     assertExportRunCurrent(owner);
     if (panel) panel.hidden = true;
     if (remainingCount) {
@@ -5492,29 +6048,34 @@ async function runConfirmedExportTranslationRound({
     };
   } catch (error) {
     if (job?.jobId && exportFlowWasCancelled(error)) {
-      await chrome.runtime
-        .sendMessage({
+      await sendResetFencedStorageMessage(
+        {
           action: "cancelExportTranslationJob",
           jobId: job.jobId,
-        })
-        .catch(() => null);
+        },
+        roundDataFence,
+      ).catch(() => null);
     }
     if (job?.jobId && !exportFlowWasCancelled(error)) {
       try {
         const latest = await readExportJobFromBackground(job.jobId);
         if (["planned", "running", "paused", "failed"].includes(latest.state)) {
-          await checkpointExportJobInBackground(job.jobId, {
-            state:
-              error?.code === "EXPORT_JOB_PROVIDER_MISMATCH"
-                ? "paused"
-                : "failed",
-            currentBatch: null,
-            lastError: {
-              code: error?.code || "EXPORT_TRANSLATION_FAILED",
-              retryable: true,
-              at: Date.now(),
+          await checkpointExportJobInBackground(
+            job.jobId,
+            {
+              state:
+                error?.code === "EXPORT_JOB_PROVIDER_MISMATCH"
+                  ? "paused"
+                  : "failed",
+              currentBatch: null,
+              lastError: {
+                code: error?.code || "EXPORT_TRANSLATION_FAILED",
+                retryable: true,
+                at: Date.now(),
+              },
             },
-          });
+            roundDataFence,
+          );
         }
       } catch (_checkpointError) {
         // Preserve the original provider/validation error for the user.
@@ -6203,9 +6764,19 @@ async function openNoteExportPicker({ selectAll = false } = {}) {
   try {
     if (currentNotesMode !== "original") {
       try {
-        currentConfigStatus = await chrome.runtime.sendMessage({
+        const requestFence = extensionDataFenceSnapshot();
+        const config = await chrome.runtime.sendMessage({
           action: "checkConfig",
         });
+        if (
+          adoptExtensionDataFence(
+            config?.runtimeInstanceId,
+            config?.dataGeneration,
+            { requestFence },
+          )
+        ) {
+          currentConfigStatus = config;
+        }
       } catch (_error) {
         // The picker still works in direct-export mode when settings are
         // temporarily unavailable; the complete action rechecks before AI.
@@ -6700,6 +7271,7 @@ async function triggerAnalysis() {
   setOverviewTranslationStatus();
 
   const videoId = currentVideoId;
+  const dataFence = captureExtensionDataFence();
   const generation = digestGeneration;
   const routeKey = currentRouteKey;
   const mediaRef = currentMediaRef;
@@ -6711,6 +7283,7 @@ async function triggerAnalysis() {
   const videoDescription = currentVideoDescription;
   const videoDuration = currentVideoDuration;
   const ownsRequest = () =>
+    extensionDataFenceIsCurrent(dataFence) &&
     isCurrentDigest(videoId, generation, routeKey) &&
     currentMediaRef?.mediaKey === mediaRef?.mediaKey &&
     currentTranscriptTimestamped === transcriptTimestamped;
@@ -6770,8 +7343,11 @@ async function triggerAnalysis() {
       currentAnalysis,
       transcriptTimestamped,
       sourceLanguage,
+      currentTranscriptSource,
+      currentTranscriptSelectedTrack,
+      dataFence,
     );
-    const digestSaved = await saveToCache(videoId);
+    const digestSaved = await saveToCache(videoId, dataFence);
     if (!overviewSaved && !digestSaved) {
       setOverviewTranslationStatus(
         "概览已生成，但本地保存失败；再次打开可能会重新生成并消耗 AI 额度。",
@@ -7305,6 +7881,22 @@ function validateOverviewCacheRecord(
   return record.analysis;
 }
 
+async function persistResetFencedCacheRecord(
+  key,
+  record,
+  expectedFence = captureExtensionDataFence(),
+) {
+  const result = await sendResetFencedStorageMessage(
+    {
+      action: "persistResetFencedCache",
+      key,
+      record,
+    },
+    expectedFence,
+  );
+  return result?.success === true;
+}
+
 async function saveOverviewToCache(
   videoId,
   analysis,
@@ -7312,6 +7904,7 @@ async function saveOverviewToCache(
   sourceLanguage = currentTranscriptLanguage,
   transcriptSource = currentTranscriptSource,
   selectedTrack = currentTranscriptSelectedTrack,
+  expectedFence = captureExtensionDataFence(),
 ) {
   const key = overviewCacheKey(videoId);
   const record = buildOverviewCacheRecord(
@@ -7324,7 +7917,12 @@ async function saveOverviewToCache(
   );
   if (!key || !record) return false;
   try {
-    await chrome.storage.local.set({ [key]: record });
+    const persisted = await persistResetFencedCacheRecord(
+      key,
+      record,
+      expectedFence,
+    );
+    if (!persisted) return false;
     await evictOldOverviewCacheEntries(OVERVIEW_CACHE_MAX_ENTRIES);
     return true;
   } catch (error) {
@@ -7385,7 +7983,10 @@ async function evictOldOverviewCacheEntries(maxEntries) {
  * without consuming API tokens or Supadata calls.
  * Cache expires after 30 days. Oldest entries evicted when > 20 videos cached.
  */
-async function saveToCache(videoId) {
+async function saveToCache(
+  videoId,
+  expectedFence = captureExtensionDataFence(),
+) {
   if (!videoId || videoId !== currentVideoId || !currentTranscript) return false;
 
   try {
@@ -7438,7 +8039,12 @@ async function saveToCache(videoId) {
       timestamp: Date.now(),
     };
 
-    await chrome.storage.local.set({ [`digest_${videoId}`]: cacheData });
+    const persisted = await persistResetFencedCacheRecord(
+      `digest_${videoId}`,
+      cacheData,
+      expectedFence,
+    );
+    if (!persisted) return false;
     debugLog(
       "Saved to cache:",
       videoId,
@@ -7450,7 +8056,7 @@ async function saveToCache(videoId) {
 
     // Refresh this video's durable export material (idempotent; only when the
     // video has a note). Captures newly translated transcript/title segments.
-    void persistCurrentVideoNoteSourceIfNoted();
+    void persistCurrentVideoNoteSourceIfNoted(expectedFence);
     return true;
   } catch (error) {
     console.error("Cache save error:", error);
@@ -7654,7 +8260,7 @@ async function invalidateTranscriptDerivedArtifacts(
     return false;
   }
   await chrome.storage.local.remove(overviewCacheKey(videoId));
-  await YTD_NOTE_SOURCES.removeNoteSources(chrome.storage.local, videoId);
+  await removeNoteSourcesInBackground(videoId);
   currentPersistedNoteSource = null;
   const cachePrefix = transcriptTranslationCachePrefix(videoId);
   for (const key of [...transcriptParagraphCache.keys()]) {
@@ -7689,9 +8295,9 @@ async function loadFromCache(videoId, expected = {}) {
 /**
  * Updates the cache after enhance or translation operations.
  */
-async function updateCache() {
+async function updateCache(expectedFence = captureExtensionDataFence()) {
   if (currentVideoId) {
-    await saveToCache(currentVideoId);
+    await saveToCache(currentVideoId, expectedFence);
   }
 }
 
@@ -7754,13 +8360,11 @@ function noteHasPolishedChineseText(note) {
 }
 
 function noteOriginalText(note) {
-  if (noteHasPolishedChineseText(note)) {
-    return note.text.trim();
-  }
-  if (noteHasChineseSource(note)) {
-    return String(note?.rawText || note?.text || "").trim();
-  }
-  return String(note?.text || note?.rawText || "").trim();
+  // "Original" must be the verbatim caption line. `text` may have been
+  // rewritten by an AI cleanup pass, so it is only a fallback for legacy
+  // notes saved before rawText existed.
+  const rawText = String(note?.rawText || "").trim();
+  return rawText || String(note?.text || "").trim();
 }
 
 function canonicalStoredNoteText(text) {
@@ -8081,6 +8685,8 @@ async function ensureNotesChinese() {
     return;
   }
 
+  const dataFence = captureExtensionDataFence();
+  if (!dataFence) return;
   const generation = ++notesTranslationGeneration;
   const failureById = new Map();
   setNotesTranslationLoading(true);
@@ -8095,20 +8701,28 @@ async function ensureNotesChinese() {
     // notes continue only after an explicit retry, so a large library cannot
     // multiply requests silently.
     const batch = missingNotes.slice(0, 10);
-    const result = await sendTranslationMessage({
-      action: "translateNotes",
-      notes: batch.map((note) => ({
-        id: note.id,
-        text: noteOriginalText(note),
-        videoTitle: note.videoTitle || "",
-        rawText: note.rawText || "",
-        sourceLanguage: note.sourceLanguage || "",
-        platform: note.platform === "bilibili" ? "bilibili" : "youtube",
-        textLanguage: note.textLanguage || "",
-      })),
-      titles: titleWork,
-    });
-    if (generation !== notesTranslationGeneration) return;
+    const result = await sendResetFencedTranslationMessage(
+      {
+        action: "translateNotes",
+        notes: batch.map((note) => ({
+          id: note.id,
+          text: noteOriginalText(note),
+          videoTitle: note.videoTitle || "",
+          rawText: note.rawText || "",
+          sourceLanguage: note.sourceLanguage || "",
+          platform: note.platform === "bilibili" ? "bilibili" : "youtube",
+          textLanguage: note.textLanguage || "",
+        })),
+        titles: titleWork,
+      },
+      dataFence,
+    );
+    if (
+      generation !== notesTranslationGeneration ||
+      !extensionDataFenceIsCurrent(dataFence)
+    ) {
+      return;
+    }
     const translatedById = new Map(
       (result.translations || []).map((note) => [note.id, note]),
     );
@@ -8281,6 +8895,12 @@ async function loadNotes(videoId, { translateMissing = true } = {}) {
 
     if (result.success) {
       currentNotes = Array.isArray(result.notes) ? result.notes : [];
+      // Capacity describes the whole library, so it is read from the response
+      // rather than from the possibly filtered `notes` array.
+      notesLibraryTotal = Number.isFinite(result.totalCount)
+        ? result.totalCount
+        : currentNotes.length;
+      notesLibraryLimit = Number.isFinite(result.limit) ? result.limit : 0;
       currentNotesFilterVideoId = videoId;
       isNotesLoading = false;
       renderNotes(currentNotes, videoId);
@@ -8304,7 +8924,37 @@ async function loadNotes(videoId, { translateMissing = true } = {}) {
  * container per media identity; containers are ordered by visible title and
  * notes inside each container by timecode ascending.
  */
+let notesLibraryTotal = 0;
+let notesLibraryLimit = 0;
+
+/**
+ * Renders the library capacity band. Capacity is a storage fact, not an error:
+ * it appears only near the ceiling, states the real numbers, and always offers
+ * the backup route before anything can be lost. Notes are never evicted to
+ * make room, so a full library refuses new saves rather than dropping old ones.
+ */
+function renderNotesCapacity() {
+  const band = document.getElementById("notesCapacity");
+  const text = document.getElementById("notesCapacityText");
+  if (!band || !text) return;
+
+  const limit = Number(notesLibraryLimit) || 0;
+  const total = Number(notesLibraryTotal) || 0;
+  if (!limit || total < Math.floor(limit * 0.9)) {
+    band.hidden = true;
+    return;
+  }
+
+  const full = total >= limit;
+  band.className = full ? "notes-capacity is-full" : "notes-capacity";
+  text.innerHTML = full
+    ? `已保存 <strong>${total} / ${limit}</strong> 条笔记，已达上限。新的笔记会被拒绝保存，已保存的笔记不会被删除。请先导出备份，再删除不再需要的笔记。`
+    : `已保存 <strong>${total} / ${limit}</strong> 条笔记，接近上限。建议先导出一份备份。`;
+  band.hidden = false;
+}
+
 function renderNotes(notes, filteredVideoId) {
+  renderNotesCapacity();
   const notesList = document.getElementById("notesList");
   const notesIntro = document.getElementById("notesIntro");
   const notesIntroText = document.getElementById("notesIntroText");
@@ -8452,8 +9102,7 @@ function buildNoteItemElement(note, filteredVideoId) {
   noteEl.querySelector(".note-delete").addEventListener("click", async (e) => {
     e.stopPropagation();
     closeAllNoteMenus();
-    await deleteNote(note.id);
-    loadNotes(filteredVideoId);
+    if (await deleteNote(note.id)) loadNotes(filteredVideoId);
   });
 
   // Copy text button — copies just the note's text
@@ -8519,13 +9168,20 @@ function ensureNoteMenuDismissHandler() {
  * Deletes a note by ID.
  */
 async function deleteNote(noteId) {
+  const fence = captureExtensionDataFence();
+  if (!fence) return false;
   try {
-    await chrome.runtime.sendMessage({
-      action: "deleteNote",
-      noteId: noteId,
-    });
+    const result = await sendResetFencedStorageMessage(
+      {
+        action: "deleteNote",
+        noteId,
+      },
+      fence,
+    );
+    return result?.success === true && extensionDataFenceIsCurrent(fence);
   } catch (error) {
     console.error("[DigestDock Panel] Delete note error:", error);
+    return false;
   }
 }
 
@@ -9378,6 +10034,7 @@ async function requestTranscriptTranslationBatch(
   generation,
   videoId,
 ) {
+  const dataFence = captureExtensionDataFence();
   const sourceBatch = indices.map((index) => segments[index]);
   setTranslatingSpinner(true);
   try {
@@ -9392,7 +10049,9 @@ async function requestTranscriptTranslationBatch(
     });
 
     const isStale =
-      generation !== translationGeneration || videoId !== currentVideoId;
+      !extensionDataFenceIsCurrent(dataFence) ||
+      generation !== translationGeneration ||
+      videoId !== currentVideoId;
     if (isStale) return;
 
     const responseSegments = result?.success
@@ -9410,7 +10069,7 @@ async function requestTranscriptTranslationBatch(
         generation,
       );
     });
-    await updateCache();
+    await updateCache(dataFence);
   } catch (error) {
     if (generation !== translationGeneration) return;
     sourceBatch.forEach((segment, batchIndex) => {
@@ -9563,6 +10222,17 @@ globalThis.__YTD_TRANSCRIPT_TESTING__ = {
   hasConfiguredAiService,
   activeAiServiceLabel,
   aiFeatureSetupMessage,
+  sidepanelMvpRefreshConfig,
+  captureExtensionDataFence,
+  extensionDataFenceSnapshot,
+  extensionDataFenceIsCurrent,
+  sendResetFencedStorageMessage,
+  sendResetFencedTranslationMessage,
+  getExtensionDataState: () => ({
+    runtimeInstanceId: extensionDataRuntimeInstanceId,
+    dataGeneration: extensionDataGeneration,
+    resetInProgress: extensionDataResetInProgress,
+  }),
   createSingleFlight,
   buildTranscriptFetchRequest,
   transcriptResponseMatchesRequest,
@@ -9598,6 +10268,7 @@ globalThis.__YTD_TRANSCRIPT_TESTING__ = {
   noteHasChineseSource,
   noteHasPolishedChineseText,
   noteOriginalText,
+  resolveNoteExportEntry,
   noteChineseText,
   noteCopyTextForMode,
   noteOriginalVideoTitle,
@@ -9614,6 +10285,7 @@ globalThis.__YTD_TRANSCRIPT_TESTING__ = {
   noteSourceMetaText,
   summarizeNoteTranslationFailures,
   saveCurrentMomentFromPanel,
+  deleteNote,
   renderNoteLanguageContent,
   renderChapterLanguageContent,
   renderQuoteLanguageContent,
@@ -9646,6 +10318,7 @@ globalThis.__YTD_TRANSCRIPT_TESTING__ = {
   handleNotesModeChange,
   buildNotesExportPrecheck,
   buildNotesExportTranslationPlan,
+  collectAllNotesExport,
   exportAllNotes,
   captureNotesOnlyMetadata,
   playNote,
@@ -9653,6 +10326,7 @@ globalThis.__YTD_TRANSCRIPT_TESTING__ = {
   normalizeExportMediaKeys,
   filterNoteGroupsByMediaKeys,
   buildFrozenExportIntent,
+  createOrResumeExportJobForRound,
   renderExportTranslationProgress,
   exportRunIsCurrent,
   sourceBatchMessage,

@@ -813,7 +813,11 @@ async function saveCurrentNote() {
       showNoteSavedToast(result.note);
     } else {
       const label =
-        result.error === "TRANSCRIPT_TASK_REQUIRED"
+        result.code === "NOTE_STORAGE_FULL"
+          ? "笔记已达上限"
+          : result.code === "NOTES_BACKUP_TOO_LARGE"
+            ? "笔记备份容量已满"
+          : result.error === "TRANSCRIPT_TASK_REQUIRED"
           ? "请先打开侧栏字幕"
           : result.error === "SUPADATA_CONSENT_REQUIRED"
             ? "请在侧栏授权"

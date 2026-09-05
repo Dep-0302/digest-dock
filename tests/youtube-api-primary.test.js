@@ -15,6 +15,7 @@ const vm = require("node:vm");
 const root = path.resolve(__dirname, "..");
 const read = (file) => fs.readFileSync(path.join(root, file), "utf8");
 const bilibiliAdapter = require("../bilibili.js");
+const notesBackup = require("../notes-backup.js");
 
 function jsonResponse(body, status = 200) {
   return {
@@ -122,6 +123,13 @@ function loadBackground({
         get: tabsGet,
       },
       scripting: { executeScript },
+    },
+    // Production loads this helper in the service-worker realm. Bridge VM note
+    // objects into the module realm for the same strict schema validation.
+    YTD_NOTES_BACKUP: {
+      ...notesBackup,
+      createBackup: (notes, options) =>
+        notesBackup.createBackup(JSON.parse(JSON.stringify(notes)), options),
     },
     YTD_SETTINGS: {
       STORAGE_KEY: "ytd_settings",
@@ -1233,8 +1241,8 @@ test("side panel and background stay wired to the Passive-first contract", () =>
   const background = read("background.js");
 
   // Protocol and cache-policy versions moved forward together.
-  assert.match(panel, /const REQUIRED_RUNTIME_PROTOCOL_VERSION = 12/);
-  assert.match(background, /const RUNTIME_PROTOCOL_VERSION = 12/);
+  assert.match(panel, /const REQUIRED_RUNTIME_PROTOCOL_VERSION = 14/);
+  assert.match(background, /const RUNTIME_PROTOCOL_VERSION = 14/);
   assert.match(panel, /const TRANSCRIPT_SOURCE_POLICY_VERSION = 5/);
   assert.match(background, /const TRANSCRIPT_SOURCE_POLICY_VERSION = 5/);
 

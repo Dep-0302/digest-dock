@@ -153,6 +153,67 @@ test("storage changes sync live and deletion restores the default", () => {
   });
 });
 
+test("reset removal overrides an optimistic reading choice that is still writing", async () => {
+  const pendingWrite = deferred();
+  const attributes = new Map();
+  const listeners = [];
+  const runtime = {
+    document: {
+      documentElement: {
+        setAttribute: (name, value) => attributes.set(name, String(value)),
+        getAttribute: (name) => attributes.get(name) || null,
+      },
+    },
+    localStorage: { getItem: () => null, setItem() {} },
+    chrome: {
+      storage: {
+        local: {
+          async get() {
+            return {};
+          },
+          set() {
+            return pendingWrite.promise;
+          },
+        },
+        onChanged: {
+          addListener(listener) {
+            listeners.push(listener);
+          },
+        },
+      },
+    },
+  };
+  const api = readingModule.createReadingDisplayApi(runtime);
+  await api.boot();
+  api.watchStoredReadingDisplay();
+  const saving = api.persistReadingDisplay({ size: "xlarge", weight: "bold" });
+  for (let index = 0; index < 3; index += 1) await Promise.resolve();
+
+  for (const listener of listeners) {
+    listener(
+      {
+        ytd_reading_display: {
+          oldValue: { size: "standard", weight: "regular" },
+          newValue: undefined,
+        },
+      },
+      "local",
+    );
+  }
+  assert.deepEqual(api.currentReadingDisplay(), {
+    size: "standard",
+    weight: "regular",
+  });
+
+  pendingWrite.resolve();
+  await saving;
+  assert.deepEqual(
+    api.currentReadingDisplay(),
+    { size: "standard", weight: "regular" },
+    "a successful pre-reset writer must not restore its optimistic value",
+  );
+});
+
 test("a late initial read cannot overwrite a newer user choice", async () => {
   const pendingGet = deferred();
   const attributes = new Map();
@@ -235,6 +296,140 @@ test("serialized writes keep a newer choice when an older write fails", async ()
   assert.deepEqual(api.currentReadingDisplay(), {
     size: "large",
     weight: "bold",
+  });
+});
+
+test("a caller-provided persistence gate keeps reading writes serialized", async () => {
+  const firstWrite = deferred();
+  const writes = [];
+  const harness = createHarness();
+  let writeCalls = 0;
+  const persist = async (value) => {
+    writeCalls += 1;
+    if (writeCalls === 1) await firstWrite.promise;
+    writes.push(value);
+  };
+
+  await harness.api.boot();
+  const older = harness.api.persistReadingDisplay(
+    { size: "large", weight: "regular" },
+    persist,
+  );
+  const newer = harness.api.persistReadingDisplay(
+    { size: "xlarge", weight: "bold" },
+    persist,
+  );
+  for (let index = 0; index < 4; index += 1) await Promise.resolve();
+
+  assert.equal(writeCalls, 1, "the second external write remains queued");
+  assert.equal(
+    harness.values.ytd_reading_display,
+    undefined,
+    "the default chrome.storage writer is bypassed",
+  );
+
+  firstWrite.resolve();
+  await Promise.all([older, newer]);
+  assert.deepEqual(writes, [
+    { size: "large", weight: "regular" },
+    { size: "xlarge", weight: "bold" },
+  ]);
+});
+
+test("an absent primary key overrides a stale first-paint mirror after reset", async () => {
+  const attributes = new Map();
+  const mirror = new Map([
+    [
+      readingModule.MIRROR_KEY,
+      JSON.stringify({ size: "xlarge", weight: "bold" }),
+    ],
+  ]);
+  const api = readingModule.createReadingDisplayApi({
+    document: {
+      documentElement: {
+        setAttribute: (name, value) => attributes.set(name, String(value)),
+        getAttribute: (name) => attributes.get(name) || null,
+      },
+    },
+    localStorage: {
+      getItem: (key) => mirror.get(key) || null,
+      setItem: (key, value) => mirror.set(key, String(value)),
+    },
+    chrome: {
+      storage: {
+        local: { async get() { return {}; }, async set() {} },
+        onChanged: { addListener() {} },
+      },
+    },
+  });
+
+  assert.deepEqual(
+    api.currentReadingDisplay(),
+    { size: "xlarge", weight: "bold" },
+    "the mirror remains only a synchronous first-paint hint",
+  );
+  await api.boot();
+  assert.deepEqual(api.currentReadingDisplay(), {
+    size: "standard",
+    weight: "regular",
+  });
+  assert.deepEqual(JSON.parse(mirror.get(readingModule.MIRROR_KEY)), {
+    size: "standard",
+    weight: "regular",
+  });
+});
+
+test("a reset-rejected reading write rolls UI and mirror back to primary storage", async () => {
+  const values = {
+    ytd_reading_display: { size: "large", weight: "regular" },
+  };
+  const attributes = new Map();
+  const mirror = new Map();
+  const api = readingModule.createReadingDisplayApi({
+    document: {
+      documentElement: {
+        setAttribute: (name, value) => attributes.set(name, String(value)),
+        getAttribute: (name) => attributes.get(name) || null,
+      },
+    },
+    localStorage: {
+      getItem: (key) => mirror.get(key) || null,
+      setItem: (key, value) => mirror.set(key, String(value)),
+    },
+    chrome: {
+      storage: {
+        local: {
+          async get(key) {
+            return Object.hasOwn(values, key) ? { [key]: values[key] } : {};
+          },
+          async set() {},
+        },
+        onChanged: { addListener() {} },
+      },
+    },
+  });
+  await api.boot();
+
+  await assert.rejects(
+    api.persistReadingDisplay(
+      { size: "xlarge", weight: "bold" },
+      async () => {
+        delete values.ytd_reading_display;
+        const error = new Error("EXTENSION_DATA_RESET");
+        error.code = "EXTENSION_DATA_RESET";
+        throw error;
+      },
+    ),
+    /EXTENSION_DATA_RESET/,
+  );
+
+  assert.deepEqual(api.currentReadingDisplay(), {
+    size: "standard",
+    weight: "regular",
+  });
+  assert.deepEqual(JSON.parse(mirror.get(readingModule.MIRROR_KEY)), {
+    size: "standard",
+    weight: "regular",
   });
 });
 

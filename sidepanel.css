@@ -2105,6 +2105,44 @@ body {
   outline: none;
 }
 
+/* Library capacity is a fact about storage, not an error, so it never borrows
+   the danger container. At the ceiling it gains weight but keeps the accent. */
+.notes-capacity {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+  padding: 10px 14px;
+  border: 1px solid var(--accent-border);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--r-md);
+  background: var(--accent-dim);
+  font-family: var(--font-reading);
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--ink-secondary);
+}
+
+.notes-capacity-text {
+  flex: 1 1 16rem;
+  min-width: 0;
+}
+
+.notes-capacity strong {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.notes-capacity.is-full {
+  border-left-color: var(--danger);
+}
+
+.notes-capacity.is-full strong {
+  color: var(--danger);
+}
+
 .notes-intro {
   display: flex;
   flex-direction: column;

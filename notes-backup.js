@@ -15,8 +15,15 @@ var YTD_NOTES_BACKUP = (() => {
   const LEGACY_SCHEMA_VERSION = 1;
   const STRICT_MEDIA_IDENTITY_MIN_VERSION = 2;
   const SUPPORTED_SCHEMA_VERSIONS = new Set([1, 2, 3]);
-  const MAX_NOTES = 100;
-  const MAX_BACKUP_BYTES = 5 * 1024 * 1024;
+  // Single source of truth for the saved-note ceiling. The service worker
+  // reads this same value via YTD_NOTES_BACKUP.MAX_NOTES so storage and import
+  // cannot drift on the number of notes they accept.
+  const MAX_NOTES = 500;
+  // 500 notes containing every field the current product can generate at its
+  // maximum length serialize below 30 MiB even when JSON must escape isolated
+  // UTF-16 surrogates. Keep the next conventional power-of-two boundary while
+  // retaining a firm bound for untrusted imports.
+  const MAX_BACKUP_BYTES = 32 * 1024 * 1024;
   const MAX_TIMESTAMP_SECONDS = 31_536_000;
   const MAX_LEGACY_NOTE_TEXT_LENGTH = 50_000;
   const MAX_LEGACY_SOURCE_LANGUAGE_LENGTH = 100;
@@ -416,6 +423,15 @@ var YTD_NOTES_BACKUP = (() => {
     return new TextEncoder().encode(text).byteLength;
   }
 
+  /**
+   * Canonical on-disk representation for a notes backup. Export size checks,
+   * downloads, and import tests must all use these exact bytes so a backup the
+   * extension creates can be read back by the same extension.
+   */
+  function serializeBackup(backup) {
+    return JSON.stringify(backup);
+  }
+
   function validateExportedAt(value) {
     if (
       typeof value !== "string" ||
@@ -442,15 +458,23 @@ var YTD_NOTES_BACKUP = (() => {
       notes: makeBackupNoteIdsUnique(notes.map(noteForBackup)),
     };
 
-    if (byteLength(JSON.stringify(backup)) > MAX_BACKUP_BYTES) {
-      fail("NOTES_BACKUP_TOO_LARGE");
+    const serializedBytes = byteLength(serializeBackup(backup));
+    if (serializedBytes > MAX_BACKUP_BYTES) {
+      fail("NOTES_BACKUP_TOO_LARGE", {
+        actualBytes: serializedBytes,
+        maxBytes: MAX_BACKUP_BYTES,
+      });
     }
     return backup;
   }
 
   function parseBackupText(text) {
-    if (typeof text !== "string" || byteLength(text) > MAX_BACKUP_BYTES) {
-      fail("NOTES_BACKUP_TOO_LARGE");
+    const serializedBytes = typeof text === "string" ? byteLength(text) : 0;
+    if (typeof text !== "string" || serializedBytes > MAX_BACKUP_BYTES) {
+      fail("NOTES_BACKUP_TOO_LARGE", {
+        actualBytes: serializedBytes,
+        maxBytes: MAX_BACKUP_BYTES,
+      });
     }
 
     let parsed;
@@ -639,6 +663,7 @@ var YTD_NOTES_BACKUP = (() => {
     normalizeNote,
     notesBackupFilename,
     parseBackupText,
+    serializeBackup,
   };
 })();
 
