@@ -15,14 +15,8 @@ var YTD_NOTES_BACKUP = (() => {
   const LEGACY_SCHEMA_VERSION = 1;
   const STRICT_MEDIA_IDENTITY_MIN_VERSION = 2;
   const SUPPORTED_SCHEMA_VERSIONS = new Set([1, 2, 3]);
-  // Single source of truth for new-note and import-growth capacity. Recovery
-  // backups may carry an already-over-limit legacy library, but neither a save
-  // nor an import may grow that library further above this ceiling.
-  const MAX_NOTES = 500;
-  // 500 notes containing every field the current product can generate at its
-  // maximum length serialize below 30 MiB even when JSON must escape isolated
-  // UTF-16 surrogates. Keep the next conventional power-of-two boundary while
-  // retaining a firm bound for untrusted imports.
+  // One shared byte-cap guard bounds untrusted imports and every recoverable
+  // notes state without imposing a fixed note-count ceiling.
   const MAX_BACKUP_BYTES = 32 * 1024 * 1024;
   const MAX_TIMESTAMP_SECONDS = 31_536_000;
   const MAX_LEGACY_NOTE_TEXT_LENGTH = 50_000;
@@ -633,17 +627,6 @@ var YTD_NOTES_BACKUP = (() => {
       importedCount += 1;
     });
 
-    if (
-      merged.length > MAX_NOTES &&
-      merged.length > existingNotes.length
-    ) {
-      fail("NOTES_CAPACITY_EXCEEDED", {
-        total: merged.length,
-        limit: MAX_NOTES,
-        overBy: merged.length - MAX_NOTES,
-      });
-    }
-
     return {
       notes: sortNewestFirst(merged),
       importedCount,
@@ -662,7 +645,6 @@ var YTD_NOTES_BACKUP = (() => {
   return {
     FORMAT,
     SCHEMA_VERSION,
-    MAX_NOTES,
     MAX_BACKUP_BYTES,
     NotesBackupError,
     byteLength,

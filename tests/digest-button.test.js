@@ -705,3 +705,85 @@ test("a cold-cache note points to the side-panel transcript task", () => {
     /result\.error === "SUPADATA_NOT_CONFIGURED"[\s\S]*?需在设置配置 Supadata/,
   );
 });
+
+test("YouTube save toast labels non-Chinese raw captions and keeps Chinese cleanup", () => {
+  const harness = createHarness();
+  const evaluatePresentation = (note) =>
+    JSON.parse(
+      vm.runInContext(
+        `JSON.stringify(youtubeNoteToastPresentation(${JSON.stringify(note)}))`,
+        harness.context,
+      ),
+    );
+
+  assert.deepEqual(
+    evaluatePresentation({
+      sourceLanguage: "en",
+      rawText: "we keep the exact subtitle words",
+      text: "We kept a polished, expanded version of the thought.",
+    }),
+    {
+      label: "字幕原话",
+      text: "we keep the exact subtitle words",
+    },
+  );
+  assert.deepEqual(
+    evaluatePresentation({
+      sourceLanguage: "zh-CN",
+      textLanguage: "zh-CN",
+      rawText: "这是字幕碎片",
+      text: "这是整理后的完整中文笔记。",
+    }),
+    {
+      label: "",
+      text: "这是整理后的完整中文笔记。",
+    },
+  );
+  for (const sourceLanguage of ["gan", "lzh"]) {
+    assert.deepEqual(
+      evaluatePresentation({
+        sourceLanguage,
+        textLanguage: sourceLanguage,
+        rawText: "这是字幕碎片",
+        text: "这是整理后的完整中文笔记。",
+      }),
+      {
+        label: "",
+        text: "这是整理后的完整中文笔记。",
+      },
+      `${sourceLanguage} must match the side-panel Chinese-language contract`,
+    );
+  }
+  assert.deepEqual(
+    evaluatePresentation({
+      sourceLanguage: "en",
+      textLanguage: "zh-CN",
+      rawText: "English source fragment",
+      text: "已确认的中文整理稿。",
+    }),
+    {
+      label: "",
+      text: "已确认的中文整理稿。",
+    },
+    "a trusted Chinese textLanguage wins just as it does in the side panel",
+  );
+  assert.deepEqual(
+    evaluatePresentation({
+      sourceLanguage: "zh-CN",
+      textLanguage: "",
+      rawText: "这段中文引用了《となりのトトロ》。",
+      text: "AI 整理稿不应冒充可信中文正文。",
+    }),
+    {
+      label: "字幕原话",
+      text: "这段中文引用了《となりのトトロ》。",
+    },
+    "without trusted textLanguage the toast must match the side-panel original fallback",
+  );
+  assert.match(
+    contentScript,
+    /function showNoteSavedToast\(note\)[\s\S]*?const presentation = youtubeNoteToastPresentation\(note\);[\s\S]*?笔记已保存\$\{presentation\.label[\s\S]*?escapeHtmlForContent\(presentation\.text\)/,
+  );
+  assert.doesNotMatch(contentScript, /result\.code === "NOTE_STORAGE_FULL"/);
+  assert.doesNotMatch(contentScript, /笔记已达上限/);
+});

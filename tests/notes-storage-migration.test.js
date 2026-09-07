@@ -871,7 +871,7 @@ test("[M2] one note migrates byte-for-byte with unchanged presentation and backu
   );
 });
 
-test("[M3] a 500-note multi-media library preserves every shard and capacity state", async () => {
+test("[M3] a 500-note multi-media library preserves every shard without a count ceiling", async () => {
   const probe = bootBackground(createStorageHarness());
   requirePhase1Api(probe.api, "M3");
 
@@ -882,13 +882,6 @@ test("[M3] a 500-note multi-media library preserves every shard and capacity sta
   const storage = createStorageHarness({ ytd_notes: notes });
   const worker = bootBackground(storage);
   const api = requirePhase1Api(worker.api, "M3");
-  const beforeCapacity = await capacitySnapshot({
-    success: true,
-    notes,
-    totalCount: notes.length,
-    limit: notesBackup.MAX_NOTES,
-  });
-
   await api.ensureNotesMigrated();
   assertDownloadBeforeStructureWrites(storage);
   const beforeBackup = downloadedBackup(storage);
@@ -897,18 +890,14 @@ test("[M3] a 500-note multi-media library preserves every shard and capacity sta
   const response = await api.handleGetNotes(null);
   assert.equal(response.success, true);
   assert.equal(response.totalCount, 500);
-  assert.equal(response.limit, 500);
-  assert.deepEqual(
-    await capacitySnapshot(() => api.handleGetNotes(null)),
-    beforeCapacity,
-  );
-  assert.equal(beforeCapacity.hidden, false);
-  assert.match(beforeCapacity.className, /is-full/);
-  assert.match(beforeCapacity.text, /500\s*\/\s*500/);
+  assert.equal(Object.hasOwn(response, "limit"), false);
+  const capacity = await capacitySnapshot(() => api.handleGetNotes(null));
+  assert.equal(capacity.hidden, true);
+  assert.doesNotMatch(capacity.text, /500\s*\/\s*500|已达上限/);
   await assertBackupAndImportIdempotence(api, storage, beforeBackup, 500);
 });
 
-test("[M4] a 620-note legacy library is never truncated and rejects only a new append", async () => {
+test("[M4] a 620-note legacy library is never truncated and accepts a backupable append", async () => {
   const probe = bootBackground(createStorageHarness());
   requirePhase1Api(probe.api, "M4");
 
@@ -926,25 +915,37 @@ test("[M4] a 620-note legacy library is never truncated and rejects only a new a
   const response = await api.handleGetNotes(null);
   assert.equal(response.success, true);
   assert.equal(response.totalCount, 620);
-  assert.equal(response.limit, 500);
+  assert.equal(Object.hasOwn(response, "limit"), false);
   const capacity = await capacitySnapshot(() => api.handleGetNotes(null));
-  assert.equal(capacity.hidden, false);
-  assert.match(capacity.className, /is-full/);
-  assert.match(capacity.text, /620\s*\/\s*500/);
-
-  const beforeAppend = storage.snapshot();
-  const rejected = await api.appendNote(
-    makeMigrationNote(999, {
-      thought: "",
-      thoughtAt: null,
-      triggerWindow: [],
-    }),
-  );
-  assert.equal(rejected?.code, "NOTE_STORAGE_FULL");
-  assert.equal(rejected?.limit, 500);
-  assert.equal(rejected?.count, 620);
-  assert.deepEqual(storage.snapshot(), beforeAppend);
+  assert.equal(capacity.hidden, true);
+  assert.doesNotMatch(capacity.text, /620\s*\/\s*500|已达上限/);
   await assertBackupAndImportIdempotence(api, storage, beforeBackup, 620);
+
+  const appendedNote = makeMigrationNote(999, {
+    thought: "",
+    thoughtAt: null,
+    triggerWindow: [],
+  });
+  assert.equal(await api.appendNote(appendedNote), true);
+
+  const afterAppend = await api.handleGetNotes(null);
+  assert.equal(afterAppend.success, true);
+  assert.equal(afterAppend.totalCount, 621);
+  assert.equal(Object.hasOwn(afterAppend, "limit"), false);
+  assert.equal(afterAppend.notes[0].id, appendedNote.id);
+  assert.ok(
+    notes.every((note) =>
+      afterAppend.notes.some((candidate) => candidate.id === note.id),
+    ),
+    "accepting note 621 must preserve every migrated legacy note",
+  );
+
+  const afterBackup = await exportBackup(api);
+  assert.equal(afterBackup.notes.length, 621);
+  assert.ok(
+    notesBackup.byteLength(notesBackup.serializeBackup(afterBackup)) <=
+      notesBackup.MAX_BACKUP_BYTES,
+  );
 });
 
 test("[M5] damaged input fails with a reason and rolls back every partial new key", async () => {
@@ -1185,7 +1186,6 @@ test("[M6] a fresh worker safely completes after interruption during shard write
       success: true,
       notes,
       totalCount: 500,
-      limit: 500,
     },
   );
   await assertBackupAndImportIdempotence(

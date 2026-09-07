@@ -242,20 +242,8 @@ test("Settings copy covers English and Simplified Chinese", () => {
   );
   const maxMiB = options.backupLimitMiB({ YTD_NOTES_BACKUP: notesBackup });
   assert.equal(maxMiB, "32");
-  assert.match(
-    options.translate("en", "notesBackupCapacity", {
-      overBy: 1,
-      limit: notesBackup.MAX_NOTES,
-    }),
-    /500-note limit/,
-  );
-  assert.match(
-    options.translate("zh-CN", "notesBackupCapacity", {
-      overBy: 1,
-      limit: notesBackup.MAX_NOTES,
-    }),
-    /500 条上限/,
-  );
+  assert.equal(Object.hasOwn(options.COPY.en, "notesBackupCapacity"), false);
+  assert.equal(Object.hasOwn(options.COPY["zh-CN"], "notesBackupCapacity"), false);
   assert.match(
     options.translate("en", "notesBackupTooLarge", { maxMiB }),
     /32 MiB/,

@@ -11,6 +11,41 @@ const contentSource = fs.readFileSync(
   path.resolve(__dirname, "..", "content.js"),
   "utf8",
 );
+const noteCleanupPrompt = fs.readFileSync(
+  path.resolve(__dirname, "..", "prompts", "note-cleanup.md"),
+  "utf8",
+);
+
+test("note cleanup keeps TARGET central and treats wider context as reference only", () => {
+  assert.match(
+    noteCleanupPrompt,
+    /TARGET is mandatory and must remain the core of the note\./,
+  );
+  assert.match(
+    noteCleanupPrompt,
+    /Use BEFORE and AFTER only when needed to finish that same sentence or thought\./,
+  );
+  assert.match(
+    noteCleanupPrompt,
+    /FULL CONTEXT is reference-only\.[\s\S]*?Never copy an independent claim from FULL CONTEXT into the note\./,
+  );
+  assert.match(
+    noteCleanupPrompt,
+    /Do NOT summarize, generalize,[\s\S]*?or add anything they did not say\./,
+  );
+  assert.match(
+    noteCleanupPrompt,
+    /TARGET 是必须保留的正文核心。[\s\S]*?不得因为邻近观点更完整、更有趣或更重要，就改选邻近观点。/,
+  );
+  assert.match(
+    noteCleanupPrompt,
+    /FULL CONTEXT 只供判断句界、消解指代和校正人名、机构名等专有名词；不得从中抽取独立观点写入笔记。/,
+  );
+  assert.match(
+    noteCleanupPrompt,
+    /禁止总结、泛化、缩写观点、改写成“视频作者提到”等第三人称转述/,
+  );
+});
 
 test("only the time rail seeks; the transcript body stays selectable text", () => {
   assert.match(

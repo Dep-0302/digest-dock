@@ -8441,6 +8441,75 @@ test("original current-moment notes bypass AI cleanup even when a key exists", a
   assert.equal(savedBroadcast.preserveOriginalOnly, true);
 });
 
+test("handleSaveNote gives cleanup four cues before TARGET and only two after without changing triggerWindow", async () => {
+  const videoId = "ctxwin00001";
+  const requests = [];
+  const transcript = Array.from({ length: 30 }, (_, index) => ({
+    start: index,
+    text: `Cue ${index}`,
+    language: "en",
+  }));
+  const storage = createMemoryStorage(makeMigratedNotesState([], {
+    ytd_settings: {
+      provider: "deepseek",
+      aiApiKeys: { deepseek: "configured-key" },
+    },
+    [`digest_${videoId}`]: {
+      transcriptSourcePolicyVersion: 5,
+      transcriptSource: "youtube-passive",
+      transcriptLanguage: "en",
+      transcript,
+    },
+  }));
+  const background = loadBackgroundHelpers({
+    storageGetImpl: storage.get,
+    storageSetImpl: storage.set,
+    storageRemoveImpl: storage.remove,
+    fetchImpl: async (url, options) => {
+      if (url.startsWith("chrome-extension://")) {
+        return { ok: true, text: async () => read("prompts/note-cleanup.md") };
+      }
+      requests.push(JSON.parse(options.body));
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [
+            {
+              message: { content: JSON.stringify({ quote: "Cue 10" }) },
+            },
+          ],
+        }),
+      };
+    },
+  });
+
+  const result = await background.handleSaveNote(
+    videoId,
+    10,
+    "Cleanup context",
+    "Channel",
+    `https://www.youtube.com/watch?v=${videoId}`,
+    null,
+    "en",
+  );
+
+  assert.equal(result.success, true);
+  assert.equal(requests.length, 1);
+  const userPrompt = requests[0].messages.find(
+    (message) => message.role === "user",
+  ).content;
+  assert.match(userPrompt, /BEFORE: "Cue 6 Cue 7 Cue 8 Cue 9"/);
+  assert.match(userPrompt, /TARGET: "Cue 10"/);
+  assert.match(userPrompt, /AFTER: "Cue 11 Cue 12"/);
+  assert.doesNotMatch(userPrompt, /AFTER: "[^"]*Cue 13/);
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(result.note.triggerWindow)),
+    transcript.slice(2, 23).map(({ start, text }) => ({ t: start, text })),
+    "the stored triggerWindow contract remains exactly 8-before/12-after",
+  );
+});
+
 test("new notes persist the exact 8-before/12-after trigger window within 20 KiB", async () => {
   const saveWithTranscript = async (videoId, transcript, timestamp) => {
     const storedNotes = [];
@@ -8520,9 +8589,10 @@ test("new notes persist the exact 8-before/12-after trigger window within 20 KiB
   );
 });
 
-test("a full library rejects before transcript or provider work", async () => {
+test("a 500-note library saves note 501 without provider work", async () => {
   const videoId = "fullnote001";
-  const fullNotes = Array.from({ length: notesBackup.MAX_NOTES }, (_, index) =>
+  const initialCount = 500;
+  const fullNotes = Array.from({ length: initialCount }, (_, index) =>
     makeValidStoredNote(`existing-note-${index}`, `Existing note ${index}.`, {
       videoId,
       mediaKey: videoId,
@@ -8540,30 +8610,31 @@ test("a full library rejects before transcript or provider work", async () => {
     mediaKey: videoId,
     canonicalUrl: `https://www.youtube.com/watch?v=${videoId}`,
   };
-  const storage = createMemoryStorage(makeMigratedNotesState(fullNotes));
+  const storage = createMemoryStorage(
+    makeMigratedNotesState(fullNotes, {
+      [`digest_${videoId}`]: {
+        transcriptSourcePolicyVersion: 5,
+        transcriptSource: "youtube-passive",
+        transcriptLanguage: "en",
+        transcript: [
+          { start: 10, text: "The 501st saved note.", language: "en" },
+        ],
+      },
+    }),
+  );
   const background = loadBackgroundHelpers({
     storageGetImpl: async (key) => {
-      if (key === `digest_${videoId}`) {
-        transcriptReads += 1;
-        return {};
-      }
-      if (key === "ytd_settings") {
-        settingsReads += 1;
-        return {
-          ytd_settings: {
-            provider: "deepseek",
-            aiApiKeys: { deepseek: "configured-key" },
-          },
-        };
-      }
+      if (key === `digest_${videoId}`) transcriptReads += 1;
+      if (key === "ytd_settings") settingsReads += 1;
       return storage.get(key);
     },
-    storageSetImpl: async () => {
+    storageSetImpl: async (items) => {
       storageWrites += 1;
+      await storage.set(items);
     },
     fetchImpl: async () => {
       networkCalls += 1;
-      throw new Error("full-library saves must not reach transcript or AI fetch");
+      throw new Error("a cached original save must not reach network fetch");
     },
     tabsImpl: {
       get: async () => ({
@@ -8582,24 +8653,30 @@ test("a full library rejects before transcript or provider work", async () => {
     42,
     "en",
     `youtube:${videoId}`,
-    false,
+    true,
   );
 
-  assert.equal(result.success, false);
-  assert.equal(result.code, "NOTE_STORAGE_FULL");
-  assert.equal(result.limit, notesBackup.MAX_NOTES);
-  assert.equal(result.count, notesBackup.MAX_NOTES);
-  assert.equal(transcriptReads, 0);
+  assert.equal(result.success, true);
+  assert.equal(result.note.rawText, "The 501st saved note.");
+  assert.equal(transcriptReads, 1);
   assert.equal(settingsReads, 0);
   assert.equal(networkCalls, 0);
-  assert.equal(storageWrites, 0);
-  assert.equal(fullNotes.length, notesBackup.MAX_NOTES);
+  assert.equal(storageWrites, 1);
+  const storedNotes = readMigratedNotesSnapshot(storage.snapshot());
+  assert.equal(storedNotes.length, initialCount + 1);
+  assert.equal(storedNotes[0].id, result.note.id);
+  assert.ok(
+    fullNotes.every((note) =>
+      storedNotes.some((candidate) => candidate.id === note.id),
+    ),
+    "saving note 501 must preserve all 500 existing notes",
+  );
 });
 
-test("two handleSaveNote calls that preflight at 499 still share one final slot", async () => {
+test("two concurrent handleSaveNote calls at 499 both succeed", async () => {
   const videoIds = ["racevid001", "racevid002"];
   const initialNotes = Array.from(
-    { length: notesBackup.MAX_NOTES - 1 },
+    { length: 499 },
     (_, index) =>
       makeValidStoredNote(`existing-note-${index}`, `Existing note ${index}.`, {
         videoId: "race-existing",
@@ -8667,16 +8744,12 @@ test("two handleSaveNote calls that preflight at 499 still share one final slot"
   transcriptBarrier.release();
   const results = await Promise.all(saves);
 
-  assert.equal(results.filter((result) => result.success === true).length, 1);
-  const rejected = results.find((result) => result.code === "NOTE_STORAGE_FULL");
-  assert.ok(rejected);
-  assert.equal(rejected.limit, notesBackup.MAX_NOTES);
-  assert.equal(rejected.count, notesBackup.MAX_NOTES);
+  assert.equal(results.filter((result) => result.success === true).length, 2);
   const storedNotes = readMigratedNotesSnapshot(storage.snapshot());
-  assert.equal(storedNotes.length, notesBackup.MAX_NOTES);
+  assert.equal(storedNotes.length, 501);
   assert.equal(
     storedNotes.filter((note) => videoIds.includes(note.videoId)).length,
-    1,
+    2,
   );
 });
 
@@ -10023,6 +10096,203 @@ test("Bilibili Chinese note cleanup keeps the polished Chinese text", async () =
   assert.match(requests[0].messages[0].content, /整理成通顺、完整、可独立阅读的中文笔记/);
 });
 
+test("note cleanup fails closed to TARGET when the provider returns only AFTER", async () => {
+  const background = loadBackgroundHelpers({
+    fetchImpl: async (url) => {
+      if (url.startsWith("chrome-extension://")) {
+        return { ok: true, text: async () => read("prompts/note-cleanup.md") };
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  quote: "AFTER-ONLY copper bridge belongs to the next idea.",
+                }),
+              },
+            },
+          ],
+        }),
+      };
+    },
+  });
+  const target = "TARGET-ANCHOR cobalt lantern is the idea I saved.";
+
+  const cleaned = await background.cleanupNoteText(
+    target,
+    "BEFORE-ONLY context leads into the saved idea.",
+    "AFTER-ONLY copper bridge belongs to the next idea.",
+    "BEFORE-ONLY context leads into the saved idea. TARGET-ANCHOR cobalt lantern is the idea I saved. AFTER-ONLY copper bridge belongs to the next idea.",
+    "Target contract",
+    "youtube",
+    "en",
+  );
+
+  assert.equal(
+    cleaned,
+    target,
+    "an AFTER-only provider answer must not replace the TARGET cue",
+  );
+});
+
+test("Chinese note cleanup rejects third-person summaries and keeps the TARGET voice", async () => {
+  const background = loadBackgroundHelpers({
+    fetchImpl: async (url) => {
+      if (url.startsWith("chrome-extension://")) {
+        return { ok: true, text: async () => read("prompts/note-cleanup.md") };
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  quote: "视频作者提到，我每天只保留一项最重要的工作。",
+                }),
+              },
+            },
+          ],
+        }),
+      };
+    },
+  });
+  const target = "我每天只保留一项最重要的工作。";
+
+  const cleaned = await background.cleanupNoteText(
+    target,
+    "以前我会同时安排很多事。",
+    "下一段开始谈完全不同的话题。",
+    "以前我会同时安排很多事。我每天只保留一项最重要的工作。下一段开始谈完全不同的话题。",
+    "目标语态合同",
+    "bilibili",
+    "zh-CN",
+  );
+
+  assert.equal(
+    cleaned,
+    target,
+    "cleanup must not turn a first-person TARGET into a third-person summary",
+  );
+});
+
+test("note cleanup preserves negation, direction, numbers, and enough TARGET substance", async () => {
+  const cleanWithCandidate = async (target, candidate, sourceLanguage = "en") => {
+    const background = loadBackgroundHelpers({
+      fetchImpl: async (url) => {
+        if (url.startsWith("chrome-extension://")) {
+          return { ok: true, text: async () => read("prompts/note-cleanup.md") };
+        }
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            choices: [
+              {
+                message: {
+                  content: JSON.stringify({ quote: candidate }),
+                },
+              },
+            ],
+          }),
+        };
+      },
+    });
+    return background.cleanupNoteText(
+      target,
+      "Earlier context.",
+      "Later context.",
+      `${target} ${candidate}`,
+      "Target invariants",
+      sourceLanguage === "en" ? "youtube" : "bilibili",
+      sourceLanguage,
+    );
+  };
+
+  const englishNegation = "We should not deploy on Friday.";
+  assert.equal(
+    await cleanWithCandidate(englishNegation, "We should deploy on Friday."),
+    englishNegation,
+  );
+  assert.equal(
+    await cleanWithCandidate("We should deploy on Friday.", "Deploy."),
+    "We should deploy on Friday.",
+  );
+  assert.equal(
+    await cleanWithCandidate(
+      "Do not delete notes; keep backups.",
+      "Delete notes; do not keep backups.",
+    ),
+    "Do not delete notes; keep backups.",
+  );
+  assert.equal(
+    await cleanWithCandidate(
+      "Revenue grew from 5% to 10%.",
+      "Revenue grew from 10% to 5%.",
+    ),
+    "Revenue grew from 5% to 10%.",
+  );
+  assert.equal(
+    await cleanWithCandidate("Values go up.", "Values go down."),
+    "Values go up.",
+  );
+  assert.equal(
+    await cleanWithCandidate(
+      "We need fewer meetings.",
+      "According to the speaker, teams need fewer meetings.",
+    ),
+    "We need fewer meetings.",
+  );
+  assert.equal(
+    await cleanWithCandidate(
+      "Keep the backup.",
+      "Keep the backup. Delete the old notes.",
+    ),
+    "Keep the backup.",
+  );
+  const chineseNegation = "不要删除用户数据。";
+  assert.equal(
+    await cleanWithCandidate(chineseNegation, "删除用户数据。", "zh-CN"),
+    chineseNegation,
+  );
+  const mixedTarget = "OpenAI 的这次改动不能上线。";
+  assert.equal(
+    await cleanWithCandidate(mixedTarget, "OpenAI。", "zh-CN"),
+    mixedTarget,
+  );
+  assert.equal(
+    await cleanWithCandidate("指标持续上涨。", "指标持续下跌。", "zh-CN"),
+    "指标持续上涨。",
+  );
+  assert.equal(
+    await cleanWithCandidate("这项改动不应该发布。", "这项改动应该发布。", "zh-CN"),
+    "这项改动不应该发布。",
+  );
+  assert.equal(
+    await cleanWithCandidate(
+      "我每天只保留一项最重要的工作。",
+      "他表示，每天只保留一项最重要的工作。",
+      "zh-CN",
+    ),
+    "我每天只保留一项最重要的工作。",
+  );
+  assert.equal(
+    await cleanWithCandidate(
+      "The brain arrives on a solution that's good enough.",
+      "The brain arrives at a solution that is good enough.",
+    ),
+    "The brain arrives at a solution that is good enough.",
+  );
+  assert.equal(
+    await cleanWithCandidate("我能举700家。", "我能举 700 公斤。", "zh-CN"),
+    "我能举 700 公斤。",
+  );
+});
+
 test("Bilibili v4 cache note saves polished Chinese once without refetching", async () => {
   const requests = [];
   const mediaRef = {
@@ -10736,9 +11006,10 @@ test("deleting the last matching note while its title provider waits returns no 
 });
 
 test("the 32 MiB backup guard rejects every unpersisted title", async () => {
+  const sampleCount = 500;
   const makeNotes = (payloadLength) => {
     const payload = "x".repeat(payloadLength);
-    return Array.from({ length: notesBackup.MAX_NOTES }, (_, index) => {
+    return Array.from({ length: sampleCount }, (_, index) => {
       const videoId = `vid${String(index).padStart(6, "0")}`;
       return {
         id: `large-${index}`,
@@ -10768,7 +11039,7 @@ test("the 32 MiB backup guard rejects every unpersisted title", async () => {
   let notes = makeNotes(payloadLength);
   let size = backupBytes(notes);
   payloadLength += Math.floor(
-    (targetBytes - size) / (notesBackup.MAX_NOTES * 3),
+    (targetBytes - size) / (sampleCount * 3),
   );
   notes = makeNotes(payloadLength);
   size = backupBytes(notes);
@@ -14067,8 +14338,8 @@ test("YouTube Chinese notes use the same contextual cleanup as Bilibili", async 
                 message: {
                   content: JSON.stringify({
                     quote: chinesePrompt
-                      ? "整理后的中文笔记。"
-                      : "Cleaned English.",
+                      ? "第二句中文字幕内容已经整理完整。"
+                      : "第二句中文字幕内容 cleaned.",
                   }),
                 },
               },
@@ -14087,7 +14358,7 @@ test("YouTube Chinese notes use the same contextual cleanup as Bilibili", async 
     const { result, savedNote, cleanupCalls } = await runSave(language);
     assert.equal(result.success, true, `${language} save should succeed`);
     assert.equal(cleanupCalls, 1, `${language} must run one Chinese cleanup`);
-    assert.equal(savedNote.text, "整理后的中文笔记。");
+    assert.equal(savedNote.text, "第二句中文字幕内容已经整理完整。");
     assert.equal(savedNote.rawText, "第二句中文字幕内容。");
     assert.equal(savedNote.sourceLanguage, language);
     assert.equal(savedNote.textLanguage, language);
@@ -14100,7 +14371,7 @@ test("YouTube Chinese notes use the same contextual cleanup as Bilibili", async 
     const { result, savedNote, cleanupCalls } = await runSave(language);
     assert.equal(result.success, true, `"${language}" save should succeed`);
     assert.equal(cleanupCalls, 1, `"${language}" must run the DeepSeek cleanup once`);
-    assert.equal(savedNote.text, "Cleaned English.");
+    assert.equal(savedNote.text, "第二句中文字幕内容 cleaned.");
     assert.equal(savedNote.rawText, "第二句中文字幕内容。");
     assert.equal(savedNote.sourceLanguage, language);
   }

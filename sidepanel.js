@@ -8919,12 +8919,6 @@ async function loadNotes(videoId, { translateMissing = true } = {}) {
 
     if (result.success) {
       currentNotes = Array.isArray(result.notes) ? result.notes : [];
-      // Capacity describes the whole library, so it is read from the response
-      // rather than from the possibly filtered `notes` array.
-      notesLibraryTotal = Number.isFinite(result.totalCount)
-        ? result.totalCount
-        : currentNotes.length;
-      notesLibraryLimit = Number.isFinite(result.limit) ? result.limit : 0;
       currentNotesFilterVideoId = videoId;
       isNotesLoading = false;
       renderNotes(currentNotes, videoId);
@@ -8950,9 +8944,6 @@ async function loadNotes(videoId, { translateMissing = true } = {}) {
  * container per media identity; containers are ordered by visible title and
  * notes inside each container by timecode ascending.
  */
-let notesLibraryTotal = 0;
-let notesLibraryLimit = 0;
-
 function isNotesMigrationFailure(value) {
   const code = String(value?.code || value?.error || "").trim();
   const message = String(value?.message || value?.error || "").trim();
@@ -8979,30 +8970,16 @@ function renderNotesMigrationFailure(result) {
   if (backup) backup.hidden = false;
 }
 
-/**
- * Renders the library capacity band. Capacity is a storage fact, not an error:
- * it appears only near the ceiling, states the real numbers, and always offers
- * the backup route before anything can be lost. Notes are never evicted to
- * make room, so a full library refuses new saves rather than dropping old ones.
- */
+/** The shared band is reserved for actionable migration failures. */
 function renderNotesCapacity() {
   const band = document.getElementById("notesCapacity");
   const text = document.getElementById("notesCapacityText");
+  const backup = document.getElementById("notesCapacityBackup");
   if (!band || !text) return;
-
-  const limit = Number(notesLibraryLimit) || 0;
-  const total = Number(notesLibraryTotal) || 0;
-  if (!limit || total < Math.floor(limit * 0.9)) {
-    band.hidden = true;
-    return;
-  }
-
-  const full = total >= limit;
-  band.className = full ? "notes-capacity is-full" : "notes-capacity";
-  text.innerHTML = full
-    ? `已保存 <strong>${total} / ${limit}</strong> 条笔记，已达上限。新的笔记会被拒绝保存，已保存的笔记不会被删除。请先导出备份，再删除不再需要的笔记。`
-    : `已保存 <strong>${total} / ${limit}</strong> 条笔记，接近上限。建议先导出一份备份。`;
-  band.hidden = false;
+  band.className = "notes-capacity";
+  band.hidden = true;
+  text.textContent = "";
+  if (backup) backup.hidden = true;
 }
 
 function renderNotes(notes, filteredVideoId) {

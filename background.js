@@ -33,12 +33,6 @@ const TRANSCRIPT_SOURCE_POLICY_VERSION = 5;
 const AI_PROVIDER_IDLE_TIMEOUT_MS = 50_000;
 const AI_PROVIDER_HARD_TIMEOUT_MS = 120_000;
 const AI_PROVIDER_MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
-// The saved-note ceiling lives in notes-backup.js so the storage path and the
-// backup/import path can never drift apart. Read it lazily: importScripts
-// globals are not available while this module is being evaluated.
-function maxSavedNotes() {
-  return YTD_NOTES_BACKUP.MAX_NOTES;
-}
 const NOTE_TRANSLATION_JOB_TIMEOUT_MS = 110_000;
 const EXPORT_SOURCE_BATCH_MAX_UNITS = 4;
 const EXPORT_SOURCE_BATCH_MAX_CHARACTERS = 12_000;
@@ -4911,18 +4905,6 @@ async function handleSaveNote(
     }
     await requireExactTabRoute(tabId, actionRouteKey);
 
-    // Capacity is independent of transcript content. Check it before reading or
-    // fetching a transcript and before a configured provider can receive note
-    // cleanup input. This is only an early rejection: the final queued write
-    // below repeats the check because another save may take the last slot.
-    const capacityPreflight = await preflightNoteStorageCapacity(
-      saveGeneration,
-      dataGeneration,
-    );
-    if (capacityPreflight !== true) {
-      return noteSaveFailureResponse(capacityPreflight);
-    }
-
     const resolvedVideoTitle = videoTitle || mediaRef.title || "Untitled Video";
     const resolvedChannelName = channelName || mediaRef.channelName || "";
     const safeTimestamp = Math.max(0, Math.floor(Number(timestamp) || 0));
@@ -5019,11 +5001,11 @@ async function handleSaveNote(
         matchedLine = line;
         matchedIndex = i;
 
-        // Build a buffer of 2 lines before and 4 lines after the target.
-        // This gives the model enough text to find a natural sentence boundary
-        // and complete a thought that spans multiple short caption chunks.
+        // Bias the cleanup buffer toward what the user just heard: reactions
+        // happen after the useful phrase, especially across short ASR cues.
+        // Two following cues remain available for completing a sentence.
         const beforeLines = [];
-        for (let j = 1; j <= 2 && i - j >= 0; j++) {
+        for (let j = 1; j <= 4 && i - j >= 0; j++) {
           beforeLines.unshift(transcript[i - j].text);
         }
         if (beforeLines.length > 0) {
@@ -5031,7 +5013,7 @@ async function handleSaveNote(
         }
 
         const afterLines = [];
-        for (let j = 1; j <= 4 && i + j < transcript.length; j++) {
+        for (let j = 1; j <= 2 && i + j < transcript.length; j++) {
           afterLines.push(transcript[i + j].text);
         }
         if (afterLines.length > 0) {
@@ -5066,7 +5048,7 @@ async function handleSaveNote(
       matchedLine = transcript[matchedIndex];
 
       const beforeLines = [];
-      for (let j = 1; j <= 2 && matchedIndex - j >= 0; j++) {
+      for (let j = 1; j <= 4 && matchedIndex - j >= 0; j++) {
         beforeLines.unshift(transcript[matchedIndex - j].text);
       }
       if (beforeLines.length > 0) {
@@ -5074,7 +5056,7 @@ async function handleSaveNote(
       }
 
       const afterLines = [];
-      for (let j = 1; j <= 4 && matchedIndex + j < transcript.length; j++) {
+      for (let j = 1; j <= 2 && matchedIndex + j < transcript.length; j++) {
         afterLines.push(transcript[matchedIndex + j].text);
       }
       if (afterLines.length > 0) {
@@ -5381,9 +5363,139 @@ async function persistSavedNoteSourceBestEffort({
   }
 }
 
+function normalizeNoteCleanupSignalText(value) {
+  return String(value || "")
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim();
+}
+
+function noteCleanupMeaningMarkers(value) {
+  const text = String(value || "").normalize("NFKC").toLowerCase();
+  const contractionSafe = text.replace(/[’']/g, "");
+  const negated =
+    /\b(?:not|no|never|without|cannot|cant|dont|doesnt|didnt|wont|isnt|arent|shouldnt|wouldnt|couldnt|mustnt)\b/.test(
+      contractionSafe,
+    ) ||
+    /(?:不(?!丹)|没|未(?!来)|并非|从不|绝不|禁止|无须|无需|无权|别)/.test(
+      text,
+    );
+  const numbers = (text.match(/\d+(?:[.,]\d+)?%?/g) || []).map((number) =>
+    number.replace(/,/g, ""),
+  );
+  const directions = new Set();
+  if (
+    /\b(?:increase|increased|increases|increasing|rise|rose|rising|higher|more|grow|grew|growing|up)\b/.test(
+      text,
+    ) || /(?:增加|提高|上升|上涨|增长|更多|更高|变多)/.test(text)
+  ) {
+    directions.add("up");
+  }
+  if (
+    /\b(?:decrease|decreased|decreases|decreasing|fall|fell|falling|lower|less|fewer|drop|dropped|reduce|reduced|down)\b/.test(
+      text,
+    ) || /(?:减少|降低|下降|下跌|更少|更低|变少)/.test(text)
+  ) {
+    directions.add("down");
+  }
+  if (/\b(?:before|earlier|previous|prior)\b/.test(text) || /(?:之前|此前|先前)/.test(text)) {
+    directions.add("before");
+  }
+  if (/\b(?:after|later|next)\b/.test(text) || /(?:之后|此后|随后)/.test(text)) {
+    directions.add("after");
+  }
+  return { negated, numbers, directions };
+}
+
+function noteCleanupOrderedCoverage(targetUnits, candidateUnits) {
+  if (!targetUnits.length || !candidateUnits.length) return 0;
+  let matched = 0;
+  let candidateIndex = 0;
+  for (const unit of targetUnits) {
+    const nextIndex = candidateUnits.indexOf(unit, candidateIndex);
+    if (nextIndex === -1) continue;
+    matched += 1;
+    candidateIndex = nextIndex + 1;
+  }
+  return matched / targetUnits.length;
+}
+
+/**
+ * Rejects a fluent answer that silently abandons TARGET for surrounding cues.
+ * Cleanup may repair punctuation and ASR noise, but the saved thought still
+ * needs recognizable lexical evidence from the cue the user chose.
+ */
+function noteCleanupPreservesTarget(candidate, target) {
+  const candidateText = String(candidate || "");
+  const targetText = String(target || "");
+  const normalizedCandidate = normalizeNoteCleanupSignalText(candidateText);
+  const normalizedTarget = normalizeNoteCleanupSignalText(targetText);
+  if (!normalizedCandidate || !normalizedTarget) return false;
+
+  // A narrator-style wrapper is a summary, not a cleaned source quotation.
+  const summaryVoice =
+    /(?:视频|本视频)?(?:作者|博主|讲者|说话者)(?:提到|表示|认为|指出|说道|讲述)|(?:他|她)(?:提到|表示|认为|指出|说道|讲述)|据(?:视频|本视频)?(?:作者|博主|讲者|说话者|他|她)(?:所说|介绍|表示)|\baccording\s+to\s+(?:(?:the\s+)?(?:speaker|author|creator)|him|her)\b|\b(?:the\s+)?(?:speaker|author|video|creator)\s+(?:says?|said|mentions?|mentioned|explains?|explained|discusses?|discussed)\b|^(?:(?:in summary|overall|in short)\b|总之|总体而言|简而言之)/i;
+  if (summaryVoice.test(candidateText) && !summaryVoice.test(targetText)) {
+    return false;
+  }
+
+  const firstPerson =
+    /\b(?:i|we|me|us|my|our|mine|ours)\b|(?:我|我们|咱|咱们|本人)/i;
+  if (firstPerson.test(targetText) && !firstPerson.test(candidateText)) {
+    return false;
+  }
+
+  const targetMarkers = noteCleanupMeaningMarkers(targetText);
+  const candidateMarkers = noteCleanupMeaningMarkers(candidateText);
+  if (targetMarkers.negated !== candidateMarkers.negated) return false;
+  if (
+    targetMarkers.numbers.join("\u0000") !==
+    candidateMarkers.numbers.join("\u0000")
+  ) {
+    return false;
+  }
+  for (const direction of targetMarkers.directions) {
+    if (!candidateMarkers.directions.has(direction)) return false;
+  }
+  if (
+    (targetMarkers.directions.has("up") && candidateMarkers.directions.has("down")) ||
+    (targetMarkers.directions.has("down") && candidateMarkers.directions.has("up")) ||
+    (targetMarkers.directions.has("before") && candidateMarkers.directions.has("after")) ||
+    (targetMarkers.directions.has("after") && candidateMarkers.directions.has("before"))
+  ) {
+    return false;
+  }
+
+  const hasCjkTarget = /[\u3400-\u9fff]/.test(normalizedTarget);
+  const targetUnits = hasCjkTarget
+    ? Array.from(normalizedTarget.replace(/\s+/g, ""))
+    : normalizedTarget.split(/\s+/).filter((word) => !["um", "uh"].includes(word));
+  const candidateUnits = hasCjkTarget
+    ? Array.from(normalizedCandidate.replace(/\s+/g, ""))
+    : normalizedCandidate.split(/\s+/).filter((word) => !["um", "uh"].includes(word));
+  if (noteCleanupOrderedCoverage(targetUnits, candidateUnits) < 0.8) {
+    return false;
+  }
+
+  const targetTerminators = (targetText.match(/[.!?。！？]+/g) || []).length;
+  const candidateTerminators = (candidateText.match(/[.!?。！？]+/g) || []).length;
+  if (targetTerminators && candidateTerminators > targetTerminators) return false;
+  const completedTargetMaxUnits = hasCjkTarget
+    ? Math.max(targetUnits.length + 8, Math.ceil(targetUnits.length * 1.75))
+    : targetUnits.length + 2;
+  if (
+    targetTerminators &&
+    candidateUnits.length > completedTargetMaxUnits
+  ) {
+    return false;
+  }
+  return true;
+}
+
 /**
  * Cleans up transcript lines using DeepSeek.
- * Takes the target line plus buffer sentences (1 before, 1 after).
+ * Takes the target line plus a reaction-aware buffer (4 before, 2 after).
  * Uses JSON output to prevent any preambles from appearing.
  */
 async function cleanupNoteText(
@@ -5438,7 +5550,10 @@ async function cleanupNoteText(
     try {
       const parsed = parseLooseJson(result);
       if (typeof parsed.quote === "string" && parsed.quote.trim()) {
-        return parsed.quote.trim().slice(0, 3000);
+        const candidate = parsed.quote.trim().slice(0, 3000);
+        return noteCleanupPreservesTarget(candidate, targetText)
+          ? candidate
+          : String(targetText || "").trim().slice(0, 3000);
       }
     } catch (parseError) {
       console.warn(
@@ -5458,7 +5573,10 @@ async function cleanupNoteText(
       result = result.replace(/^["']|["']$/g, "");
     }
 
-    return result.slice(0, 3000);
+    const candidate = result.slice(0, 3000);
+    return noteCleanupPreservesTarget(candidate, targetText)
+      ? candidate
+      : String(targetText || "").trim().slice(0, 3000);
   } catch (e) {
     console.error("[DigestDock] Cleanup error:", e);
   }
@@ -5979,8 +6097,6 @@ async function readAllNotes() {
 async function appendNote(note) {
   await ensureNotesMigrated();
   const index = await readNoteIndex();
-  const capacity = noteStorageCapacityResult(index);
-  if (capacity !== true) return capacity;
 
   assertNotesRemainBackupable([note]);
   const allNotes = await readAllNotes();
@@ -6164,44 +6280,7 @@ async function deleteNote(id) {
   return { changed: true };
 }
 
-function noteStorageCapacityResult(notes) {
-  const limit = maxSavedNotes();
-  return notes.length >= limit
-    ? { code: "NOTE_STORAGE_FULL", limit, count: notes.length }
-    : true;
-}
-
-/**
- * Serial read-only capacity check used to avoid transcript/provider work that
- * cannot result in a saved note. The final write remains authoritative.
- */
-async function preflightNoteStorageCapacity(
-  expectedGeneration = noteStorageGeneration,
-  expectedDataGeneration = extensionDataGeneration,
-) {
-  await ensureNotesMigrated();
-  return withNoteStorageWrite(async () => {
-    if (
-      expectedGeneration !== noteStorageGeneration ||
-      !extensionDataGenerationIsWritable(expectedDataGeneration)
-    ) {
-      return false;
-    }
-    const index = await readNoteIndex();
-    return noteStorageCapacityResult(index);
-  });
-}
-
 function noteSaveFailureResponse(result) {
-  if (result && result.code === "NOTE_STORAGE_FULL") {
-    return {
-      success: false,
-      code: "NOTE_STORAGE_FULL",
-      limit: result.limit,
-      count: result.count,
-      error: `笔记已达 ${result.limit} 条上限。请先导出备份并删除不再需要的笔记，已保存的笔记不会被自动删除。`,
-    };
-  }
   if (result && result.code === "NOTES_BACKUP_TOO_LARGE") {
     const maxMiB = result.maxBytes / (1024 * 1024);
     return {
@@ -6253,8 +6332,6 @@ function notesBackupFailure(error, fallbackCode) {
   return {
     success: false,
     code: error?.code || fallbackCode,
-    overBy: Number(error?.details?.overBy) || 0,
-    limit: Number(error?.details?.limit) || maxSavedNotes(),
     maxBytes:
       Number(error?.details?.maxBytes) || YTD_NOTES_BACKUP.MAX_BACKUP_BYTES,
   };
@@ -6510,9 +6587,7 @@ async function handleGetNotes(videoId) {
             );
       const totalCount = index.length;
 
-      // The capacity band reports the whole library, not the filtered view, so
-      // the totals travel with every notes read.
-      return { success: true, notes, totalCount, limit: maxSavedNotes() };
+      return { success: true, notes, totalCount };
     });
   } catch (error) {
     if (error?.code === "NOTE_STORAGE_RESET") {
@@ -8877,8 +8952,8 @@ function validateNoteTranslationCandidate(candidate, source) {
     typeof candidate?.textZh === "string" ? candidate.textZh.trim() : "";
   if (!textZh) return { textZh: "", failureCode: "EMPTY_RESPONSE" };
   // A generated translation must stay within the same durable note-body bound
-  // as the source and cleanup paths. Besides keeping the UI useful, this makes
-  // the maximum size of a 500-note product-generated backup provable.
+  // as the source and cleanup paths. Besides keeping the UI useful, this keeps
+  // the recovery-backup byte guard enforceable for every library size.
   if (textZh.length > 3000) {
     return { textZh: "", unchanged: false, failureCode: "INVALID_TRANSLATION" };
   }
@@ -10302,7 +10377,6 @@ globalThis.__YTD_TRANSLATION_TESTING__ = {
   handlePersistResetFencedSettings,
   handlePersistResetFencedReadingDisplay,
   handleResetFencedSessionMutation,
-  preflightNoteStorageCapacity,
   handleSaveNote,
   persistSavedNoteSourceBestEffort,
   handleTranslateOverviewOriginal,

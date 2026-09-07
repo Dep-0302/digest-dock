@@ -582,8 +582,8 @@ test("backup parsing rejects damaged JSON, newer versions, oversized input, and 
   }
 });
 
-test("note-count and serialized-backup limits are fixed at the Phase 0 contract", () => {
-  assert.equal(notesBackup.MAX_NOTES, 500);
+test("backup capacity is byte-bounded without a fixed note-count ceiling", () => {
+  assert.equal(Object.hasOwn(notesBackup, "MAX_NOTES"), false);
   assert.equal(notesBackup.MAX_BACKUP_BYTES, 32 * 1024 * 1024);
 });
 
@@ -605,7 +605,7 @@ test("the exact serialized byte boundary is accepted and one extra byte is rejec
   );
 });
 
-test("500 maximum product-generated notes serialize and restore below 32 MiB", () => {
+test("a large product-generated note library serializes and restores below 32 MiB", () => {
   // JSON.stringify must escape an isolated surrogate as six ASCII bytes. Using
   // it for every bounded product field is stricter than ordinary UTF-8 CJK and
   // protects the headroom calculation from a truncation splitting a pair.
@@ -613,7 +613,8 @@ test("500 maximum product-generated notes serialize and restore below 32 MiB", (
   const text = worstCodeUnit.repeat(3000);
   const title = worstCodeUnit.repeat(500);
   const channel = worstCodeUnit.repeat(300);
-  const notes = Array.from({ length: notesBackup.MAX_NOTES }, (_, index) => {
+  const sampleCount = 500;
+  const notes = Array.from({ length: sampleCount }, (_, index) => {
     const bvid = "BV1zfg36ZEXi";
     const cid = 40_830_435_549 + index;
     const mediaKey = `bilibili:${bvid}:${cid}`;
@@ -648,10 +649,10 @@ test("500 maximum product-generated notes serialize and restore below 32 MiB", (
 
   assert.ok(
     notesBackup.byteLength(textOnDisk) < notesBackup.MAX_BACKUP_BYTES,
-    "the defensive maximum product dataset must retain 32 MiB headroom",
+    "the large product dataset must retain 32 MiB headroom",
   );
   const restored = notesBackup.parseBackupText(textOnDisk);
-  assert.equal(restored.length, notesBackup.MAX_NOTES);
+  assert.equal(restored.length, sampleCount);
   assert.deepEqual(
     restored.map((note) => note.id),
     notes.map((note) => note.id),
@@ -942,17 +943,28 @@ test("a reused note ID with different identity content fails without mutating in
   assert.deepEqual(imported, importedBefore);
 });
 
-test("the configured note-capacity check rejects the whole merge atomically", () => {
-  const existing = Array.from({ length: notesBackup.MAX_NOTES }, (_, index) =>
+test("note count alone does not reject a backup merge below the byte guard", () => {
+  const existing = Array.from({ length: 620 }, (_, index) =>
     makeNote(index),
   );
+  const imported = [makeNote(2_000)];
   const existingBefore = clone(existing);
+  const importedBefore = clone(imported);
 
-  assertBackupError(
-    () => notesBackup.mergeNotes(existing, [makeNote(1_000)]),
-    "NOTES_CAPACITY_EXCEEDED",
+  const result = notesBackup.mergeNotes(existing, imported);
+
+  assert.equal(result.importedCount, 1);
+  assert.equal(result.duplicateCount, 0);
+  assert.equal(result.totalCount, 621);
+  assert.equal(result.changed, true);
+  assert.equal(result.notes.some((note) => note.id === imported[0].id), true);
+  assert.ok(
+    notesBackup.byteLength(
+      notesBackup.serializeBackup(notesBackup.createBackup(result.notes)),
+    ) <= notesBackup.MAX_BACKUP_BYTES,
   );
   assert.deepEqual(existing, existingBefore);
+  assert.deepEqual(imported, importedBefore);
 });
 
 test("background imports share the note write queue with normal note saves", async () => {
@@ -1123,10 +1135,8 @@ test("note IDs use UUIDs when available and unique timestamp-random fallbacks ot
   );
 });
 
-test("background import failures perform zero storage writes", async () => {
-  const existing = Array.from({ length: notesBackup.MAX_NOTES }, (_, index) =>
-    makeNote(index),
-  );
+test("damaged background imports perform zero storage writes", async () => {
+  const existing = [makeNote(1)];
   const existingBefore = clone(existing);
   const state = loadBackgroundBackupHelpers({ initialNotes: existing });
   await state.helpers.ensureNotesMigrated();
@@ -1135,18 +1145,41 @@ test("background import failures perform zero storage writes", async () => {
   const damaged = await state.helpers.handleImportNotesBackup("not json");
   assert.equal(damaged.success, false);
   assert.equal(damaged.code, "INVALID_NOTES_BACKUP");
-
-  const overCapacity = await state.helpers.handleImportNotesBackup(
-    JSON.stringify(validBackupObject([makeNote(2_000)])),
-  );
-  assert.equal(overCapacity.success, false);
-  assert.equal(overCapacity.code, "NOTES_CAPACITY_EXCEEDED");
-  assert.equal(overCapacity.overBy, 1);
-  assert.equal(overCapacity.limit, notesBackup.MAX_NOTES);
-  assert.equal(overCapacity.maxBytes, notesBackup.MAX_BACKUP_BYTES);
   assert.equal(state.writes.length, writesBeforeFailures);
   assert.deepEqual(state.readStoredNotes(), existingBefore);
   assert.deepEqual(state.notifications, []);
+});
+
+test("background import can grow a 620-note library while it remains backupable", async () => {
+  const existing = Array.from({ length: 620 }, (_, index) => makeNote(index));
+  const importedNote = makeNote(2_000);
+  const state = loadBackgroundBackupHelpers({ initialNotes: existing });
+  await state.helpers.ensureNotesMigrated();
+  const writesBeforeImport = state.writes.length;
+
+  const result = await state.helpers.handleImportNotesBackup(
+    notesBackup.serializeBackup(validBackupObject([importedNote])),
+  );
+
+  assert.equal(result.success, true);
+  assert.equal(result.importedCount, 1);
+  assert.equal(result.duplicateCount, 0);
+  assert.equal(result.totalCount, 621);
+  assert.equal(result.changed, true);
+  const stored = state.readStoredNotes();
+  assert.equal(stored.length, 621);
+  assert.equal(stored.some((note) => note.id === importedNote.id), true);
+  assert.ok(existing.every((note) => stored.some((item) => item.id === note.id)));
+  assert.equal(state.writes.length - writesBeforeImport, 1);
+  assert.deepEqual(state.notifications, [{ action: "notesChanged" }]);
+
+  const exported = await state.helpers.handleExportNotesBackup();
+  assert.equal(exported.success, true);
+  assert.equal(exported.count, 621);
+  assert.ok(
+    notesBackup.byteLength(notesBackup.serializeBackup(exported.backup)) <=
+      notesBackup.MAX_BACKUP_BYTES,
+  );
 });
 
 test("an accepted legacy backup can immediately be exported and restored", async () => {
@@ -1297,40 +1330,29 @@ test("new note saves retain the current 3000-character and 20-character limits",
 
 // --- Phase 0: saved notes are never silently evicted -----------------------
 
-test("a full note library refuses the new save and keeps every existing note", async () => {
-  const limit = notesBackup.MAX_NOTES;
-  const initialNotes = Array.from({ length: limit }, (_, index) =>
+test("a 500-note library accepts the 501st note and keeps every existing note", async () => {
+  const initialCount = 500;
+  const initialNotes = Array.from({ length: initialCount }, (_, index) =>
     makeNote(index + 1),
   );
   const state = loadBackgroundBackupHelpers({ initialNotes });
   await state.helpers.ensureNotesMigrated();
-  const writesBeforeSave = state.writes.length;
 
   const result = await state.helpers.saveNoteToStorage(makeNote(9999));
 
-  assert.equal(result.code, "NOTE_STORAGE_FULL");
-  assert.equal(result.limit, limit);
-  assert.equal(result.count, limit);
+  assert.equal(result, true);
 
   const stored = state.readStoredNotes();
-  assert.equal(stored.length, limit);
-  assert.ok(
-    !stored.some((note) => note.id === "note-9999"),
-    "the refused note must not be stored",
-  );
+  assert.equal(stored.length, initialCount + 1);
+  assert.equal(stored[0].id, "note-9999");
   assert.deepEqual(
-    stored.map((note) => note.id),
+    stored.slice(1).map((note) => note.id),
     initialNotes.map((note) => note.id),
-    "no existing note may be evicted to make room",
-  );
-  assert.equal(
-    state.writes.length,
-    writesBeforeSave,
-    "a refused save must not write after migration",
+    "accepting the new note must not evict or reorder existing notes",
   );
 });
 
-test("a save below the ceiling still succeeds and keeps newest-first order", async () => {
+test("an ordinary save succeeds and keeps newest-first order", async () => {
   const initialNotes = [makeNote(1), makeNote(2)];
   const state = loadBackgroundBackupHelpers({ initialNotes });
 
@@ -1370,9 +1392,34 @@ test("a save cannot make an exportable legacy library exceed the backup bound", 
   assert.equal(state.writes.length, writesBeforeSave);
 });
 
-test("two saves that preflight at 499 still serialize the final slot", async () => {
+test("a Chrome storage quota failure leaves the existing note library unchanged", async () => {
+  const existing = makeNote(1);
+  let rejectWrites = false;
+  const state = loadBackgroundBackupHelpers({
+    initialNotes: [existing],
+    setImpl: async (items, commit) => {
+      if (rejectWrites) throw new Error("QUOTA_BYTES quota exceeded");
+      return commit(items);
+    },
+  });
+  await state.helpers.ensureNotesMigrated();
+  const before = state.readStorage();
+  const writesBeforeSave = state.writes.length;
+  rejectWrites = true;
+
+  await assert.rejects(
+    state.helpers.saveNoteToStorage(makeNote(2)),
+    /QUOTA_BYTES quota exceeded/,
+  );
+
+  assert.deepEqual(state.readStorage(), before);
+  assert.deepEqual(state.readStoredNotes(), [existing]);
+  assert.equal(state.writes.length, writesBeforeSave);
+});
+
+test("two concurrent saves at 499 both serialize without a count ceiling", async () => {
   const initialNotes = Array.from(
-    { length: notesBackup.MAX_NOTES - 1 },
+    { length: 499 },
     (_, index) => makeNote(index + 1),
   );
   const state = loadBackgroundBackupHelpers({ initialNotes });
@@ -1380,43 +1427,28 @@ test("two saves that preflight at 499 still serialize the final slot", async () 
   const writesBeforeSaves = state.writes.length;
   const generation = state.helpers.getNoteStorageGeneration();
 
-  const preflights = await Promise.all([
-    state.helpers.preflightNoteStorageCapacity(generation),
-    state.helpers.preflightNoteStorageCapacity(generation),
-  ]);
-  assert.deepEqual(preflights, [true, true]);
-
   const results = await Promise.all([
     state.helpers.saveNoteToStorage(makeNote(9001), generation),
     state.helpers.saveNoteToStorage(makeNote(9002), generation),
   ]);
-  assert.equal(results.filter((result) => result === true).length, 1);
-  const rejected = results.find((result) => result !== true);
-  assert.equal(rejected.code, "NOTE_STORAGE_FULL");
-  assert.equal(rejected.limit, notesBackup.MAX_NOTES);
-  assert.equal(rejected.count, notesBackup.MAX_NOTES);
-  assert.equal(state.readStoredNotes().length, notesBackup.MAX_NOTES);
+  assert.deepEqual(results, [true, true]);
+  const stored = state.readStoredNotes();
+  assert.equal(stored.length, 501);
+  assert.equal(stored.some((note) => note.id === "note-9001"), true);
+  assert.equal(stored.some((note) => note.id === "note-9002"), true);
   assert.equal(
     state.writes.length - writesBeforeSaves,
-    1,
-    "only the winning save may write",
+    2,
+    "both serialized saves must write",
   );
 });
 
-test("a capacity preflight never survives a later clear generation", async () => {
+test("a captured save generation never survives a later clear", async () => {
   const state = loadBackgroundBackupHelpers({ initialNotes: [makeNote(1)] });
   const generation = state.helpers.getNoteStorageGeneration();
 
-  assert.equal(
-    await state.helpers.preflightNoteStorageCapacity(generation),
-    true,
-  );
   await state.helpers.handleClearAllNotes();
 
-  assert.equal(
-    await state.helpers.preflightNoteStorageCapacity(generation),
-    false,
-  );
   assert.equal(
     await state.helpers.saveNoteToStorage(makeNote(2), generation),
     false,
@@ -1424,13 +1456,10 @@ test("a capacity preflight never survives a later clear generation", async () =>
   assert.deepEqual(state.readStoredNotes(), []);
 });
 
-test("the storage ceiling has exactly one source of truth", () => {
+test("the storage path has no fixed note-count ceiling", () => {
   const source = read("background.js");
-  assert.match(
-    source,
-    /function maxSavedNotes\(\)\s*\{\s*return YTD_NOTES_BACKUP\.MAX_NOTES;/,
-    "background must read the ceiling from notes-backup.js",
-  );
+  assert.doesNotMatch(source, /function maxSavedNotes\(/);
+  assert.doesNotMatch(source, /YTD_NOTES_BACKUP\.MAX_NOTES/);
   assert.doesNotMatch(
     source,
     /MAX_SAVED_NOTES\s*=\s*\d/,
@@ -1438,7 +1467,7 @@ test("the storage ceiling has exactly one source of truth", () => {
   );
 });
 
-test("getNotes reports whole-library capacity alongside the filtered notes", async () => {
+test("getNotes does not report a fixed count ceiling", async () => {
   const state = loadBackgroundBackupHelpers({
     initialNotes: [
       makeNote(1, { videoId: "video_a", mediaKey: "video_a" }),
@@ -1454,7 +1483,7 @@ test("getNotes reports whole-library capacity alongside the filtered notes", asy
     2,
     "capacity describes the library, not the filtered view",
   );
-  assert.equal(filtered.limit, notesBackup.MAX_NOTES);
+  assert.equal(Object.hasOwn(filtered, "limit"), false);
 });
 
 test("resetting all extension data also clears session storage", async () => {

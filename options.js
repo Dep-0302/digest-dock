@@ -114,8 +114,6 @@ const YTD_OPTIONS = (() => {
         "This backup was created by a newer unsupported format. Update DigestDock before importing it.",
       notesBackupConflict:
         "The backup conflicts with an existing note that has the same ID. No notes were changed.",
-      notesBackupCapacity: ({ overBy, limit }) =>
-        `Import would exceed the ${limit}-note limit by ${overBy}. Delete unneeded notes and try again. No notes were changed.`,
       notesImportFailed: "Could not import the notes backup. No notes were changed.",
       clearedDigests: ({ count }) =>
         `Cleared ${count} cached digest${count === 1 ? "" : "s"}.`,
@@ -233,8 +231,6 @@ const YTD_OPTIONS = (() => {
       notesBackupInvalid: "这不是有效的 DigestDock 笔记备份，现有笔记未改变。",
       notesBackupUnsupported: "该备份使用了当前版本不支持的新格式，请更新 DigestDock 后再导入。",
       notesBackupConflict: "备份与本机具有相同 ID 的笔记内容冲突，现有笔记未改变。",
-      notesBackupCapacity: ({ overBy, limit }) =>
-        `导入后将超过 ${limit} 条上限，多出 ${overBy} 条。请先删除不需要的笔记后重试，现有笔记未改变。`,
       notesImportFailed: "无法导入笔记备份，现有笔记未改变。",
       clearedDigests: ({ count }) => `已清除 ${count} 条缓存摘要。`,
       notesDeleted: "已删除全部已保存的笔记。",
@@ -690,8 +686,6 @@ const YTD_OPTIONS = (() => {
         return "notesBackupUnsupported";
       case "NOTES_BACKUP_CONFLICT":
         return "notesBackupConflict";
-      case "NOTES_CAPACITY_EXCEEDED":
-        return "notesBackupCapacity";
       case "INVALID_NOTES_BACKUP":
       case "INVALID_STORED_NOTES":
         return "notesBackupInvalid";
@@ -1560,9 +1554,6 @@ const YTD_OPTIONS = (() => {
         }
         if (!result?.success) {
           setStatus(backupStatus, notesBackupErrorKey(result?.code), {
-            overBy: result?.overBy || 0,
-            limit:
-              result?.limit || root.YTD_NOTES_BACKUP.MAX_NOTES,
             maxMiB: backupLimitMiB(root, result?.maxBytes),
           });
           return;
