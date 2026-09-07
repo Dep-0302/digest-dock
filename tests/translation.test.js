@@ -10212,6 +10212,160 @@ test("Chinese note cleanup accepts removal of dense listed fillers", async () =>
   );
 });
 
+test("note cleanup rejects an appended independent sentence when TARGET has no punctuation", async () => {
+  const target = "Keep the backup";
+  const candidate = "Keep the backup. Delete the old notes.";
+
+  const cleaned = await cleanupWithProviderCandidate({
+    target,
+    candidate,
+    fullContext: candidate,
+  });
+
+  assert.equal(cleaned, target);
+});
+
+test("note cleanup rejects an appended independent clause after a semicolon", async () => {
+  const target = "Keep the backup";
+  const candidate = "Keep the backup; delete the old notes.";
+
+  const cleaned = await cleanupWithProviderCandidate({
+    target,
+    candidate,
+    fullContext: candidate,
+  });
+
+  assert.equal(cleaned, target);
+});
+
+test("English note cleanup accepts ordinary inflection repair", async () => {
+  const target = "it keep it and add new feature";
+  const candidate = "It keeps it and adds new features.";
+
+  const cleaned = await cleanupWithProviderCandidate({
+    target,
+    candidate,
+    fullContext: target,
+  });
+
+  assert.equal(cleaned, candidate);
+});
+
+test("note cleanup keeps a linked second sentence in the same thought", async () => {
+  const target = "The system keeps the backup";
+  const candidate =
+    "The system keeps the backup. That preserves the only recovery path.";
+
+  const cleaned = await cleanupWithProviderCandidate({
+    target,
+    candidate,
+    fullContext: candidate,
+  });
+
+  assert.equal(cleaned, candidate);
+
+  const chineseTarget = "我们先把问题想清楚";
+  const chineseCandidate = "我们先把问题想清楚，然后再开始动手。";
+  assert.equal(
+    await cleanupWithProviderCandidate({
+      target: chineseTarget,
+      candidate: chineseCandidate,
+      fullContext: "我们先把问题想清楚 然后再开始动手",
+      platform: "bilibili",
+      sourceLanguage: "zh-CN",
+    }),
+    chineseCandidate,
+  );
+});
+
+test("note cleanup rejects linked-looking neighboring topics and opposite actions", async () => {
+  for (const candidate of [
+    "Keep the backup. And tomorrow we discuss pricing.",
+    "Keep the backup. That unrelated product launches tomorrow.",
+    "Keep the backup, and delete the old notes.",
+    "Keep the backup. Delete the backup.",
+  ]) {
+    assert.equal(
+      await cleanupWithProviderCandidate({
+        target: "Keep the backup",
+        candidate,
+        fullContext: candidate,
+      }),
+      "Keep the backup",
+    );
+  }
+
+  assert.equal(
+    await cleanupWithProviderCandidate({
+      target: "保留用户备份",
+      candidate: "保留用户备份。所以删除用户备份。",
+      fullContext: "保留用户备份。所以删除用户备份。",
+      platform: "bilibili",
+      sourceLanguage: "zh-CN",
+    }),
+    "保留用户备份",
+  );
+});
+
+test("note cleanup meaning markers come only from the TARGET source sentence", async () => {
+  assert.equal(
+    await cleanupWithProviderCandidate({
+      target: "We should deploy Friday.",
+      candidate: "We should not deploy Friday.",
+      fullContext: "We should deploy Friday. Do not delete backups.",
+    }),
+    "We should deploy Friday.",
+  );
+  assert.equal(
+    await cleanupWithProviderCandidate({
+      target: "We saved 5 notes.",
+      candidate: "We saved 5 notes and deleted 10 backups.",
+      fullContext: "We saved 5 notes. We deleted 10 backups.",
+    }),
+    "We saved 5 notes.",
+  );
+});
+
+test("note cleanup accepts a source-grounded speaker frame from the TARGET sentence", async () => {
+  const target = "we should begin.";
+  const candidate = "The speaker said we should begin.";
+  assert.equal(
+    await cleanupWithProviderCandidate({
+      target,
+      candidate,
+      fullContext: candidate,
+    }),
+    candidate,
+  );
+
+  const chineseTarget = "我们应该开始。";
+  const chineseCandidate = "视频作者提到，我们应该开始。";
+  assert.equal(
+    await cleanupWithProviderCandidate({
+      target: chineseTarget,
+      candidate: chineseCandidate,
+      fullContext: chineseCandidate,
+      platform: "bilibili",
+      sourceLanguage: "zh-CN",
+    }),
+    chineseCandidate,
+  );
+});
+
+test("note cleanup rejects material that is absent from FULL CONTEXT", async () => {
+  const target =
+    "We should keep the current backup because it protects all user history.";
+  assert.equal(
+    await cleanupWithProviderCandidate({
+      target,
+      candidate:
+        "We should keep the current backup because it protects all user history and delete the originals.",
+      fullContext: target,
+    }),
+    target,
+  );
+});
+
 test("note cleanup fails closed to TARGET when the provider returns only AFTER", async () => {
   const background = loadBackgroundHelpers({
     fetchImpl: async (url) => {
@@ -14418,7 +14572,7 @@ test("YouTube Chinese notes use the same contextual cleanup as Bilibili", async 
     transcriptSource: "supadata",
     transcript: [
       { start: 0, text: "开场白。", language },
-      { start: 10, text: "第二句中文字幕内容。", language },
+      { start: 10, text: "第二句中文字幕内容", language },
       { start: 20, text: "结束语。", language },
     ],
   });
@@ -14427,6 +14581,7 @@ test("YouTube Chinese notes use the same contextual cleanup as Bilibili", async 
     const digest = makeDigest(language);
     const storedNotes = [];
     let cleanupCalls = 0;
+    let usedChinesePrompt = false;
     const storage = createMigratedNotesAdapter(storedNotes, {
       ytd_settings: settings,
       [`digest_${videoId}`]: digest,
@@ -14445,6 +14600,7 @@ test("YouTube Chinese notes use the same contextual cleanup as Bilibili", async 
         const chinesePrompt = request.messages.some((message) =>
           /整理成通顺、完整、可独立阅读的中文笔记/.test(message.content),
         );
+        usedChinesePrompt = chinesePrompt;
         return {
           ok: true,
           status: 200,
@@ -14453,9 +14609,7 @@ test("YouTube Chinese notes use the same contextual cleanup as Bilibili", async 
               {
                 message: {
                   content: JSON.stringify({
-                    quote: chinesePrompt
-                      ? "第二句中文字幕内容已经整理完整。"
-                      : "第二句中文字幕内容 cleaned.",
+                    quote: "第二句中文字幕内容。",
                   }),
                 },
               },
@@ -14465,17 +14619,19 @@ test("YouTube Chinese notes use the same contextual cleanup as Bilibili", async 
       },
     });
     const result = await background.handleSaveNote(videoId, 10, "视频", "频道");
-    return { result, savedNote: storedNotes[0], cleanupCalls };
+    return { result, savedNote: storedNotes[0], cleanupCalls, usedChinesePrompt };
   };
 
   // Trusted YouTube Chinese tracks now share the contextual Chinese cleanup
   // contract instead of storing a single raw caption fragment.
   for (const language of ["zh-CN", "zh-Hans", "zh-SG", "zh-Hant", "zh-TW"]) {
-    const { result, savedNote, cleanupCalls } = await runSave(language);
+    const { result, savedNote, cleanupCalls, usedChinesePrompt } =
+      await runSave(language);
     assert.equal(result.success, true, `${language} save should succeed`);
     assert.equal(cleanupCalls, 1, `${language} must run one Chinese cleanup`);
-    assert.equal(savedNote.text, "第二句中文字幕内容已经整理完整。");
-    assert.equal(savedNote.rawText, "第二句中文字幕内容。");
+    assert.equal(usedChinesePrompt, true);
+    assert.equal(savedNote.text, "第二句中文字幕内容。");
+    assert.equal(savedNote.rawText, "第二句中文字幕内容");
     assert.equal(savedNote.sourceLanguage, language);
     assert.equal(savedNote.textLanguage, language);
   }
@@ -14484,11 +14640,13 @@ test("YouTube Chinese notes use the same contextual cleanup as Bilibili", async 
   // an explicit Japanese line and a missing language keep the cleanup path so
   // Japanese kanji is never misread as Chinese.
   for (const language of ["en", "ja", ""]) {
-    const { result, savedNote, cleanupCalls } = await runSave(language);
+    const { result, savedNote, cleanupCalls, usedChinesePrompt } =
+      await runSave(language);
     assert.equal(result.success, true, `"${language}" save should succeed`);
     assert.equal(cleanupCalls, 1, `"${language}" must run the DeepSeek cleanup once`);
-    assert.equal(savedNote.text, "第二句中文字幕内容 cleaned.");
-    assert.equal(savedNote.rawText, "第二句中文字幕内容。");
+    assert.equal(usedChinesePrompt, false);
+    assert.equal(savedNote.text, "第二句中文字幕内容。");
+    assert.equal(savedNote.rawText, "第二句中文字幕内容");
     assert.equal(savedNote.sourceLanguage, language);
   }
 });

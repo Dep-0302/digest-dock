@@ -5408,12 +5408,46 @@ function noteCleanupMeaningMarkers(value) {
   return { negated, numbers, directions };
 }
 
-function noteCleanupOrderedCoverage(targetUnits, candidateUnits) {
+function noteCleanupEnglishUnitMatches(left, right) {
+  if (left === right) return true;
+  if (!left || !right) return false;
+
+  for (const [base, inflected] of [
+    [left, right],
+    [right, left],
+  ]) {
+    if (base.length < 3) continue;
+    if (
+      inflected === `${base}s` ||
+      inflected === `${base}es` ||
+      inflected === `${base}ed` ||
+      inflected === `${base}ing` ||
+      (base.endsWith("e") && inflected === `${base.slice(0, -1)}ing`) ||
+      (base.endsWith("y") &&
+        inflected === `${base.slice(0, -1)}ies`)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function noteCleanupOrderedCoverage(
+  targetUnits,
+  candidateUnits,
+  unitsMatch = (left, right) => left === right,
+) {
   if (!targetUnits.length || !candidateUnits.length) return 0;
   let matched = 0;
   let candidateIndex = 0;
   for (const unit of targetUnits) {
-    const nextIndex = candidateUnits.indexOf(unit, candidateIndex);
+    let nextIndex = -1;
+    for (let index = candidateIndex; index < candidateUnits.length; index += 1) {
+      if (unitsMatch(unit, candidateUnits[index])) {
+        nextIndex = index;
+        break;
+      }
+    }
     if (nextIndex === -1) continue;
     matched += 1;
     candidateIndex = nextIndex + 1;
@@ -5421,14 +5455,233 @@ function noteCleanupOrderedCoverage(targetUnits, candidateUnits) {
   return matched / targetUnits.length;
 }
 
+const NOTE_CLEANUP_ENGLISH_GROUNDING_STOP_WORDS = new Set([
+  "a",
+  "an",
+  "and",
+  "are",
+  "as",
+  "at",
+  "be",
+  "but",
+  "by",
+  "for",
+  "from",
+  "in",
+  "is",
+  "of",
+  "on",
+  "or",
+  "the",
+  "to",
+  "was",
+  "were",
+  "with",
+]);
+
+function noteCleanupCoverageUnits(value, hasCjk) {
+  if (hasCjk) {
+    let source = String(value || "").normalize("NFKC").toLowerCase();
+    const filler =
+      /(^|[\s，,。！？!?；;：:、])(?:对吧|就是|然后|那么|这个|那个|其实|啊|呃|嗯)(?=$|[\s，,。！？!?；;：:、])/g;
+    for (let pass = 0; pass < 2; pass += 1) {
+      source = source.replace(filler, "$1");
+    }
+    const normalized = normalizeNoteCleanupSignalText(source);
+    return Array.from(normalized.replace(/\s+/g, ""));
+  }
+  const source = String(value || "")
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(
+      /^(?:(?:um|uh|like|you know|sort of|kind of)\s*[,;:]\s*)+/i,
+      "",
+    );
+  const normalized = normalizeNoteCleanupSignalText(source);
+  return normalized
+    .split(/\s+/)
+    .filter(
+      (word) =>
+        word && !NOTE_CLEANUP_ENGLISH_GROUNDING_STOP_WORDS.has(word),
+    );
+}
+
+function noteCleanupSequenceContained(required, available) {
+  if (!required.length) return true;
+  return noteCleanupOrderedCoverage(required, available) === 1;
+}
+
+function noteCleanupTargetSourceScope(fullContext, target) {
+  const contextText = String(fullContext || "");
+  const targetText = String(target || "");
+  const targetIndex = contextText.indexOf(targetText);
+  if (!contextText || !targetText || targetIndex < 0) return contextText || targetText;
+
+  const boundaryPattern = /[.!?。！？;；]/;
+  let start = targetIndex;
+  while (start > 0 && !boundaryPattern.test(contextText[start - 1])) start -= 1;
+
+  const targetEnd = targetIndex + targetText.length;
+  let end = targetEnd;
+  if (!boundaryPattern.test(targetText.trimEnd().slice(-1))) {
+    while (end < contextText.length && !boundaryPattern.test(contextText[end])) {
+      end += 1;
+    }
+    if (end < contextText.length) end += 1;
+  }
+  return contextText.slice(start, end).trim() || targetText;
+}
+
+function noteCleanupActionMarkers(value) {
+  const text = String(value || "").normalize("NFKC").toLowerCase();
+  const actions = new Set();
+  if (
+    /\b(?:keep|keeps|kept|preserve|preserves|preserved|retain|retains|retained|save|saves|saved|backup|backups|backed up|recover|recovers|recovered)\b/.test(
+      text,
+    ) || /(?:保留|保存|备份|留存|恢复)/.test(text)
+  ) {
+    actions.add("preserve");
+  }
+  if (
+    /\b(?:delete|deletes|deleted|remove|removes|removed|discard|discards|discarded|destroy|destroys|destroyed|erase|erases|erased|clear|clears|cleared)\b/.test(
+      text,
+    ) || /(?:删除|移除|丢弃|销毁|抹除|清除)/.test(text)
+  ) {
+    actions.add("destroy");
+  }
+  return actions;
+}
+
+function noteCleanupStartsWithThoughtLink(value, hasCjk) {
+  const text = String(value || "").trim();
+  if (hasCjk) {
+    return /^(?:然后|接着|而且|并且|但是|所以|因此|因为|如果|虽然|不过|然而|这样|同时|从而|于是|这|那|它|他|她|其|再|也|而|但|则|才)/.test(
+      text,
+    );
+  }
+  return /^(?:and|but|because|so|therefore|however|that|this|these|those|it|they|he|she|which|who|when|while|if|although|though|as|once|instead|also|then)\b/i.test(
+    text,
+  );
+}
+
+function noteCleanupClausesStayWithTarget(candidateText, targetUnits, hasCjk) {
+  const clauses = String(candidateText || "")
+    .split(
+      /[.!?。！？;；]+|,\s+(?=(?:and|but|then|so)\b)|，\s*(?=(?:然后|但是|所以|而且|并且|不过|然而|但|而|则))/iu,
+    )
+    .map((clause) => clause.trim())
+    .filter(Boolean);
+  if (clauses.length <= 1) return true;
+
+  const unitsMatch = hasCjk
+    ? (left, right) => left === right
+    : noteCleanupEnglishUnitMatches;
+  const clauseUnits = clauses.map((clause) =>
+    noteCleanupCoverageUnits(clause, hasCjk),
+  );
+  let targetClauseIndex = 0;
+  let bestTargetCoverage = 0;
+  for (let index = 0; index < clauseUnits.length; index += 1) {
+    const coverage = noteCleanupOrderedCoverage(
+      targetUnits,
+      clauseUnits[index],
+      unitsMatch,
+    );
+    if (coverage > bestTargetCoverage) {
+      bestTargetCoverage = coverage;
+      targetClauseIndex = index;
+    }
+  }
+
+  const targetClause = clauses[targetClauseIndex];
+  const targetClauseUnits = clauseUnits[targetClauseIndex];
+  const targetActions = noteCleanupActionMarkers(targetClause);
+  const targetCjkText = hasCjk ? targetClauseUnits.join("") : "";
+  const targetCjkPairs = new Set(
+    Array.from({ length: Math.max(0, targetCjkText.length - 1) }, (_, index) =>
+      targetCjkText.slice(index, index + 2),
+    ),
+  );
+
+  for (let index = 0; index < clauses.length; index += 1) {
+    if (index === targetClauseIndex) continue;
+    const units = clauseUnits[index];
+    if (!units.length) continue;
+    const meaningfulTargetUnits = hasCjk
+      ? []
+      : targetUnits.filter(
+          (unit) =>
+            unit.length >= 3 &&
+            !NOTE_CLEANUP_ENGLISH_GROUNDING_STOP_WORDS.has(unit),
+        );
+    const meaningfulUnits = hasCjk
+      ? []
+      : units.filter(
+          (unit) =>
+            unit.length >= 3 &&
+            !NOTE_CLEANUP_ENGLISH_GROUNDING_STOP_WORDS.has(unit),
+        );
+    const repeatsTarget =
+      meaningfulTargetUnits.length > 0 &&
+      noteCleanupOrderedCoverage(
+        meaningfulTargetUnits,
+        meaningfulUnits,
+        unitsMatch,
+      ) >= 0.5;
+    let sharesSubject = false;
+    if (hasCjk) {
+      const text = units.join("");
+      for (let pairIndex = 0; pairIndex + 1 < text.length; pairIndex += 1) {
+        if (targetCjkPairs.has(text.slice(pairIndex, pairIndex + 2))) {
+          sharesSubject = true;
+          break;
+        }
+      }
+    } else {
+      sharesSubject = units.some(
+        (unit) =>
+          unit.length >= 3 &&
+          !NOTE_CLEANUP_ENGLISH_GROUNDING_STOP_WORDS.has(unit) &&
+          targetClauseUnits.some((targetUnit) =>
+            noteCleanupEnglishUnitMatches(unit, targetUnit),
+          ),
+      );
+    }
+    const clauseActions = noteCleanupActionMarkers(clauses[index]);
+    const actionConflict =
+      (targetActions.has("preserve") && clauseActions.has("destroy")) ||
+      (targetActions.has("destroy") && clauseActions.has("preserve"));
+    if (actionConflict) return false;
+    const sharesAction = Array.from(clauseActions).some((action) =>
+      targetActions.has(action),
+    );
+    const linked =
+      noteCleanupStartsWithThoughtLink(clauses[index], hasCjk) ||
+      (index < targetClauseIndex &&
+        noteCleanupStartsWithThoughtLink(targetClause, hasCjk));
+    const pairedSequence = hasCjk
+      ? /先/.test(targetClause) && /^(?:然后|再|接着)/.test(clauses[index])
+      : /\bfirst\b/i.test(targetClause) && /^(?:then|next)\b/i.test(clauses[index]);
+    if (
+      !linked ||
+      (!repeatsTarget && !sharesSubject && !sharesAction && !pairedSequence)
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
 /**
  * Rejects a fluent answer that silently abandons TARGET for surrounding cues.
  * Cleanup may repair punctuation and ASR noise, but the saved thought still
  * needs recognizable lexical evidence from the cue the user chose.
  */
-function noteCleanupPreservesTarget(candidate, target) {
+function noteCleanupPreservesTarget(candidate, target, fullContext = target) {
   const candidateText = String(candidate || "");
   const targetText = String(target || "");
+  const contextText = String(fullContext || targetText);
+  const targetSourceScope = noteCleanupTargetSourceScope(contextText, targetText);
   const normalizedCandidate = normalizeNoteCleanupSignalText(candidateText);
   const normalizedTarget = normalizeNoteCleanupSignalText(targetText);
   if (!normalizedCandidate || !normalizedTarget) return false;
@@ -5436,7 +5689,7 @@ function noteCleanupPreservesTarget(candidate, target) {
   // A narrator-style wrapper is a summary, not a cleaned source quotation.
   const summaryVoice =
     /(?:视频|本视频)?(?:作者|博主|讲者|说话者)(?:提到|表示|认为|指出|说道|讲述)|(?:他|她)(?:提到|表示|认为|指出|说道|讲述)|据(?:视频|本视频)?(?:作者|博主|讲者|说话者|他|她)(?:所说|介绍|表示)|\baccording\s+to\s+(?:(?:the\s+)?(?:speaker|author|creator)|him|her)\b|\b(?:the\s+)?(?:speaker|author|video|creator)\s+(?:says?|said|mentions?|mentioned|explains?|explained|discusses?|discussed)\b|^(?:(?:in summary|overall|in short)\b|总之|总体而言|简而言之)/i;
-  if (summaryVoice.test(candidateText) && !summaryVoice.test(targetText)) {
+  if (summaryVoice.test(candidateText) && !summaryVoice.test(targetSourceScope)) {
     return false;
   }
 
@@ -5448,15 +5701,20 @@ function noteCleanupPreservesTarget(candidate, target) {
 
   const targetMarkers = noteCleanupMeaningMarkers(targetText);
   const candidateMarkers = noteCleanupMeaningMarkers(candidateText);
-  if (targetMarkers.negated !== candidateMarkers.negated) return false;
-  if (
-    targetMarkers.numbers.join("\u0000") !==
-    candidateMarkers.numbers.join("\u0000")
-  ) {
+  const contextMarkers = noteCleanupMeaningMarkers(targetSourceScope);
+  if (targetMarkers.negated && !candidateMarkers.negated) return false;
+  if (candidateMarkers.negated && !contextMarkers.negated) return false;
+  if (!noteCleanupSequenceContained(targetMarkers.numbers, candidateMarkers.numbers)) {
+    return false;
+  }
+  if (!noteCleanupSequenceContained(candidateMarkers.numbers, contextMarkers.numbers)) {
     return false;
   }
   for (const direction of targetMarkers.directions) {
     if (!candidateMarkers.directions.has(direction)) return false;
+  }
+  for (const direction of candidateMarkers.directions) {
+    if (!contextMarkers.directions.has(direction)) return false;
   }
   if (
     (targetMarkers.directions.has("up") && candidateMarkers.directions.has("down")) ||
@@ -5468,26 +5726,42 @@ function noteCleanupPreservesTarget(candidate, target) {
   }
 
   const hasCjkTarget = /[\u3400-\u9fff]/.test(normalizedTarget);
-  const targetUnits = hasCjkTarget
-    ? Array.from(normalizedTarget.replace(/\s+/g, ""))
-    : normalizedTarget.split(/\s+/).filter((word) => !["um", "uh"].includes(word));
-  const candidateUnits = hasCjkTarget
-    ? Array.from(normalizedCandidate.replace(/\s+/g, ""))
-    : normalizedCandidate.split(/\s+/).filter((word) => !["um", "uh"].includes(word));
-  if (noteCleanupOrderedCoverage(targetUnits, candidateUnits) < 0.8) {
+  const targetUnits = noteCleanupCoverageUnits(targetText, hasCjkTarget);
+  const candidateUnits = noteCleanupCoverageUnits(candidateText, hasCjkTarget);
+  const contextUnits = noteCleanupCoverageUnits(contextText, hasCjkTarget);
+  const unitsMatch = hasCjkTarget
+    ? (left, right) => left === right
+    : noteCleanupEnglishUnitMatches;
+  const minimumTargetCoverage = hasCjkTarget ? 0.6 : 0.7;
+  if (
+    !targetUnits.length ||
+    noteCleanupOrderedCoverage(targetUnits, candidateUnits, unitsMatch) <
+      minimumTargetCoverage
+  ) {
     return false;
   }
-
-  const targetTerminators = (targetText.match(/[.!?。！？]+/g) || []).length;
-  const candidateTerminators = (candidateText.match(/[.!?。！？]+/g) || []).length;
-  if (targetTerminators && candidateTerminators > targetTerminators) return false;
-  const completedTargetMaxUnits = hasCjkTarget
-    ? Math.max(targetUnits.length + 8, Math.ceil(targetUnits.length * 1.75))
-    : targetUnits.length + 2;
+  const candidateGroundingUnits = hasCjkTarget
+    ? candidateUnits
+    : candidateUnits.filter(
+        (unit) => !NOTE_CLEANUP_ENGLISH_GROUNDING_STOP_WORDS.has(unit),
+      );
+  const contextGroundingUnits = hasCjkTarget
+    ? contextUnits
+    : contextUnits.filter(
+        (unit) => !NOTE_CLEANUP_ENGLISH_GROUNDING_STOP_WORDS.has(unit),
+      );
+  const minimumSourceCoverage = hasCjkTarget ? 0.75 : 0.85;
   if (
-    targetTerminators &&
-    candidateUnits.length > completedTargetMaxUnits
+    !candidateGroundingUnits.length ||
+    noteCleanupOrderedCoverage(
+      candidateGroundingUnits,
+      contextGroundingUnits,
+      unitsMatch,
+    ) < minimumSourceCoverage
   ) {
+    return false;
+  }
+  if (!noteCleanupClausesStayWithTarget(candidateText, targetUnits, hasCjkTarget)) {
     return false;
   }
   return true;
@@ -5551,7 +5825,7 @@ async function cleanupNoteText(
       const parsed = parseLooseJson(result);
       if (typeof parsed.quote === "string" && parsed.quote.trim()) {
         const candidate = parsed.quote.trim().slice(0, 3000);
-        return noteCleanupPreservesTarget(candidate, targetText)
+        return noteCleanupPreservesTarget(candidate, targetText, fullContext)
           ? candidate
           : String(targetText || "").trim().slice(0, 3000);
       }
@@ -5574,7 +5848,7 @@ async function cleanupNoteText(
     }
 
     const candidate = result.slice(0, 3000);
-    return noteCleanupPreservesTarget(candidate, targetText)
+    return noteCleanupPreservesTarget(candidate, targetText, fullContext)
       ? candidate
       : String(targetText || "").trim().slice(0, 3000);
   } catch (e) {
