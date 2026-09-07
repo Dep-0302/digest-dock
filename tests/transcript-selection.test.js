@@ -16,34 +16,115 @@ const noteCleanupPrompt = fs.readFileSync(
   "utf8",
 );
 
-test("note cleanup keeps TARGET central and treats wider context as reference only", () => {
-  assert.match(
+function fencedPromptSection(markdown, heading) {
+  const headingIndex = markdown.indexOf(`## ${heading}`);
+  assert.notEqual(headingIndex, -1, `missing ${heading} heading`);
+  const fenceStart = markdown.indexOf("```", headingIndex);
+  const contentStart = markdown.indexOf("\n", fenceStart) + 1;
+  const fenceEnd = markdown.indexOf("\n```", contentStart);
+  assert.ok(fenceStart >= headingIndex && contentStart > fenceStart);
+  assert.ok(fenceEnd > contentStart, `missing ${heading} closing fence`);
+  return markdown.slice(contentStart, fenceEnd);
+}
+
+function markdownSection(markdown, heading, nextHeading) {
+  const sectionStart = markdown.indexOf(`## ${heading}`);
+  const sectionEnd = markdown.indexOf(`## ${nextHeading}`, sectionStart + 1);
+  assert.notEqual(sectionStart, -1, `missing ${heading} heading`);
+  assert.ok(sectionEnd > sectionStart, `missing ${nextHeading} heading`);
+  return markdown.slice(sectionStart, sectionEnd);
+}
+
+test("English and Chinese cleanup prompts separately allow completion and forbid drift", () => {
+  const englishSystemPrompt = fencedPromptSection(
     noteCleanupPrompt,
+    "System prompt",
+  );
+  const chineseSystemPrompt = fencedPromptSection(
+    noteCleanupPrompt,
+    "Chinese system prompt",
+  );
+  const userPrompt = fencedPromptSection(noteCleanupPrompt, "User prompt");
+  const variables = markdownSection(
+    noteCleanupPrompt,
+    "Variables",
+    "Output format",
+  );
+
+  assert.match(
+    englishSystemPrompt,
     /TARGET is mandatory and must remain the core of the note\./,
   );
   assert.match(
-    noteCleanupPrompt,
-    /Use BEFORE and AFTER only when needed to finish that same sentence or thought\./,
+    englishSystemPrompt,
+    /ALLOW COMPLETION:[^\n]*BEFORE, AFTER, and FULL CONTEXT[^\n]*same sentence or single thought[^\n]*regardless of how many transcript lines it spans\./,
   );
   assert.match(
-    noteCleanupPrompt,
-    /FULL CONTEXT is reference-only\.[\s\S]*?Never copy an independent claim from FULL CONTEXT into the note\./,
+    englishSystemPrompt,
+    /FORBID DRIFT:[^\n]*independent neighboring sentence, claim, idea, or topic[^\n]*TARGET-containing sentence or thought\./,
   );
   assert.match(
-    noteCleanupPrompt,
+    englishSystemPrompt,
     /Do NOT summarize, generalize,[\s\S]*?or add anything they did not say\./,
   );
   assert.match(
-    noteCleanupPrompt,
+    chineseSystemPrompt,
     /TARGET 是必须保留的正文核心。[\s\S]*?不得因为邻近观点更完整、更有趣或更重要，就改选邻近观点。/,
   );
   assert.match(
-    noteCleanupPrompt,
-    /FULL CONTEXT 只供判断句界、消解指代和校正人名、机构名等专有名词；不得从中抽取独立观点写入笔记。/,
+    chineseSystemPrompt,
+    /允许补全：[^\n]*BEFORE、AFTER 和 FULL CONTEXT[^\n]*同一句话或同一个完整观点[^\n]*无论[^\n]*跨多少行。/,
   );
   assert.match(
-    noteCleanupPrompt,
+    chineseSystemPrompt,
+    /禁止跑偏：[^\n]*独立相邻句子、观点或话题/,
+  );
+  assert.match(
+    chineseSystemPrompt,
     /禁止总结、泛化、缩写观点、改写成“视频作者提到”等第三人称转述/,
+  );
+  assert.match(
+    userPrompt,
+    /FULL CONTEXT[^\n]*complete[^\n]*same sentence or thought[^\n]*TARGET/i,
+  );
+  assert.match(
+    userPrompt,
+    /never[^\n]*independent[^\n]*(?:nearby|neighboring) (?:idea|sentence|thought|topic)/i,
+  );
+  assert.doesNotMatch(userPrompt, /reference[ -]only|solely for boundaries/i);
+  assert.match(
+    variables,
+    /\{fullContext\}[^\n]*complete[^\n]*same sentence or thought[^\n]*TARGET/i,
+  );
+  assert.doesNotMatch(variables, /reference[ -]only|solely for boundaries/i);
+});
+
+test("Chinese cleanup names concrete fillers, ASR repairs, and unpunctuated sentence recovery", () => {
+  const chineseSystemPrompt = fencedPromptSection(
+    noteCleanupPrompt,
+    "Chinese system prompt",
+  );
+
+  for (const filler of [
+    "就是",
+    "然后",
+    "那么",
+    "这个",
+    "那个",
+    "其实",
+    "对吧",
+    "啊",
+    "呃",
+    "嗯",
+  ]) {
+    assert.match(chineseSystemPrompt, new RegExp(`“${filler}”`));
+  }
+  assert.match(chineseSystemPrompt, /重复词/);
+  assert.match(chineseSystemPrompt, /口误重启/);
+  assert.match(chineseSystemPrompt, /ASR[^\n]*同音字错误/);
+  assert.match(
+    chineseSystemPrompt,
+    /为无标点的连续中文文本补出正确的中文标点与断句/,
   );
 });
 

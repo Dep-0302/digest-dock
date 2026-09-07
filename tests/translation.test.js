@@ -10096,6 +10096,122 @@ test("Bilibili Chinese note cleanup keeps the polished Chinese text", async () =
   assert.match(requests[0].messages[0].content, /整理成通顺、完整、可独立阅读的中文笔记/);
 });
 
+async function cleanupWithProviderCandidate({
+  target,
+  candidate,
+  before = "",
+  after = "",
+  fullContext = target,
+  platform = "youtube",
+  sourceLanguage = "en",
+}) {
+  const background = loadBackgroundHelpers({
+    fetchImpl: async (url) => {
+      if (url.startsWith("chrome-extension://")) {
+        return { ok: true, text: async () => read("prompts/note-cleanup.md") };
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({ quote: candidate }),
+              },
+            },
+          ],
+        }),
+      };
+    },
+  });
+
+  return background.cleanupNoteText(
+    target,
+    before,
+    after,
+    fullContext,
+    "Note cleanup quality contract",
+    platform,
+    sourceLanguage,
+  );
+}
+
+test("English note cleanup accepts same-thought completion from FULL CONTEXT", async () => {
+  const target = "it keeps it and then adds new features.";
+  const candidate =
+    "Evolution proceeds by accretion: once the brain arrives at a solution that's good enough, it keeps it and then adds new features.";
+
+  const cleaned = await cleanupWithProviderCandidate({
+    target,
+    candidate,
+    fullContext: `${candidate} A separate neighboring topic begins here.`,
+  });
+
+  assert.equal(
+    cleaned,
+    candidate,
+    "source-grounded completion of the same sentence must not be rejected for extending beyond TARGET",
+  );
+});
+
+test("Chinese note cleanup accepts same-thought completion from FULL CONTEXT", async () => {
+  const target = "所以我们必须先确认备份已经完成。";
+  const candidate =
+    "因为这份资料是唯一能够恢复用户历史的副本，所以我们必须先确认备份已经完成。";
+
+  const cleaned = await cleanupWithProviderCandidate({
+    target,
+    candidate,
+    fullContext: `${candidate}下一个独立话题从这里开始。`,
+    platform: "bilibili",
+    sourceLanguage: "zh-CN",
+  });
+
+  assert.equal(
+    cleaned,
+    candidate,
+    "来自 FULL CONTEXT 的同一句补全不应因超出 TARGET 长度而被退回原文",
+  );
+});
+
+test("English note cleanup accepts removal of dense listed fillers", async () => {
+  const target = "Um, like, you know, we should sort of start now.";
+  const candidate = "We should start now.";
+
+  const cleaned = await cleanupWithProviderCandidate({
+    target,
+    candidate,
+    fullContext: target,
+  });
+
+  assert.equal(
+    cleaned,
+    candidate,
+    "removing listed filler phrases must not fail TARGET-preservation validation",
+  );
+});
+
+test("Chinese note cleanup accepts removal of dense listed fillers", async () => {
+  const target =
+    "嗯，呃，啊，就是，然后，那么，这个，那个，其实，我们现在开始，对吧。";
+  const candidate = "我们现在开始。";
+
+  const cleaned = await cleanupWithProviderCandidate({
+    target,
+    candidate,
+    fullContext: target,
+    platform: "bilibili",
+    sourceLanguage: "zh-CN",
+  });
+
+  assert.equal(
+    cleaned,
+    candidate,
+    "删除明确列出的中文口头禅不应触发 TARGET 回退",
+  );
+});
+
 test("note cleanup fails closed to TARGET when the provider returns only AFTER", async () => {
   const background = loadBackgroundHelpers({
     fetchImpl: async (url) => {
