@@ -8940,6 +8940,128 @@ test("note save rejects a tab that changes route before persistence", async () =
   assert.deepEqual(readMigratedNotesSnapshot(storage.snapshot()), []);
 });
 
+test("Bilibili Traditional and Cantonese notes translate from cleaned text while legacy notes keep raw input", async () => {
+  const runtime = loadSidepanelRuntime();
+  const fixture = runtime.evaluate(`
+    (() => {
+      const elements = new Map();
+      let sentNotes = [];
+      const element = (id) => {
+        if (!elements.has(id)) {
+          elements.set(id, {
+            hidden: false,
+            textContent: "",
+            classList: { toggle() {} },
+            setAttribute() {},
+          });
+        }
+        return elements.get(id);
+      };
+      document.getElementById = element;
+      document.querySelectorAll = () => [];
+      renderNotes = () => {};
+      currentNotesMode = "zh";
+      isNotesLoading = false;
+      isNotesTranslationLoading = false;
+      currentNotes = [
+        {
+          id: "note_traditional_cleaned",
+          mediaKey: "bilibili:BV1zfg36ZEXi:traditional",
+          videoId: "bilibili:BV1zfg36ZEXi:traditional",
+          platform: "bilibili",
+          videoTitle: "繁體中文影片",
+          sourceLanguage: "zh-TW",
+          textLanguage: "zh-TW",
+          rawText: "我哋先釐清",
+          text: "我哋先釐清問題，再選擇最小方案。",
+        },
+        {
+          id: "note_cantonese_cleaned",
+          mediaKey: "bilibili:BV1zfg36ZEXi:cantonese",
+          videoId: "bilibili:BV1zfg36ZEXi:cantonese",
+          platform: "bilibili",
+          videoTitle: "粵語影片",
+          sourceLanguage: "yue-HK",
+          textLanguage: "yue-HK",
+          rawText: "我哋先搞清楚",
+          text: "我哋先搞清楚問題，再揀最細方案。",
+        },
+        {
+          id: "note_traditional_legacy",
+          mediaKey: "bilibili:BV1zfg36ZEXi:legacy",
+          videoId: "bilibili:BV1zfg36ZEXi:legacy",
+          platform: "bilibili",
+          videoTitle: "舊繁體影片",
+          sourceLanguage: "zh-TW",
+          textLanguage: "",
+          rawText: "舊筆記逐字原文",
+          text: "舊資料中的 text 未經語言標記，不應冒充整理稿。",
+        },
+      ];
+      chrome.runtime.sendMessage = async (message) => {
+        if (message.action !== "translateNotes") return {};
+        sentNotes = message.notes.map(({ id, text, rawText, textLanguage }) => ({
+          id,
+          text,
+          rawText,
+          textLanguage,
+        }));
+        return {
+          success: true,
+          translations: message.notes.map((note) => ({
+            id: note.id,
+            textZh: "简体结果：" + note.id,
+          })),
+          failures: [],
+          titles: [],
+          titleFailures: [],
+        };
+      };
+      return {
+        run: () => ensureNotesChinese(),
+        snapshot: () => JSON.stringify({
+          sentNotes,
+          originals: currentNotes.map((note) => noteOriginalText(note)),
+          chinese: currentNotes.map((note) => noteChineseText(note)),
+        }),
+      };
+    })()
+  `);
+
+  await fixture.run();
+  const snapshot = JSON.parse(fixture.snapshot());
+  assert.deepEqual(snapshot.sentNotes, [
+    {
+      id: "note_traditional_cleaned",
+      text: "我哋先釐清問題，再選擇最小方案。",
+      rawText: "我哋先釐清",
+      textLanguage: "zh-TW",
+    },
+    {
+      id: "note_cantonese_cleaned",
+      text: "我哋先搞清楚問題，再揀最細方案。",
+      rawText: "我哋先搞清楚",
+      textLanguage: "yue-HK",
+    },
+    {
+      id: "note_traditional_legacy",
+      text: "舊筆記逐字原文",
+      rawText: "舊筆記逐字原文",
+      textLanguage: "",
+    },
+  ]);
+  assert.deepEqual(snapshot.originals, [
+    "我哋先釐清",
+    "我哋先搞清楚",
+    "舊筆記逐字原文",
+  ]);
+  assert.deepEqual(snapshot.chinese, [
+    "简体结果：note_traditional_cleaned",
+    "简体结果：note_cantonese_cleaned",
+    "简体结果：note_traditional_legacy",
+  ]);
+});
+
 test("clicking the active Chinese notes mode retries once without duplicate requests", async () => {
   const runtime = loadSidepanelRuntime();
   const fixture = runtime.evaluate(`
@@ -10051,7 +10173,8 @@ test("Traditional Bilibili overview and notes keep source text distinct from Sim
   assert.equal(background.shouldUseChineseNoteCleanup("youtube", "zh-CN"), true);
   assert.equal(background.shouldUseChineseNoteCleanup("youtube", "zh-TW"), true);
   assert.equal(background.shouldUseChineseNoteCleanup("bilibili", "zh-CN"), true);
-  assert.equal(background.shouldUseChineseNoteCleanup("bilibili", "zh-TW"), false);
+  assert.equal(background.shouldUseChineseNoteCleanup("bilibili", "zh-TW"), true);
+  assert.equal(background.shouldUseChineseNoteCleanup("bilibili", "yue-HK"), true);
   assert.equal(background.shouldUseChineseNoteCleanup("youtube", "ja"), false);
 });
 
@@ -10649,6 +10772,145 @@ test("Bilibili v4 cache note saves polished Chinese once without refetching", as
   assert.match(result.note.timestampedUrl, /BV1zfg36ZEXi\/\?t=0$/);
   const storedNotes = readMigratedNotesSnapshot(storage.snapshot());
   assert.equal(storedNotes[0].text, result.note.text);
+});
+
+test("Bilibili Traditional and Cantonese notes use one Chinese cleanup without changing the saved cue", async (t) => {
+  const cases = [
+    {
+      name: "Traditional Chinese",
+      language: "zh-TW",
+      cid: 40830435550,
+      before: ["這是前四行", "這是前三行", "這是前兩行", "這是前一行"],
+      target: "我們先釐清問題",
+      after: ["再選擇最小方案", "最後開始實作"],
+      outsideAfter: "這是第三個後續觀點",
+      cleaned: "我們先釐清問題，再選擇最小方案，最後開始實作。",
+    },
+    {
+      name: "Cantonese",
+      language: "yue-HK",
+      cid: 40830435551,
+      before: ["呢個係前四行", "呢個係前三行", "呢個係前兩行", "呢個係前一行"],
+      target: "我哋先搞清楚問題",
+      after: ["再揀最細方案", "最後先開始做"],
+      outsideAfter: "呢個係第三個後續觀點",
+      cleaned: "我哋先搞清楚問題，再揀最細方案，最後先開始做。",
+    },
+  ];
+
+  for (const fixture of cases) {
+    await t.test(fixture.name, async () => {
+      const mediaRef = {
+        platform: "bilibili",
+        bvid: "BV1zfg36ZEXi",
+        aid: 123,
+        cid: fixture.cid,
+        page: 1,
+        mediaKey: `bilibili:BV1zfg36ZEXi:${fixture.cid}`,
+        canonicalUrl: "https://www.bilibili.com/video/BV1zfg36ZEXi/",
+        title: "示例视频",
+        channelName: "示例作者",
+      };
+      const transcriptTexts = [
+        ...fixture.before,
+        fixture.target,
+        ...fixture.after,
+        fixture.outsideAfter,
+      ];
+      const transcript = transcriptTexts.map((text, index) => ({
+        start: index * 10,
+        text,
+        language: fixture.language,
+      }));
+      const storage = createMemoryStorage(makeMigratedNotesState([], {
+        ytd_settings: {
+          provider: "deepseek",
+          aiApiKey: "test-key",
+          aiBaseUrl: "https://api.deepseek.com",
+          aiModel: "deepseek-v4-flash",
+        },
+        [`digest_${mediaRef.mediaKey}`]: {
+          transcriptSourcePolicyVersion: 4,
+          transcriptSource: "bilibili",
+          mediaRef,
+          transcriptLanguage: fixture.language,
+          transcript,
+        },
+      }));
+      const requests = [];
+      const background = loadBackgroundHelpers({
+        storageGetImpl: storage.get,
+        storageSetImpl: storage.set,
+        storageRemoveImpl: storage.remove,
+        fetchImpl: async (url, options) => {
+          if (url.startsWith("chrome-extension://")) {
+            return {
+              ok: true,
+              text: async () => read("prompts/note-cleanup.md"),
+            };
+          }
+          requests.push(JSON.parse(options.body));
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              choices: [
+                {
+                  message: {
+                    content: JSON.stringify({ quote: fixture.cleaned }),
+                  },
+                },
+              ],
+            }),
+          };
+        },
+      });
+
+      const result = await background.handleSaveNote(
+        mediaRef,
+        40,
+        mediaRef.title,
+        mediaRef.channelName,
+      );
+
+      assert.equal(result.success, true);
+      assert.equal(requests.length, 1, "save must make exactly one cleanup request");
+      const systemPrompt = requests[0].messages.find(
+        (message) => message.role === "system",
+      )?.content;
+      const userPrompt = requests[0].messages.find(
+        (message) => message.role === "user",
+      )?.content;
+      assert.match(
+        systemPrompt || "",
+        /整理成通顺、完整、可独立阅读的中文笔记/,
+      );
+      assert.match(userPrompt || "", new RegExp(`Source language: ${fixture.language}`));
+      assert.match(
+        userPrompt || "",
+        new RegExp(`BEFORE: "${fixture.before.join(" ")}"`),
+      );
+      assert.match(userPrompt || "", new RegExp(`TARGET: "${fixture.target}"`));
+      assert.match(
+        userPrompt || "",
+        new RegExp(`AFTER: "${fixture.after.join(" ")}"`),
+      );
+      assert.doesNotMatch(
+        userPrompt || "",
+        new RegExp(`AFTER: "[^"]*${fixture.outsideAfter}`),
+      );
+
+      assert.equal(result.note.text, fixture.cleaned);
+      assert.equal(result.note.rawText, fixture.target);
+      assert.equal(result.note.sourceLanguage, fixture.language);
+      assert.equal(result.note.textLanguage, fixture.language);
+      assert.equal(result.note.timestampSeconds, 40);
+      assert.deepEqual(
+        result.note.triggerWindow.map(({ t, text }) => ({ t, text })),
+        transcript.map(({ start, text }) => ({ t: start, text })),
+      );
+    });
+  }
 });
 
 test("a note saved before the first caption uses the first line instead of the last", async () => {
