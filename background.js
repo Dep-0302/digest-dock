@@ -4397,10 +4397,8 @@ function shouldUseBilibiliChinese(platform, sourceLanguage) {
   );
 }
 
-function shouldUseChineseNoteCleanup(platform, sourceLanguage) {
-  return platform === "bilibili"
-    ? isConfirmedSimplifiedChineseSource(sourceLanguage)
-    : isChineseLanguage(sourceLanguage);
+function shouldUseChineseNoteCleanup(_platform, sourceLanguage) {
+  return isChineseLanguage(sourceLanguage);
 }
 
 function normalizeAnalysisCues(cues, transcriptText = "") {

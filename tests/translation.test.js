@@ -10906,7 +10906,11 @@ test("Bilibili Traditional and Cantonese notes use one Chinese cleanup without c
       assert.equal(result.note.textLanguage, fixture.language);
       assert.equal(result.note.timestampSeconds, 40);
       assert.deepEqual(
-        result.note.triggerWindow.map(({ t, text }) => ({ t, text })),
+        JSON.parse(
+          JSON.stringify(
+            result.note.triggerWindow.map(({ t, text }) => ({ t, text })),
+          ),
+        ),
         transcript.map(({ start, text }) => ({ t: start, text })),
       );
     });

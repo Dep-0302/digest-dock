@@ -8391,6 +8391,20 @@ function noteOriginalText(note) {
   return rawText || String(note?.text || "").trim();
 }
 
+function noteTextForChineseGeneration(note) {
+  const textLanguage = normalizeLanguageCode(note?.textLanguage);
+  if (
+    note?.platform === "bilibili" &&
+    textLanguage &&
+    isChineseLanguage(textLanguage) &&
+    !isConfirmedSimplifiedChineseSource(textLanguage)
+  ) {
+    const cleanedText = String(note?.text || "").trim();
+    if (cleanedText) return cleanedText;
+  }
+  return noteOriginalText(note);
+}
+
 function canonicalStoredNoteText(text) {
   return String(text || "").normalize("NFKC").trim().replace(/\s+/g, " ");
 }
@@ -8730,7 +8744,7 @@ async function ensureNotesChinese() {
         action: "translateNotes",
         notes: batch.map((note) => ({
           id: note.id,
-          text: noteOriginalText(note),
+          text: noteTextForChineseGeneration(note),
           videoTitle: note.videoTitle || "",
           rawText: note.rawText || "",
           sourceLanguage: note.sourceLanguage || "",
