@@ -342,7 +342,7 @@ function bootBackground(
           if (isMigrationBackupMessage(copied)) {
             recordDownload(copied, "runtime-message");
             return downloadSucceeds
-              ? { success: true }
+              ? { success: true, filename: copied.filename }
               : { success: false, code: downloadError };
           }
           return { success: true };
@@ -762,6 +762,25 @@ test("[M1] empty library creates only an empty index and schema without a backup
   assert.deepEqual(clone(await api.readAllNotes()), []);
   assert.deepEqual(clone(await api.readNoteIndex()), []);
 
+  const rollbackStorage = createStorageHarness({}, {
+    async onSet(items, commit) {
+      if (Object.hasOwn(items, "ytd_notes_schema")) {
+        throw new Error("simulated empty-schema write failure");
+      }
+      return commit(items);
+    },
+  });
+  const rollbackWorker = bootBackground(rollbackStorage);
+  await assert.rejects(
+    rollbackWorker.api.ensureNotesMigrated(),
+    (error) => error?.code === "NOTES_MIGRATION_FAILED",
+  );
+  assert.deepEqual(
+    rollbackStorage.snapshot(),
+    {},
+    "a failed empty migration must roll back its index",
+  );
+
   assert.deepEqual(
     await emptyStateSnapshot(() => api.handleGetNotes(null)),
     {
@@ -819,6 +838,37 @@ test("[M2] one note migrates byte-for-byte with unchanged presentation and backu
   );
   assert.deepEqual(presentationSnapshot(migrated), beforePresentation);
   await assertBackupAndImportIdempotence(api, storage, beforeBackup, 1);
+
+  const aliasNote = makeMigrationNote(2, {
+    id: "note_legacy_alias",
+    videoId: "legacyvideo01",
+    mediaKey: "legacy_media_key",
+  });
+  const aliasStorage = createStorageHarness({
+    ytd_notes_schema: 1,
+    ytd_note_index: [
+      {
+        id: aliasNote.id,
+        mediaKey: aliasNote.mediaKey,
+        platform: aliasNote.platform,
+        videoTitle: aliasNote.videoTitle,
+        channelName: aliasNote.channelName,
+        timestampSeconds: aliasNote.timestampSeconds,
+        savedAt: aliasNote.createdAt,
+        hasThought: false,
+        searchText: expectedSearchText(aliasNote),
+      },
+    ],
+    [`ytd_notes_${aliasNote.mediaKey}`]: [aliasNote],
+  });
+  const aliasWorker = bootBackground(aliasStorage);
+  const legacyFiltered = await aliasWorker.api.handleGetNotes(aliasNote.videoId);
+  assert.equal(legacyFiltered.success, true);
+  assert.deepEqual(
+    clone(legacyFiltered.notes),
+    [aliasNote],
+    "legacy videoId filtering remains compatible when mediaKey differs",
+  );
 });
 
 test("[M3] a 500-note multi-media library preserves every shard and capacity state", async () => {
@@ -931,6 +981,16 @@ test("[M5] damaged input fails with a reason and rolls back every partial new ke
       value: [makeMigrationNote(3, { timestampSeconds: "24" })],
       reason: /timestampSeconds|field|字段/i,
     },
+    {
+      label: "mediaKey collides with the schema marker",
+      value: [
+        makeMigrationNote(4, {
+          videoId: "schema",
+          mediaKey: "schema",
+        }),
+      ],
+      reason: /mediaKey|保留键|schema/i,
+    },
   ];
 
   for (const damaged of damagedCases) {
@@ -947,6 +1007,18 @@ test("[M5] damaged input fails with a reason and rolls back every partial new ke
     assert.deepEqual(storage.snapshot().ytd_notes, before.ytd_notes);
     assert.equal(storage.snapshot().unrelated_key, "keep");
     assert.deepEqual(structureKeys(storage.snapshot()), []);
+    if (damaged.label.includes("schema marker")) {
+      const downloadsBeforeRetry = storage.operations.filter(
+        (event) => event.type === "download",
+      ).length;
+      const repeated = await api.handleGetNotes(null);
+      assert.equal(repeated.success, false);
+      assert.equal(
+        storage.operations.filter((event) => event.type === "download").length,
+        downloadsBeforeRetry,
+        "a deterministic migration failure must not redownload in a loop",
+      );
+    }
   }
 
   const uiStorage = createStorageHarness({
@@ -965,6 +1037,70 @@ test("[M5] damaged input fails with a reason and rolls back every partial new ke
   assert.match(sidepanel.element("notesCapacityText").textContent, /\bid\b/i);
   assert.equal(sidepanel.element("notesCapacityBackup").hidden, false);
   assert.equal(sidepanel.element("notesCapacityBackup").textContent, "导出备份");
+
+  const importStorage = createStorageHarness();
+  const importWorker = bootBackground(importStorage);
+  const importApi = requirePhase1Api(importWorker.api, "M5 reserved import");
+  await importApi.ensureNotesMigrated();
+  const reservedBackup = notesBackup.createBackup([
+    makeMigrationNote(5, { videoId: "schema", mediaKey: "schema" }),
+  ]);
+  const imported = await importApi.handleImportNotesBackup(
+    notesBackup.serializeBackup(reservedBackup),
+  );
+  assert.equal(imported.success, false);
+  assert.equal(imported.code, "INVALID_STORED_NOTES");
+  assert.deepEqual(importStorage.snapshot(), {
+    ytd_note_index: [],
+    ytd_notes_schema: 1,
+  });
+
+  const integrityCases = [
+    {
+      label: "missing referenced shard",
+      mutate: async (storage, note) =>
+        storage.area.remove(`ytd_notes_${note.mediaKey}`),
+    },
+    {
+      label: "extra unindexed shard record",
+      mutate: async (storage, note) =>
+        storage.area.set({
+          [`ytd_notes_${note.mediaKey}`]: [
+            note,
+            makeMigrationNote(98, {
+              videoId: note.videoId,
+              mediaKey: note.mediaKey,
+            }),
+          ],
+        }),
+    },
+    {
+      label: "record stored in the wrong shard",
+      mutate: async (storage, note) =>
+        storage.area.set({
+          [`ytd_notes_${note.mediaKey}`]: [
+            { ...note, mediaKey: "wrong_media", videoId: "wrong_media" },
+          ],
+        }),
+    },
+    {
+      label: "duplicate index id",
+      mutate: async (storage) => {
+        const [entry] = storage.snapshot().ytd_note_index;
+        await storage.area.set({ ytd_note_index: [entry, entry] });
+      },
+    },
+  ];
+  for (const damaged of integrityCases) {
+    const note = makeMigrationNote(97);
+    const storage = createStorageHarness({ ytd_notes: [note] });
+    const worker = bootBackground(storage);
+    await worker.api.ensureNotesMigrated();
+    await damaged.mutate(storage, note);
+    const result = await worker.api.handleGetNotes(note.mediaKey);
+    assert.equal(result.success, false, damaged.label);
+    assert.equal(result.code, "NOTES_MIGRATION_FAILED", damaged.label);
+  }
 
   let structureWriteCount = 0;
   const validNotes = makeLibrary(3, 3);

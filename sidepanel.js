@@ -1546,6 +1546,25 @@ document.addEventListener("DOMContentLoaded", async () => {
 
 // Listen for messages from the Digest button on YouTube page
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (
+    message?.action === "downloadNotesMigrationBackup" &&
+    message?.target === "sidepanel"
+  ) {
+    try {
+      const filename = String(message.filename || "").trim();
+      if (typeof message.backupText !== "string" || !filename) {
+        throw new Error("Invalid notes migration backup download");
+      }
+      downloadTextFile(message.backupText, filename, "application/json");
+      sendResponse({ success: true, filename });
+    } catch (_error) {
+      sendResponse({
+        success: false,
+        code: "NOTES_MIGRATION_BACKUP_DOWNLOAD_FAILED",
+      });
+    }
+    return false;
+  }
   if (message.action === "extensionDataResetStarted") {
     applyExtensionDataResetFence(
       message.runtimeInstanceId,
@@ -4753,11 +4772,16 @@ async function persistCurrentVideoNoteSourceIfNoted(
     return null;
   }
   try {
-    const stored = await chrome.storage.local.get("ytd_notes");
+    const response = await chrome.runtime.sendMessage({
+      action: "getNotes",
+      mediaKey: key,
+      videoId: key,
+    });
     if (!extensionDataFenceIsCurrent(expectedFence)) {
       return null;
     }
-    const notes = Array.isArray(stored.ytd_notes) ? stored.ytd_notes : [];
+    const notes =
+      response?.success && Array.isArray(response.notes) ? response.notes : [];
     const hasNote = notes.some(
       (note) => String(note?.mediaKey || note?.videoId || "") === key,
     );
@@ -8909,10 +8933,12 @@ async function loadNotes(videoId, { translateMissing = true } = {}) {
       }
     } else {
       setNotesFilter(previousShowAll);
+      if (isNotesMigrationFailure(result)) renderNotesMigrationFailure(result);
     }
   } catch (error) {
     if (!ownsLoad()) return;
     setNotesFilter(previousShowAll);
+    if (isNotesMigrationFailure(error)) renderNotesMigrationFailure(error);
     console.error("[DigestDock Panel] Load notes error:", error);
   } finally {
     if (ownsLoad()) isNotesLoading = false;
@@ -8926,6 +8952,32 @@ async function loadNotes(videoId, { translateMissing = true } = {}) {
  */
 let notesLibraryTotal = 0;
 let notesLibraryLimit = 0;
+
+function isNotesMigrationFailure(value) {
+  const code = String(value?.code || value?.error || "").trim();
+  const message = String(value?.message || value?.error || "").trim();
+  return (
+    value?.migrationFailed === true ||
+    code === "INVALID_STORED_NOTES" ||
+    code.startsWith("NOTES_MIGRATION_") ||
+    /(?:notes? migration|笔记迁移)/i.test(message)
+  );
+}
+
+function renderNotesMigrationFailure(result) {
+  const band = document.getElementById("notesCapacity");
+  const text = document.getElementById("notesCapacityText");
+  const backup = document.getElementById("notesCapacityBackup");
+  if (!band || !text) return;
+
+  const reason = String(result?.message || result?.error || "").trim();
+  text.textContent = `笔记迁移失败，旧笔记保持不变。${
+    reason || "旧笔记数据未通过校验。"
+  } 请先导出备份，再重试。`;
+  band.className = "notes-capacity is-full";
+  band.hidden = false;
+  if (backup) backup.hidden = false;
+}
 
 /**
  * Renders the library capacity band. Capacity is a storage fact, not an error:

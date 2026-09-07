@@ -15,9 +15,9 @@ var YTD_NOTES_BACKUP = (() => {
   const LEGACY_SCHEMA_VERSION = 1;
   const STRICT_MEDIA_IDENTITY_MIN_VERSION = 2;
   const SUPPORTED_SCHEMA_VERSIONS = new Set([1, 2, 3]);
-  // Single source of truth for the saved-note ceiling. The service worker
-  // reads this same value via YTD_NOTES_BACKUP.MAX_NOTES so storage and import
-  // cannot drift on the number of notes they accept.
+  // Single source of truth for new-note and import-growth capacity. Recovery
+  // backups may carry an already-over-limit legacy library, but neither a save
+  // nor an import may grow that library further above this ceiling.
   const MAX_NOTES = 500;
   // 500 notes containing every field the current product can generate at its
   // maximum length serialize below 30 MiB even when JSON must escape isolated
@@ -444,7 +444,7 @@ var YTD_NOTES_BACKUP = (() => {
   }
 
   function createBackup(notes, { exportedAt, extensionVersion = "" } = {}) {
-    if (!Array.isArray(notes) || notes.length > MAX_NOTES) {
+    if (!Array.isArray(notes)) {
       fail("INVALID_NOTES_BACKUP", { field: "notes" });
     }
 
@@ -494,7 +494,7 @@ var YTD_NOTES_BACKUP = (() => {
     }
     validateExportedAt(parsed.exportedAt);
     normalizeString(parsed.extensionVersion, "extensionVersion", { max: 32 });
-    if (!Array.isArray(parsed.notes) || parsed.notes.length > MAX_NOTES) {
+    if (!Array.isArray(parsed.notes)) {
       fail("INVALID_NOTES_BACKUP", { field: "notes" });
     }
 
@@ -593,7 +593,12 @@ var YTD_NOTES_BACKUP = (() => {
       fail("INVALID_NOTES_BACKUP", { field: "notes" });
     }
 
-    const merged = existingNotes.map(normalizeNote);
+    // Validate and normalize backup-owned fields without discarding local-only
+    // fields that intentionally do not travel in the portable backup schema.
+    const merged = existingNotes.map((note, index) => ({
+      ...note,
+      ...normalizeNote(note, index),
+    }));
     const byId = new Map();
     merged.forEach((note, index) => {
       if (byId.has(note.id)) {
@@ -628,7 +633,10 @@ var YTD_NOTES_BACKUP = (() => {
       importedCount += 1;
     });
 
-    if (merged.length > MAX_NOTES) {
+    if (
+      merged.length > MAX_NOTES &&
+      merged.length > existingNotes.length
+    ) {
       fail("NOTES_CAPACITY_EXCEEDED", {
         total: merged.length,
         limit: MAX_NOTES,

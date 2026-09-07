@@ -657,13 +657,20 @@ const YTD_OPTIONS = (() => {
     return Number.isInteger(value) ? String(value) : value.toFixed(1);
   }
 
-  function triggerNotesBackupDownload(root, backup, date = new Date()) {
+  function triggerNotesBackupDownload(
+    root,
+    backup,
+    date = new Date(),
+    requestedFilename = "",
+  ) {
     const text = root.YTD_NOTES_BACKUP.serializeBackup(backup);
     const blob = new root.Blob([text], { type: "application/json" });
     const url = root.URL.createObjectURL(blob);
     const link = root.document.createElement("a");
     link.href = url;
-    link.download = root.YTD_NOTES_BACKUP.notesBackupFilename(date);
+    link.download =
+      String(requestedFilename || "").trim() ||
+      root.YTD_NOTES_BACKUP.notesBackupFilename(date);
     link.hidden = true;
     root.document.body.appendChild(link);
     try {
@@ -1648,7 +1655,31 @@ const YTD_OPTIONS = (() => {
       }
     }
 
-    function handleExtensionDataResetMessage(message) {
+    function handleExtensionDataResetMessage(message, _sender, sendResponse) {
+      if (
+        message?.action === "downloadNotesMigrationBackup" &&
+        message?.target === "options"
+      ) {
+        try {
+          const filename = String(message.filename || "").trim();
+          if (!filename || !message.backup || typeof message.backup !== "object") {
+            throw new Error("Invalid notes migration backup download");
+          }
+          const download = triggerNotesBackupDownload(
+            root,
+            message.backup,
+            undefined,
+            filename,
+          );
+          sendResponse({ success: true, filename: download.filename });
+        } catch (_error) {
+          sendResponse({
+            success: false,
+            code: "NOTES_MIGRATION_BACKUP_DOWNLOAD_FAILED",
+          });
+        }
+        return false;
+      }
       if (
         message?.action !== "extensionDataResetStarted" &&
         message?.action !== "extensionDataResetCompleted"

@@ -64,6 +64,101 @@ function makeValidStoredNote(id, text, overrides = {}) {
   };
 }
 
+function makeMigratedNotesState(notes, extra = {}) {
+  const shards = {};
+  const index = notes.map((note) => {
+    const mediaKey = String(note.mediaKey || note.videoId || "").trim();
+    const shardKey = `ytd_notes_${mediaKey}`;
+    if (!shards[shardKey]) shards[shardKey] = [];
+    shards[shardKey].push(note);
+    return {
+      id: note.id,
+      mediaKey,
+      platform: note.platform || "youtube",
+      videoTitle: note.videoTitle || "",
+      channelName: note.channelName || "",
+      timestampSeconds: note.timestampSeconds,
+      savedAt: note.createdAt,
+      hasThought: !!String(note.thought || "").trim(),
+      searchText: [
+        note.thought,
+        note.rawText,
+        note.videoTitle,
+        note.channelName,
+      ]
+        .filter((value) => typeof value === "string" && value.trim())
+        .join(" ")
+        .normalize("NFKC")
+        .trim()
+        .replace(/\s+/g, " "),
+    };
+  });
+  Object.values(shards).forEach((shard) => {
+    shard.sort(
+      (left, right) => left.timestampSeconds - right.timestampSeconds,
+    );
+  });
+  return {
+    ...extra,
+    ytd_notes: notes,
+    ...shards,
+    ytd_note_index: index,
+    ytd_notes_schema: 1,
+  };
+}
+
+function readMigratedNotesSnapshot(snapshot) {
+  if (snapshot.ytd_notes_schema !== 1) return snapshot.ytd_notes || [];
+  const notesById = new Map();
+  for (const [key, shard] of Object.entries(snapshot)) {
+    if (!key.startsWith("ytd_notes_") || key === "ytd_notes_schema") continue;
+    if (!Array.isArray(shard)) continue;
+    shard.forEach((note) => notesById.set(note.id, note));
+  }
+  return (snapshot.ytd_note_index || []).map((entry) => notesById.get(entry.id));
+}
+
+function createMigratedNotesAdapter(storedNotes, extra = {}) {
+  const completeNotes = storedNotes.map((note, index) => {
+    const fallbackVideoId = `testvid${String(index + 1).padStart(3, "0")}`;
+    const mediaKey = String(note.mediaKey || note.videoId || fallbackVideoId);
+    const videoId = String(note.videoId || mediaKey);
+    return makeValidStoredNote(note.id, note.text || "Stored test note.", {
+      timestampSeconds: index,
+      createdAt: 1_700_000_000_000 + index,
+      ...note,
+      mediaKey,
+      videoId,
+    });
+  });
+  storedNotes.splice(0, storedNotes.length, ...completeNotes);
+  const storage = createMemoryStorageArea(
+    makeMigratedNotesState(completeNotes, extra),
+  );
+  const sync = () => {
+    const current = readMigratedNotesSnapshot(storage.snapshot());
+    storedNotes.splice(0, storedNotes.length, ...current);
+  };
+  return {
+    async get(keys) {
+      return storage.get(keys);
+    },
+    async set(items) {
+      await storage.set(items);
+      sync();
+    },
+    async remove(keys) {
+      await storage.remove(keys);
+      sync();
+    },
+    async clear() {
+      await storage.clear();
+      sync();
+    },
+    snapshot: storage.snapshot,
+  };
+}
+
 function loadSidepanelRuntime({
   sendMessage = null,
   setTimeoutImpl = () => 0,
@@ -297,7 +392,8 @@ function loadBackgroundHelpers({
   notesBackupImpl = null,
   noteSourcesImpl = require("../note-sources.js"),
   exportJobsImpl = require("../export-jobs.js"),
-  runtimeSendMessageImpl = () => Promise.resolve({ success: true }),
+  runtimeSendMessageImpl = (message) =>
+    Promise.resolve({ success: true, filename: message?.filename }),
   consoleImpl = console,
 } = {}) {
   const listeners = { addListener() {} };
@@ -2662,18 +2758,16 @@ function makeExportNotesBackground({ switchProviderBeforeFetch = false } = {}) {
   const noteSources = require("../note-sources.js");
   const exportJobs = require("../export-jobs.js");
   const mediaKey = "canonical-note-video";
-  const note = {
-    id: "canonical-note-1",
-    mediaKey,
-    videoId: mediaKey,
-    platform: "youtube",
-    videoTitle: "Canonical Stored Video Title",
-    text: "Canonical stored English note body.",
-    rawText: "Canonical stored English note body.",
-    sourceLanguage: "en",
-    textLanguage: "en",
-    translatedText: "",
-  };
+  const note = makeValidStoredNote(
+    "canonical-note-1",
+    "Canonical stored English note body.",
+    {
+      mediaKey,
+      videoId: mediaKey,
+      videoTitle: "Canonical Stored Video Title",
+      timestampSeconds: 12,
+    },
+  );
   const noteUnitKey = `note:${noteSources.hashSourceText(note.id)}:${noteSources.hashSourceText(note.text)}`;
   const titleUnitKey = `title:${noteSources.hashSourceText(mediaKey)}:${noteSources.hashSourceText(note.videoTitle)}`;
   const notesRevision = noteSources.hashSourceText(
@@ -2718,14 +2812,13 @@ function makeExportNotesBackground({ switchProviderBeforeFetch = false } = {}) {
     },
   };
   const zhipuSettings = { ...deepseekSettings, provider: "zhipu" };
-  const storage = createMemoryStorage({
+  const storage = createMemoryStorage(makeMigratedNotesState([note], {
     ytd_settings: deepseekSettings,
-    ytd_notes: [note],
     [exportJobs.STORAGE_KEY]: {
       schemaVersion: exportJobs.SCHEMA_VERSION,
       jobs: { [job.jobId]: job },
     },
-  });
+  }));
   let settingsReads = 0;
   let providerCalls = 0;
   const providerInputs = [];
@@ -3394,16 +3487,11 @@ test("clearing notes removes source/job state and a late response cannot recreat
     segmentCount: 2,
     holdFirst: true,
   });
-  await fixture.storage.set({
-    ytd_notes: [
-      {
-        id: "note-clear-1",
-        mediaKey: fixture.mediaKey,
-        videoId: fixture.mediaKey,
-        text: "Saved note",
-      },
-    ],
+  const storedNote = makeValidStoredNote("note-clear-1", "Saved note", {
+    mediaKey: fixture.mediaKey,
+    videoId: fixture.mediaKey,
   });
+  await fixture.storage.set(makeMigratedNotesState([storedNote]));
   const pending = dispatchBackgroundMessage(
     fixture.background,
     fixture.messageForBatch(0),
@@ -3420,7 +3508,8 @@ test("clearing notes removes source/job state and a late response cannot recreat
   assert.equal(late.actualProviderCalls, 1);
   await nextTurn();
   const snapshot = fixture.storage.snapshot();
-  assert.equal(Object.hasOwn(snapshot, "ytd_notes"), false);
+  assert.deepEqual(snapshot.ytd_notes, [storedNote]);
+  assert.deepEqual(readMigratedNotesSnapshot(snapshot), []);
   assert.equal(Object.hasOwn(snapshot, fixture.noteSources.STORAGE_KEY), false);
   assert.equal(Object.hasOwn(snapshot, fixture.exportJobs.STORAGE_KEY), false);
 });
@@ -3429,21 +3518,17 @@ test("clearAllNotes generation barrier rejects a concurrent source upsert withou
   const fixture = makeExportSourceBackground({ segmentCount: 1 });
   const gate = createAsyncGate();
   let holdNotesRead = true;
-  const storage = createMemoryStorage({
+  const storedNote = makeValidStoredNote("clear-race-note", "Saved note", {
+    mediaKey: fixture.mediaKey,
+    videoId: fixture.mediaKey,
+  });
+  const storage = createMemoryStorage(makeMigratedNotesState([storedNote], {
     ytd_settings: {
       provider: "deepseek",
       aiApiKey: "test-key-never-returned",
       aiBaseUrl: "https://api.deepseek.com",
       aiModel: "deepseek-v4-flash",
     },
-    ytd_notes: [
-      {
-        id: "clear-race-note",
-        mediaKey: fixture.mediaKey,
-        videoId: fixture.mediaKey,
-        text: "Saved note",
-      },
-    ],
     [fixture.noteSources.STORAGE_KEY]: {
       [fixture.mediaKey]: fixture.source,
     },
@@ -3451,10 +3536,10 @@ test("clearAllNotes generation barrier rejects a concurrent source upsert withou
       schemaVersion: fixture.exportJobs.SCHEMA_VERSION,
       jobs: { [fixture.job.jobId]: fixture.job },
     },
-  });
+  }));
   const background = loadBackgroundHelpers({
     storageGetImpl: async (keys) => {
-      if (keys === "ytd_notes" && holdNotesRead) {
+      if (keys === "ytd_note_index" && holdNotesRead) {
         holdNotesRead = false;
         await gate.enter();
       }
@@ -3485,7 +3570,8 @@ test("clearAllNotes generation barrier rejects a concurrent source upsert withou
   assert.equal(late.success, false);
   assert.equal(late.code, "EXPORT_JOB_NOT_FOUND");
   const snapshot = storage.snapshot();
-  assert.equal(Object.hasOwn(snapshot, "ytd_notes"), false);
+  assert.deepEqual(snapshot.ytd_notes, [storedNote]);
+  assert.deepEqual(readMigratedNotesSnapshot(snapshot), []);
   assert.equal(Object.hasOwn(snapshot, fixture.noteSources.STORAGE_KEY), false);
   assert.equal(Object.hasOwn(snapshot, fixture.exportJobs.STORAGE_KEY), false);
 });
@@ -3777,8 +3863,12 @@ test("a stale delete request cannot recreate an empty notes key after reset", as
   assert.equal(freshNoMatch.changed, false);
   assert.deepEqual(
     storage.snapshot(),
-    { ytd_options_language: "zh-CN" },
-    "a post-reset no-op delete must not create ytd_notes: []",
+    {
+      ytd_options_language: "zh-CN",
+      ytd_note_index: [],
+      ytd_notes_schema: 1,
+    },
+    "a post-reset no-op delete may initialize the Phase 1 empty schema but must not recreate legacy ytd_notes",
   );
 });
 
@@ -3835,6 +3925,54 @@ test("a delete queued while reset still has an even epoch fails at its inner fen
   const deletionResult = await deletion;
   assert.equal(deletionResult.success, false);
   assert.equal(deletionResult.code, "EXTENSION_DATA_RESET");
+  assert.deepEqual(storage.snapshot(), {
+    ytd_options_language: "zh-CN",
+    ytd_note_index: [],
+    ytd_notes_schema: 1,
+  });
+});
+
+test("a reset queued behind migration cannot deadlock a waiting notes export", async () => {
+  const downloadGate = createAsyncGate();
+  const storedNote = makeValidStoredNote(
+    "migration-reset-note",
+    "Migration must settle before reset.",
+  );
+  const storage = createMemoryStorage({ ytd_notes: [storedNote] });
+  const background = loadBackgroundHelpers({
+    storageGetImpl: storage.get,
+    storageSetImpl: storage.set,
+    storageRemoveImpl: storage.remove,
+    storageClearImpl: storage.clear,
+    runtimeSendMessageImpl: async (message) => {
+      if (message?.action === "downloadNotesMigrationBackup") {
+        await downloadGate.enter();
+      }
+      return { success: true, filename: message?.filename };
+    },
+  });
+
+  const pendingExport = background.handleExportNotesBackup();
+  await downloadGate.entered;
+  const pendingReset = background.handleResetAllExtensionData("zh-CN");
+  await nextTurn();
+  downloadGate.release();
+
+  let timeoutId;
+  const settled = await Promise.race([
+    Promise.all([pendingExport, pendingReset]),
+    new Promise((_, reject) => {
+      timeoutId = setTimeout(
+        () => reject(new Error("migration/reset notes operations deadlocked")),
+        1_000,
+      );
+    }),
+  ]);
+  clearTimeout(timeoutId);
+  const [exportResult, resetResult] = settled;
+  assert.equal(exportResult.success, false);
+  assert.equal(exportResult.code, "NOTE_STORAGE_RESET");
+  assert.equal(resetResult.success, true);
   assert.deepEqual(storage.snapshot(), { ytd_options_language: "zh-CN" });
 });
 
@@ -4005,15 +4143,18 @@ test("clearAllNotes is all-or-nothing when either export store has a future sche
     },
   ];
   for (const item of cases) {
-    const initial = {
+    const note = makeValidStoredNote(
+      `note-${item.label.replaceAll(" ", "-")}`,
+      "must survive",
+    );
+    const initial = makeMigratedNotesState([note], {
       ytd_settings: {
         provider: "deepseek",
         aiApiKey: "test-key-never-returned",
       },
-      ytd_notes: [{ id: `note-${item.label}`, text: "must survive" }],
       [noteSources.STORAGE_KEY]: item.sources,
       [exportJobs.STORAGE_KEY]: item.jobs,
-    };
+    });
     const storage = createMemoryStorage(initial);
     const background = loadBackgroundHelpers({
       storageGetImpl: storage.get,
@@ -4173,7 +4314,7 @@ test("job-aware note and title batches use canonical storage and persist validat
   );
   assert.doesNotMatch(JSON.stringify(fixture.providerInputs[1]), /SPOOFED CALLER/);
 
-  const persisted = fixture.storage.snapshot().ytd_notes[0];
+  const persisted = readMigratedNotesSnapshot(fixture.storage.snapshot())[0];
   assert.equal(persisted.translatedText, "持久保存的中文笔记。");
   assert.equal(persisted.translatedValidated, true);
   assert.equal(persisted.videoTitleZh, "持久保存的中文标题");
@@ -8231,7 +8372,6 @@ test("the current-moment action rejects a late time result from another video", 
 
 test("original current-moment notes bypass AI cleanup even when a key exists", async () => {
   const videoId = "free-note-with-key";
-  let storedNotes = [];
   let providerCalls = 0;
   const runtimeMessages = [];
   const mediaRef = {
@@ -8240,36 +8380,26 @@ test("original current-moment notes bypass AI cleanup even when a key exists", a
     mediaKey: videoId,
     canonicalUrl: `https://www.youtube.com/watch?v=${videoId}`,
   };
+  const storage = createMemoryStorage(makeMigratedNotesState([], {
+    ytd_settings: {
+      provider: "deepseek",
+      aiApiKeys: { deepseek: "configured-key" },
+    },
+    [`digest_${videoId}`]: {
+      transcriptSourcePolicyVersion: 5,
+      transcriptSource: "youtube-passive",
+      transcriptLanguage: "en",
+      transcript: [
+        { start: 0, text: "Before the key idea.", language: "en" },
+        { start: 8, text: "The key idea is local-first.", language: "en" },
+        { start: 16, text: "After the key idea.", language: "en" },
+      ],
+    },
+  }));
   const background = loadBackgroundHelpers({
-    storageGetImpl: async (key) => {
-      if (key === "ytd_settings") {
-        return {
-          ytd_settings: {
-            provider: "deepseek",
-            aiApiKeys: { deepseek: "configured-key" },
-          },
-        };
-      }
-      if (key === `digest_${videoId}`) {
-        return {
-          [`digest_${videoId}`]: {
-            transcriptSourcePolicyVersion: 5,
-            transcriptSource: "youtube-passive",
-            transcriptLanguage: "en",
-            transcript: [
-              { start: 0, text: "Before the key idea.", language: "en" },
-              { start: 8, text: "The key idea is local-first.", language: "en" },
-              { start: 16, text: "After the key idea.", language: "en" },
-            ],
-          },
-        };
-      }
-      if (key === "ytd_notes") return { ytd_notes: storedNotes };
-      return {};
-    },
-    storageSetImpl: async (items) => {
-      if (Array.isArray(items.ytd_notes)) storedNotes = items.ytd_notes;
-    },
+    storageGetImpl: storage.get,
+    storageSetImpl: storage.set,
+    storageRemoveImpl: storage.remove,
     tabsImpl: {
       get: async () => ({
         id: 42,
@@ -8300,6 +8430,7 @@ test("original current-moment notes bypass AI cleanup even when a key exists", a
 
   assert.equal(result.success, true);
   assert.equal(providerCalls, 0);
+  const storedNotes = readMigratedNotesSnapshot(storage.snapshot());
   assert.equal(storedNotes.length, 1);
   assert.match(storedNotes[0].text, /The key idea is local-first/);
   assert.equal(storedNotes[0].translatedText, "");
@@ -8310,11 +8441,95 @@ test("original current-moment notes bypass AI cleanup even when a key exists", a
   assert.equal(savedBroadcast.preserveOriginalOnly, true);
 });
 
+test("new notes persist the exact 8-before/12-after trigger window within 20 KiB", async () => {
+  const saveWithTranscript = async (videoId, transcript, timestamp) => {
+    const storedNotes = [];
+    const storage = createMigratedNotesAdapter(storedNotes, {
+      [`digest_${videoId}`]: {
+        transcriptSourcePolicyVersion: 5,
+        transcriptSource: "youtube-passive",
+        transcriptLanguage: "en",
+        transcript,
+      },
+    });
+    const background = loadBackgroundHelpers({
+      storageGetImpl: storage.get,
+      storageSetImpl: storage.set,
+      storageRemoveImpl: storage.remove,
+    });
+    const result = await background.handleSaveNote(
+      videoId,
+      timestamp,
+      "Trigger window",
+      "Channel",
+      `https://www.youtube.com/watch?v=${videoId}`,
+      null,
+      "en",
+      "",
+      true,
+    );
+    assert.equal(result.success, true);
+    assert.equal(storedNotes.length, 1);
+    return storedNotes[0];
+  };
+
+  const transcript = Array.from({ length: 30 }, (_, index) => ({
+    start: index,
+    text: `Line ${index}`,
+    language: "en",
+  }));
+  const note = await saveWithTranscript("triggerwin01", transcript, 10);
+  assert.equal(note.thought, "");
+  assert.equal(note.thoughtAt, null);
+  assert.deepEqual(
+    note.triggerWindow,
+    transcript.slice(2, 23).map(({ start, text }) => ({ t: start, text })),
+  );
+
+  const longTranscript = Array.from({ length: 30 }, (_, index) => ({
+    start: index,
+    text: `${index}: ${"x".repeat(3_900)}`,
+    language: "en",
+  }));
+  const trimmed = await saveWithTranscript("triggerwin02", longTranscript, 10);
+  assert.ok(trimmed.triggerWindow.length < 21);
+  assert.ok(
+    new TextEncoder().encode(JSON.stringify(trimmed.triggerWindow)).byteLength <=
+      20 * 1024,
+  );
+  assert.ok(
+    trimmed.triggerWindow.some(
+      (row) => row.t === 10 && row.text === longTranscript[10].text,
+    ),
+    "trimming must retain the complete matched row",
+  );
+
+  const emojiSource = "😀".repeat(8_000);
+  const singleRow = await saveWithTranscript(
+    "triggerwin03",
+    [{ start: 0, text: emojiSource, language: "en" }],
+    0,
+  );
+  assert.equal(singleRow.triggerWindow.length, 1);
+  assert.equal(singleRow.triggerWindow[0].t, 0);
+  assert.ok(emojiSource.startsWith(singleRow.triggerWindow[0].text));
+  assert.doesNotMatch(singleRow.triggerWindow[0].text, /[\uD800-\uDBFF]$/);
+  assert.ok(
+    new TextEncoder().encode(JSON.stringify(singleRow.triggerWindow)).byteLength <=
+      20 * 1024,
+  );
+});
+
 test("a full library rejects before transcript or provider work", async () => {
   const videoId = "fullnote001";
-  const fullNotes = Array.from({ length: notesBackup.MAX_NOTES }, (_, index) => ({
-    id: `existing-note-${index}`,
-  }));
+  const fullNotes = Array.from({ length: notesBackup.MAX_NOTES }, (_, index) =>
+    makeValidStoredNote(`existing-note-${index}`, `Existing note ${index}.`, {
+      videoId,
+      mediaKey: videoId,
+      timestampSeconds: index,
+      createdAt: 1_700_000_000_000 + index,
+    }),
+  );
   let transcriptReads = 0;
   let settingsReads = 0;
   let networkCalls = 0;
@@ -8325,9 +8540,9 @@ test("a full library rejects before transcript or provider work", async () => {
     mediaKey: videoId,
     canonicalUrl: `https://www.youtube.com/watch?v=${videoId}`,
   };
+  const storage = createMemoryStorage(makeMigratedNotesState(fullNotes));
   const background = loadBackgroundHelpers({
     storageGetImpl: async (key) => {
-      if (key === "ytd_notes") return { ytd_notes: fullNotes };
       if (key === `digest_${videoId}`) {
         transcriptReads += 1;
         return {};
@@ -8341,7 +8556,7 @@ test("a full library rejects before transcript or provider work", async () => {
           },
         };
       }
-      return {};
+      return storage.get(key);
     },
     storageSetImpl: async () => {
       storageWrites += 1;
@@ -8385,7 +8600,13 @@ test("two handleSaveNote calls that preflight at 499 still share one final slot"
   const videoIds = ["racevid001", "racevid002"];
   const initialNotes = Array.from(
     { length: notesBackup.MAX_NOTES - 1 },
-    (_, index) => ({ id: `existing-note-${index}` }),
+    (_, index) =>
+      makeValidStoredNote(`existing-note-${index}`, `Existing note ${index}.`, {
+        videoId: "race-existing",
+        mediaKey: "race-existing",
+        timestampSeconds: index,
+        createdAt: 1_700_000_000_000 + index,
+      }),
   );
   const digests = Object.fromEntries(
     videoIds.map((videoId) => [
@@ -8398,7 +8619,9 @@ test("two handleSaveNote calls that preflight at 499 still share one final slot"
       },
     ]),
   );
-  const storage = createMemoryStorageArea({ ytd_notes: initialNotes, ...digests });
+  const storage = createMemoryStorageArea(
+    makeMigratedNotesState(initialNotes, digests),
+  );
   const transcriptBarrier = createAsyncBarrier(2);
   const tabUrls = new Map(
     videoIds.map((videoId, index) => [
@@ -8449,10 +8672,10 @@ test("two handleSaveNote calls that preflight at 499 still share one final slot"
   assert.ok(rejected);
   assert.equal(rejected.limit, notesBackup.MAX_NOTES);
   assert.equal(rejected.count, notesBackup.MAX_NOTES);
-  const stored = await storage.get("ytd_notes");
-  assert.equal(stored.ytd_notes.length, notesBackup.MAX_NOTES);
+  const storedNotes = readMigratedNotesSnapshot(storage.snapshot());
+  assert.equal(storedNotes.length, notesBackup.MAX_NOTES);
   assert.equal(
-    stored.ytd_notes.filter((note) => videoIds.includes(note.videoId)).length,
+    storedNotes.filter((note) => videoIds.includes(note.videoId)).length,
     1,
   );
 });
@@ -8462,15 +8685,21 @@ test("an in-flight save cannot cross a clear or reset generation", async (t) => 
     await t.test(operation, async () => {
       const videoId = `${operation}vid01`;
       const digestKey = `digest_${videoId}`;
-      const storage = createMemoryStorageArea({
-        ytd_notes: [{ id: "existing-note" }],
+      const existingNote = makeValidStoredNote(
+        "existing-note",
+        "Existing note.",
+      );
+      const storage = createMemoryStorageArea(makeMigratedNotesState(
+        [existingNote],
+        {
         [digestKey]: {
           transcriptSourcePolicyVersion: 5,
           transcriptSource: "youtube-passive",
           transcriptLanguage: "en",
           transcript: [{ start: 0, text: "Generation-safe note.", language: "en" }],
         },
-      });
+        },
+      ));
       const transcriptGate = createAsyncGate();
       const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
       const background = loadBackgroundHelpers({
@@ -8514,8 +8743,13 @@ test("an in-flight save cannot cross a clear or reset generation", async (t) => 
       const result = await pendingSave;
       assert.equal(result.success, false);
       assert.equal(result.code, "NOTE_SAVE_CANCELED");
-      const stored = await storage.get("ytd_notes");
-      assert.equal(stored.ytd_notes, undefined);
+      const snapshot = storage.snapshot();
+      assert.deepEqual(readMigratedNotesSnapshot(snapshot), []);
+      if (operation === "clear") {
+        assert.deepEqual(snapshot.ytd_notes, [existingNote]);
+      } else {
+        assert.equal(Object.hasOwn(snapshot, "ytd_notes"), false);
+      }
     });
   }
 });
@@ -8582,7 +8816,6 @@ test("an original-only save notification never starts note translation", async (
 
 test("note save rejects a tab that changes route before persistence", async () => {
   const videoId = "note-route-a";
-  let storedNotes = [];
   let tabReads = 0;
   const mediaRef = {
     platform: "youtube",
@@ -8590,25 +8823,19 @@ test("note save rejects a tab that changes route before persistence", async () =
     mediaKey: videoId,
     canonicalUrl: `https://www.youtube.com/watch?v=${videoId}`,
   };
+  const storage = createMemoryStorage(makeMigratedNotesState([], {
+    ytd_settings: {},
+    [`digest_${videoId}`]: {
+      transcriptSourcePolicyVersion: 5,
+      transcriptSource: "youtube-passive",
+      transcriptLanguage: "en",
+      transcript: [{ start: 0, text: "Route A note.", language: "en" }],
+    },
+  }));
   const background = loadBackgroundHelpers({
-    storageGetImpl: async (key) => {
-      if (key === "ytd_settings") return { ytd_settings: {} };
-      if (key === `digest_${videoId}`) {
-        return {
-          [`digest_${videoId}`]: {
-            transcriptSourcePolicyVersion: 5,
-            transcriptSource: "youtube-passive",
-            transcriptLanguage: "en",
-            transcript: [{ start: 0, text: "Route A note.", language: "en" }],
-          },
-        };
-      }
-      if (key === "ytd_notes") return { ytd_notes: storedNotes };
-      return {};
-    },
-    storageSetImpl: async (items) => {
-      if (Array.isArray(items.ytd_notes)) storedNotes = items.ytd_notes;
-    },
+    storageGetImpl: storage.get,
+    storageSetImpl: storage.set,
+    storageRemoveImpl: storage.remove,
     tabsImpl: {
       get: async () => {
         tabReads += 1;
@@ -8637,7 +8864,7 @@ test("note save rejects a tab that changes route before persistence", async () =
 
   assert.equal(result.success, false);
   assert.equal(result.code, "PAGE_CONTEXT_CHANGED");
-  assert.equal(storedNotes.length, 0);
+  assert.deepEqual(readMigratedNotesSnapshot(storage.snapshot()), []);
 });
 
 test("clicking the active Chinese notes mode retries once without duplicate requests", async () => {
@@ -9798,7 +10025,6 @@ test("Bilibili Chinese note cleanup keeps the polished Chinese text", async () =
 
 test("Bilibili v4 cache note saves polished Chinese once without refetching", async () => {
   const requests = [];
-  let storedNotes = [];
   const mediaRef = {
     platform: "bilibili",
     bvid: "BV1zfg36ZEXi",
@@ -9810,38 +10036,28 @@ test("Bilibili v4 cache note saves polished Chinese once without refetching", as
     title: "示例视频",
     channelName: "示例作者",
   };
+  const storage = createMemoryStorage(makeMigratedNotesState([], {
+    ytd_settings: {
+      provider: "deepseek",
+      aiApiKey: "test-key",
+      aiBaseUrl: "https://api.deepseek.com",
+      aiModel: "deepseek-v4-flash",
+    },
+    [`digest_${mediaRef.mediaKey}`]: {
+      transcriptSourcePolicyVersion: 4,
+      transcriptSource: "bilibili",
+      mediaRef,
+      transcriptLanguage: "zh-CN",
+      transcript: [
+        { start: 0, text: "我们先把问题想清楚", language: "zh-CN" },
+        { start: 8, text: "然后再开始动手", language: "zh-CN" },
+      ],
+    },
+  }));
   const background = loadBackgroundHelpers({
-    storageGetImpl: async (key) => {
-      if (key === "ytd_settings") {
-        return {
-          ytd_settings: {
-            provider: "deepseek",
-            aiApiKey: "test-key",
-            aiBaseUrl: "https://api.deepseek.com",
-            aiModel: "deepseek-v4-flash",
-          },
-        };
-      }
-      if (key === `digest_${mediaRef.mediaKey}`) {
-        return {
-          [`digest_${mediaRef.mediaKey}`]: {
-            transcriptSourcePolicyVersion: 4,
-            transcriptSource: "bilibili",
-            mediaRef,
-            transcriptLanguage: "zh-CN",
-            transcript: [
-              { start: 0, text: "我们先把问题想清楚", language: "zh-CN" },
-              { start: 8, text: "然后再开始动手", language: "zh-CN" },
-            ],
-          },
-        };
-      }
-      if (key === "ytd_notes") return { ytd_notes: storedNotes };
-      return {};
-    },
-    storageSetImpl: async (items) => {
-      if (Array.isArray(items.ytd_notes)) storedNotes = items.ytd_notes;
-    },
+    storageGetImpl: storage.get,
+    storageSetImpl: storage.set,
+    storageRemoveImpl: storage.remove,
     fetchImpl: async (url, options) => {
       if (url.startsWith("chrome-extension://")) {
         return { ok: true, text: async () => read("prompts/note-cleanup.md") };
@@ -9891,11 +10107,11 @@ test("Bilibili v4 cache note saves polished Chinese once without refetching", as
   assert.equal(result.note.canonicalUrl, mediaRef.canonicalUrl);
   assert.equal(result.note.timestampSeconds, 0);
   assert.match(result.note.timestampedUrl, /BV1zfg36ZEXi\/\?t=0$/);
+  const storedNotes = readMigratedNotesSnapshot(storage.snapshot());
   assert.equal(storedNotes[0].text, result.note.text);
 });
 
 test("a note saved before the first caption uses the first line instead of the last", async () => {
-  let storedNotes = [];
   const mediaRef = {
     platform: "bilibili",
     bvid: "BV1zfg36ZEXi",
@@ -9907,29 +10123,23 @@ test("a note saved before the first caption uses the first line instead of the l
     title: "示例视频",
     channelName: "示例作者",
   };
+  const storage = createMemoryStorage(makeMigratedNotesState([], {
+    ytd_settings: {},
+    [`digest_${mediaRef.mediaKey}`]: {
+      transcriptSourcePolicyVersion: 4,
+      transcriptSource: "bilibili",
+      mediaRef,
+      transcriptLanguage: "zh-CN",
+      transcript: [
+        { start: 5, text: "第一条字幕。", language: "zh-CN" },
+        { start: 10, text: "最后一条字幕。", language: "zh-CN" },
+      ],
+    },
+  }));
   const background = loadBackgroundHelpers({
-    storageGetImpl: async (key) => {
-      if (key === "ytd_settings") return { ytd_settings: {} };
-      if (key === `digest_${mediaRef.mediaKey}`) {
-        return {
-          [`digest_${mediaRef.mediaKey}`]: {
-            transcriptSourcePolicyVersion: 4,
-            transcriptSource: "bilibili",
-            mediaRef,
-            transcriptLanguage: "zh-CN",
-            transcript: [
-              { start: 5, text: "第一条字幕。", language: "zh-CN" },
-              { start: 10, text: "最后一条字幕。", language: "zh-CN" },
-            ],
-          },
-        };
-      }
-      if (key === "ytd_notes") return { ytd_notes: storedNotes };
-      return {};
-    },
-    storageSetImpl: async (items) => {
-      if (Array.isArray(items.ytd_notes)) storedNotes = items.ytd_notes;
-    },
+    storageGetImpl: storage.get,
+    storageSetImpl: storage.set,
+    storageRemoveImpl: storage.remove,
   });
 
   const result = await background.handleSaveNote(
@@ -9940,6 +10150,7 @@ test("a note saved before the first caption uses the first line instead of the l
   );
 
   assert.equal(result.success, true);
+  const storedNotes = readMigratedNotesSnapshot(storage.snapshot());
   assert.equal(storedNotes.length, 1);
   assert.equal(storedNotes[0].rawText, "第一条字幕。");
   assert.match(storedNotes[0].text, /^第一条字幕/);
@@ -9948,9 +10159,8 @@ test("a note saved before the first caption uses the first line instead of the l
 test("saving a YouTube note also freezes exact page metadata for later export", async () => {
   const videoId = "save-source-yt";
   const noteSources = require("../note-sources.js");
-  const storage = createMemoryStorage({
+  const storage = createMemoryStorage(makeMigratedNotesState([], {
     ytd_settings: {},
-    ytd_notes: [],
     [`digest_${videoId}`]: {
       transcriptSourcePolicyVersion: 5,
       transcriptSource: "supadata",
@@ -9959,7 +10169,7 @@ test("saving a YouTube note also freezes exact page metadata for later export", 
         { start: 0, text: "保存笔记时同时保存页面资料。", language: "zh-CN" },
       ],
     },
-  });
+  }));
   const background = loadBackgroundHelpers({
     storageGetImpl: storage.get,
     storageSetImpl: storage.set,
@@ -10013,16 +10223,15 @@ test("saving a YouTube note also freezes exact page metadata for later export", 
 test("a stale YouTube player cannot block the note or attach another video's source", async () => {
   const videoId = "save-source-current";
   const noteSources = require("../note-sources.js");
-  const storage = createMemoryStorage({
+  const storage = createMemoryStorage(makeMigratedNotesState([], {
     ytd_settings: {},
-    ytd_notes: [],
     [`digest_${videoId}`]: {
       transcriptSourcePolicyVersion: 5,
       transcriptSource: "supadata",
       transcriptLanguage: "zh-CN",
       transcript: [{ start: 0, text: "当前视频字幕。", language: "zh-CN" }],
     },
-  });
+  }));
   const background = loadBackgroundHelpers({
     storageGetImpl: storage.get,
     storageSetImpl: storage.set,
@@ -10060,7 +10269,7 @@ test("a stale YouTube player cannot block the note or attach another video's sou
   );
 
   assert.equal(result.success, true);
-  assert.equal((await storage.get("ytd_notes")).ytd_notes.length, 1);
+  assert.equal(readMigratedNotesSnapshot(storage.snapshot()).length, 1);
   assert.equal(await noteSources.readNoteSource(storage, videoId), null);
   assert.equal(await noteSources.readNoteSource(storage, "different-video"), null);
 });
@@ -10068,16 +10277,15 @@ test("a stale YouTube player cannot block the note or attach another video's sou
 test("source persistence failure never reverses a successful note save", async () => {
   const videoId = "save-source-failure";
   const noteSources = require("../note-sources.js");
-  const storage = createMemoryStorage({
+  const storage = createMemoryStorage(makeMigratedNotesState([], {
     ytd_settings: {},
-    ytd_notes: [],
     [`digest_${videoId}`]: {
       transcriptSourcePolicyVersion: 5,
       transcriptSource: "supadata",
       transcriptLanguage: "zh-CN",
       transcript: [{ start: 0, text: "笔记应继续保存。", language: "zh-CN" }],
     },
-  });
+  }));
   const background = loadBackgroundHelpers({
     storageGetImpl: storage.get,
     storageSetImpl: storage.set,
@@ -10121,7 +10329,7 @@ test("source persistence failure never reverses a successful note save", async (
   );
 
   assert.equal(result.success, true);
-  assert.equal((await storage.get("ytd_notes")).ytd_notes.length, 1);
+  assert.equal(readMigratedNotesSnapshot(storage.snapshot()).length, 1);
 });
 
 test("Chinese notes keep raw original while Chinese mode uses cleaned text", () => {
@@ -10160,26 +10368,26 @@ test("Chinese notes keep raw original while Chinese mode uses cleaned text", () 
 });
 
 test("Bilibili polished Chinese notes reuse cleaned text without translation", async () => {
-  const note = {
-    id: "note_bili_zh",
-    videoId: "bilibili:BV1zfg36ZEXi:40830435549",
-    mediaKey: "bilibili:BV1zfg36ZEXi:40830435549",
-    platform: "bilibili",
-    text: "润色后的完整中文笔记。",
-    rawText: "原始字幕碎片",
-    sourceLanguage: "zh-CN",
-    textLanguage: "zh-CN",
-    videoTitle: "示例视频",
-    translatedText: "",
-  };
-  let storedNotes = [note];
+  const mediaKey = "bilibili:BV1zfg36ZEXi:40830435549";
+  const note = makeValidStoredNote(
+    "note_bili_zh",
+    "润色后的完整中文笔记。",
+    {
+      videoId: mediaKey,
+      mediaKey,
+      platform: "bilibili",
+      rawText: "原始字幕碎片",
+      sourceLanguage: "zh-CN",
+      textLanguage: "zh-CN",
+      videoTitle: "示例视频",
+    },
+  );
+  const storage = createMemoryStorage(makeMigratedNotesState([note]));
   let providerCalls = 0;
   const background = loadBackgroundHelpers({
-    storageGetImpl: async (key) =>
-      key === "ytd_notes" ? { ytd_notes: storedNotes } : {},
-    storageSetImpl: async (items) => {
-      if (Array.isArray(items.ytd_notes)) storedNotes = items.ytd_notes;
-    },
+    storageGetImpl: storage.get,
+    storageSetImpl: storage.set,
+    storageRemoveImpl: storage.remove,
     fetchImpl: async () => {
       providerCalls += 1;
       throw new Error("Chinese Bilibili notes must not call the provider");
@@ -10192,36 +10400,34 @@ test("Bilibili polished Chinese notes reuse cleaned text without translation", a
   assert.equal(providerCalls, 0);
   assert.equal(result.translations[0].textZh, note.text);
   assert.notEqual(result.translations[0].textZh, note.rawText);
+  const storedNotes = readMigratedNotesSnapshot(storage.snapshot());
   assert.equal(storedNotes[0].translatedText, note.text);
   assert.equal(storedNotes[0].translatedValidated, true);
 });
 
 test("Traditional Bilibili notes make one provider call and persist Simplified Chinese", async () => {
-  const note = {
-    id: "note_bili_traditional",
-    videoId: "bilibili:BV1zfg36ZEXi:40830435549",
-    mediaKey: "bilibili:BV1zfg36ZEXi:40830435549",
-    platform: "bilibili",
-    text: "這是繁體中文筆記。",
-    rawText: "這是繁體中文筆記。",
-    sourceLanguage: "zh-TW",
-    textLanguage: "",
-    videoTitle: "示例视频",
-    translatedText: "",
-  };
-  let storedNotes = [note];
+  const mediaKey = "bilibili:BV1zfg36ZEXi:40830435549";
+  const note = makeValidStoredNote(
+    "note_bili_traditional",
+    "這是繁體中文筆記。",
+    {
+      videoId: mediaKey,
+      mediaKey,
+      platform: "bilibili",
+      rawText: "這是繁體中文筆記。",
+      sourceLanguage: "zh-TW",
+      textLanguage: "",
+      videoTitle: "示例视频",
+    },
+  );
+  const storage = createMemoryStorage(makeMigratedNotesState([note], {
+    ytd_settings: { aiApiKey: "test-key" },
+  }));
   let providerCalls = 0;
   const background = loadBackgroundHelpers({
-    storageGetImpl: async (key) => {
-      if (key === "ytd_settings") {
-        return { ytd_settings: { aiApiKey: "test-key" } };
-      }
-      if (key === "ytd_notes") return { ytd_notes: storedNotes };
-      return {};
-    },
-    storageSetImpl: async (items) => {
-      if (Array.isArray(items.ytd_notes)) storedNotes = items.ytd_notes;
-    },
+    storageGetImpl: storage.get,
+    storageSetImpl: storage.set,
+    storageRemoveImpl: storage.remove,
     fetchImpl: async (url) => {
       if (url.startsWith("chrome-extension://")) {
         return { ok: true, text: async () => read("prompts/translation.md") };
@@ -10258,6 +10464,7 @@ test("Traditional Bilibili notes make one provider call and persist Simplified C
   assert.equal(result.success, true);
   assert.equal(providerCalls, 1);
   assert.equal(result.translations[0].textZh, "这是繁体中文笔记。");
+  const storedNotes = readMigratedNotesSnapshot(storage.snapshot());
   assert.equal(storedNotes[0].translatedText, "这是繁体中文笔记。");
   assert.equal(storedNotes[0].translatedValidated, true);
   assert.match(
@@ -10286,17 +10493,18 @@ function loadTitleTranslationBackground({
       return false;
     }
   };
+  const storage = createMigratedNotesAdapter(storedNotesRef.notes, {
+    ytd_settings: { aiApiKey: "test-key" },
+  });
   return loadBackgroundHelpers({
-    storageGetImpl: async (key) => {
-      if (key === "ytd_settings") return { ytd_settings: { aiApiKey: "test-key" } };
-      if (key === "ytd_notes") return { ytd_notes: storedNotesRef.notes };
-      return {};
+    storageGetImpl: storage.get,
+    storageSetImpl: async (items) => {
+      if (storageSetImpl) await storageSetImpl(items);
+      await storage.set(items);
     },
-    storageSetImpl:
-      storageSetImpl ||
-      (async (items) => {
-        if (Array.isArray(items.ytd_notes)) storedNotesRef.notes = items.ytd_notes;
-      }),
+    storageRemoveImpl: async (keys) => {
+      await storage.remove(keys);
+    },
     notesBackupImpl,
     fetchImpl: async (url, options) => {
       if (String(url).startsWith("chrome-extension://")) {
@@ -10434,10 +10642,9 @@ test("a title storage failure returns no ghost title and keeps a persisted body"
       ],
     }),
     storageSetImpl: async (items) => {
-      if (!Array.isArray(items.ytd_notes)) return;
+      if (!Array.isArray(items.ytd_note_index)) return;
       noteWrites += 1;
       if (noteWrites > 1) throw new Error("simulated storage failure");
-      ref.notes = items.ytd_notes;
     },
   });
 
@@ -10688,24 +10895,18 @@ test("notes generate Chinese once from polished English and persist it", async (
       translatedText: "",
     },
   ];
+  const storage = createMigratedNotesAdapter(storedNotes, {
+    ytd_settings: {
+      provider: "deepseek",
+      aiApiKey: "test-key",
+      aiBaseUrl: "https://api.deepseek.com",
+      aiModel: "deepseek-v4-flash",
+    },
+  });
   const background = loadBackgroundHelpers({
-    storageGetImpl: async (key) => {
-      if (key === "ytd_settings") {
-        return {
-          ytd_settings: {
-            provider: "deepseek",
-            aiApiKey: "test-key",
-            aiBaseUrl: "https://api.deepseek.com",
-            aiModel: "deepseek-v4-flash",
-          },
-        };
-      }
-      if (key === "ytd_notes") return { ytd_notes: storedNotes };
-      return {};
-    },
-    storageSetImpl: async (items) => {
-      if (items.ytd_notes) storedNotes = items.ytd_notes;
-    },
+    storageGetImpl: storage.get,
+    storageSetImpl: storage.set,
+    storageRemoveImpl: storage.remove,
     fetchImpl: async (url, options) => {
       if (url.startsWith("chrome-extension://")) {
         return { ok: true, text: async () => read("prompts/translation.md") };
@@ -10752,17 +10953,13 @@ test("technical-only notes accept an explicit unchanged model result", async () 
     { id: "note_tech", text: technicalText, videoTitle: "Tooling" },
   ];
   let apiCalls = 0;
+  const storage = createMigratedNotesAdapter(storedNotes, {
+    ytd_settings: { aiApiKey: "test-key" },
+  });
   const background = loadBackgroundHelpers({
-    storageGetImpl: async (key) => {
-      if (key === "ytd_settings") {
-        return { ytd_settings: { aiApiKey: "test-key" } };
-      }
-      if (key === "ytd_notes") return { ytd_notes: storedNotes };
-      return {};
-    },
-    storageSetImpl: async (items) => {
-      if (items.ytd_notes) storedNotes = items.ytd_notes;
-    },
+    storageGetImpl: storage.get,
+    storageSetImpl: storage.set,
+    storageRemoveImpl: storage.remove,
     fetchImpl: async (url) => {
       if (url.startsWith("chrome-extension://")) {
         return { ok: true, text: async () => read("prompts/translation.md") };
@@ -11000,12 +11197,11 @@ test("a valid one-character stored Chinese note is reused without an API call", 
     { id: "note_short", text: "Good.", translatedText: "好" },
   ];
   let apiCalls = 0;
+  const storage = createMigratedNotesAdapter(storedNotes);
   const background = loadBackgroundHelpers({
-    storageGetImpl: async (key) =>
-      key === "ytd_notes" ? { ytd_notes: storedNotes } : {},
-    storageSetImpl: async (items) => {
-      if (items.ytd_notes) storedNotes = items.ytd_notes;
-    },
+    storageGetImpl: storage.get,
+    storageSetImpl: storage.set,
+    storageRemoveImpl: storage.remove,
     fetchImpl: async () => {
       apiCalls += 1;
       throw new Error("A valid stored translation must not call the API");
@@ -11026,17 +11222,13 @@ test("a unique singleton retry safely recovers a model-modified note ID", async 
     { id: "note_2", text: "Second English note.", videoTitle: "Video" },
   ];
   let apiCalls = 0;
+  const storage = createMigratedNotesAdapter(storedNotes, {
+    ytd_settings: { aiApiKey: "test-key" },
+  });
   const background = loadBackgroundHelpers({
-    storageGetImpl: async (key) => {
-      if (key === "ytd_settings") {
-        return { ytd_settings: { aiApiKey: "test-key" } };
-      }
-      if (key === "ytd_notes") return { ytd_notes: storedNotes };
-      return {};
-    },
-    storageSetImpl: async (items) => {
-      if (items.ytd_notes) storedNotes = items.ytd_notes;
-    },
+    storageGetImpl: storage.get,
+    storageSetImpl: storage.set,
+    storageRemoveImpl: storage.remove,
     fetchImpl: async (url) => {
       if (url.startsWith("chrome-extension://")) {
         return { ok: true, text: async () => read("prompts/translation.md") };
@@ -11200,17 +11392,13 @@ test("plain Chinese from a singleton retry is persisted instead of discarded", a
     },
   ];
   let apiCalls = 0;
+  const storage = createMigratedNotesAdapter(storedNotes, {
+    ytd_settings: { aiApiKey: "test-key" },
+  });
   const background = loadBackgroundHelpers({
-    storageGetImpl: async (key) => {
-      if (key === "ytd_settings") {
-        return { ytd_settings: { aiApiKey: "test-key" } };
-      }
-      if (key === "ytd_notes") return { ytd_notes: storedNotes };
-      return {};
-    },
-    storageSetImpl: async (items) => {
-      if (items.ytd_notes) storedNotes = items.ytd_notes;
-    },
+    storageGetImpl: storage.get,
+    storageSetImpl: storage.set,
+    storageRemoveImpl: storage.remove,
     fetchImpl: async (url) => {
       if (url.startsWith("chrome-extension://")) {
         return { ok: true, text: async () => read("prompts/translation.md") };
@@ -11239,17 +11427,13 @@ test("note recovery keeps provider calls bounded for persistently invalid JSON s
     videoTitle: "Video",
   }));
   let apiCalls = 0;
+  const storage = createMigratedNotesAdapter(storedNotes, {
+    ytd_settings: { aiApiKey: "test-key" },
+  });
   const background = loadBackgroundHelpers({
-    storageGetImpl: async (key) => {
-      if (key === "ytd_settings") {
-        return { ytd_settings: { aiApiKey: "test-key" } };
-      }
-      if (key === "ytd_notes") return { ytd_notes: storedNotes };
-      return {};
-    },
-    storageSetImpl: async (items) => {
-      if (items.ytd_notes) storedNotes = items.ytd_notes;
-    },
+    storageGetImpl: storage.get,
+    storageSetImpl: storage.set,
+    storageRemoveImpl: storage.remove,
     fetchImpl: async (url) => {
       if (url.startsWith("chrome-extension://")) {
         return { ok: true, text: async () => read("prompts/translation.md") };
@@ -11290,17 +11474,13 @@ test("a rate limit on the final provider-call slot starts cooldown without waiti
   }));
   let apiCalls = 0;
   const waits = [];
+  const storage = createMigratedNotesAdapter(storedNotes, {
+    ytd_settings: { aiApiKey: "test-key" },
+  });
   const background = loadBackgroundHelpers({
-    storageGetImpl: async (key) => {
-      if (key === "ytd_settings") {
-        return { ytd_settings: { aiApiKey: "test-key" } };
-      }
-      if (key === "ytd_notes") return { ytd_notes: storedNotes };
-      return {};
-    },
-    storageSetImpl: async (items) => {
-      if (items.ytd_notes) storedNotes = items.ytd_notes;
-    },
+    storageGetImpl: storage.get,
+    storageSetImpl: storage.set,
+    storageRemoveImpl: storage.remove,
     fetchImpl: async (url) => {
       if (url.startsWith("chrome-extension://")) {
         return { ok: true, text: async () => read("prompts/translation.md") };
@@ -11338,23 +11518,21 @@ test("a rate limit on the final provider-call slot starts cooldown without waiti
 });
 
 test("a notes deadline includes queue wait and lets the next fresh job continue", async () => {
-  let storedNotes = [
-    { id: "note_1", text: "First note.", videoTitle: "Video" },
-    { id: "note_2", text: "Second note.", videoTitle: "Video" },
+  const storedNotes = [
+    makeValidStoredNote("note_1", "First note."),
+    makeValidStoredNote("note_2", "Second note."),
   ];
+  const storage = createMemoryStorageArea(
+    makeMigratedNotesState(storedNotes, {
+      ytd_settings: { aiApiKey: "test-key" },
+    }),
+  );
   let apiCalls = 0;
   let releaseFirst;
   const background = loadBackgroundHelpers({
-    storageGetImpl: async (key) => {
-      if (key === "ytd_settings") {
-        return { ytd_settings: { aiApiKey: "test-key" } };
-      }
-      if (key === "ytd_notes") return { ytd_notes: storedNotes };
-      return {};
-    },
-    storageSetImpl: async (items) => {
-      if (items.ytd_notes) storedNotes = items.ytd_notes;
-    },
+    storageGetImpl: storage.get,
+    storageSetImpl: storage.set,
+    storageRemoveImpl: storage.remove,
     fetchImpl: async (url, options) => {
       if (url.startsWith("chrome-extension://")) {
         return { ok: true, text: async () => read("prompts/translation.md") };
@@ -11414,25 +11592,28 @@ test("a notes deadline includes queue wait and lets the next fresh job continue"
 });
 
 test("a hung notes storage read times out without permanently blocking the queue", async () => {
-  let ytdNotesReads = 0;
+  let noteIndexReads = 0;
   let apiCalls = 0;
   const storedNotes = [
-    { id: "note_storage", text: "Storage note.", videoTitle: "Video" },
+    makeValidStoredNote("note_storage", "Storage note."),
   ];
+  const storage = createMemoryStorageArea(
+    makeMigratedNotesState(storedNotes, {
+      ytd_settings: { aiApiKey: "test-key" },
+    }),
+  );
   const background = loadBackgroundHelpers({
     setTimeoutImpl: (callback, delay) => setTimeout(callback, delay),
     clearTimeoutImpl: (id) => clearTimeout(id),
     storageGetImpl: async (key) => {
-      if (key === "ytd_notes") {
-        ytdNotesReads += 1;
-        if (ytdNotesReads === 1) return new Promise(() => {});
-        return { ytd_notes: storedNotes };
+      if (key === "ytd_note_index") {
+        noteIndexReads += 1;
+        if (noteIndexReads === 1) return new Promise(() => {});
       }
-      if (key === "ytd_settings") {
-        return { ytd_settings: { aiApiKey: "test-key" } };
-      }
-      return {};
+      return storage.get(key);
     },
+    storageSetImpl: storage.set,
+    storageRemoveImpl: storage.remove,
     fetchImpl: async (url, options) => {
       if (url.startsWith("chrome-extension://")) {
         return { ok: true, text: async () => read("prompts/translation.md") };
@@ -11474,34 +11655,36 @@ test("a hung notes storage read times out without permanently blocking the queue
 });
 
 test("a timed-out persist read cannot perform a late write or block a fresh save", async () => {
-  let storedNotes = [
-    { id: "note_persist", text: "Persist note.", videoTitle: "Video" },
+  const storedNotes = [
+    makeValidStoredNote("note_persist", "Persist note."),
   ];
-  let ytdNotesReads = 0;
+  const storage = createMemoryStorageArea(
+    makeMigratedNotesState(storedNotes, {
+      ytd_settings: { aiApiKey: "test-key" },
+    }),
+  );
+  let noteIndexReads = 0;
   let releasePersistRead;
   let storageSets = 0;
   const background = loadBackgroundHelpers({
     setTimeoutImpl: (callback, delay) => setTimeout(callback, delay),
     clearTimeoutImpl: (id) => clearTimeout(id),
     storageGetImpl: async (key) => {
-      if (key === "ytd_notes") {
-        ytdNotesReads += 1;
-        if (ytdNotesReads === 2) {
+      if (key === "ytd_note_index") {
+        noteIndexReads += 1;
+        if (noteIndexReads === 2) {
           return new Promise((resolve) => {
-            releasePersistRead = () => resolve({ ytd_notes: storedNotes });
+            releasePersistRead = () => storage.get(key).then(resolve);
           });
         }
-        return { ytd_notes: storedNotes };
       }
-      if (key === "ytd_settings") {
-        return { ytd_settings: { aiApiKey: "test-key" } };
-      }
-      return {};
+      return storage.get(key);
     },
     storageSetImpl: async (items) => {
       storageSets += 1;
-      if (items.ytd_notes) storedNotes = items.ytd_notes;
+      await storage.set(items);
     },
+    storageRemoveImpl: storage.remove,
     fetchImpl: async (url) => {
       if (url.startsWith("chrome-extension://")) {
         return { ok: true, text: async () => read("prompts/translation.md") };
@@ -11538,13 +11721,21 @@ test("a timed-out persist read cannot perform a late write or block a fresh save
     makeValidStoredNote("note_after_timeout", "Saved after timeout."),
   );
   assert.equal(storageSets, 1);
-  assert.equal(storedNotes[0].id, "note_after_timeout");
+  assert.equal(
+    readMigratedNotesSnapshot(storage.snapshot())[0].id,
+    "note_after_timeout",
+  );
 });
 
 test("an in-flight storage commit keeps later note jobs behind the write queue", async () => {
-  let storedNotes = [
-    { id: "note_commit", text: "Commit note.", videoTitle: "Video" },
+  const storedNotes = [
+    makeValidStoredNote("note_commit", "Commit note."),
   ];
+  const storage = createMemoryStorageArea(
+    makeMigratedNotesState(storedNotes, {
+      ytd_settings: { aiApiKey: "test-key" },
+    }),
+  );
   let apiCalls = 0;
   let blockedCommit = false;
   let releaseCommit;
@@ -11553,18 +11744,13 @@ test("an in-flight storage commit keeps later note jobs behind the write queue",
     commitStarted = resolve;
   });
   const background = loadBackgroundHelpers({
-    storageGetImpl: async (key) => {
-      if (key === "ytd_settings") {
-        return { ytd_settings: { aiApiKey: "test-key" } };
-      }
-      if (key === "ytd_notes") return { ytd_notes: storedNotes };
-      return {};
-    },
+    storageGetImpl: storage.get,
     storageSetImpl: async (items) => {
-      if (items.ytd_notes) storedNotes = items.ytd_notes;
+      await storage.set(items);
+      const nextNotes = readMigratedNotesSnapshot(storage.snapshot());
       if (
         !blockedCommit &&
-        storedNotes.some((note) => note.translatedText === "提交中的中文。")
+        nextNotes.some((note) => note.translatedText === "提交中的中文。")
       ) {
         blockedCommit = true;
         commitStarted();
@@ -11573,6 +11759,7 @@ test("an in-flight storage commit keeps later note jobs behind the write queue",
         });
       }
     },
+    storageRemoveImpl: storage.remove,
     fetchImpl: async (url) => {
       if (url.startsWith("chrome-extension://")) {
         return { ok: true, text: async () => read("prompts/translation.md") };
@@ -11609,23 +11796,21 @@ test("an in-flight storage commit keeps later note jobs behind the write queue",
 });
 
 test("a notes deadline prevents a rate-limit backoff from starting another call", async () => {
-  let storedNotes = [
-    { id: "note_deadline", text: "Deadline note.", videoTitle: "Video" },
+  const storedNotes = [
+    makeValidStoredNote("note_deadline", "Deadline note."),
   ];
+  const storage = createMemoryStorageArea(
+    makeMigratedNotesState(storedNotes, {
+      ytd_settings: { aiApiKey: "test-key" },
+    }),
+  );
   let apiCalls = 0;
   const waits = [];
   let now = 1_000;
   const background = loadBackgroundHelpers({
-    storageGetImpl: async (key) => {
-      if (key === "ytd_settings") {
-        return { ytd_settings: { aiApiKey: "test-key" } };
-      }
-      if (key === "ytd_notes") return { ytd_notes: storedNotes };
-      return {};
-    },
-    storageSetImpl: async (items) => {
-      if (items.ytd_notes) storedNotes = items.ytd_notes;
-    },
+    storageGetImpl: storage.get,
+    storageSetImpl: storage.set,
+    storageRemoveImpl: storage.remove,
     fetchImpl: async (url) => {
       if (url.startsWith("chrome-extension://")) {
         return { ok: true, text: async () => read("prompts/translation.md") };
@@ -11676,24 +11861,26 @@ test("a notes provider call receives only its remaining hard-timeout budget", as
 });
 
 test("notes reuse the deadline-bounded settings snapshot before provider fetch", async () => {
-  let storedNotes = [
-    { id: "note_settings", text: "Settings note.", videoTitle: "Video" },
+  const storedNotes = [
+    makeValidStoredNote("note_settings", "Settings note."),
   ];
+  const storage = createMemoryStorageArea(
+    makeMigratedNotesState(storedNotes, {
+      ytd_settings: { aiApiKey: "test-key" },
+    }),
+  );
   let settingsReads = 0;
   let apiCalls = 0;
   const background = loadBackgroundHelpers({
     storageGetImpl: async (key) => {
-      if (key === "ytd_notes") return { ytd_notes: storedNotes };
       if (key === "ytd_settings") {
         settingsReads += 1;
         if (settingsReads > 1) return new Promise(() => {});
-        return { ytd_settings: { aiApiKey: "test-key" } };
       }
-      return {};
+      return storage.get(key);
     },
-    storageSetImpl: async (items) => {
-      if (items.ytd_notes) storedNotes = items.ytd_notes;
-    },
+    storageSetImpl: storage.set,
+    storageRemoveImpl: storage.remove,
     fetchImpl: async (url) => {
       if (url.startsWith("chrome-extension://")) {
         return { ok: true, text: async () => read("prompts/translation.md") };
@@ -11757,20 +11944,20 @@ test("pre-reset note and title translations cannot recreate local notes", async 
   for (const scenario of scenarios) {
     await t.test(scenario.label, async () => {
       const providerGate = createAsyncGate();
-      const storage = createMemoryStorageArea({
+      const storedNote = makeValidStoredNote(
+        "reset-note",
+        "A note that must not return after reset.",
+        {
+          mediaKey: "reset-video",
+          videoId: "reset-video",
+          videoTitle: "Reset video",
+          sourceLanguage: "en",
+        },
+      );
+      const storage = createMemoryStorageArea(makeMigratedNotesState([storedNote], {
         ytd_settings: { aiApiKey: "test-key" },
         ytd_options_language: "zh-CN",
-        ytd_notes: [
-          {
-            id: "reset-note",
-            mediaKey: "reset-video",
-            videoId: "reset-video",
-            text: "A note that must not return after reset.",
-            videoTitle: "Reset video",
-            sourceLanguage: "en",
-          },
-        ],
-      });
+      }));
       const background = loadBackgroundHelpers({
         storageGetImpl: storage.get,
         storageSetImpl: storage.set,
@@ -11800,34 +11987,43 @@ test("pre-reset note and title translations cannot recreate local notes", async 
 
       providerGate.release();
       await pending;
-      assert.deepEqual(storage.snapshot(), { ytd_options_language: "zh-CN" });
+      assert.deepEqual(storage.snapshot(), {
+        ytd_options_language: "zh-CN",
+        ytd_note_index: [],
+        ytd_notes_schema: 1,
+      });
     });
   }
 });
 
 test("Chinese source notes reuse their raw subtitle without an API call", async () => {
-  let storedNotes = [
+  const legacyChineseNote = makeValidStoredNote(
+    "note_zh_legacy",
+    "Legacy fallback text.",
     {
-      id: "note_zh",
-      text: "Polished fallback text.",
+      rawText: "这条旧笔记没有语言字段，但原字幕是中文。",
+      videoTitle: "旧视频",
+      videoId: "legacyzh01",
+      mediaKey: "legacyzh01",
+    },
+  );
+  delete legacyChineseNote.sourceLanguage;
+  const storedNotes = [
+    makeValidStoredNote("note_zh", "Polished fallback text.", {
       rawText: "这条原字幕已经是中文。",
       sourceLanguage: "zh-CN",
       videoTitle: "示例视频",
-    },
-    {
-      id: "note_zh_legacy",
-      text: "Legacy fallback text.",
-      rawText: "这条旧笔记没有语言字段，但原字幕是中文。",
-      videoTitle: "旧视频",
-    },
+      videoId: "chinese001",
+      mediaKey: "chinese001",
+    }),
+    legacyChineseNote,
   ];
+  const storage = createMemoryStorageArea(makeMigratedNotesState(storedNotes));
   let apiCalls = 0;
   const background = loadBackgroundHelpers({
-    storageGetImpl: async (key) =>
-      key === "ytd_notes" ? { ytd_notes: storedNotes } : {},
-    storageSetImpl: async (items) => {
-      if (items.ytd_notes) storedNotes = items.ytd_notes;
-    },
+    storageGetImpl: storage.get,
+    storageSetImpl: storage.set,
+    storageRemoveImpl: storage.remove,
     fetchImpl: async () => {
       apiCalls += 1;
       throw new Error("Chinese source notes must not call the API");
@@ -11842,9 +12038,10 @@ test("Chinese source notes reuse their raw subtitle without an API call", async 
     result.translations[1].textZh,
     "这条旧笔记没有语言字段，但原字幕是中文。",
   );
-  assert.equal(storedNotes[0].translatedText, "这条原字幕已经是中文。");
+  const persistedNotes = readMigratedNotesSnapshot(storage.snapshot());
+  assert.equal(persistedNotes[0].translatedText, "这条原字幕已经是中文。");
   assert.equal(
-    storedNotes[1].translatedText,
+    persistedNotes[1].translatedText,
     "这条旧笔记没有语言字段，但原字幕是中文。",
   );
   assert.equal(background.noteHasChineseSource(storedNotes[0]), true);
@@ -11873,21 +12070,19 @@ test("Chinese source notes reuse their raw subtitle without an API call", async 
 
 test("missing note translations retry individually instead of discarding the batch", async () => {
   const requests = [];
-  let storedNotes = [
-    { id: "note_1", text: "First English note.", videoTitle: "Video" },
-    { id: "note_2", text: "Second English note.", videoTitle: "Video" },
+  const storedNotes = [
+    makeValidStoredNote("note_1", "First English note."),
+    makeValidStoredNote("note_2", "Second English note."),
   ];
+  const storage = createMemoryStorageArea(
+    makeMigratedNotesState(storedNotes, {
+      ytd_settings: { aiApiKey: "test-key" },
+    }),
+  );
   const background = loadBackgroundHelpers({
-    storageGetImpl: async (key) => {
-      if (key === "ytd_settings") {
-        return { ytd_settings: { aiApiKey: "test-key" } };
-      }
-      if (key === "ytd_notes") return { ytd_notes: storedNotes };
-      return {};
-    },
-    storageSetImpl: async (items) => {
-      if (items.ytd_notes) storedNotes = items.ytd_notes;
-    },
+    storageGetImpl: storage.get,
+    storageSetImpl: storage.set,
+    storageRemoveImpl: storage.remove,
     fetchImpl: async (url, options) => {
       if (url.startsWith("chrome-extension://")) {
         return { ok: true, text: async () => read("prompts/translation.md") };
@@ -11911,28 +12106,27 @@ test("missing note translations retry individually instead of discarding the bat
   assert.equal(result.success, true);
   assert.equal(requests.length, 2);
   assert.deepEqual(result.missingIds, []);
-  assert.equal(storedNotes[0].translatedText, "第一条中文笔记。");
-  assert.equal(storedNotes[1].translatedText, "第二条中文笔记。");
+  const persistedNotes = readMigratedNotesSnapshot(storage.snapshot());
+  assert.equal(persistedNotes[0].translatedText, "第一条中文笔记。");
+  assert.equal(persistedNotes[1].translatedText, "第二条中文笔记。");
 });
 
 test("valid note translations persist even when another item still fails", async () => {
-  let storedNotes = [
-    { id: "note_1", text: "First English note.", videoTitle: "Video" },
-    { id: "note_2", text: "Second English note.", videoTitle: "Video" },
+  const storedNotes = [
+    makeValidStoredNote("note_1", "First English note."),
+    makeValidStoredNote("note_2", "Second English note."),
   ];
+  const storage = createMemoryStorageArea(
+    makeMigratedNotesState(storedNotes, {
+      ytd_settings: { aiApiKey: "test-key" },
+    }),
+  );
   let apiCall = 0;
   const waits = [];
   const background = loadBackgroundHelpers({
-    storageGetImpl: async (key) => {
-      if (key === "ytd_settings") {
-        return { ytd_settings: { aiApiKey: "test-key" } };
-      }
-      if (key === "ytd_notes") return { ytd_notes: storedNotes };
-      return {};
-    },
-    storageSetImpl: async (items) => {
-      if (items.ytd_notes) storedNotes = items.ytd_notes;
-    },
+    storageGetImpl: storage.get,
+    storageSetImpl: storage.set,
+    storageRemoveImpl: storage.remove,
     fetchImpl: async (url) => {
       if (url.startsWith("chrome-extension://")) {
         return { ok: true, text: async () => read("prompts/translation.md") };
@@ -11969,26 +12163,25 @@ test("valid note translations persist even when another item still fails", async
   assert.deepEqual(JSON.parse(JSON.stringify(result.failures)), [
     { id: "note_2", code: "RATE_LIMITED" },
   ]);
-  assert.equal(storedNotes[0].translatedText, "第一条中文笔记。");
-  assert.equal(storedNotes[1].translatedText, undefined);
+  const persistedNotes = readMigratedNotesSnapshot(storage.snapshot());
+  assert.equal(persistedNotes[0].translatedText, "第一条中文笔记。");
+  assert.equal(persistedNotes[1].translatedText, "");
 });
 
 test("concurrent requests for the same note serialize and call the API once", async () => {
-  let storedNotes = [
-    { id: "note_1", text: "English note.", videoTitle: "Video" },
+  const storedNotes = [
+    makeValidStoredNote("note_1", "English note."),
   ];
+  const storage = createMemoryStorageArea(
+    makeMigratedNotesState(storedNotes, {
+      ytd_settings: { aiApiKey: "test-key" },
+    }),
+  );
   let apiCalls = 0;
   const background = loadBackgroundHelpers({
-    storageGetImpl: async (key) => {
-      if (key === "ytd_settings") {
-        return { ytd_settings: { aiApiKey: "test-key" } };
-      }
-      if (key === "ytd_notes") return { ytd_notes: storedNotes };
-      return {};
-    },
-    storageSetImpl: async (items) => {
-      if (items.ytd_notes) storedNotes = items.ytd_notes;
-    },
+    storageGetImpl: storage.get,
+    storageSetImpl: storage.set,
+    storageRemoveImpl: storage.remove,
     fetchImpl: async (url) => {
       if (url.startsWith("chrome-extension://")) {
         return { ok: true, text: async () => read("prompts/translation.md") };
@@ -12022,13 +12215,21 @@ test("concurrent requests for the same note serialize and call the API once", as
   assert.equal(first.success, true, JSON.stringify(first));
   assert.equal(second.success, true);
   assert.equal(apiCalls, 1);
-  assert.equal(storedNotes[0].translatedText, "中文笔记。");
+  assert.equal(
+    readMigratedNotesSnapshot(storage.snapshot())[0].translatedText,
+    "中文笔记。",
+  );
 });
 
 test("note translation, save, and delete share one storage write queue", async () => {
-  let storedNotes = [
-    { id: "note_1", text: "English note.", videoTitle: "Video" },
+  const storedNotes = [
+    makeValidStoredNote("note_1", "English note."),
   ];
+  const storage = createMemoryStorageArea(
+    makeMigratedNotesState(storedNotes, {
+      ytd_settings: { aiApiKey: "test-key" },
+    }),
+  );
   let signalTranslationWrite;
   const translationWriteStarted = new Promise((resolve) => {
     signalTranslationWrite = resolve;
@@ -12039,18 +12240,10 @@ test("note translation, save, and delete share one storage write queue", async (
   });
   let blockedTranslationWrite = false;
   const background = loadBackgroundHelpers({
-    storageGetImpl: async (key) => {
-      if (key === "ytd_settings") {
-        return { ytd_settings: { aiApiKey: "test-key" } };
-      }
-      if (key === "ytd_notes") {
-        return { ytd_notes: storedNotes.map((note) => ({ ...note })) };
-      }
-      return {};
-    },
+    storageGetImpl: storage.get,
     storageSetImpl: async (items) => {
-      if (!Array.isArray(items.ytd_notes)) return;
-      const nextNotes = items.ytd_notes.map((note) => ({ ...note }));
+      await storage.set(items);
+      const nextNotes = readMigratedNotesSnapshot(storage.snapshot());
       if (
         !blockedTranslationWrite &&
         nextNotes.some((note) => note.translatedText === "中文笔记。")
@@ -12059,8 +12252,8 @@ test("note translation, save, and delete share one storage write queue", async (
         signalTranslationWrite();
         await translationWriteGate;
       }
-      storedNotes = nextNotes;
     },
+    storageRemoveImpl: storage.remove,
     fetchImpl: async (url) => {
       if (url.startsWith("chrome-extension://")) {
         return { ok: true, text: async () => read("prompts/translation.md") };
@@ -12099,20 +12292,22 @@ test("note translation, save, and delete share one storage write queue", async (
   assert.equal(translationResult.success, true);
   assert.equal(deletionResult.success, true);
   assert.deepEqual(
-    storedNotes.map((note) => note.id),
+    readMigratedNotesSnapshot(storage.snapshot()).map((note) => note.id),
     ["note_new"],
   );
 });
 
 test("deleting an unknown note is a no-op and never rewrites note storage", async () => {
   const storedNotes = [makeValidStoredNote("note_kept", "Keep this note.")];
+  const storage = createMemoryStorageArea(makeMigratedNotesState(storedNotes));
   let storageWrites = 0;
   const background = loadBackgroundHelpers({
-    storageGetImpl: async (key) =>
-      key === "ytd_notes" ? { ytd_notes: storedNotes } : {},
-    storageSetImpl: async () => {
+    storageGetImpl: storage.get,
+    storageSetImpl: async (items) => {
       storageWrites += 1;
+      await storage.set(items);
     },
+    storageRemoveImpl: storage.remove,
   });
 
   const result = await background.handleDeleteNote("note_missing");
@@ -13843,20 +14038,16 @@ test("YouTube Chinese notes use the same contextual cleanup as Bilibili", async 
 
   const runSave = async (language) => {
     const digest = makeDigest(language);
-    let savedNote = null;
+    const storedNotes = [];
     let cleanupCalls = 0;
+    const storage = createMigratedNotesAdapter(storedNotes, {
+      ytd_settings: settings,
+      [`digest_${videoId}`]: digest,
+    });
     const background = loadBackgroundHelpers({
-      storageGetImpl: async (key) => {
-        if (key === "ytd_settings") return { ytd_settings: settings };
-        if (key === `digest_${videoId}`) {
-          return { [`digest_${videoId}`]: digest };
-        }
-        if (key === "ytd_notes") return { ytd_notes: [] };
-        return {};
-      },
-      storageSetImpl: async (items) => {
-        if (items.ytd_notes) savedNote = items.ytd_notes[0];
-      },
+      storageGetImpl: storage.get,
+      storageSetImpl: storage.set,
+      storageRemoveImpl: storage.remove,
       fetchImpl: async (url, options) => {
         if (url.startsWith("chrome-extension://")) {
           return { ok: true, text: async () => read("prompts/note-cleanup.md") };
@@ -13887,7 +14078,7 @@ test("YouTube Chinese notes use the same contextual cleanup as Bilibili", async 
       },
     });
     const result = await background.handleSaveNote(videoId, 10, "视频", "频道");
-    return { result, savedNote, cleanupCalls };
+    return { result, savedNote: storedNotes[0], cleanupCalls };
   };
 
   // Trusted YouTube Chinese tracks now share the contextual Chinese cleanup
@@ -13917,37 +14108,27 @@ test("YouTube Chinese notes use the same contextual cleanup as Bilibili", async 
 
 test("free YouTube Chinese notes separate raw original from cleaned Chinese without AI", async () => {
   const videoId = "youtube-zh-free-note";
-  let storedNote = null;
+  const storedNotes = [];
   let providerCalls = 0;
+  const storage = createMigratedNotesAdapter(storedNotes, {
+    ytd_settings: {
+      provider: "deepseek",
+      aiApiKeys: { deepseek: "configured-key" },
+    },
+    [`digest_${videoId}`]: {
+      transcriptSourcePolicyVersion: 5,
+      transcriptSource: "youtube-passive",
+      transcript: [
+        { start: 0, text: "我们先理解问题", language: "zh-CN" },
+        { start: 10, text: "再选择最小方案", language: "zh-CN" },
+        { start: 20, text: "最后开始实现", language: "zh-CN" },
+      ],
+    },
+  });
   const background = loadBackgroundHelpers({
-    storageGetImpl: async (key) => {
-      if (key === "ytd_settings") {
-        return {
-          ytd_settings: {
-            provider: "deepseek",
-            aiApiKeys: { deepseek: "configured-key" },
-          },
-        };
-      }
-      if (key === `digest_${videoId}`) {
-        return {
-          [`digest_${videoId}`]: {
-            transcriptSourcePolicyVersion: 5,
-            transcriptSource: "youtube-passive",
-            transcript: [
-              { start: 0, text: "我们先理解问题", language: "zh-CN" },
-              { start: 10, text: "再选择最小方案", language: "zh-CN" },
-              { start: 20, text: "最后开始实现", language: "zh-CN" },
-            ],
-          },
-        };
-      }
-      if (key === "ytd_notes") return { ytd_notes: [] };
-      return {};
-    },
-    storageSetImpl: async (items) => {
-      if (Array.isArray(items.ytd_notes)) storedNote = items.ytd_notes[0];
-    },
+    storageGetImpl: storage.get,
+    storageSetImpl: storage.set,
+    storageRemoveImpl: storage.remove,
     fetchImpl: async () => {
       providerCalls += 1;
       throw new Error("skipAiCleanup must not call the provider");
@@ -13968,6 +14149,7 @@ test("free YouTube Chinese notes separate raw original from cleaned Chinese with
 
   assert.equal(result.success, true);
   assert.equal(providerCalls, 0);
+  const storedNote = storedNotes[0];
   assert.equal(storedNote.textLanguage, "zh-CN");
   assert.equal(storedNote.rawText, "再选择最小方案");
   assert.match(storedNote.text, /我们先理解问题.*再选择最小方案.*最后开始实现/);

@@ -5005,6 +5005,8 @@ async function handleSaveNote(
     let matchedLine = null;
     let matchedIndex = 0;
     let contextLines = [];
+    let triggerWindow = [];
+    let triggerWindowMatchedIndex = 0;
     let beforeLine = null; // a few sentences before
     let afterLine = null; // a few sentences after
 
@@ -5041,6 +5043,13 @@ async function handleSaveNote(
         const endIdx = Math.min(transcript.length - 1, i + 12);
         for (let j = startIdx; j <= endIdx; j++) {
           contextLines.push(transcript[j].text);
+          if (j === matchedIndex) {
+            triggerWindowMatchedIndex = triggerWindow.length;
+          }
+          triggerWindow.push({
+            t: transcript[j].start,
+            text: transcript[j].text,
+          });
         }
         break;
       }
@@ -5076,7 +5085,62 @@ async function handleSaveNote(
       const endIdx = Math.min(transcript.length - 1, matchedIndex + 12);
       for (let j = startIdx; j <= endIdx; j++) {
         contextLines.push(transcript[j].text);
+        if (j === matchedIndex) {
+          triggerWindowMatchedIndex = triggerWindow.length;
+        }
+        triggerWindow.push({
+          t: transcript[j].start,
+          text: transcript[j].text,
+        });
       }
+    }
+
+    const triggerWindowMaxBytes = 20 * 1024;
+    let trimFromStart = true;
+    while (
+      new TextEncoder().encode(JSON.stringify(triggerWindow)).byteLength >
+        triggerWindowMaxBytes &&
+      triggerWindow.length > 1
+    ) {
+      const canTrimStart = triggerWindowMatchedIndex > 0;
+      const canTrimEnd =
+        triggerWindowMatchedIndex < triggerWindow.length - 1;
+      if (canTrimStart && (trimFromStart || !canTrimEnd)) {
+        triggerWindow.shift();
+        triggerWindowMatchedIndex -= 1;
+      } else if (canTrimEnd) {
+        triggerWindow.pop();
+      } else {
+        break;
+      }
+      trimFromStart = !trimFromStart;
+    }
+    if (
+      triggerWindow.length === 1 &&
+      new TextEncoder().encode(JSON.stringify(triggerWindow)).byteLength >
+        triggerWindowMaxBytes
+    ) {
+      const row = triggerWindow[0];
+      const sourceText = String(row.text || "");
+      let low = 0;
+      let high = sourceText.length;
+      while (low < high) {
+        const middle = Math.ceil((low + high) / 2);
+        const candidate = [{ ...row, text: sourceText.slice(0, middle) }];
+        if (
+          new TextEncoder().encode(JSON.stringify(candidate)).byteLength <=
+          triggerWindowMaxBytes
+        ) {
+          low = middle;
+        } else {
+          high = middle - 1;
+        }
+      }
+      let slicedText = sourceText.slice(0, low);
+      if (/[\uD800-\uDBFF]$/.test(slicedText)) {
+        slicedText = slicedText.slice(0, -1);
+      }
+      triggerWindow = [{ ...row, text: slicedText }];
     }
 
     const matchedLanguage = normalizeLanguageCode(matchedLine.language);
@@ -5159,6 +5223,9 @@ async function handleSaveNote(
       sourceLanguage: storedSourceLanguage,
       textLanguage: directChineseNote ? matchedLanguage : "",
       createdAt: Date.now(),
+      thought: "",
+      thoughtAt: null,
+      triggerWindow,
     };
 
     // Save to storage
@@ -5405,6 +5472,7 @@ async function cleanupNoteText(
  */
 let noteStorageWriteQueue = Promise.resolve();
 let noteStorageGeneration = 0;
+let notesMigrationPromise = null;
 
 function createNoteId({
   now = Date.now,
@@ -5446,6 +5514,656 @@ function withNoteStorageWrite(task) {
   return run;
 }
 
+/**
+ * Lazily migrates the legacy flat note array to the Phase 1 index + per-media
+ * shards. The retained Promise is both the single-flight gate and the fast
+ * path for the rest of this service-worker lifetime. Only a missing download
+ * receiver clears the gate for an in-lifetime retry; deterministic data/write
+ * failures remain settled until the worker restarts, preventing download loops.
+ */
+function ensureNotesMigrated() {
+  if (notesMigrationPromise) return notesMigrationPromise;
+
+  const migration = withNoteStorageWrite(async () => {
+    const schemaResult = await chrome.storage.local.get("ytd_notes_schema");
+    if (schemaResult.ytd_notes_schema === 1) return { success: true };
+
+    const legacyResult = await chrome.storage.local.get("ytd_notes");
+    const hasLegacyNotes = Object.hasOwn(legacyResult, "ytd_notes");
+    const legacyNotes = legacyResult.ytd_notes;
+    if (!hasLegacyNotes || (Array.isArray(legacyNotes) && legacyNotes.length === 0)) {
+      let wroteIndex = false;
+      try {
+        await chrome.storage.local.set({ ytd_note_index: [] });
+        wroteIndex = true;
+        await chrome.storage.local.set({ ytd_notes_schema: 1 });
+        return { success: true };
+      } catch (cause) {
+        if (wroteIndex) {
+          try {
+            await chrome.storage.local.remove("ytd_note_index");
+          } catch (_rollbackError) {
+            // The absent schema marker keeps the empty migration incomplete.
+          }
+        }
+        const error = new Error(
+          `笔记迁移失败：写入空索引失败（${cause?.message || "unknown"}）。`,
+        );
+        error.code = "NOTES_MIGRATION_FAILED";
+        error.cause = cause;
+        throw error;
+      }
+    }
+
+    if (!Array.isArray(legacyNotes)) {
+      const error = new Error(
+        "笔记迁移失败：ytd_notes 必须是数组。请先导出备份并检查原始数据。",
+      );
+      error.code = "NOTES_MIGRATION_FAILED";
+      throw error;
+    }
+    let backup;
+    try {
+      const exportedAt = new Date().toISOString();
+      const extensionVersion = chrome.runtime.getManifest?.().version || "";
+      backup = YTD_NOTES_BACKUP.createBackup(legacyNotes, {
+        exportedAt,
+        extensionVersion,
+      });
+    } catch (cause) {
+      const field = String(cause?.details?.field || "").trim();
+      const error = new Error(
+        `笔记迁移失败：旧笔记${field ? `字段 ${field}` : "数据"}无法生成安全备份。`,
+      );
+      error.code = cause?.code || "NOTES_MIGRATION_FAILED";
+      error.cause = cause;
+      throw error;
+    }
+
+    const filename = YTD_NOTES_BACKUP.notesBackupFilename(new Date());
+    const backupText = YTD_NOTES_BACKUP.serializeBackup(backup);
+    let downloaded = false;
+    for (const target of ["sidepanel", "options"]) {
+      try {
+        const response = await chrome.runtime.sendMessage({
+          action: "downloadNotesMigrationBackup",
+          target,
+          filename,
+          ...(target === "sidepanel" ? { backupText } : { backup }),
+        });
+        if (
+          response?.success === true &&
+          String(response.filename || "").trim() === filename
+        ) {
+          downloaded = true;
+          break;
+        }
+      } catch (_error) {
+        // Try the other existing extension-page download surface.
+      }
+    }
+    if (!downloaded) {
+      const error = new Error(
+        "笔记迁移失败：迁移前备份未能下载，旧笔记保持不变。",
+      );
+      error.code = "NOTES_MIGRATION_BACKUP_DOWNLOAD_FAILED";
+      throw error;
+    }
+
+    const seenIds = new Set();
+    const shards = new Map();
+    const index = [];
+    try {
+      for (let position = 0; position < legacyNotes.length; position += 1) {
+        const note = legacyNotes[position];
+        if (!note || typeof note !== "object" || Array.isArray(note)) {
+          const error = new Error(`笔记迁移失败：第 ${position + 1} 条不是对象。`);
+          error.code = "NOTES_MIGRATION_FAILED";
+          throw error;
+        }
+        if (typeof note.id !== "string" || !note.id.trim()) {
+          const error = new Error(
+            `笔记迁移失败：第 ${position + 1} 条缺少有效 id。`,
+          );
+          error.code = "NOTES_MIGRATION_FAILED";
+          throw error;
+        }
+        if (seenIds.has(note.id)) {
+          const error = new Error(
+            `笔记迁移失败：第 ${position + 1} 条 id 重复。`,
+          );
+          error.code = "NOTES_MIGRATION_FAILED";
+          throw error;
+        }
+        seenIds.add(note.id);
+
+        const mediaKey =
+          typeof note.mediaKey === "string" && note.mediaKey.trim()
+            ? note.mediaKey
+            : typeof note.videoId === "string" && note.videoId.trim()
+              ? note.videoId
+              : "";
+        if (!mediaKey) {
+          const error = new Error(
+            `笔记迁移失败：第 ${position + 1} 条缺少 mediaKey 与 videoId。`,
+          );
+          error.code = "NOTES_MIGRATION_FAILED";
+          throw error;
+        }
+        if (mediaKey === "schema") {
+          const error = new Error(
+            `笔记迁移失败：第 ${position + 1} 条 mediaKey 与存储保留键冲突。`,
+          );
+          error.code = "NOTES_MIGRATION_FAILED";
+          throw error;
+        }
+
+        const stringFields = [
+          "id",
+          "videoId",
+          "mediaKey",
+          "platform",
+          "canonicalUrl",
+          "bvid",
+          "videoTitle",
+          "channelName",
+          "timestamp",
+          "timestampedUrl",
+          "text",
+          "translatedText",
+          "rawText",
+          "sourceLanguage",
+          "textLanguage",
+        ];
+        const badStringField = stringFields.find(
+          (field) =>
+            note[field] !== undefined && note[field] !== null &&
+            typeof note[field] !== "string",
+        );
+        if (badStringField) {
+          const error = new Error(
+            `笔记迁移失败：第 ${position + 1} 条字段 ${badStringField} 类型错误。`,
+          );
+          error.code = "NOTES_MIGRATION_FAILED";
+          throw error;
+        }
+        for (const field of ["timestampSeconds", "createdAt"]) {
+          if (!Number.isSafeInteger(note[field]) || note[field] < 0) {
+            const error = new Error(
+              `笔记迁移失败：第 ${position + 1} 条字段 ${field} 类型错误。`,
+            );
+            error.code = "NOTES_MIGRATION_FAILED";
+            throw error;
+          }
+        }
+        for (const field of ["cid", "page"]) {
+          if (
+            note[field] !== undefined && note[field] !== null &&
+            !Number.isSafeInteger(note[field])
+          ) {
+            const error = new Error(
+              `笔记迁移失败：第 ${position + 1} 条字段 ${field} 类型错误。`,
+            );
+            error.code = "NOTES_MIGRATION_FAILED";
+            throw error;
+          }
+        }
+        for (const field of [
+          "translatedValidated",
+          "translatedUnchanged",
+        ]) {
+          if (note[field] !== undefined && typeof note[field] !== "boolean") {
+            const error = new Error(
+              `笔记迁移失败：第 ${position + 1} 条字段 ${field} 类型错误。`,
+            );
+            error.code = "NOTES_MIGRATION_FAILED";
+            throw error;
+          }
+        }
+        if (
+          note.translatedValidationVersion !== undefined &&
+          !Number.isSafeInteger(note.translatedValidationVersion)
+        ) {
+          const error = new Error(
+            `笔记迁移失败：第 ${position + 1} 条字段 translatedValidationVersion 类型错误。`,
+          );
+          error.code = "NOTES_MIGRATION_FAILED";
+          throw error;
+        }
+        if (
+          note.platform !== undefined &&
+          note.platform !== "youtube" &&
+          note.platform !== "bilibili"
+        ) {
+          const error = new Error(
+            `笔记迁移失败：第 ${position + 1} 条字段 platform 类型错误。`,
+          );
+          error.code = "NOTES_MIGRATION_FAILED";
+          throw error;
+        }
+
+        if (!shards.has(mediaKey)) shards.set(mediaKey, []);
+        shards.get(mediaKey).push(note);
+        const searchText = [
+          "",
+          note.rawText,
+          note.videoTitle,
+          note.channelName,
+        ]
+          .filter((value) => typeof value === "string" && value.trim())
+          .join(" ")
+          .normalize("NFKC")
+          .trim()
+          .replace(/\s+/g, " ");
+        index.push({
+          id: note.id,
+          mediaKey,
+          platform: note.platform || "youtube",
+          videoTitle: note.videoTitle || "",
+          channelName: note.channelName || "",
+          timestampSeconds: note.timestampSeconds,
+          savedAt: note.createdAt,
+          hasThought: false,
+          searchText,
+        });
+      }
+    } catch (cause) {
+      if (cause?.code === "NOTES_MIGRATION_FAILED") throw cause;
+      const error = new Error("笔记迁移失败：旧笔记字段校验失败。");
+      error.code = "NOTES_MIGRATION_FAILED";
+      error.cause = cause;
+      throw error;
+    }
+
+    const writtenKeys = [];
+    try {
+      for (const [mediaKey, notes] of shards) {
+        const key = `ytd_notes_${mediaKey}`;
+        await chrome.storage.local.set({
+          [key]: [...notes].sort(
+            (left, right) =>
+              left.timestampSeconds - right.timestampSeconds,
+          ),
+        });
+        writtenKeys.push(key);
+      }
+      await chrome.storage.local.set({ ytd_note_index: index });
+      writtenKeys.push("ytd_note_index");
+      await chrome.storage.local.set({ ytd_notes_schema: 1 });
+      return { success: true };
+    } catch (cause) {
+      if (writtenKeys.length) {
+        try {
+          await chrome.storage.local.remove(writtenKeys);
+        } catch (_rollbackError) {
+          // The legacy key remains the truth while schema=1 is absent.
+        }
+      }
+      const error = new Error(
+        `笔记迁移失败：写入新结构失败（${cause?.message || "unknown"}）。`,
+      );
+      error.code = "NOTES_MIGRATION_FAILED";
+      error.cause = cause;
+      throw error;
+    }
+  });
+
+  notesMigrationPromise = migration;
+  migration.catch((error) => {
+    if (
+      error?.code === "NOTES_MIGRATION_BACKUP_DOWNLOAD_FAILED" &&
+      notesMigrationPromise === migration
+    ) {
+      notesMigrationPromise = null;
+    }
+  });
+  return migration;
+}
+
+async function readNoteIndex() {
+  await ensureNotesMigrated();
+  const stored = await chrome.storage.local.get("ytd_note_index");
+  if (!Array.isArray(stored.ytd_note_index)) {
+    const error = new Error("笔记迁移失败：笔记索引缺失或损坏。");
+    error.code = "NOTES_MIGRATION_FAILED";
+    throw error;
+  }
+  const expectedFields = [
+    "channelName",
+    "hasThought",
+    "id",
+    "mediaKey",
+    "platform",
+    "savedAt",
+    "searchText",
+    "timestampSeconds",
+    "videoTitle",
+  ];
+  const seenIds = new Set();
+  for (const entry of stored.ytd_note_index) {
+    const fields =
+      entry && typeof entry === "object" && !Array.isArray(entry)
+        ? Object.keys(entry).sort()
+        : [];
+    const validShape =
+      fields.length === expectedFields.length &&
+      fields.every((field, index) => field === expectedFields[index]);
+    const validValues =
+      typeof entry?.id === "string" &&
+      !!entry.id.trim() &&
+      typeof entry?.mediaKey === "string" &&
+      !!entry.mediaKey.trim() &&
+      entry.mediaKey !== "schema" &&
+      (entry.platform === "youtube" || entry.platform === "bilibili") &&
+      typeof entry.videoTitle === "string" &&
+      typeof entry.channelName === "string" &&
+      Number.isSafeInteger(entry.timestampSeconds) &&
+      entry.timestampSeconds >= 0 &&
+      Number.isSafeInteger(entry.savedAt) &&
+      entry.savedAt >= 0 &&
+      typeof entry.hasThought === "boolean" &&
+      typeof entry.searchText === "string";
+    if (!validShape || !validValues || seenIds.has(entry?.id)) {
+      const error = new Error("笔记迁移失败：笔记索引条目损坏或重复。");
+      error.code = "NOTES_MIGRATION_FAILED";
+      throw error;
+    }
+    seenIds.add(entry.id);
+  }
+  return stored.ytd_note_index;
+}
+
+async function readNotesByMedia(mediaKey) {
+  await ensureNotesMigrated();
+  const normalizedMediaKey = String(mediaKey || "").trim();
+  if (!normalizedMediaKey) return [];
+  if (normalizedMediaKey === "schema") {
+    const error = new Error("笔记迁移失败：mediaKey 与存储保留键冲突。");
+    error.code = "NOTES_MIGRATION_FAILED";
+    throw error;
+  }
+  const index = await readNoteIndex();
+  const expectedIds = new Set(
+    index
+      .filter((entry) => entry.mediaKey === normalizedMediaKey)
+      .map((entry) => entry.id),
+  );
+  const key = `ytd_notes_${normalizedMediaKey}`;
+  const stored = await chrome.storage.local.get(key);
+  if (!Object.hasOwn(stored, key)) {
+    if (!expectedIds.size) return [];
+    const error = new Error(`笔记迁移失败：分片 ${normalizedMediaKey} 缺失。`);
+    error.code = "NOTES_MIGRATION_FAILED";
+    throw error;
+  }
+  if (!Array.isArray(stored[key])) {
+    const error = new Error(`笔记迁移失败：分片 ${normalizedMediaKey} 已损坏。`);
+    error.code = "NOTES_MIGRATION_FAILED";
+    throw error;
+  }
+  const seenIds = new Set();
+  for (const note of stored[key]) {
+    const noteMediaKey = String(note?.mediaKey || note?.videoId || "").trim();
+    if (
+      typeof note?.id !== "string" ||
+      seenIds.has(note.id) ||
+      noteMediaKey !== normalizedMediaKey ||
+      !expectedIds.has(note.id)
+    ) {
+      const error = new Error(`笔记迁移失败：分片 ${normalizedMediaKey} 与索引不一致。`);
+      error.code = "NOTES_MIGRATION_FAILED";
+      throw error;
+    }
+    seenIds.add(note.id);
+  }
+  if (seenIds.size !== expectedIds.size) {
+    const error = new Error(`笔记迁移失败：分片 ${normalizedMediaKey} 与索引不一致。`);
+    error.code = "NOTES_MIGRATION_FAILED";
+    throw error;
+  }
+  return stored[key];
+}
+
+async function readAllNotes() {
+  await ensureNotesMigrated();
+  const index = await readNoteIndex();
+  if (!index.length) return [];
+
+  const mediaKeys = [
+    ...new Set(index.map((entry) => String(entry?.mediaKey || "")).filter(Boolean)),
+  ];
+  const keys = mediaKeys.map((mediaKey) => `ytd_notes_${mediaKey}`);
+  const stored = await chrome.storage.local.get(keys);
+  const notesById = new Map();
+  for (const mediaKey of mediaKeys) {
+    const key = `ytd_notes_${mediaKey}`;
+    if (!Array.isArray(stored[key])) {
+      const error = new Error(`笔记迁移失败：分片 ${mediaKey} 缺失或损坏。`);
+      error.code = "NOTES_MIGRATION_FAILED";
+      throw error;
+    }
+    const expectedIds = new Set(
+      index
+        .filter((entry) => entry.mediaKey === mediaKey)
+        .map((entry) => entry.id),
+    );
+    for (const note of stored[key]) {
+      const noteMediaKey = String(note?.mediaKey || note?.videoId || "").trim();
+      if (
+        typeof note?.id !== "string" ||
+        notesById.has(note.id) ||
+        noteMediaKey !== mediaKey ||
+        !expectedIds.has(note.id)
+      ) {
+        const error = new Error(`笔记迁移失败：分片 ${mediaKey} 与索引不一致。`);
+        error.code = "NOTES_MIGRATION_FAILED";
+        throw error;
+      }
+      notesById.set(note.id, note);
+    }
+    if (stored[key].length !== expectedIds.size) {
+      const error = new Error(`笔记迁移失败：分片 ${mediaKey} 与索引不一致。`);
+      error.code = "NOTES_MIGRATION_FAILED";
+      throw error;
+    }
+  }
+  return index.map((entry) => {
+    const note = notesById.get(entry.id);
+    if (note) return note;
+    const error = new Error(`笔记迁移失败：索引项 ${entry.id || "unknown"} 无对应记录。`);
+    error.code = "NOTES_MIGRATION_FAILED";
+    throw error;
+  });
+}
+
+async function appendNote(note) {
+  await ensureNotesMigrated();
+  const index = await readNoteIndex();
+  const capacity = noteStorageCapacityResult(index);
+  if (capacity !== true) return capacity;
+
+  assertNotesRemainBackupable([note]);
+  const allNotes = await readAllNotes();
+  try {
+    assertNotesRemainBackupable([note, ...allNotes], {
+      allowInvalidStored: true,
+    });
+  } catch (error) {
+    if (error?.code === "NOTES_BACKUP_TOO_LARGE") {
+      return {
+        code: error.code,
+        maxBytes:
+          Number(error?.details?.maxBytes) ||
+          YTD_NOTES_BACKUP.MAX_BACKUP_BYTES,
+        count: index.length,
+      };
+    }
+    throw error;
+  }
+
+  const mediaKey = String(note?.mediaKey || note?.videoId || "").trim();
+  if (!mediaKey || mediaKey === "schema") {
+    const error = new Error(
+      mediaKey
+        ? "笔记 mediaKey 与存储保留键冲突。"
+        : "笔记缺少 mediaKey 与 videoId。",
+    );
+    error.code = "INVALID_STORED_NOTES";
+    throw error;
+  }
+  if (
+    typeof note?.id !== "string" ||
+    !note.id.trim() ||
+    index.some((entry) => entry.id === note.id)
+  ) {
+    const error = new Error("笔记 id 缺失或重复。");
+    error.code = "INVALID_STORED_NOTES";
+    throw error;
+  }
+  const shard = await readNotesByMedia(mediaKey);
+  const nextShard = [...shard, note].sort(
+    (left, right) => left.timestampSeconds - right.timestampSeconds,
+  );
+  const searchText = [
+    note?.thought,
+    note?.rawText,
+    note?.videoTitle,
+    note?.channelName,
+  ]
+    .filter((value) => typeof value === "string" && value.trim())
+    .join(" ")
+    .normalize("NFKC")
+    .trim()
+    .replace(/\s+/g, " ");
+  const nextIndex = [
+    {
+      id: note.id,
+      mediaKey,
+      platform: note.platform || "youtube",
+      videoTitle: note.videoTitle || "",
+      channelName: note.channelName || "",
+      timestampSeconds: note.timestampSeconds,
+      savedAt: note.createdAt,
+      hasThought: !!String(note.thought || "").trim(),
+      searchText,
+    },
+    ...index,
+  ];
+  await chrome.storage.local.set({
+    [`ytd_notes_${mediaKey}`]: nextShard,
+    ytd_note_index: nextIndex,
+  });
+  return true;
+}
+
+async function replaceNotes(notes) {
+  await ensureNotesMigrated();
+  if (!Array.isArray(notes)) {
+    const error = new Error("INVALID_STORED_NOTES");
+    error.code = "INVALID_STORED_NOTES";
+    throw error;
+  }
+
+  const oldIndex = await readNoteIndex();
+  const oldMediaKeys = new Set(
+    oldIndex.map((entry) => String(entry?.mediaKey || "")).filter(Boolean),
+  );
+  const shards = new Map();
+  const nextIndex = [];
+  const seenIds = new Set();
+  for (const note of notes) {
+    const mediaKey = String(note?.mediaKey || note?.videoId || "").trim();
+    if (!mediaKey || mediaKey === "schema") {
+      const error = new Error("INVALID_STORED_NOTES");
+      error.code = "INVALID_STORED_NOTES";
+      throw error;
+    }
+    if (
+      typeof note?.id !== "string" ||
+      !note.id.trim() ||
+      seenIds.has(note.id) ||
+      (note.platform !== undefined &&
+        note.platform !== "youtube" &&
+        note.platform !== "bilibili") ||
+      !Number.isSafeInteger(note.timestampSeconds) ||
+      note.timestampSeconds < 0 ||
+      !Number.isSafeInteger(note.createdAt) ||
+      note.createdAt < 0
+    ) {
+      const error = new Error("INVALID_STORED_NOTES");
+      error.code = "INVALID_STORED_NOTES";
+      throw error;
+    }
+    seenIds.add(note.id);
+    if (!shards.has(mediaKey)) shards.set(mediaKey, []);
+    shards.get(mediaKey).push(note);
+    const searchText = [
+      note?.thought,
+      note?.rawText,
+      note?.videoTitle,
+      note?.channelName,
+    ]
+      .filter((value) => typeof value === "string" && value.trim())
+      .join(" ")
+      .normalize("NFKC")
+      .trim()
+      .replace(/\s+/g, " ");
+    nextIndex.push({
+      id: note.id,
+      mediaKey,
+      platform: note.platform || "youtube",
+      videoTitle: note.videoTitle || "",
+      channelName: note.channelName || "",
+      timestampSeconds: note.timestampSeconds,
+      savedAt: note.createdAt,
+      hasThought: !!String(note.thought || "").trim(),
+      searchText,
+    });
+  }
+
+  const update = { ytd_note_index: nextIndex };
+  for (const [mediaKey, shard] of shards) {
+    update[`ytd_notes_${mediaKey}`] = [...shard].sort(
+      (left, right) => left.timestampSeconds - right.timestampSeconds,
+    );
+    oldMediaKeys.delete(mediaKey);
+  }
+  for (const mediaKey of oldMediaKeys) {
+    update[`ytd_notes_${mediaKey}`] = [];
+  }
+  await chrome.storage.local.set(update);
+  if (oldMediaKeys.size) {
+    await chrome.storage.local.remove(
+      [...oldMediaKeys].map((mediaKey) => `ytd_notes_${mediaKey}`),
+    );
+  }
+  return true;
+}
+
+async function deleteNote(id) {
+  await ensureNotesMigrated();
+  const index = await readNoteIndex();
+  const entry = index.find((candidate) => candidate?.id === id);
+  if (!entry) return { changed: false };
+
+  const shard = await readNotesByMedia(entry.mediaKey);
+  const nextShard = shard.filter((note) => note?.id !== id);
+  const nextIndex = index.filter((candidate) => candidate?.id !== id);
+  if (nextShard.length) {
+    await chrome.storage.local.set({
+      [`ytd_notes_${entry.mediaKey}`]: nextShard,
+      ytd_note_index: nextIndex,
+    });
+  } else {
+    await chrome.storage.local.set({
+      [`ytd_notes_${entry.mediaKey}`]: [],
+      ytd_note_index: nextIndex,
+    });
+    await chrome.storage.local.remove(`ytd_notes_${entry.mediaKey}`);
+  }
+  return { changed: true };
+}
+
 function noteStorageCapacityResult(notes) {
   const limit = maxSavedNotes();
   return notes.length >= limit
@@ -5457,10 +6175,11 @@ function noteStorageCapacityResult(notes) {
  * Serial read-only capacity check used to avoid transcript/provider work that
  * cannot result in a saved note. The final write remains authoritative.
  */
-function preflightNoteStorageCapacity(
+async function preflightNoteStorageCapacity(
   expectedGeneration = noteStorageGeneration,
   expectedDataGeneration = extensionDataGeneration,
 ) {
+  await ensureNotesMigrated();
   return withNoteStorageWrite(async () => {
     if (
       expectedGeneration !== noteStorageGeneration ||
@@ -5468,9 +6187,8 @@ function preflightNoteStorageCapacity(
     ) {
       return false;
     }
-    const result = await chrome.storage.local.get("ytd_notes");
-    const notes = Array.isArray(result.ytd_notes) ? result.ytd_notes : [];
-    return noteStorageCapacityResult(notes);
+    const index = await readNoteIndex();
+    return noteStorageCapacityResult(index);
   });
 }
 
@@ -5514,11 +6232,12 @@ function assertNotesRemainBackupable(notes, { allowInvalidStored = false } = {})
   }
 }
 
-function saveNoteToStorage(
+async function saveNoteToStorage(
   note,
   expectedGeneration = noteStorageGeneration,
   expectedDataGeneration = extensionDataGeneration,
 ) {
+  await ensureNotesMigrated();
   return withNoteStorageWrite(async () => {
     if (
       expectedGeneration !== noteStorageGeneration ||
@@ -5526,42 +6245,7 @@ function saveNoteToStorage(
     ) {
       return false;
     }
-    const result = await chrome.storage.local.get("ytd_notes");
-    const notes = Array.isArray(result.ytd_notes) ? result.ytd_notes : [];
-
-    // A saved note is the user's own material and must never be discarded to
-    // make room for a newer one. At capacity the save is refused and reported,
-    // leaving every existing note intact.
-    const capacity = noteStorageCapacityResult(notes);
-    if (capacity !== true) return capacity;
-
-    // The note produced by the current save must satisfy the current backup
-    // schema on its own. The merged check below may tolerate an older local
-    // record, but must never hide a defect introduced by this write.
-    assertNotesRemainBackupable([note]);
-    notes.unshift(note); // Add to beginning (newest first)
-    try {
-      assertNotesRemainBackupable(notes, { allowInvalidStored: true });
-    } catch (error) {
-      if (error?.code === "NOTES_BACKUP_TOO_LARGE") {
-        return {
-          code: error.code,
-          maxBytes:
-            Number(error?.details?.maxBytes) ||
-            YTD_NOTES_BACKUP.MAX_BACKUP_BYTES,
-          count: notes.length - 1,
-        };
-      }
-      throw error;
-    }
-    if (
-      expectedGeneration !== noteStorageGeneration ||
-      !extensionDataGenerationIsWritable(expectedDataGeneration)
-    ) {
-      return false;
-    }
-    await chrome.storage.local.set({ ytd_notes: notes });
-    return true;
+    return appendNote(note);
   });
 }
 
@@ -5601,25 +6285,35 @@ async function notifyExtensionDataReset(action, dataGeneration, success) {
 /**
  * Creates a consistent notes-only snapshot after all earlier note writes finish.
  */
-function handleExportNotesBackup() {
-  return withNoteStorageWrite(async () => {
-    try {
-      const stored = await chrome.storage.local.get("ytd_notes");
-      const notes = Array.isArray(stored.ytd_notes) ? stored.ytd_notes : [];
+async function handleExportNotesBackup() {
+  const expectedNoteGeneration = noteStorageGeneration;
+  const expectedDataGeneration = extensionDataGeneration;
+  const expectedRuntimeInstanceId = runtimeInstanceId;
+  try {
+    await ensureNotesMigrated();
+    return await withNoteStorageWrite(async () => {
+      assertNoteStorageGeneration(
+        expectedNoteGeneration,
+        expectedDataGeneration,
+        expectedRuntimeInstanceId,
+      );
+      const notes = await readAllNotes();
       const extensionVersion = chrome.runtime.getManifest?.().version || "";
-      const backup = YTD_NOTES_BACKUP.createBackup(notes, { extensionVersion });
+      const backup = YTD_NOTES_BACKUP.createBackup(notes, {
+        extensionVersion,
+      });
       return { success: true, backup, count: backup.notes.length };
-    } catch (error) {
-      return notesBackupFailure(error, "NOTES_EXPORT_FAILED");
-    }
-  });
+    });
+  } catch (error) {
+    return notesBackupFailure(error, "NOTES_EXPORT_FAILED");
+  }
 }
 
 /**
  * Validates and atomically merges an uploaded backup through the shared note
  * storage queue. A failure never partially updates the stored notes.
  */
-function handleImportNotesBackup(
+async function handleImportNotesBackup(
   backupText,
   expectedDataGeneration = extensionDataGeneration,
   expectedRuntimeInstanceId = runtimeInstanceId,
@@ -5630,12 +6324,11 @@ function handleImportNotesBackup(
       expectedDataGeneration,
     )
   ) {
-    return Promise.resolve(
-      extensionDataMutationResult(false, "EXTENSION_DATA_RESET"),
-    );
+    return extensionDataMutationResult(false, "EXTENSION_DATA_RESET");
   }
-  return withNoteStorageWrite(async () => {
-    try {
+  try {
+    await ensureNotesMigrated();
+    return await withNoteStorageWrite(async () => {
       if (
         !extensionDataFenceIsWritable(
           expectedRuntimeInstanceId,
@@ -5645,11 +6338,11 @@ function handleImportNotesBackup(
         return extensionDataMutationResult(false, "EXTENSION_DATA_RESET");
       }
       const importedNotes = YTD_NOTES_BACKUP.parseBackupText(backupText);
-      const stored = await chrome.storage.local.get("ytd_notes");
-      const existingNotes = Array.isArray(stored.ytd_notes)
-        ? stored.ytd_notes
-        : [];
-      const result = YTD_NOTES_BACKUP.mergeNotes(existingNotes, importedNotes);
+      const existingNotes = await readAllNotes();
+      const result = YTD_NOTES_BACKUP.mergeNotes(
+        existingNotes,
+        importedNotes,
+      );
 
       // A legacy schema can normalize to a slightly larger current schema, and
       // merging two individually valid files can exceed the bounded export.
@@ -5666,25 +6359,34 @@ function handleImportNotesBackup(
         ) {
           return extensionDataMutationResult(false, "EXTENSION_DATA_RESET");
         }
-        await chrome.storage.local.set({ ytd_notes: result.notes });
+        await replaceNotes(result.notes);
         notifyNotesChanged();
       }
 
       const { notes: _notes, ...summary } = result;
       return extensionDataMutationResult(true, "OK", summary);
-    } catch (error) {
-      return extensionDataMutationResult(
-        false,
-        error?.code || "NOTES_IMPORT_FAILED",
-        notesBackupFailure(error, "NOTES_IMPORT_FAILED"),
-      );
-    }
-  });
+    });
+  } catch (error) {
+    return extensionDataMutationResult(
+      false,
+      error?.code || "NOTES_IMPORT_FAILED",
+      notesBackupFailure(error, "NOTES_IMPORT_FAILED"),
+    );
+  }
 }
 
-function handleClearAllNotes() {
-  return withNoteStorageWrite(async () => {
-    try {
+async function handleClearAllNotes() {
+  const expectedNoteGeneration = noteStorageGeneration;
+  const expectedDataGeneration = extensionDataGeneration;
+  const expectedRuntimeInstanceId = runtimeInstanceId;
+  try {
+    await ensureNotesMigrated();
+    return await withNoteStorageWrite(async () => {
+      assertNoteStorageGeneration(
+        expectedNoteGeneration,
+        expectedDataGeneration,
+        expectedRuntimeInstanceId,
+      );
       await preflightExportTranslationStorage();
       noteStorageGeneration += 1;
       exportSourceStorageGeneration += 1;
@@ -5700,13 +6402,13 @@ function handleClearAllNotes() {
       ) {
         await YTD_NOTE_SOURCES.clearNoteSources(chrome.storage.local);
       }
-      await chrome.storage.local.remove("ytd_notes");
+      await replaceNotes([]);
       notifyNotesChanged();
       return { success: true };
-    } catch (error) {
-      return notesBackupFailure(error, "NOTES_CLEAR_FAILED");
-    }
-  });
+    });
+  } catch (error) {
+    return notesBackupFailure(error, "NOTES_CLEAR_FAILED");
+  }
 }
 
 function handleResetAllExtensionData(preferredLanguage) {
@@ -5751,6 +6453,7 @@ function handleResetAllExtensionData(preferredLanguage) {
           }
           const safeLanguage = preferredLanguage === "en" ? "en" : "zh-CN";
           await chrome.storage.local.clear();
+          notesMigrationPromise = null;
           await chrome.storage.local.set({ ytd_options_language: safeLanguage });
           result = { success: true };
         } catch (error) {
@@ -5783,21 +6486,49 @@ function handleResetAllExtensionData(preferredLanguage) {
  * Gets notes from storage, optionally filtered by video ID
  */
 async function handleGetNotes(videoId) {
+  const expectedNoteGeneration = noteStorageGeneration;
+  const expectedDataGeneration = extensionDataGeneration;
+  const expectedRuntimeInstanceId = runtimeInstanceId;
   try {
-    const result = await chrome.storage.local.get("ytd_notes");
-    let notes = Array.isArray(result.ytd_notes) ? result.ytd_notes : [];
+    await ensureNotesMigrated();
+    return await withNoteStorageWrite(async () => {
+      assertNoteStorageGeneration(
+        expectedNoteGeneration,
+        expectedDataGeneration,
+        expectedRuntimeInstanceId,
+      );
+      const index = await readNoteIndex();
+      const filterKey = String(videoId || "").trim();
+      const hasExactMediaKey =
+        !!filterKey && index.some((entry) => entry.mediaKey === filterKey);
+      const notes = !filterKey
+        ? await readAllNotes()
+        : hasExactMediaKey
+          ? await readNotesByMedia(filterKey)
+          : (await readAllNotes()).filter(
+              (note) => String(note?.videoId || "").trim() === filterKey,
+            );
+      const totalCount = index.length;
 
-    const totalCount = notes.length;
-
-    if (videoId) {
-      notes = notes.filter((n) => n.videoId === videoId);
-    }
-
-    // The capacity band reports the whole library, not the filtered view, so
-    // the totals travel with every notes read.
-    return { success: true, notes, totalCount, limit: maxSavedNotes() };
+      // The capacity band reports the whole library, not the filtered view, so
+      // the totals travel with every notes read.
+      return { success: true, notes, totalCount, limit: maxSavedNotes() };
+    });
   } catch (error) {
-    return { success: false, error: error.message };
+    if (error?.code === "NOTE_STORAGE_RESET") {
+      return {
+        success: false,
+        code: "NOTE_STORAGE_RESET",
+        error: "笔记库刚刚发生变化，请重试。",
+        message: "笔记库刚刚发生变化，请重试。",
+      };
+    }
+    return {
+      success: false,
+      code: error?.code || "NOTES_MIGRATION_FAILED",
+      error: error?.message || "笔记迁移失败。",
+      message: error?.message || "笔记迁移失败。",
+    };
   }
 }
 
@@ -5818,6 +6549,7 @@ async function handleDeleteNote(
     return extensionDataMutationResult(false, "EXTENSION_DATA_RESET");
   }
   try {
+    await ensureNotesMigrated();
     return await withNoteStorageWrite(async () => {
       if (
         !extensionDataFenceIsWritable(
@@ -5827,12 +6559,7 @@ async function handleDeleteNote(
       ) {
         return extensionDataMutationResult(false, "EXTENSION_DATA_RESET");
       }
-      const result = await chrome.storage.local.get("ytd_notes");
-      const notes = Array.isArray(result.ytd_notes) ? result.ytd_notes : [];
-      const nextNotes = notes.filter((note) => note.id !== noteId);
-      if (nextNotes.length === notes.length) {
-        return extensionDataMutationResult(true, "OK", { changed: false });
-      }
+      const result = await deleteNote(noteId);
       if (
         !extensionDataFenceIsWritable(
           expectedRuntimeInstanceId,
@@ -5841,8 +6568,7 @@ async function handleDeleteNote(
       ) {
         return extensionDataMutationResult(false, "EXTENSION_DATA_RESET");
       }
-      await chrome.storage.local.set({ ytd_notes: nextNotes });
-      return extensionDataMutationResult(true, "OK", { changed: true });
+      return extensionDataMutationResult(true, "OK", result);
     });
   } catch (error) {
     return extensionDataMutationResult(false, "NOTE_DELETE_FAILED", {
@@ -6432,8 +7158,7 @@ async function assertExportNotesJobCurrent(
       { jobState: job?.state || "" },
     );
   }
-  const stored = await chrome.storage.local.get("ytd_notes");
-  const notes = Array.isArray(stored?.ytd_notes) ? stored.ytd_notes : [];
+  const notes = await readAllNotes();
   if (exportStoredNotesRevision(notes, job.intent.mediaKeys) !== job.notesRevision) {
     throw exportSourceBatchError(
       "EXPORT_JOB_SOURCE_REVISION_MISMATCH",
@@ -7456,6 +8181,18 @@ async function handleUpsertNoteSource(
   expectedDataGeneration = extensionDataGeneration,
   expectedRuntimeInstanceId = runtimeInstanceId,
 ) {
+  if (
+    !extensionDataFenceIsWritable(
+      expectedRuntimeInstanceId,
+      expectedDataGeneration,
+    )
+  ) {
+    return extensionDataMutationResult(false, "EXTENSION_DATA_RESET");
+  }
+  // Reset owns locks in note -> passive -> extension-data order. Complete the
+  // lazy note migration before entering the extension-data queue so the first
+  // source upsert can never acquire those locks in reverse.
+  await ensureNotesMigrated();
   return queueExtensionDataMutation(async () => {
     requireExportSourceModules();
     if (
@@ -7476,11 +8213,11 @@ async function handleUpsertNoteSource(
         ),
       );
     }
-    const stored = await chrome.storage.local.get("ytd_notes");
+    const noteIndex = await readNoteIndex();
     assertExportSourceStorageGeneration(storageGeneration);
     const protectedKeys = new Set(
-      (Array.isArray(stored?.ytd_notes) ? stored.ytd_notes : [])
-        .map((note) => String(note?.mediaKey || note?.videoId || "").trim())
+      noteIndex
+        .map((entry) => String(entry?.mediaKey || "").trim())
         .filter(Boolean),
     );
     protectedKeys.add(source.mediaKey);
@@ -8361,20 +9098,20 @@ function noteTranslationUserContent(notes) {
   });
 }
 
-function persistNoteTranslations(translatedById, job) {
+async function persistNoteTranslations(translatedById, job) {
+  await ensureNotesMigrated();
   return withNoteStorageWrite(async () => {
     assertNoteStorageGeneration(
       job?.storageGeneration,
       job?.dataGeneration,
       job?.runtimeInstanceId,
     );
-    const stored = job
+    const storedNotes = job
       ? await waitForNoteJobDeadline(
           job,
-          () => chrome.storage.local.get("ytd_notes"),
+          () => readAllNotes(),
         )
-      : await chrome.storage.local.get("ytd_notes");
-    const storedNotes = Array.isArray(stored.ytd_notes) ? stored.ytd_notes : [];
+      : await readAllNotes();
     const updatedNotes = storedNotes.map((note) =>
       translatedById.has(note.id)
         ? {
@@ -8403,7 +9140,7 @@ function persistNoteTranslations(translatedById, job) {
       job?.dataGeneration,
       job?.runtimeInstanceId,
     );
-    await chrome.storage.local.set({ ytd_notes: updatedNotes });
+    await replaceNotes(updatedNotes);
   });
 }
 
@@ -8818,19 +9555,19 @@ function normalizeNoteTitleTranslation(parsed, sourceTitles) {
   });
 }
 
-function persistNoteTitleTranslations(titleByMediaKey, job) {
+async function persistNoteTitleTranslations(titleByMediaKey, job) {
+  await ensureNotesMigrated();
   return withNoteStorageWrite(async () => {
     assertNoteStorageGeneration(
       job?.storageGeneration,
       job?.dataGeneration,
       job?.runtimeInstanceId,
     );
-    const stored = job
+    const storedNotes = job
       ? await waitForNoteJobDeadline(job, () =>
-          chrome.storage.local.get("ytd_notes"),
+          readAllNotes(),
         )
-      : await chrome.storage.local.get("ytd_notes");
-    const storedNotes = Array.isArray(stored.ytd_notes) ? stored.ytd_notes : [];
+      : await readAllNotes();
     const matchedMediaKeys = new Set();
     const updatedNotes = storedNotes.map((note) => {
       const key = noteTitleMediaKey(note);
@@ -8858,7 +9595,7 @@ function persistNoteTitleTranslations(titleByMediaKey, job) {
     );
     if (!matchedMediaKeys.size) return [];
     assertNotesRemainBackupable(updatedNotes, { allowInvalidStored: true });
-    await chrome.storage.local.set({ ytd_notes: updatedNotes });
+    await replaceNotes(updatedNotes);
     return [...matchedMediaKeys];
   });
 }
@@ -9090,13 +9827,10 @@ async function runTranslateNoteBodies(notes, job) {
   let requestedNotes = [];
   try {
     requestedNotes = validateNoteTranslationRequest(notes);
-    const storedBefore = await waitForNoteJobDeadline(
+    const storedNotesBefore = await waitForNoteJobDeadline(
       job,
-      () => chrome.storage.local.get("ytd_notes"),
+      () => readAllNotes(),
     );
-    const storedNotesBefore = Array.isArray(storedBefore.ytd_notes)
-      ? storedBefore.ytd_notes
-      : [];
     const storedTranslationById = new Map();
     storedNotesBefore.forEach((note) => {
       if (
@@ -9552,6 +10286,13 @@ globalThis.__YTD_TRANSLATION_TESTING__ = {
   handleImportNotesBackup,
   handleClearAllNotes,
   handleResetAllExtensionData,
+  ensureNotesMigrated,
+  readAllNotes,
+  readNotesByMedia,
+  readNoteIndex,
+  appendNote,
+  replaceNotes,
+  deleteNote,
   createNoteId,
   getNoteStorageGeneration,
   getRuntimeInstanceId,

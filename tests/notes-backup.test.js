@@ -14,9 +14,12 @@ const read = (file) => fs.readFileSync(path.join(root, file), "utf8");
 
 function makeNote(index, overrides = {}) {
   const timestampSeconds = index * 10 + 5;
+  const videoId = `video_${String(index).padStart(3, "0")}`;
   return {
     id: `note-${index}`,
-    videoId: `video_${String(index).padStart(3, "0")}`,
+    platform: "youtube",
+    mediaKey: videoId,
+    videoId,
     videoTitle: `Video ${index}`,
     channelName: `Channel ${index}`,
     timestamp: `${Math.floor(timestampSeconds / 60)}:${String(
@@ -246,6 +249,12 @@ function loadBackgroundBackupHelpers({
         getURL: (resourcePath) => `chrome-extension://test/${resourcePath}`,
         getManifest: () => ({ version: "1.2.1" }),
         sendMessage(message) {
+          if (message?.action === "downloadNotesMigrationBackup") {
+            return Promise.resolve({
+              success: true,
+              filename: message.filename,
+            });
+          }
           notifications.push(clone(message));
           return Promise.resolve();
         },
@@ -261,6 +270,28 @@ function loadBackgroundBackupHelpers({
   sandbox.globalThis = sandbox;
   vm.runInNewContext(read("background.js"), sandbox);
 
+  const readCurrentStoredNotes = () => {
+    if (storedValues.ytd_notes_schema !== 1) {
+      return clone(storedValues.ytd_notes || []);
+    }
+    if (!Array.isArray(storedValues.ytd_note_index)) {
+      throw new Error("The migrated note index is missing from the test store.");
+    }
+    return clone(
+      storedValues.ytd_note_index.map((entry) => {
+        const shard = storedValues[`ytd_notes_${entry.mediaKey}`];
+        if (!Array.isArray(shard)) {
+          throw new Error(`The migrated note shard ${entry.mediaKey} is missing.`);
+        }
+        const note = shard.find((candidate) => candidate?.id === entry.id);
+        if (!note) {
+          throw new Error(`The migrated note ${entry.id} is missing.`);
+        }
+        return note;
+      }),
+    );
+  };
+
   return {
     helpers: sandbox.__YTD_TRANSLATION_TESTING__,
     notifications,
@@ -269,7 +300,7 @@ function loadBackgroundBackupHelpers({
     seedSessionStorage: (items) => {
       sessionValues = { ...sessionValues, ...clone(items) };
     },
-    readStoredNotes: () => clone(storedValues.ytd_notes || []),
+    readStoredNotes: readCurrentStoredNotes,
     removals,
     get clearCount() {
       return clearCount;
@@ -695,6 +726,29 @@ test("merging fills an empty title but never overwrites a different validated ti
   assert.equal(kept.notes[0].videoTitleZh, "本地已验证标题");
 });
 
+test("a changing import preserves local-only Phase 1 note fields", () => {
+  const local = {
+    ...makeNote(35),
+    thought: "My own connection",
+    thoughtAt: 1_700_000_000_123,
+    triggerWindow: [
+      { t: 9, text: "Before" },
+      { t: 10, text: "Matched" },
+      { t: 11, text: "After" },
+    ],
+  };
+  const imported = makeNote(36);
+
+  const result = notesBackup.mergeNotes([local], [imported]);
+
+  assert.equal(result.changed, true);
+  const preserved = result.notes.find((note) => note.id === local.id);
+  assert.equal(preserved.thought, local.thought);
+  assert.equal(preserved.thoughtAt, local.thoughtAt);
+  assert.deepEqual(preserved.triggerWindow, local.triggerWindow);
+  assert.equal(result.notes.some((note) => note.id === imported.id), true);
+});
+
 test("backups preserve legacy notes that exceed current save-time field limits", () => {
   const legacy = makeNote(9, {
     videoTitle: "",
@@ -906,6 +960,8 @@ test("background imports share the note write queue with normal note saves", asy
   const savedDuringImport = makeNote(30, { createdAt: 30 });
   const imported = makeNote(31, { createdAt: 31 });
   const backupText = JSON.stringify(validBackupObject([imported]));
+  await state.helpers.ensureNotesMigrated();
+  const writesBeforeOperations = state.writes.length;
 
   const savePromise = state.helpers.saveNoteToStorage(savedDuringImport);
   const importPromise = state.helpers.handleImportNotesBackup(backupText);
@@ -918,12 +974,13 @@ test("background imports share the note write queue with normal note saves", asy
     state.readStoredNotes().map((note) => note.id),
     [imported.id, savedDuringImport.id],
   );
-  assert.equal(state.writes.length, 2);
+  assert.equal(state.writes.length - writesBeforeOperations, 2);
   assert.deepEqual(state.notifications, [{ action: "notesChanged" }]);
 });
 
 test("background import and clear operations serialize through one write queue", async () => {
   const state = loadBackgroundBackupHelpers({ initialNotes: [makeNote(50)] });
+  await state.helpers.ensureNotesMigrated();
   const importPromise = state.helpers.handleImportNotesBackup(
     JSON.stringify(validBackupObject([makeNote(51)])),
   );
@@ -938,7 +995,14 @@ test("background import and clear operations serialize through one write queue",
   assert.equal(importResult.totalCount, 2);
   assert.equal(clearResult.success, true);
   assert.deepEqual(state.readStoredNotes(), []);
-  assert.deepEqual(state.removals, ["ytd_notes"]);
+  assert.deepEqual([...state.removals].sort(), [
+    "ytd_notes_video_050",
+    "ytd_notes_video_051",
+  ]);
+  assert.ok(
+    Object.hasOwn(state.readStorage(), "ytd_notes"),
+    "clearing the migrated library must retain the legacy rollback key",
+  );
   assert.deepEqual(state.notifications, [
     { action: "notesChanged" },
     { action: "notesChanged" },
@@ -981,6 +1045,7 @@ test("clear and reset reject slow saves captured under an older generation", asy
   const clearState = loadBackgroundBackupHelpers();
   const clearGeneration = clearState.helpers.getNoteStorageGeneration();
   await clearState.helpers.handleClearAllNotes();
+  const writesAfterClear = clearState.writes.length;
 
   assert.equal(
     clearState.helpers.getNoteStorageGeneration(),
@@ -991,7 +1056,12 @@ test("clear and reset reject slow saves captured under an older generation", asy
     false,
   );
   assert.deepEqual(clearState.readStoredNotes(), []);
-  assert.equal(clearState.writes.length, 0);
+  assert.equal(
+    writesAfterClear,
+    3,
+    "empty migration writes index + schema before clear replaces the index",
+  );
+  assert.equal(clearState.writes.length, writesAfterClear);
 
   const resetState = loadBackgroundBackupHelpers({
     initialStorage: { ytd_options_language: "zh-CN" },
@@ -1010,6 +1080,8 @@ test("clear and reset reject slow saves captured under an older generation", asy
   assert.deepEqual(resetState.readStoredNotes(), []);
   assert.deepEqual(resetState.readStorage(), {
     ytd_options_language: "zh-CN",
+    ytd_note_index: [],
+    ytd_notes_schema: 1,
   });
   assert.equal(
     resetState.writes.filter((items) => Object.hasOwn(items, "ytd_notes")).length,
@@ -1057,6 +1129,8 @@ test("background import failures perform zero storage writes", async () => {
   );
   const existingBefore = clone(existing);
   const state = loadBackgroundBackupHelpers({ initialNotes: existing });
+  await state.helpers.ensureNotesMigrated();
+  const writesBeforeFailures = state.writes.length;
 
   const damaged = await state.helpers.handleImportNotesBackup("not json");
   assert.equal(damaged.success, false);
@@ -1070,7 +1144,7 @@ test("background import failures perform zero storage writes", async () => {
   assert.equal(overCapacity.overBy, 1);
   assert.equal(overCapacity.limit, notesBackup.MAX_NOTES);
   assert.equal(overCapacity.maxBytes, notesBackup.MAX_BACKUP_BYTES);
-  assert.equal(state.writes.length, 0);
+  assert.equal(state.writes.length, writesBeforeFailures);
   assert.deepEqual(state.readStoredNotes(), existingBefore);
   assert.deepEqual(state.notifications, []);
 });
@@ -1116,6 +1190,8 @@ test("import rejects a merged state that could not be exported", async () => {
     initialNotes: [existing],
     notesBackupImpl: constrainedBackup,
   });
+  await state.helpers.ensureNotesMigrated();
+  const writesBeforeImport = state.writes.length;
 
   const result = await state.helpers.handleImportNotesBackup(
     notesBackup.serializeBackup(validBackupObject([importedNote])),
@@ -1125,7 +1201,7 @@ test("import rejects a merged state that could not be exported", async () => {
   assert.equal(result.code, "NOTES_BACKUP_TOO_LARGE");
   assert.equal(result.maxBytes, notesBackup.MAX_BACKUP_BYTES);
   assert.deepEqual(state.readStoredNotes(), [existing]);
-  assert.equal(state.writes.length, 0);
+  assert.equal(state.writes.length, writesBeforeImport);
 });
 
 test("the JSON download helper uses an object URL and cleans it up", () => {
@@ -1227,6 +1303,8 @@ test("a full note library refuses the new save and keeps every existing note", a
     makeNote(index + 1),
   );
   const state = loadBackgroundBackupHelpers({ initialNotes });
+  await state.helpers.ensureNotesMigrated();
+  const writesBeforeSave = state.writes.length;
 
   const result = await state.helpers.saveNoteToStorage(makeNote(9999));
 
@@ -1245,7 +1323,11 @@ test("a full note library refuses the new save and keeps every existing note", a
     initialNotes.map((note) => note.id),
     "no existing note may be evicted to make room",
   );
-  assert.equal(state.writes.length, 0, "a refused save must not write");
+  assert.equal(
+    state.writes.length,
+    writesBeforeSave,
+    "a refused save must not write after migration",
+  );
 });
 
 test("a save below the ceiling still succeeds and keeps newest-first order", async () => {
@@ -1276,6 +1358,8 @@ test("a save cannot make an exportable legacy library exceed the backup bound", 
     initialNotes: [existing],
     notesBackupImpl: constrainedBackup,
   });
+  await state.helpers.ensureNotesMigrated();
+  const writesBeforeSave = state.writes.length;
 
   const result = await state.helpers.saveNoteToStorage(makeNote(2));
 
@@ -1283,7 +1367,7 @@ test("a save cannot make an exportable legacy library exceed the backup bound", 
   assert.equal(result.maxBytes, notesBackup.MAX_BACKUP_BYTES);
   assert.equal(result.count, 1);
   assert.deepEqual(state.readStoredNotes(), [existing]);
-  assert.equal(state.writes.length, 0);
+  assert.equal(state.writes.length, writesBeforeSave);
 });
 
 test("two saves that preflight at 499 still serialize the final slot", async () => {
@@ -1292,6 +1376,8 @@ test("two saves that preflight at 499 still serialize the final slot", async () 
     (_, index) => makeNote(index + 1),
   );
   const state = loadBackgroundBackupHelpers({ initialNotes });
+  await state.helpers.ensureNotesMigrated();
+  const writesBeforeSaves = state.writes.length;
   const generation = state.helpers.getNoteStorageGeneration();
 
   const preflights = await Promise.all([
@@ -1310,7 +1396,11 @@ test("two saves that preflight at 499 still serialize the final slot", async () 
   assert.equal(rejected.limit, notesBackup.MAX_NOTES);
   assert.equal(rejected.count, notesBackup.MAX_NOTES);
   assert.equal(state.readStoredNotes().length, notesBackup.MAX_NOTES);
-  assert.equal(state.writes.length, 1, "only the winning save may write");
+  assert.equal(
+    state.writes.length - writesBeforeSaves,
+    1,
+    "only the winning save may write",
+  );
 });
 
 test("a capacity preflight never survives a later clear generation", async () => {
@@ -1351,8 +1441,8 @@ test("the storage ceiling has exactly one source of truth", () => {
 test("getNotes reports whole-library capacity alongside the filtered notes", async () => {
   const state = loadBackgroundBackupHelpers({
     initialNotes: [
-      makeNote(1, { videoId: "video_a" }),
-      makeNote(2, { videoId: "video_b" }),
+      makeNote(1, { videoId: "video_a", mediaKey: "video_a" }),
+      makeNote(2, { videoId: "video_b", mediaKey: "video_b" }),
     ],
   });
 
