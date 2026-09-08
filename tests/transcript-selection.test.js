@@ -35,6 +35,21 @@ function markdownSection(markdown, heading, nextHeading) {
   return markdown.slice(sectionStart, sectionEnd);
 }
 
+function loadTranscriptGrouping() {
+  const sectionStart = source.indexOf("const TRANSCRIPT_SEGMENT_LIMITS");
+  const sectionEnd = source.indexOf(
+    "// INITIALIZATION",
+    sectionStart,
+  );
+  assert.notEqual(sectionStart, -1, "missing transcript grouping section");
+  assert.ok(
+    sectionEnd > sectionStart,
+    "missing transcript grouping section end",
+  );
+  const groupingSource = source.slice(sectionStart, sectionEnd);
+  return Function(`${groupingSource}\nreturn { groupTranscriptEntries };`)();
+}
+
 test("English and Chinese cleanup prompts separately allow completion and forbid drift", () => {
   const englishSystemPrompt = fencedPromptSection(
     noteCleanupPrompt,
@@ -197,6 +212,75 @@ test("timestamp seeks use the exact route and require a real player success", ()
   assert.match(
     contentSource,
     /function seekToTimestamp\(seconds\)[\s\S]*?if \(!video\)[\s\S]*?return false[\s\S]*?video\.currentTime = seconds[\s\S]*?return true/,
+  );
+});
+
+test("a sentence beginning inside an English cue displays and seeks from the same semantic start", () => {
+  const { groupTranscriptEntries } = loadTranscriptGrouping();
+  const groups = groupTranscriptEntries([
+    {
+      start: 57.64,
+      duration: 4.4,
+      text: "First, because I wanted to sort of show",
+    },
+    {
+      start: 60.24,
+      duration: 5.04,
+      text: "you something that I think we're",
+    },
+    {
+      start: 62.04,
+      duration: 6.12,
+      text: "beginning to forget. The absence of AI",
+    },
+    {
+      start: 65.28,
+      duration: 5.56,
+      text: "is not proof that something is genuine.",
+    },
+  ]);
+  const secondSentence = groups.find((group) =>
+    group.text.startsWith("The absence of AI"),
+  );
+
+  assert.ok(
+    secondSentence,
+    "the second sentence must remain independently seekable",
+  );
+  assert.ok(
+    Math.abs(secondSentence.start - 65.261) < 0.002,
+    `expected semantic start near 65.261s, got ${secondSentence.start}`,
+  );
+  assert.ok(
+    Math.abs(secondSentence.seekStart - 65.261) < 0.002,
+    `display/seek must use the semantic start, got ${secondSentence.seekStart}`,
+  );
+  assert.match(
+    source,
+    /transcriptTimeCellMarkup\(group\.seekStart \?\? group\.start\)[\s\S]*?attachTranscriptTimeSeek\(div, group\.seekStart \?\? group\.start\)/,
+    "the visible time label and click handler must share one timestamp",
+  );
+});
+
+test("splitting one unpunctuated long Chinese cue keeps its real source seek start", () => {
+  const { groupTranscriptEntries } = loadTranscriptGrouping();
+  const groups = groupTranscriptEntries([
+    {
+      start: 10,
+      duration: 30,
+      language: "zh-CN",
+      text: "这".repeat(160),
+    },
+  ]);
+
+  assert.ok(groups.length > 1, "the long cue must still be split for reading");
+  assert.ok(
+    groups.some((group) => group.start > 10),
+    "visual pieces may retain estimated positions for playback highlighting",
+  );
+  assert.ok(
+    groups.every((group) => group.seekStart === 10),
+    "synthetic pieces must all seek to the only real source timestamp",
   );
 });
 

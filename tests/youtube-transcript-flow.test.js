@@ -88,6 +88,8 @@ function loadBackground({
   storageLocalGet,
   pageSnapshotOptions = {},
   bilibiliAdapterImpl = bilibiliAdapter,
+  setTimeoutImpl = setTimeout,
+  clearTimeoutImpl = clearTimeout,
 } = {}) {
   const counts = {
     activeInject: 0,
@@ -153,8 +155,8 @@ function loadBackground({
     TextEncoder,
     Intl,
     AbortController,
-    setTimeout,
-    clearTimeout,
+    setTimeout: setTimeoutImpl,
+    clearTimeout: clearTimeoutImpl,
     fetch: async (...args) => {
       counts.fetch += 1;
       return fetchImpl(...args);
@@ -274,6 +276,36 @@ function nativeOptions(
     trackKind: "manual-first",
     captionRetry: captionRetry === true,
   };
+}
+
+function createManualTimers() {
+  const timers = new Map();
+  let nextId = 1;
+  return {
+    setTimeout(callback, delay) {
+      const id = nextId++;
+      timers.set(id, { callback, delay });
+      return id;
+    },
+    clearTimeout(id) {
+      timers.delete(id);
+    },
+    delays() {
+      return [...timers.values()].map((timer) => timer.delay);
+    },
+    runAll() {
+      for (const [id, timer] of [...timers]) {
+        timers.delete(id);
+        timer.callback();
+      }
+    },
+  };
+}
+
+async function flushTurns(count = 4) {
+  for (let index = 0; index < count; index += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
 }
 
 test("Passive capture ends the route with zero Active, Panel, and third-party calls", async () => {
@@ -775,8 +807,50 @@ test("Passive bridge health requires a live runtime roundtrip, not only a stale 
   }
 });
 
+test("an empty Passive gate enters Active without arming the 1.5 second wait", async () => {
+  const timers = createManualTimers();
+  const worker = loadBackground({
+    setTimeoutImpl: timers.setTimeout,
+    clearTimeoutImpl: timers.clearTimeout,
+    pageSnapshotOptions: {
+      captionTrackCountKnown: true,
+      captionTrackCount: 1,
+      availableTracks: [{ language: "en", kind: "manual" }],
+      pageDefaultTrack: { language: "en", kind: "manual" },
+    },
+    activeResult: transcriptResult("immediate Active"),
+  });
+
+  const pending = worker.helpers.handleFetchYoutubeNativeTranscript(
+    VIDEO_ID,
+    "en",
+    1,
+    nativeOptions("empty-fast"),
+  );
+  await flushTurns();
+
+  const activeRunsBeforeAnyTimer = worker.counts.activeRun;
+  const waitsBeforeActive = timers.delays();
+  // Release an old implementation's bounded waiter so the red test always
+  // settles cleanly instead of leaving a fake timer or route promise behind.
+  timers.runAll();
+  const result = await pending;
+
+  assert.deepEqual(
+    { activeRunsBeforeAnyTimer, waitsBeforeActive },
+    { activeRunsBeforeAnyTimer: 1, waitsBeforeActive: [] },
+    "an empty Passive buffer must reach Active without arming the 1.5 second budget",
+  );
+  assert.equal(result.success, true);
+  assert.equal(result.source, "youtube-active");
+});
+
 test("an in-flight Passive response waits once and wins before the CC prompt", async () => {
-  const worker = loadBackground();
+  const timers = createManualTimers();
+  const worker = loadBackground({
+    setTimeoutImpl: timers.setTimeout,
+    clearTimeoutImpl: timers.clearTimeout,
+  });
   await worker.dispatch(
     {
       action: "youtubePassiveState",
@@ -798,7 +872,9 @@ test("an in-flight Passive response waits once and wins before the CC prompt", a
     1,
     nativeOptions("8"),
   );
-  await Promise.resolve();
+  await flushTurns();
+  assert.deepEqual(timers.delays(), [1_500]);
+  assert.equal(worker.counts.activeRun, 0);
   await worker.dispatch(
     {
       action: "youtubePassiveState",
@@ -818,54 +894,7 @@ test("an in-flight Passive response waits once and wins before the CC prompt", a
   assert.equal(result.source, "youtube-passive");
   assert.equal(result.transcript[0].text, "arrived while waiting");
   assert.equal(worker.counts.activeRun, 0);
-});
-
-test("an initially empty Passive gate accepts a capture that registers within the same bounded wait", async () => {
-  const worker = loadBackground();
-  const pending = worker.helpers.awaitYoutubePassiveGate({
-    tabId: 1,
-    videoId: VIDEO_ID,
-    preferredLanguage: "en",
-    trackKind: "manual-first",
-  });
-
-  // Let the first empty storage read complete. The old implementation returned
-  // null here immediately, before a just-starting page request could register.
-  await new Promise((resolve) => setImmediate(resolve));
-  await worker.dispatch(
-    {
-      action: "youtubePassiveState",
-      payload: {
-        type: "inflight",
-        videoId: VIDEO_ID,
-        language: "en",
-        kind: "manual",
-        status: 0,
-        inFlight: true,
-      },
-    },
-    { tab: { id: 1 } },
-  );
-  await worker.dispatch(
-    {
-      action: "youtubePassiveState",
-      payload: {
-        type: "capture",
-        videoId: VIDEO_ID,
-        language: "en",
-        kind: "manual",
-        status: 200,
-        inFlight: false,
-        body: json3Body("registered after the empty read"),
-      },
-    },
-    { tab: { id: 1 } },
-  );
-
-  const result = await pending;
-  assert.equal(result?.source, "youtube-passive");
-  assert.equal(result?.transcript?.[0]?.text, "registered after the empty read");
-  assert.equal(worker.counts.fetch, 0);
+  assert.deepEqual(timers.delays(), []);
 });
 
 test("URL updates preserve the current video's Passive capture and clear only old video identities", async () => {
@@ -1424,6 +1453,7 @@ test("an unexpected YouTube orchestration error still echoes run identity", asyn
 });
 
 test("Bilibili keeps its existing adapter path", async () => {
+  const timers = createManualTimers();
   const mediaRef = {
     platform: "bilibili",
     bvid: "BV1zfg36ZEXi",
@@ -1433,6 +1463,8 @@ test("Bilibili keeps its existing adapter path", async () => {
     canonicalUrl: "https://www.bilibili.com/video/BV1zfg36ZEXi/",
   };
   const worker = loadBackground({
+    setTimeoutImpl: timers.setTimeout,
+    clearTimeoutImpl: timers.clearTimeout,
     bilibiliAdapterImpl: {
       ...bilibiliAdapter,
       async fetchTranscript() {
@@ -1459,4 +1491,9 @@ test("Bilibili keeps its existing adapter path", async () => {
   assert.equal(worker.counts.activeRun, 0);
   assert.equal(worker.counts.panelRun, 0);
   assert.equal(worker.counts.fetch, 0);
+  assert.deepEqual(
+    timers.delays(),
+    [],
+    "Bilibili must never enter the YouTube Passive wait budget",
+  );
 });

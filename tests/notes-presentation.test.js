@@ -219,6 +219,56 @@ test("original mode falls back to text for legacy notes without rawText", () => 
   );
 });
 
+test("English bilingual notes use the polished text while original stays verbatim", () => {
+  const { helpers } = loadRuntime();
+  const rawText = "second reason I lied is much more";
+  const polishedText =
+    "And the second reason I lied is much more important, because right now, you could expose my lie.";
+  const translatedText =
+    "而我撒谎的第二个原因重要得多，因为现在你可以揭穿我的谎言。";
+  const note = {
+    platform: "youtube",
+    sourceLanguage: "en",
+    textLanguage: "",
+    rawText,
+    text: polishedText,
+    translatedText,
+    translatedValidated: true,
+    translatedValidationVersion: 1,
+  };
+
+  const original = helpers.renderNoteLanguageContent(note, "original");
+  assert.match(original, new RegExp(`>“${rawText}”</span>`));
+  assert.doesNotMatch(original, /And the second reason/);
+  assert.equal(helpers.noteCopyTextForMode(note, "original"), rawText);
+
+  const bilingual = helpers.renderNoteLanguageContent(note, "bilingual");
+  assert.match(bilingual, /And the second reason/);
+  assert.match(bilingual, new RegExp(translatedText));
+  assert.doesNotMatch(bilingual, new RegExp(`>“${rawText}”</span>`));
+  assert.equal(
+    helpers.noteCopyTextForMode(note, "bilingual"),
+    `${polishedText}\n${translatedText}`,
+  );
+
+  const resolved = helpers.resolveNoteExportEntry(note);
+  const txt = noteExport.buildAllNotesText(
+    [
+      {
+        platform: "youtube",
+        sourceLanguage: "en",
+        titleOriginal: "People Have No Idea What’s About To Happen",
+        descriptionStatus: "confirmed-empty",
+        notes: [{ timestampSeconds: 83, ...resolved }],
+      },
+    ],
+    "original",
+    { date: "2026-09-07T00:00:00.000Z" },
+  );
+  assert.match(txt, new RegExp(rawText));
+  assert.doesNotMatch(txt, /And the second reason/);
+});
+
 test("trusted Chinese rawText stays original in display and TXT export", () => {
   const { helpers } = loadRuntime();
   const note = {

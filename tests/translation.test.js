@@ -8940,7 +8940,7 @@ test("note save rejects a tab that changes route before persistence", async () =
   assert.deepEqual(readMigratedNotesSnapshot(storage.snapshot()), []);
 });
 
-test("Bilibili Traditional and Cantonese notes translate from cleaned text while legacy notes keep raw input", async () => {
+test("English and Bilibili notes translate from cleaned text while legacy notes keep raw input", async () => {
   const runtime = loadSidepanelRuntime();
   const fixture = runtime.evaluate(`
     (() => {
@@ -8964,6 +8964,17 @@ test("Bilibili Traditional and Cantonese notes translate from cleaned text while
       isNotesLoading = false;
       isNotesTranslationLoading = false;
       currentNotes = [
+        {
+          id: "note_english_cleaned",
+          mediaKey: "youtube:english-cleanup",
+          videoId: "english-cleanup",
+          platform: "youtube",
+          videoTitle: "People Have No Idea What’s About To Happen",
+          sourceLanguage: "en",
+          textLanguage: "",
+          rawText: "second reason I lied is much more",
+          text: "And the second reason I lied is much more important, because right now, you could expose my lie.",
+        },
         {
           id: "note_traditional_cleaned",
           mediaKey: "bilibili:BV1zfg36ZEXi:traditional",
@@ -9032,6 +9043,12 @@ test("Bilibili Traditional and Cantonese notes translate from cleaned text while
   const snapshot = JSON.parse(fixture.snapshot());
   assert.deepEqual(snapshot.sentNotes, [
     {
+      id: "note_english_cleaned",
+      text: "And the second reason I lied is much more important, because right now, you could expose my lie.",
+      rawText: "second reason I lied is much more",
+      textLanguage: "",
+    },
+    {
       id: "note_traditional_cleaned",
       text: "我哋先釐清問題，再選擇最小方案。",
       rawText: "我哋先釐清",
@@ -9051,11 +9068,13 @@ test("Bilibili Traditional and Cantonese notes translate from cleaned text while
     },
   ]);
   assert.deepEqual(snapshot.originals, [
+    "second reason I lied is much more",
     "我哋先釐清",
     "我哋先搞清楚",
     "舊筆記逐字原文",
   ]);
   assert.deepEqual(snapshot.chinese, [
+    "简体结果：note_english_cleaned",
     "简体结果：note_traditional_cleaned",
     "简体结果：note_cantonese_cleaned",
     "简体结果：note_traditional_legacy",
