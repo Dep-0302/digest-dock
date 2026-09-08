@@ -76,9 +76,23 @@ function youtubeCacheRecord(helpers, source = "youtube-active") {
   );
   return {
     transcriptSourcePolicyVersion: helpers.TRANSCRIPT_SOURCE_POLICY_VERSION,
+    transcriptTimingCapabilityVersion:
+      source === "youtube-active" || source === "youtube-passive"
+        ? helpers.TRANSCRIPT_TIMING_CAPABILITY_VERSION
+        : null,
     transcript: [
-      { start: 0, text: "hello" },
-      { start: 2, text: "world" },
+      {
+        start: 0,
+        duration: 2,
+        text: "hello",
+        timingPoints: [{ charIndex: 0, start: 0 }],
+      },
+      {
+        start: 2,
+        duration: 2,
+        text: "world",
+        timingPoints: [{ charIndex: 0, start: 2 }],
+      },
     ],
     transcriptText: "hello world",
     transcriptTimestamped,
@@ -214,6 +228,83 @@ test("cache validation rejects language, selected-track, and fingerprint drift",
     null,
     "a later explicit page track must invalidate a different cached track",
   );
+});
+
+test("only English Active and Passive caches require the JSON3 timing marker", () => {
+  const helpers = loadSidepanelHelpers();
+  const expected = {
+    videoId: "video-1",
+    mediaRef: { platform: "youtube", mediaKey: "video-1" },
+    requestedLanguage: "en-US",
+    trackKind: "manual-first",
+    routeKey: "youtube:video-1",
+  };
+
+  for (const source of ["youtube-active", "youtube-passive"]) {
+    const legacyEnglish = youtubeCacheRecord(helpers, source);
+    delete legacyEnglish.transcriptTimingCapabilityVersion;
+    assert.equal(
+      helpers.validateTranscriptCacheRecord(legacyEnglish, expected),
+      null,
+      `${source} English cache without the timing marker must refetch`,
+    );
+
+    const legacyWithoutTranscriptLanguage = youtubeCacheRecord(helpers, source);
+    legacyWithoutTranscriptLanguage.transcriptLanguage = null;
+    delete legacyWithoutTranscriptLanguage.transcriptTimingCapabilityVersion;
+    assert.equal(
+      helpers.validateTranscriptCacheRecord(
+        legacyWithoutTranscriptLanguage,
+        expected,
+      ),
+      null,
+      "the selected English track must still invalidate a legacy cache",
+    );
+
+    const markedWithoutInteriorPoints = youtubeCacheRecord(helpers, source);
+    markedWithoutInteriorPoints.transcript.forEach((entry) => {
+      delete entry.timingPoints;
+    });
+    assert.ok(
+      helpers.validateTranscriptCacheRecord(markedWithoutInteriorPoints, expected),
+      "the marker records parser capability; individual cues may still use fallback timing",
+    );
+
+    const chinese = youtubeCacheRecord(helpers, source);
+    chinese.transcriptLanguage = "zh-CN";
+    chinese.transcriptSelectedTrack.language = "zh-CN";
+    chinese.transcriptSelectedTrackIdentity =
+      helpers.transcriptSelectedTrackIdentity(chinese.transcriptSelectedTrack);
+    chinese.transcriptArtifactIdentity = helpers.transcriptArtifactIdentity({
+      source,
+      language: "zh-CN",
+      requestedLanguage: "en-US",
+      selectedTrack: chinese.transcriptSelectedTrack,
+      fingerprint: chinese.transcriptFingerprint,
+    });
+    delete chinese.transcriptTimingCapabilityVersion;
+    assert.ok(
+      helpers.validateTranscriptCacheRecord(chinese, expected),
+      "Chinese YouTube caches remain outside the English seek migration",
+    );
+  }
+
+  for (const source of ["youtube-panel", "supadata"]) {
+    const record = youtubeCacheRecord(helpers, source);
+    delete record.transcriptTimingCapabilityVersion;
+    if (source === "supadata") {
+      record.transcriptSelectedTrack = null;
+      record.transcriptSelectedTrackIdentity = "none";
+      record.transcriptArtifactIdentity = helpers.transcriptArtifactIdentity({
+        source,
+        language: "en",
+        requestedLanguage: "en-US",
+        selectedTrack: null,
+        fingerprint: record.transcriptFingerprint,
+      });
+    }
+    assert.ok(helpers.validateTranscriptCacheRecord(record, expected));
+  }
 });
 
 test("cross-language subtitles reuse an exact cache without treating audio language as track identity", () => {

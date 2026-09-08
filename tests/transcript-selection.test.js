@@ -212,7 +212,7 @@ test("timestamp seeks use the exact route and require a real player success", ()
   );
 });
 
-test("a sentence beginning inside an English cue displays and seeks from the same semantic start", () => {
+test("a sentence beginning inside an English cue uses its exact JSON3 word start", () => {
   const {
     groupTranscriptEntries,
     transcriptEntrySeekSeconds,
@@ -232,6 +232,13 @@ test("a sentence beginning inside an English cue displays and seeks from the sam
       start: 62.04,
       duration: 6.12,
       text: "beginning to forget. The absence of AI",
+      timingPoints: [
+        { charIndex: 0, start: 62.04 },
+        { charIndex: 10, start: 62.46 },
+        { charIndex: 13, start: 62.96 },
+        { charIndex: 21, start: 63.52 },
+        { charIndex: 25, start: 64.14 },
+      ],
     },
     {
       start: 65.28,
@@ -249,16 +256,20 @@ test("a sentence beginning inside an English cue displays and seeks from the sam
   );
   assert.ok(
     Math.abs(secondSentence.start - 65.261) < 0.002,
-    `expected semantic start near 65.261s, got ${secondSentence.start}`,
+    `the estimated semantic start remains available, got ${secondSentence.start}`,
   );
   assert.ok(
     Math.abs(secondSentence.seekStart - 62.04) < 0.002,
     `the real source cue start must stay intact, got ${secondSentence.seekStart}`,
   );
   assert.ok(
-    Math.abs(transcriptEntrySeekSeconds(secondSentence, false) - 65.261) <
+    Math.abs(secondSentence.preciseSeekStart - 63.52) < 0.002,
+    `expected provider timing at 63.52s, got ${secondSentence.preciseSeekStart}`,
+  );
+  assert.ok(
+    Math.abs(transcriptEntrySeekSeconds(secondSentence, false) - 63.52) <
       0.002,
-    "YouTube English display/seek must use the semantic sentence start",
+    "YouTube English display/seek must prefer the exact provider word start",
   );
   assert.ok(
     Math.abs(transcriptEntrySeekSeconds(secondSentence, true) - 62.04) <
@@ -281,6 +292,48 @@ test("only YouTube English uses semantic transcript seek starts", () => {
   assert.equal(preserveTranscriptSourceCueStart("youtube", "ja"), true);
   assert.equal(preserveTranscriptSourceCueStart("youtube", "zh-CN"), true);
   assert.equal(preserveTranscriptSourceCueStart("bilibili", "en"), true);
+});
+
+test("invalid timing points fail closed to the existing English estimate", () => {
+  const { groupTranscriptEntries, transcriptEntrySeekSeconds } =
+    loadTranscriptGrouping();
+  const groups = groupTranscriptEntries([
+    {
+      start: 57.64,
+      duration: 4.4,
+      text: "First, because I wanted to sort of show",
+    },
+    {
+      start: 60.24,
+      duration: 5.04,
+      text: "you something that I think we're",
+    },
+    {
+      start: 62.04,
+      duration: 6.12,
+      text: "beginning to forget. The absence of AI",
+      timingPoints: [
+        { charIndex: 0, start: 62.04 },
+        { charIndex: 21, start: 70 },
+      ],
+    },
+    {
+      start: 65.28,
+      duration: 5.56,
+      text: "is not proof that something is genuine.",
+    },
+  ]);
+  const secondSentence = groups.find((group) =>
+    group.text.startsWith("The absence of AI"),
+  );
+
+  assert.ok(secondSentence);
+  assert.equal(secondSentence.preciseSeekStart, undefined);
+  assert.ok(
+    Math.abs(transcriptEntrySeekSeconds(secondSentence, false) - 65.261) <
+      0.002,
+    "an invalid provider point must not override the established fallback",
+  );
 });
 
 test("splitting one unpunctuated long Chinese cue keeps its real source seek start", () => {
