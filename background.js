@@ -55,6 +55,7 @@ const YOUTUBE_PASSIVE_WAIT_MS = 1_500;
 const YOUTUBE_PASSIVE_MAX_BODY_BYTES = 8 * 1024 * 1024;
 const YOUTUBE_PASSIVE_MAX_STATE_BYTES = 6 * 1024 * 1024;
 const YOUTUBE_PASSIVE_MAX_ENTRIES = 6;
+const YOUTUBE_MAX_TIMING_POINTS_PER_CUE = 512;
 const YOUTUBE_ACTIVE_PRODUCT_FILE = "youtube-transcript-active.js";
 const YOUTUBE_TRANSCRIPT_CACHE_SOURCES = new Set([
   "youtube-passive",
@@ -959,6 +960,78 @@ function cleanPassiveText(value) {
     .trim();
 }
 
+function normalizeYoutubeTimingPoints(points, text, start, duration) {
+  const cueStart = Number(start);
+  const cueDuration = Number(duration);
+  const cueEnd = cueStart + cueDuration;
+  const fallback =
+    text && Number.isFinite(cueStart) && cueStart >= 0
+      ? [{ charIndex: 0, start: cueStart }]
+      : [];
+  if (!Array.isArray(points) || !points.length) return fallback;
+
+  const normalized = [];
+  let previousCharIndex = -1;
+  let previousStart = -1;
+  for (const point of points.slice(0, YOUTUBE_MAX_TIMING_POINTS_PER_CUE)) {
+    const charIndex = point?.charIndex;
+    const pointStart = point?.start;
+    if (
+      typeof charIndex !== "number" ||
+      !Number.isInteger(charIndex) ||
+      charIndex < 0 ||
+      charIndex >= text.length ||
+      typeof pointStart !== "number" ||
+      !Number.isFinite(pointStart) ||
+      pointStart < cueStart ||
+      pointStart > cueEnd ||
+      charIndex <= previousCharIndex ||
+      pointStart < previousStart
+    ) {
+      return fallback;
+    }
+    normalized.push({ charIndex, start: pointStart });
+    previousCharIndex = charIndex;
+    previousStart = pointStart;
+  }
+  return normalized[0]?.charIndex === 0 ? normalized : fallback;
+}
+
+function passiveJson3TimingPoints(event, text, start, duration) {
+  const segments = Array.isArray(event?.segs) ? event.segs : [];
+  const eventStartMs = Number(event?.tStartMs || 0);
+  const points = [];
+  let searchFrom = 0;
+
+  for (const segment of segments.slice(0, YOUTUBE_MAX_TIMING_POINTS_PER_CUE)) {
+    const segmentText = cleanPassiveText(segment?.utf8);
+    if (!segmentText) continue;
+    const charIndex = text.indexOf(segmentText, searchFrom);
+    if (charIndex < 0) return [];
+    searchFrom = charIndex + segmentText.length;
+
+    const hasOffset = segment?.tOffsetMs !== undefined;
+    if (!hasOffset && charIndex !== 0) continue;
+    const offsetMs = hasOffset ? segment.tOffsetMs : 0;
+    if (
+      typeof offsetMs !== "number" ||
+      !Number.isFinite(offsetMs) ||
+      offsetMs < 0
+    ) {
+      return [];
+    }
+    points.push({
+      charIndex,
+      start: (eventStartMs + offsetMs) / 1000,
+    });
+  }
+
+  if (points[0]?.charIndex !== 0) {
+    points.unshift({ charIndex: 0, start });
+  }
+  return normalizeYoutubeTimingPoints(points, text, start, duration);
+}
+
 function normalizePassiveSegments(rows, language) {
   return (Array.isArray(rows) ? rows : [])
     .map((row) => {
@@ -974,10 +1047,17 @@ function normalizePassiveSegments(rows, language) {
       ) {
         return null;
       }
+      const timingPoints = normalizeYoutubeTimingPoints(
+        row?.timingPoints,
+        text,
+        start,
+        duration,
+      );
       return {
         text,
         start,
         duration,
+        timingPoints,
         language:
           normalizeLanguageCode(language) ||
           normalizeLanguageCode(row?.language) ||
@@ -998,10 +1078,21 @@ function parsePassiveJson3(body, language) {
   const rows = [];
   for (const event of Array.isArray(payload?.events) ? payload.events : []) {
     if (!Array.isArray(event?.segs) || event.aAppend === 1) continue;
+    const text = cleanPassiveText(
+      event.segs.map((segment) => segment?.utf8 || "").join(""),
+    );
+    const start = Number(event.tStartMs || 0) / 1000;
+    const duration = Number(event.dDurationMs || 0) / 1000;
     rows.push({
-      text: event.segs.map((segment) => segment?.utf8 || "").join(""),
-      start: Number(event.tStartMs || 0) / 1000,
-      duration: Number(event.dDurationMs || 0) / 1000,
+      text,
+      start,
+      duration,
+      timingPoints: passiveJson3TimingPoints(
+        event,
+        text,
+        start,
+        duration,
+      ),
     });
   }
   return normalizePassiveSegments(rows, language);
@@ -1198,6 +1289,22 @@ function waitForYoutubePassiveChange(maxWaitMs, observedRevision) {
   });
 }
 
+function youtubePassiveEntryStartedAt(entry, now = Date.now()) {
+  for (const value of [entry?.startedAt, entry?.updatedAt]) {
+    if (
+      typeof value === "number" &&
+      Number.isFinite(value) &&
+      value >= 0 &&
+      value <= now
+    ) {
+      return value;
+    }
+  }
+  // Session entries created by an older build or damaged state must never
+  // extend a request beyond the request-level 1.5 second ceiling.
+  return now;
+}
+
 async function handleYoutubePassiveState(payload, sender) {
   const dataGeneration = extensionDataGeneration;
   const type = String(payload?.type || "");
@@ -1243,6 +1350,12 @@ async function handleYoutubePassiveState(payload, sender) {
       return { ok: true, state: "rate-limited" };
     }
     if (type === "inflight") {
+      const now = Date.now();
+      const startedAt =
+        previous &&
+        (previous.state === "inflight" || previous.inFlight === true)
+          ? youtubePassiveEntryStartedAt(previous, now)
+          : now;
       next.push({
         identity,
         tabId,
@@ -1251,7 +1364,8 @@ async function handleYoutubePassiveState(payload, sender) {
         trackKind,
         state: "inflight",
         inFlight: true,
-        updatedAt: Date.now(),
+        startedAt,
+        updatedAt: now,
       });
     } else if (type === "capture") {
       if (
@@ -1283,6 +1397,7 @@ async function handleYoutubePassiveState(payload, sender) {
         inFlight:
           payload?.inFlight === true || Number(payload?.inFlight) > 0,
         capture: capture.result,
+        startedAt: youtubePassiveEntryStartedAt(previous),
         updatedAt: Date.now(),
       });
     }
@@ -1369,13 +1484,22 @@ async function readYoutubePassiveGate(request) {
   const capture = entries.find(
     (entry) => entry.state === "capture" && entry.capture?.success === true,
   );
+  const inFlightEntries = entries.filter(
+    (entry) =>
+      entry.state === "inflight" ||
+      (entry.state === "capture" && entry.inFlight === true),
+  );
+  const now = Date.now();
   return {
     capture: capture?.capture || null,
-    inFlight: entries.some(
-      (entry) =>
-        entry.state === "inflight" ||
-        (entry.state === "capture" && entry.inFlight === true),
-    ),
+    inFlight: inFlightEntries.length > 0,
+    inFlightStartedAt: inFlightEntries.length
+      ? Math.max(
+          ...inFlightEntries.map((entry) =>
+            youtubePassiveEntryStartedAt(entry, now),
+          ),
+        )
+      : null,
   };
 }
 
@@ -1383,6 +1507,15 @@ async function awaitYoutubePassiveGate(
   request,
   deadlineAt = Date.now() + YOUTUBE_PASSIVE_WAIT_MS,
 ) {
+  const requestDeadlineAt = Number.isFinite(Number(deadlineAt))
+    ? Number(deadlineAt)
+    : Date.now() + YOUTUBE_PASSIVE_WAIT_MS;
+  const gateDeadlineAt = (gate) => {
+    const startedAt = Number(gate?.inFlightStartedAt);
+    return Number.isFinite(startedAt)
+      ? Math.min(requestDeadlineAt, startedAt + YOUTUBE_PASSIVE_WAIT_MS)
+      : requestDeadlineAt;
+  };
   let gate = await readYoutubePassiveGate(request);
   // A completed page capture always wins. The bounded wait is reserved for a
   // page request we have actually observed in flight; an empty buffer falls
@@ -1390,13 +1523,15 @@ async function awaitYoutubePassiveGate(
   // guaranteed 1.5 seconds to every cold YouTube load.
   if (gate.capture || !gate.inFlight) return gate.capture;
   while (gate.inFlight) {
-    const remaining = deadlineAt - Date.now();
+    let remaining = gateDeadlineAt(gate) - Date.now();
     if (remaining <= 0) return null;
     const observedRevision = youtubePassiveRevision;
     // Re-read before sleeping: if a capture arrived between the previous read
     // and waiter registration, the revision check resolves immediately.
     gate = await readYoutubePassiveGate(request);
     if (gate.capture || !gate.inFlight) return gate.capture;
+    remaining = gateDeadlineAt(gate) - Date.now();
+    if (remaining <= 0) return null;
     await waitForYoutubePassiveChange(remaining, observedRevision);
     gate = await readYoutubePassiveGate(request);
     if (gate.capture) return gate.capture;
@@ -3288,6 +3423,7 @@ function youtubePanelRows(result) {
         : Number.isFinite(nextStart) && nextStart >= start
           ? nextStart - start
           : 0,
+      timingPoints: row?.timingPoints,
       language: row?.language || result?.language,
     };
   });

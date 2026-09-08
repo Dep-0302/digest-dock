@@ -7,7 +7,7 @@
  */
 (function installYouTubeActive(root, factory) {
   const existing = root?.DIGESTDOCK_YOUTUBE_ACTIVE;
-  const api = existing?.apiVersion === 1 ? existing : factory();
+  const api = existing?.apiVersion === 2 ? existing : factory();
   if (root) root.DIGESTDOCK_YOUTUBE_ACTIVE = api;
   if (typeof module !== "undefined" && module.exports) module.exports = api;
 })(typeof globalThis !== "undefined" ? globalThis : this, function createApi() {
@@ -21,6 +21,7 @@
   const MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
   const MAX_PLAYER_REQUESTS = 1;
   const MAX_TIMEDTEXT_REQUESTS = 1;
+  const MAX_TIMING_POINTS_PER_CUE = 512;
   const TRUSTED_CAPTION_HOST = "www.youtube.com";
   const TRUSTED_CAPTION_PATH = "/api/timedtext";
   let activeRunState = null;
@@ -268,6 +269,75 @@
       .trim();
   }
 
+  function normalizeTimingPoints(points, text, start, duration) {
+    if (!Array.isArray(points) || !text) return [];
+    const cueEnd = start + duration;
+    const normalized = [];
+    let previousCharIndex = -1;
+    let previousStart = -1;
+
+    for (const point of points.slice(0, MAX_TIMING_POINTS_PER_CUE)) {
+      const charIndex = point?.charIndex;
+      const pointStart = point?.start;
+      if (
+        typeof charIndex !== "number" ||
+        !Number.isInteger(charIndex) ||
+        charIndex < 0 ||
+        charIndex >= text.length ||
+        typeof pointStart !== "number" ||
+        !Number.isFinite(pointStart) ||
+        pointStart < start ||
+        pointStart > cueEnd ||
+        charIndex <= previousCharIndex ||
+        pointStart < previousStart
+      ) {
+        return [];
+      }
+      normalized.push({ charIndex, start: pointStart });
+      previousCharIndex = charIndex;
+      previousStart = pointStart;
+    }
+    return normalized[0]?.charIndex === 0 ? normalized : [];
+  }
+
+  function json3TimingPoints(event, text, start, duration) {
+    const segments = Array.isArray(event?.segs) ? event.segs : [];
+    const eventStartMs = Number(event?.tStartMs || 0);
+    const points = [];
+    let searchFrom = 0;
+
+    for (const segment of segments.slice(0, MAX_TIMING_POINTS_PER_CUE)) {
+      const segmentText = cleanText(segment?.utf8);
+      if (!segmentText) continue;
+      const charIndex = text.indexOf(segmentText, searchFrom);
+      if (charIndex < 0) return [];
+      searchFrom = charIndex + segmentText.length;
+
+      const hasOffset = segment?.tOffsetMs !== undefined;
+      if (!hasOffset && charIndex !== 0) continue;
+      const offsetMs = hasOffset ? segment.tOffsetMs : 0;
+      if (
+        typeof offsetMs !== "number" ||
+        !Number.isFinite(offsetMs) ||
+        offsetMs < 0
+      ) {
+        return [];
+      }
+      points.push({
+        charIndex,
+        start: (eventStartMs + offsetMs) / 1000,
+      });
+    }
+
+    // Some manual tracks omit per-segment offsets. The cue boundary still
+    // proves a precise start for its first visible character and marks this
+    // JSON3 row as timing-capable without inventing interior timing.
+    if (points[0]?.charIndex !== 0) {
+      points.unshift({ charIndex: 0, start });
+    }
+    return normalizeTimingPoints(points, text, start, duration);
+  }
+
   function normalizeSegments(rows, language) {
     return (Array.isArray(rows) ? rows : [])
       .map((row) => {
@@ -283,7 +353,19 @@
         ) {
           return null;
         }
-        return { text, start, duration, language };
+        const timingPoints = normalizeTimingPoints(
+          row?.timingPoints,
+          text,
+          start,
+          duration,
+        );
+        return {
+          text,
+          start,
+          duration,
+          language,
+          ...(timingPoints.length ? { timingPoints } : {}),
+        };
       })
       .filter(Boolean)
       .sort((left, right) => left.start - right.start);
@@ -299,10 +381,16 @@
     const rows = [];
     for (const event of Array.isArray(payload?.events) ? payload.events : []) {
       if (!Array.isArray(event?.segs) || event.aAppend === 1) continue;
+      const text = cleanText(
+        event.segs.map((segment) => segment?.utf8 || "").join(""),
+      );
+      const start = Number(event.tStartMs || 0) / 1000;
+      const duration = Number(event.dDurationMs || 0) / 1000;
       rows.push({
-        text: event.segs.map((segment) => segment?.utf8 || "").join(""),
-        start: Number(event.tStartMs || 0) / 1000,
-        duration: Number(event.dDurationMs || 0) / 1000,
+        text,
+        start,
+        duration,
+        timingPoints: json3TimingPoints(event, text, start, duration),
       });
     }
     return normalizeSegments(rows, language);
@@ -844,5 +932,5 @@
     }
   }
 
-  return Object.freeze({ apiVersion: 1, run });
+  return Object.freeze({ apiVersion: 2, run });
 });

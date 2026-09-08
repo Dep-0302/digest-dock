@@ -463,6 +463,7 @@ const NOTE_TRANSLATION_VALIDATION_VERSION = 2;
 const NOTE_TITLE_TRANSLATION_VALIDATION_VERSION = 1;
 const TRANSCRIPT_TRANSLATION_CACHE_VERSION = 2;
 const TRANSCRIPT_SOURCE_POLICY_VERSION = 5;
+const TRANSCRIPT_TIMING_CAPABILITY_VERSION = 1;
 const YOUTUBE_TRANSCRIPT_SOURCES = new Set([
   "youtube-passive",
   "youtube-active",
@@ -1270,6 +1271,7 @@ const COMPACT_CJK_SEGMENT_LIMITS = Object.freeze({
   maxChars: 120,
   maxSeconds: 12,
 });
+const MAX_TRANSCRIPT_TIMING_POINTS_PER_CUE = 512;
 const SENTENCE_PUNCTUATION_PATTERN = /[.!?;:,。！？；：，]/;
 const COMPACT_CJK_PATTERN = /[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]/g;
 
@@ -1280,6 +1282,55 @@ function normalizeCaptionText(text) {
     .replace(/([，。；：！？])\s+(?=[\u3400-\u9fff])/g, "$1")
     .replace(/\s+([,.;:!?，。；：！？])/g, "$1")
     .trim();
+}
+
+function normalizeTranscriptTimingPoints(entry, text, start, duration) {
+  const points = entry?.timingPoints;
+  if (!Array.isArray(points) || !text) return [];
+  const cueEnd = start + duration;
+  const normalized = [];
+  let previousCharIndex = -1;
+  let previousStart = -1;
+
+  for (const point of points.slice(0, MAX_TRANSCRIPT_TIMING_POINTS_PER_CUE)) {
+    const charIndex = point?.charIndex;
+    const pointStart = point?.start;
+    if (
+      typeof charIndex !== "number" ||
+      !Number.isInteger(charIndex) ||
+      charIndex < 0 ||
+      charIndex >= text.length ||
+      typeof pointStart !== "number" ||
+      !Number.isFinite(pointStart) ||
+      pointStart < start ||
+      pointStart > cueEnd ||
+      charIndex <= previousCharIndex ||
+      pointStart < previousStart
+    ) {
+      return [];
+    }
+    normalized.push({ charIndex, start: pointStart });
+    previousCharIndex = charIndex;
+    previousStart = pointStart;
+  }
+  return normalized[0]?.charIndex === 0 ? normalized : [];
+}
+
+function transcriptTimingStartAt(points, charIndex) {
+  const match = points.find((point) => point.charIndex === charIndex);
+  return Number.isFinite(match?.start) ? match.start : null;
+}
+
+function transcriptRequiresTimingCapability(source, language) {
+  const primaryLanguage = String(language || "")
+    .trim()
+    .replace(/_/g, "-")
+    .toLowerCase()
+    .split("-")[0];
+  return (
+    primaryLanguage === "en" &&
+    (source === "youtube-active" || source === "youtube-passive")
+  );
 }
 
 function needsVisualChineseQuotes(text) {
@@ -1335,7 +1386,14 @@ function transcriptSegmentProfile(text, fallback = TRANSCRIPT_SEGMENT_LIMITS) {
   return compactCjk ? COMPACT_CJK_SEGMENT_LIMITS : fallback;
 }
 
-function splitCaptionPiece(text, start, duration, profile, seekStart = start) {
+function splitCaptionPiece(
+  text,
+  start,
+  duration,
+  profile,
+  seekStart = start,
+  preciseStartResolver = null,
+) {
   const normalized = normalizeCaptionText(text);
   if (!normalized) return [];
   const compactCjk = profile === COMPACT_CJK_SEGMENT_LIMITS;
@@ -1358,7 +1416,12 @@ function splitCaptionPiece(text, start, duration, profile, seekStart = start) {
   );
   const parts = splitOversizedThought(normalized, targetChars);
   let consumedChars = 0;
+  let searchFrom = 0;
   return parts.map((part) => {
+    const partCharIndex = normalized.indexOf(part, searchFrom);
+    const normalizedPartCharIndex =
+      partCharIndex >= 0 ? partCharIndex : consumedChars;
+    searchFrom = normalizedPartCharIndex + part.length;
     const startRatio = normalized.length
       ? Math.min(1, consumedChars / normalized.length)
       : 0;
@@ -1366,10 +1429,15 @@ function splitCaptionPiece(text, start, duration, profile, seekStart = start) {
     const endRatio = normalized.length
       ? Math.min(1, consumedChars / normalized.length)
       : 1;
+    const preciseSeekStart =
+      typeof preciseStartResolver === "function"
+        ? preciseStartResolver(normalizedPartCharIndex)
+        : null;
     return {
       text: part,
       start: start + duration * startRatio,
       seekStart,
+      ...(Number.isFinite(preciseSeekStart) ? { preciseSeekStart } : {}),
       end: start + duration * endRatio,
       semanticEnd:
         /[.!?。！？]["')\]”’）】」』]*$/.test(part) || parts.length > 1,
@@ -1394,6 +1462,12 @@ function groupTranscriptEntries(entries, limits = TRANSCRIPT_SEGMENT_LIMITS) {
     if (!text) return;
     const start = Number.isFinite(Number(entry.start)) ? Number(entry.start) : 0;
     const duration = Math.max(0, Number(entry.duration) || 0);
+    const timingPoints = normalizeTranscriptTimingPoints(
+      entry,
+      text,
+      start,
+      duration,
+    );
     const sentenceParts =
       text.match(/[^.!?;:,。！？；：，]+(?:[.!?;:,。！？；：，]+["')\]”’）】」』]*|$)/g) ||
       [text];
@@ -1402,6 +1476,9 @@ function groupTranscriptEntries(entries, limits = TRANSCRIPT_SEGMENT_LIMITS) {
     sentenceParts.forEach((sentencePart) => {
       const cleanPart = normalizeCaptionText(sentencePart);
       if (!cleanPart) return;
+      const foundCharIndex = text.indexOf(cleanPart, consumedChars);
+      const sentenceCharIndex =
+        foundCharIndex >= 0 ? foundCharIndex : consumedChars;
       const ratio = text.length ? Math.min(1, consumedChars / text.length) : 0;
       const sentenceDuration = text.length
         ? duration * (cleanPart.length / text.length)
@@ -1413,6 +1490,11 @@ function groupTranscriptEntries(entries, limits = TRANSCRIPT_SEGMENT_LIMITS) {
         sentenceDuration,
         profile,
         start,
+        (partCharIndex) =>
+          transcriptTimingStartAt(
+            timingPoints,
+            sentenceCharIndex + partCharIndex,
+          ),
       ).forEach((piece, partIndex) => {
         pieces.push({
           ...piece,
@@ -1438,6 +1520,9 @@ function groupTranscriptEntries(entries, limits = TRANSCRIPT_SEGMENT_LIMITS) {
       id: `segment-${index}-${Math.round(current.start * 1000)}`,
       start: current.start,
       seekStart: current.seekStart,
+      ...(Number.isFinite(current.preciseSeekStart)
+        ? { preciseSeekStart: current.preciseSeekStart }
+        : {}),
       text,
       texts: texts.length ? texts : [text],
     });
@@ -1461,6 +1546,7 @@ function groupTranscriptEntries(entries, limits = TRANSCRIPT_SEGMENT_LIMITS) {
       current = {
         start: piece.start,
         seekStart: piece.seekStart,
+        preciseSeekStart: piece.preciseSeekStart,
         end: piece.end,
         text: "",
         visualFragments: [],
@@ -1510,7 +1596,7 @@ function groupTranscriptEntries(entries, limits = TRANSCRIPT_SEGMENT_LIMITS) {
 function transcriptEntrySeekSeconds(segment, preserveSourceCueStart) {
   return preserveSourceCueStart
     ? Number(segment?.seekStart ?? segment?.start) || 0
-    : Number(segment?.start) || 0;
+    : Number(segment?.preciseSeekStart ?? segment?.start) || 0;
 }
 
 function preserveTranscriptSourceCueStart(platform, language) {
@@ -4189,11 +4275,11 @@ function renderTranscript() {
   grouped.forEach((group) => {
     const div = document.createElement("div");
     div.className = "transcript-entry";
-    div.dataset.seconds = group.start;
     const seekSeconds = transcriptEntrySeekSeconds(
       group,
       preserveSourceCueStart,
     );
+    div.dataset.seconds = seekSeconds;
 
     div.innerHTML = `
       ${transcriptTimeCellMarkup(seekSeconds)}
@@ -8072,6 +8158,13 @@ async function saveToCache(
       channelName: currentChannelName,
       paragraphCache: paragraphCacheForVideo,
       transcriptSourcePolicyVersion: TRANSCRIPT_SOURCE_POLICY_VERSION,
+      transcriptTimingCapabilityVersion:
+        transcriptRequiresTimingCapability(
+          currentTranscriptSource,
+          currentTranscriptLanguage,
+        )
+          ? TRANSCRIPT_TIMING_CAPABILITY_VERSION
+          : null,
       transcriptRequestedLanguage: currentVideoSourceLanguage || null,
       transcriptRequestedTrackKind: currentPlatformIsBilibili()
         ? null
@@ -8251,6 +8344,17 @@ function validateTranscriptCacheRecord(
   }
 
   const transcriptLanguage = normalizeLanguageCode(cached.transcriptLanguage);
+  if (
+    !isBilibili &&
+    transcriptRequiresTimingCapability(
+      source,
+      transcriptLanguage || selectedTrack?.language,
+    ) &&
+    cached.transcriptTimingCapabilityVersion !==
+      TRANSCRIPT_TIMING_CAPABILITY_VERSION
+  ) {
+    return null;
+  }
   if (
     selectedTrack?.language &&
     transcriptLanguage &&
@@ -10062,7 +10166,6 @@ function renderTranscriptModeRows(segments, mode) {
       transcriptTranslationCacheKey(currentVideoId, segment),
     );
     div.className = `transcript-entry ${cached ? "translated" : "translating"}`;
-    div.dataset.seconds = segment.start;
     div.dataset.segmentId = segment.id;
     div.dataset.segmentIndex = index;
 
@@ -10070,6 +10173,7 @@ function renderTranscriptModeRows(segments, mode) {
       segment,
       preserveSourceCueStart,
     );
+    div.dataset.seconds = seekSeconds;
     div.innerHTML = `
       ${transcriptTimeCellMarkup(seekSeconds)}
       ${renderTranscriptSegmentContent(segment, mode, cached, "")}
@@ -10329,6 +10433,7 @@ function setTranslatingSpinner(show) {
 // not read this object at runtime.
 globalThis.__YTD_TRANSCRIPT_TESTING__ = {
   TRANSCRIPT_SOURCE_POLICY_VERSION,
+  TRANSCRIPT_TIMING_CAPABILITY_VERSION,
   YOUTUBE_TRANSCRIPT_TRACK_KIND,
   hasConfiguredAiService,
   activeAiServiceLabel,
@@ -10355,6 +10460,7 @@ globalThis.__YTD_TRANSCRIPT_TESTING__ = {
   cachedTranscriptArtifactIdentity,
   digestMediaIdentityChanged,
   validateTranscriptCacheRecord,
+  transcriptRequiresTimingCapability,
   sendTranslationMessage,
   groupTranscriptEntries,
   buildOverviewAnalysisCues,
