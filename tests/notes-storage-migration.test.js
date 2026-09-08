@@ -335,7 +335,7 @@ function bootBackground(
         onMessage: listeners,
         openOptionsPage() {},
         getURL: (resourcePath) => `chrome-extension://test/${resourcePath}`,
-        getManifest: () => ({ version: "1.4.8" }),
+        getManifest: () => ({ version: "2.0.0" }),
         async sendMessage(message) {
           const copied = clone(message);
           notifications.push(copied);
