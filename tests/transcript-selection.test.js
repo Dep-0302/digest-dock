@@ -47,7 +47,9 @@ function loadTranscriptGrouping() {
     "missing transcript grouping section end",
   );
   const groupingSource = source.slice(sectionStart, sectionEnd);
-  return Function(`${groupingSource}\nreturn { groupTranscriptEntries };`)();
+  return Function(
+    `${groupingSource}\nreturn { groupTranscriptEntries, transcriptEntrySeekSeconds, preserveTranscriptSourceCueStart };`,
+  )();
 }
 
 test("English and Chinese cleanup prompts separately allow completion and forbid drift", () => {
@@ -167,17 +169,12 @@ test("only the time rail seeks; the transcript body stays selectable text", () =
   );
 
   const railWiring = source.match(/attachTranscriptTimeSeek\(div, [^)]+\)/g) || [];
-  assert.ok(
-    railWiring.includes(
-      "attachTranscriptTimeSeek(div, group.seekStart ?? group.start)",
-    ),
-    "raw transcript rows must wire seek onto the time rail",
-  );
-  assert.ok(
-    railWiring.includes(
-      "attachTranscriptTimeSeek(div, segment.seekStart ?? segment.start)",
-    ),
-    "translated-only and bilingual rows must wire seek onto the time rail",
+  assert.equal(
+    railWiring.filter(
+      (wiring) => wiring === "attachTranscriptTimeSeek(div, seekSeconds)",
+    ).length,
+    2,
+    "raw, translated-only, and bilingual rows must use the selected seek time on the time rail",
   );
 
   // The whole-row seek handlers (guarded or not) must be gone: the body text
@@ -216,7 +213,10 @@ test("timestamp seeks use the exact route and require a real player success", ()
 });
 
 test("a sentence beginning inside an English cue displays and seeks from the same semantic start", () => {
-  const { groupTranscriptEntries } = loadTranscriptGrouping();
+  const {
+    groupTranscriptEntries,
+    transcriptEntrySeekSeconds,
+  } = loadTranscriptGrouping();
   const groups = groupTranscriptEntries([
     {
       start: 57.64,
@@ -252,18 +252,40 @@ test("a sentence beginning inside an English cue displays and seeks from the sam
     `expected semantic start near 65.261s, got ${secondSentence.start}`,
   );
   assert.ok(
-    Math.abs(secondSentence.seekStart - 65.261) < 0.002,
-    `display/seek must use the semantic start, got ${secondSentence.seekStart}`,
+    Math.abs(secondSentence.seekStart - 62.04) < 0.002,
+    `the real source cue start must stay intact, got ${secondSentence.seekStart}`,
+  );
+  assert.ok(
+    Math.abs(transcriptEntrySeekSeconds(secondSentence, false) - 65.261) <
+      0.002,
+    "YouTube English display/seek must use the semantic sentence start",
+  );
+  assert.ok(
+    Math.abs(transcriptEntrySeekSeconds(secondSentence, true) - 62.04) <
+      0.002,
+    "Chinese and Bilibili paths must preserve the real source cue start",
   );
   assert.match(
     source,
-    /transcriptTimeCellMarkup\(group\.seekStart \?\? group\.start\)[\s\S]*?attachTranscriptTimeSeek\(div, group\.seekStart \?\? group\.start\)/,
+    /const preserveSourceCueStart = preserveTranscriptSourceCueStart\([\s\S]*?const seekSeconds = transcriptEntrySeekSeconds\(\s*group,\s*preserveSourceCueStart,\s*\);[\s\S]*?transcriptTimeCellMarkup\(seekSeconds\)[\s\S]*?attachTranscriptTimeSeek\(div, seekSeconds\)/,
     "the visible time label and click handler must share one timestamp",
   );
 });
 
+test("only YouTube English uses semantic transcript seek starts", () => {
+  const { preserveTranscriptSourceCueStart } = loadTranscriptGrouping();
+
+  assert.equal(preserveTranscriptSourceCueStart("youtube", "en"), false);
+  assert.equal(preserveTranscriptSourceCueStart("youtube", "en-US"), false);
+  assert.equal(preserveTranscriptSourceCueStart("youtube", "es"), true);
+  assert.equal(preserveTranscriptSourceCueStart("youtube", "ja"), true);
+  assert.equal(preserveTranscriptSourceCueStart("youtube", "zh-CN"), true);
+  assert.equal(preserveTranscriptSourceCueStart("bilibili", "en"), true);
+});
+
 test("splitting one unpunctuated long Chinese cue keeps its real source seek start", () => {
-  const { groupTranscriptEntries } = loadTranscriptGrouping();
+  const { groupTranscriptEntries, transcriptEntrySeekSeconds } =
+    loadTranscriptGrouping();
   const groups = groupTranscriptEntries([
     {
       start: 10,
@@ -281,6 +303,10 @@ test("splitting one unpunctuated long Chinese cue keeps its real source seek sta
   assert.ok(
     groups.every((group) => group.seekStart === 10),
     "synthetic pieces must all seek to the only real source timestamp",
+  );
+  assert.ok(
+    groups.every((group) => transcriptEntrySeekSeconds(group, true) === 10),
+    "Chinese display and click must keep that source timestamp",
   );
 });
 

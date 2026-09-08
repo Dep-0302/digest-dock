@@ -459,7 +459,7 @@ let activeExportJobId = "";
 let currentPersistedNoteSource = null;
 const TRANSLATION_MESSAGE_TIMEOUT_MS = 130_000;
 const NOTES_MANUAL_RETRY_DEBOUNCE_MS = 400;
-const NOTE_TRANSLATION_VALIDATION_VERSION = 1;
+const NOTE_TRANSLATION_VALIDATION_VERSION = 2;
 const NOTE_TITLE_TRANSLATION_VALIDATION_VERSION = 1;
 const TRANSCRIPT_TRANSLATION_CACHE_VERSION = 2;
 const TRANSCRIPT_SOURCE_POLICY_VERSION = 5;
@@ -1505,6 +1505,21 @@ function groupTranscriptEntries(entries, limits = TRANSCRIPT_SEGMENT_LIMITS) {
   flush();
 
   return grouped;
+}
+
+function transcriptEntrySeekSeconds(segment, preserveSourceCueStart) {
+  return preserveSourceCueStart
+    ? Number(segment?.seekStart ?? segment?.start) || 0
+    : Number(segment?.start) || 0;
+}
+
+function preserveTranscriptSourceCueStart(platform, language) {
+  const primaryLanguage = String(language || "")
+    .trim()
+    .replace(/_/g, "-")
+    .toLowerCase()
+    .split("-")[0];
+  return platform !== "youtube" || primaryLanguage !== "en";
 }
 
 // ============================================================
@@ -4166,14 +4181,22 @@ function renderTranscript() {
   const grouped = groupTranscriptEntries(currentTranscript);
   const originalIsChinese =
     currentPlatformIsBilibili() || currentVideoIsChinese();
+  const preserveSourceCueStart = preserveTranscriptSourceCueStart(
+    currentPlatformIsBilibili() ? "bilibili" : "youtube",
+    currentTranscriptLanguage,
+  );
 
   grouped.forEach((group) => {
     const div = document.createElement("div");
     div.className = "transcript-entry";
     div.dataset.seconds = group.start;
+    const seekSeconds = transcriptEntrySeekSeconds(
+      group,
+      preserveSourceCueStart,
+    );
 
     div.innerHTML = `
-      ${transcriptTimeCellMarkup(group.seekStart ?? group.start)}
+      ${transcriptTimeCellMarkup(seekSeconds)}
       <span class="transcript-text">${
         originalIsChinese
           ? renderTranscriptVisualFragments(group.texts)
@@ -4181,7 +4204,7 @@ function renderTranscript() {
       }</span>
     `;
 
-    attachTranscriptTimeSeek(div, group.seekStart ?? group.start);
+    attachTranscriptTimeSeek(div, seekSeconds);
     transcriptList.appendChild(div);
   });
 
@@ -8391,22 +8414,58 @@ function noteOriginalText(note) {
   return rawText || String(note?.text || "").trim();
 }
 
-function noteTextForChineseGeneration(note) {
+function notePolishedText(note) {
+  const cleanedText = String(note?.text || "").trim();
+  if (!cleanedText) return noteOriginalText(note);
+
+  // Older Chinese notes did not record which language `text` represents.
+  // Keep their trusted verbatim fallback; newly cleaned Chinese notes carry a
+  // textLanguage, while non-Chinese cleanup has always lived in `text`.
   const textLanguage = normalizeLanguageCode(note?.textLanguage);
   if (
-    note?.platform === "bilibili" &&
-    textLanguage &&
-    isChineseLanguage(textLanguage) &&
-    !isConfirmedSimplifiedChineseSource(textLanguage)
+    !textLanguage &&
+    (isChineseLanguage(note?.sourceLanguage) ||
+      looksLikeLegacyChineseNote(noteOriginalText(note)))
   ) {
-    const cleanedText = String(note?.text || "").trim();
-    if (cleanedText) return cleanedText;
+    return noteOriginalText(note);
   }
-  return noteOriginalText(note);
+  return cleanedText;
+}
+
+function noteTextForChineseGeneration(note) {
+  return notePolishedText(note);
+}
+
+function noteSourceTextForMode(note, mode) {
+  return mode === "original" ? noteOriginalText(note) : notePolishedText(note);
 }
 
 function canonicalStoredNoteText(text) {
   return String(text || "").normalize("NFKC").trim().replace(/\s+/g, " ");
+}
+
+function noteTranslationUsesCurrentSource(note) {
+  if (note?.translatedValidationVersion === NOTE_TRANSLATION_VALIDATION_VERSION) {
+    return true;
+  }
+  if (note?.translatedValidationVersion !== 1) return false;
+
+  const storedText = canonicalStoredNoteText(note?.text);
+  const rawText = canonicalStoredNoteText(noteOriginalText(note));
+  if (!storedText || storedText === rawText) return true;
+  if (
+    note?.translatedUnchanged === true &&
+    canonicalStoredNoteText(note?.translatedText) === storedText
+  ) {
+    return true;
+  }
+
+  const textLanguage = normalizeLanguageCode(note?.textLanguage);
+  return Boolean(
+    note?.platform === "bilibili" &&
+      isChineseLanguage(textLanguage) &&
+      !isConfirmedSimplifiedChineseSource(textLanguage),
+  );
 }
 
 function looksLikeLegacyChineseNote(text) {
@@ -8424,16 +8483,17 @@ function noteChineseText(note) {
   if (!translated) return "";
   if (
     note?.translatedValidated === true &&
-    note?.translatedValidationVersion === NOTE_TRANSLATION_VALIDATION_VERSION
+    noteTranslationUsesCurrentSource(note)
   ) {
     if (note?.translatedUnchanged === true) {
       return canonicalStoredNoteText(translated) ===
-        canonicalStoredNoteText(noteOriginalText(note))
+        canonicalStoredNoteText(notePolishedText(note))
         ? translated
         : "";
     }
     return translated;
   }
+  if (note?.translatedValidated === true) return "";
   return looksLikeLegacyChineseNote(translated) ? translated : "";
 }
 
@@ -8599,7 +8659,7 @@ function notePlatformLabel(note) {
 function renderNoteLanguageContent(note, mode = currentNotesMode) {
   const originalIsChinese = noteHasChineseSource(note);
   return YTD_NOTE_EXPORT.localizedSegments(
-    noteOriginalText(note),
+    noteSourceTextForMode(note, mode),
     noteChineseText(note),
     mode,
   )
@@ -8617,7 +8677,7 @@ function renderNoteLanguageContent(note, mode = currentNotesMode) {
 
 function noteCopyTextForMode(note, mode = currentNotesMode) {
   return YTD_NOTE_EXPORT.localizedPlainText(
-    noteOriginalText(note),
+    noteSourceTextForMode(note, mode),
     noteChineseText(note),
     mode,
   );
@@ -9990,6 +10050,10 @@ function renderTranscriptModeRows(segments, mode) {
   transcriptList.innerHTML = "";
 
   renderTranscriptTranslationBadge(mode);
+  const preserveSourceCueStart = preserveTranscriptSourceCueStart(
+    currentPlatformIsBilibili() ? "bilibili" : "youtube",
+    currentTranscriptLanguage,
+  );
 
   const rows = [];
   segments.forEach((segment, index) => {
@@ -10002,11 +10066,15 @@ function renderTranscriptModeRows(segments, mode) {
     div.dataset.segmentId = segment.id;
     div.dataset.segmentIndex = index;
 
+    const seekSeconds = transcriptEntrySeekSeconds(
+      segment,
+      preserveSourceCueStart,
+    );
     div.innerHTML = `
-      ${transcriptTimeCellMarkup(segment.seekStart ?? segment.start)}
+      ${transcriptTimeCellMarkup(seekSeconds)}
       ${renderTranscriptSegmentContent(segment, mode, cached, "")}
     `;
-    attachTranscriptTimeSeek(div, segment.seekStart ?? segment.start);
+    attachTranscriptTimeSeek(div, seekSeconds);
     transcriptList.appendChild(div);
     rows.push(div);
   });

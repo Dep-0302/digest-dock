@@ -87,9 +87,11 @@ function loadBackground({
   scriptingExecuteScript,
   storageLocalGet,
   pageSnapshotOptions = {},
+  pageSnapshotRun,
   bilibiliAdapterImpl = bilibiliAdapter,
   setTimeoutImpl = setTimeout,
   clearTimeoutImpl = clearTimeout,
+  nowImpl = Date.now,
 } = {}) {
   const counts = {
     activeInject: 0,
@@ -142,14 +144,23 @@ function loadBackground({
         },
       ];
     }
+    if (typeof pageSnapshotRun === "function") {
+      return pageSnapshotRun(details, pageSnapshotOptions);
+    }
     return pageSnapshot(
       tabVideoIds.get(details.target?.tabId) || VIDEO_ID,
       pageSnapshotOptions,
     );
   };
 
+  const SandboxDate = class extends Date {
+    static now() {
+      return nowImpl();
+    }
+  };
   const sandbox = {
     console,
+    Date: SandboxDate,
     URL,
     TextDecoder,
     TextEncoder,
@@ -280,11 +291,14 @@ function nativeOptions(
 
 function createManualTimers() {
   const timers = new Map();
+  const scheduledDelays = [];
   let nextId = 1;
+  let now = 0;
   return {
     setTimeout(callback, delay) {
       const id = nextId++;
       timers.set(id, { callback, delay });
+      scheduledDelays.push(delay);
       return id;
     },
     clearTimeout(id) {
@@ -293,9 +307,16 @@ function createManualTimers() {
     delays() {
       return [...timers.values()].map((timer) => timer.delay);
     },
+    scheduledDelays() {
+      return [...scheduledDelays];
+    },
+    now() {
+      return now;
+    },
     runAll() {
       for (const [id, timer] of [...timers]) {
         timers.delete(id);
+        now += timer.delay;
         timer.callback();
       }
     },
@@ -845,6 +866,82 @@ test("an empty Passive gate enters Active without arming the 1.5 second wait", a
   assert.equal(result.source, "youtube-active");
 });
 
+test("a Passive capture arriving during the page snapshot wins before Active starts", async () => {
+  let releaseSnapshot;
+  let markSnapshotStarted;
+  const snapshotStarted = new Promise((resolve) => {
+    markSnapshotStarted = resolve;
+  });
+  const snapshotGate = new Promise((resolve) => {
+    releaseSnapshot = resolve;
+  });
+  const worker = loadBackground({
+    pageSnapshotOptions: {
+      captionTrackCountKnown: true,
+      captionTrackCount: 1,
+      availableTracks: [{ language: "en", kind: "manual" }],
+      pageDefaultTrack: { language: "en", kind: "manual" },
+    },
+    pageSnapshotRun: async (_details, options) => {
+      markSnapshotStarted();
+      await snapshotGate;
+      return pageSnapshot(VIDEO_ID, options);
+    },
+    activeResult: transcriptResult("must not start"),
+  });
+
+  const pending = worker.helpers.handleFetchYoutubeNativeTranscript(
+    VIDEO_ID,
+    "en",
+    1,
+    nativeOptions("snapshot-race"),
+  );
+  await snapshotStarted;
+  assert.equal(
+    worker.counts.activeRun,
+    0,
+    "the route is still reading the page track snapshot",
+  );
+
+  await worker.dispatch(
+    {
+      action: "youtubePassiveState",
+      payload: {
+        type: "inflight",
+        videoId: VIDEO_ID,
+        language: "en",
+        kind: "manual",
+        status: 0,
+        inFlight: true,
+      },
+    },
+    { tab: { id: 1 } },
+  );
+  await worker.dispatch(
+    {
+      action: "youtubePassiveState",
+      payload: {
+        type: "capture",
+        videoId: VIDEO_ID,
+        language: "en",
+        kind: "manual",
+        status: 200,
+        inFlight: false,
+        body: json3Body("captured during page snapshot"),
+      },
+    },
+    { tab: { id: 1 } },
+  );
+  releaseSnapshot();
+
+  const result = await pending;
+  assert.equal(result.success, true);
+  assert.equal(result.source, "youtube-passive");
+  assert.equal(result.transcript[0].text, "captured during page snapshot");
+  assert.equal(worker.counts.activeInject, 0);
+  assert.equal(worker.counts.activeRun, 0);
+});
+
 test("an in-flight Passive response waits once and wins before the CC prompt", async () => {
   const timers = createManualTimers();
   const worker = loadBackground({
@@ -895,6 +992,52 @@ test("an in-flight Passive response waits once and wins before the CC prompt", a
   assert.equal(result.transcript[0].text, "arrived while waiting");
   assert.equal(worker.counts.activeRun, 0);
   assert.deepEqual(timers.delays(), []);
+});
+
+test("two Passive gate checks share one total 1.5 second deadline", async () => {
+  const timers = createManualTimers();
+  const worker = loadBackground({
+    setTimeoutImpl: timers.setTimeout,
+    clearTimeoutImpl: timers.clearTimeout,
+    nowImpl: timers.now,
+    pageSnapshotOptions: {
+      captionTrackCountKnown: true,
+      captionTrackCount: 1,
+      availableTracks: [{ language: "en", kind: "manual" }],
+      pageDefaultTrack: { language: "en", kind: "manual" },
+    },
+    activeResult: transcriptResult("active after one Passive budget"),
+  });
+  await worker.dispatch(
+    {
+      action: "youtubePassiveState",
+      payload: {
+        type: "inflight",
+        videoId: VIDEO_ID,
+        language: "en",
+        kind: "manual",
+        status: 0,
+        inFlight: true,
+      },
+    },
+    { tab: { id: 1 } },
+  );
+
+  const pending = worker.helpers.handleFetchYoutubeNativeTranscript(
+    VIDEO_ID,
+    "en",
+    1,
+    nativeOptions("one-total-budget"),
+  );
+  await flushTurns();
+  assert.deepEqual(timers.delays(), [1_500]);
+  timers.runAll();
+  const result = await pending;
+
+  assert.equal(result.success, true);
+  assert.equal(result.source, "youtube-active");
+  assert.equal(worker.counts.activeRun, 1);
+  assert.deepEqual(timers.scheduledDelays(), [1_500]);
 });
 
 test("URL updates preserve the current video's Passive capture and clear only old video identities", async () => {

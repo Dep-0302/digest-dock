@@ -8974,6 +8974,9 @@ test("English and Bilibili notes translate from cleaned text while legacy notes 
           textLanguage: "",
           rawText: "second reason I lied is much more",
           text: "And the second reason I lied is much more important, because right now, you could expose my lie.",
+          translatedText: "我撒谎的第二个原因重要得多",
+          translatedValidated: true,
+          translatedValidationVersion: 1,
         },
         {
           id: "note_traditional_cleaned",
@@ -12039,7 +12042,7 @@ test("a valid one-character stored Chinese note is reused without an API call", 
   assert.equal(apiCalls, 0);
   assert.equal(result.translations[0].textZh, "好");
   assert.equal(storedNotes[0].translatedValidated, true);
-  assert.equal(storedNotes[0].translatedValidationVersion, 1);
+  assert.equal(storedNotes[0].translatedValidationVersion, 2);
 });
 
 test("a unique singleton retry safely recovers a model-modified note ID", async () => {

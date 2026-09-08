@@ -1379,28 +1379,29 @@ async function readYoutubePassiveGate(request) {
   };
 }
 
-async function awaitYoutubePassiveGate(request) {
-  const startedAt = Date.now();
-  while (true) {
-    let gate = await readYoutubePassiveGate(request);
-    if (gate.capture) return gate.capture;
-    const remaining = YOUTUBE_PASSIVE_WAIT_MS - (Date.now() - startedAt);
+async function awaitYoutubePassiveGate(
+  request,
+  deadlineAt = Date.now() + YOUTUBE_PASSIVE_WAIT_MS,
+) {
+  let gate = await readYoutubePassiveGate(request);
+  // A completed page capture always wins. The bounded wait is reserved for a
+  // page request we have actually observed in flight; an empty buffer falls
+  // through immediately to the existing Active route instead of adding a
+  // guaranteed 1.5 seconds to every cold YouTube load.
+  if (gate.capture || !gate.inFlight) return gate.capture;
+  while (gate.inFlight) {
+    const remaining = deadlineAt - Date.now();
     if (remaining <= 0) return null;
     const observedRevision = youtubePassiveRevision;
-    // Re-read before sleeping: if the first inflight/capture signal arrived
-    // between the previous read and waiter registration, the revision check
-    // resolves immediately. An initially empty buffer receives the same single
-    // bounded budget; it never starts a page request and never waits beyond the
-    // existing 1.5 second total.
+    // Re-read before sleeping: if a capture arrived between the previous read
+    // and waiter registration, the revision check resolves immediately.
     gate = await readYoutubePassiveGate(request);
-    if (gate.capture) return gate.capture;
+    if (gate.capture || !gate.inFlight) return gate.capture;
     await waitForYoutubePassiveChange(remaining, observedRevision);
     gate = await readYoutubePassiveGate(request);
     if (gate.capture) return gate.capture;
-    // No revision means the bounded waiter expired. A revision without a
-    // capture loops only for the time still left in the original total budget.
-    if (youtubePassiveRevision === observedRevision) return null;
   }
+  return null;
 }
 
 // ============================================================
@@ -3584,7 +3585,8 @@ async function handleFetchYoutubeNativeTranscript(
     );
   }
 
-  const passive = await awaitYoutubePassiveGate(request);
+  const passiveDeadlineAt = Date.now() + YOUTUBE_PASSIVE_WAIT_MS;
+  const passive = await awaitYoutubePassiveGate(request, passiveDeadlineAt);
   if (!(await requestStillCurrent())) {
     return withYoutubeRouteIdentity(
       {
@@ -3684,6 +3686,28 @@ async function handleFetchYoutubeNativeTranscript(
     );
   }
   request.pageCaptionEvidence = pageCaptionEvidence;
+
+  // The page may begin its own caption request while we read the track list.
+  // Recheck once immediately before Active: an empty gate still adds no wait,
+  // while a newly observed in-flight Passive request keeps the routes
+  // sequential and may win within the existing bounded budget.
+  const passiveBeforeActive = await awaitYoutubePassiveGate(
+    request,
+    passiveDeadlineAt,
+  );
+  if (!(await requestStillCurrent())) {
+    return withYoutubeRouteIdentity(
+      {
+        ...pageContextChangedResult(),
+        routeOutcome: "PAGE_CONTEXT_CHANGED",
+        supadataEligible: false,
+      },
+      routeIdentity,
+    );
+  }
+  if (passiveBeforeActive?.success) {
+    return withYoutubeRouteIdentity(passiveBeforeActive, routeIdentity);
+  }
 
   const cooldownUntil = await readYoutubeNativeCooldownUntil();
   if (Date.now() < cooldownUntil) {
@@ -9497,10 +9521,34 @@ let noteTranslationCooldownUntil = 0;
 const NOTE_TRANSLATION_MAX_PROVIDER_CALLS = 5;
 const NOTE_TRANSLATION_RATE_LIMIT_BACKOFF_MS = 1_000;
 const NOTE_TRANSLATION_RATE_LIMIT_COOLDOWN_MS = 5_000;
-const NOTE_TRANSLATION_VALIDATION_VERSION = 1;
+const NOTE_TRANSLATION_VALIDATION_VERSION = 2;
 const NOTE_TITLE_TRANSLATION_VALIDATION_VERSION = 1;
 const NOTE_TITLE_MEDIA_KEY_PATTERN = /^[A-Za-z0-9:_-]{1,64}$/;
 const NOTE_TITLE_TRANSLATION_MAX_TITLES = 10;
+
+function noteTranslationUsesCurrentSource(note) {
+  if (note?.translatedValidationVersion === NOTE_TRANSLATION_VALIDATION_VERSION) {
+    return true;
+  }
+  if (note?.translatedValidationVersion !== 1) return false;
+
+  const storedText = canonicalNoteText(note?.text);
+  const rawText = canonicalNoteText(note?.rawText || note?.text);
+  if (!storedText || storedText === rawText) return true;
+  if (
+    note?.translatedUnchanged === true &&
+    canonicalNoteText(note?.translatedText) === storedText
+  ) {
+    return true;
+  }
+
+  const textLanguage = normalizeLanguageCode(note?.textLanguage);
+  return Boolean(
+    note?.platform === "bilibili" &&
+      isChineseLanguage(textLanguage) &&
+      !isConfirmedSimplifiedChineseSource(textLanguage),
+  );
+}
 
 function noteFailureCode(result, fallback = "PROVIDER_ERROR") {
   if (EXPORT_SOURCE_SAFE_ERROR_CODES.has(result?.code)) return result.code;
@@ -10191,8 +10239,7 @@ async function runTranslateNoteBodies(notes, job) {
       let validated;
       if (
         note.translatedValidated === true &&
-        note.translatedValidationVersion ===
-          NOTE_TRANSLATION_VALIDATION_VERSION
+        noteTranslationUsesCurrentSource(note)
       ) {
         const unchangedValid =
           note.translatedUnchanged !== true ||
@@ -10204,11 +10251,13 @@ async function runTranslateNoteBodies(notes, job) {
               unchanged: note.translatedUnchanged === true,
             }
           : { textZh: "", unchanged: false };
-      } else {
+      } else if (note.translatedValidated !== true) {
         validated = validateNoteTranslationCandidate(
           { textZh: note.translatedText },
           { text: sourceText, videoTitle: note.videoTitle || "" },
         );
+      } else {
+        validated = { textZh: "", unchanged: false };
       }
       if (validated.textZh) {
         storedTranslationById.set(note.id, {

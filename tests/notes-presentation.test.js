@@ -234,7 +234,7 @@ test("English bilingual notes use the polished text while original stays verbati
     text: polishedText,
     translatedText,
     translatedValidated: true,
-    translatedValidationVersion: 1,
+    translatedValidationVersion: 2,
   };
 
   const original = helpers.renderNoteLanguageContent(note, "original");
@@ -267,6 +267,25 @@ test("English bilingual notes use the polished text while original stays verbati
   );
   assert.match(txt, new RegExp(rawText));
   assert.doesNotMatch(txt, /And the second reason/);
+});
+
+test("unmarked legacy Chinese notes keep the verbatim text in bilingual mode", () => {
+  const { helpers } = loadRuntime();
+  const note = {
+    platform: "youtube",
+    sourceLanguage: "",
+    textLanguage: "",
+    rawText: "这是旧笔记的逐字原文。",
+    text: "旧字段里无法证明来源的改写。",
+  };
+
+  const bilingual = helpers.renderNoteLanguageContent(note, "bilingual");
+  assert.match(bilingual, /这是旧笔记的逐字原文。/);
+  assert.doesNotMatch(bilingual, /无法证明来源的改写/);
+  assert.equal(
+    helpers.noteCopyTextForMode(note, "bilingual"),
+    "这是旧笔记的逐字原文。",
+  );
 });
 
 test("trusted Chinese rawText stays original in display and TXT export", () => {
