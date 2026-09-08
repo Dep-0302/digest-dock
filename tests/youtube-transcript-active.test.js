@@ -88,7 +88,22 @@ test("repeated product injection reuses the same cancellable Active instance", (
   const first = sandbox.DIGESTDOCK_YOUTUBE_ACTIVE;
   vm.runInNewContext(source, sandbox);
   assert.equal(sandbox.DIGESTDOCK_YOUTUBE_ACTIVE, first);
-  assert.equal(first.apiVersion, 1);
+  assert.equal(first.apiVersion, 2);
+});
+
+test("a stale v1 Active global is replaced before word-timing results are cached", () => {
+  const source = fs.readFileSync(
+    path.join(__dirname, "..", "youtube-transcript-active.js"),
+    "utf8",
+  );
+  const legacy = { apiVersion: 1, run() {} };
+  const sandbox = { URL, TextEncoder, TextDecoder, DIGESTDOCK_YOUTUBE_ACTIVE: legacy };
+  sandbox.globalThis = sandbox;
+
+  vm.runInNewContext(source, sandbox);
+
+  assert.notEqual(sandbox.DIGESTDOCK_YOUTUBE_ACTIVE, legacy);
+  assert.equal(sandbox.DIGESTDOCK_YOUTUBE_ACTIVE.apiVersion, 2);
 });
 
 test("returns the frozen product contract after a typical 1 + 1 manual success", async () => {
@@ -143,6 +158,78 @@ test("returns the frozen product contract after a typical 1 + 1 manual success",
   });
   const serialized = JSON.stringify(result);
   assert.doesNotMatch(serialized, /never-persist-this|\/api\/timedtext\?/);
+});
+
+test("preserves bounded JSON3 word timing without changing cue text or boundaries", async () => {
+  const captionBody = JSON.stringify({
+    events: [
+      {
+        tStartMs: 62_040,
+        dDurationMs: 6_120,
+        segs: [
+          { utf8: "beginning ", tOffsetMs: 0 },
+          { utf8: "to ", tOffsetMs: 420 },
+          { utf8: "forget. ", tOffsetMs: 920 },
+          { utf8: "The ", tOffsetMs: 1_480 },
+          { utf8: "absence of AI", tOffsetMs: 2_100 },
+        ],
+      },
+    ],
+  });
+  const result = await active.run(
+    { videoId: VIDEO_ID, language: "en", trackKind: "manual" },
+    {
+      fetchImpl: async (url) =>
+        String(url).includes("/youtubei/v1/player")
+          ? response(playerBody([manualTrack()]))
+          : response(captionBody),
+    },
+  );
+
+  assert.equal(result.status, "HAVE_TRANSCRIPT");
+  assert.equal(result.transcript.length, 1);
+  assert.equal(
+    result.transcript[0].text,
+    "beginning to forget. The absence of AI",
+  );
+  assert.equal(result.transcript[0].start, 62.04);
+  assert.equal(result.transcript[0].duration, 6.12);
+  assert.deepEqual(result.transcript[0].timingPoints, [
+    { charIndex: 0, start: 62.04 },
+    { charIndex: 10, start: 62.46 },
+    { charIndex: 13, start: 62.96 },
+    { charIndex: 21, start: 63.52 },
+    { charIndex: 25, start: 64.14 },
+  ]);
+});
+
+test("fails closed on an invalid JSON3 timing-point set", async () => {
+  const captionBody = JSON.stringify({
+    events: [
+      {
+        tStartMs: 10_000,
+        dDurationMs: 2_000,
+        segs: [
+          { utf8: "Alpha ", tOffsetMs: -10 },
+          { utf8: "beta ", tOffsetMs: 1_400 },
+          { utf8: "gamma ", tOffsetMs: 900 },
+          { utf8: "delta", tOffsetMs: 4_000 },
+        ],
+      },
+    ],
+  });
+  const result = await active.run(
+    { videoId: VIDEO_ID, language: "en", trackKind: "manual" },
+    {
+      fetchImpl: async (url) =>
+        String(url).includes("/youtubei/v1/player")
+          ? response(playerBody([manualTrack()]))
+          : response(captionBody),
+    },
+  );
+
+  assert.equal(result.status, "HAVE_TRANSCRIPT");
+  assert.equal(result.transcript[0].timingPoints, undefined);
 });
 
 test("selects an ASR track without silently crossing the requested kind", async () => {

@@ -8,7 +8,7 @@ This version also supports standard `www.bilibili.com/video/BV...` pages with an
 
 The main workflow is intentionally small:
 
-- Read and search the timestamped source transcript.
+- Read the timestamped source transcript.
 - Switch between the original transcript, Simplified Chinese, and an aligned bilingual view.
 - Generate a chapter-based overview, inspect key quotes, and explain selected text.
 - Jump back to the video from transcript rows, overview chapters, or saved notes.
@@ -136,7 +136,7 @@ To restore on another device or Chrome profile:
 
 The JSON file contains backup-format metadata and saved note records only, including their stored original/English and Simplified Chinese content and the validated YouTube or Bilibili media identity and timestamp details needed to restore them. It does not contain API keys, extension settings, complete transcripts or transcript caches, or overview and summary caches. Source text already saved inside an individual note remains part of that note record. Exporting and importing use only the downloaded file and Chrome's local extension storage; these actions do not send the backup to Bilibili, Supadata, DeepSeek, or any other network service.
 
-Import merges the backup with notes already on the device and skips duplicates. If a matching note is missing stored content, the import may fill that content from the backup. If the same note ID has conflicting content, or the merged result would exceed the 100-note limit, the entire import is rejected. Invalid, unsupported, oversized, or otherwise failed imports do not change the notes already stored on the device.
+Import merges the backup with notes already on the device and skips duplicates. If a matching note is missing stored content, the import may fill that content from the backup. DigestDock has no fixed note-count limit. If the same note ID has conflicting content, or the resulting recovery backup would exceed the 32 MiB capacity guard, the entire import is rejected. New saves use the same capacity guard. Invalid, unsupported, oversized, or otherwise failed imports do not change the notes already stored on the device.
 
 Backup files are plain, unencrypted JSON and may contain personal notes. Store and share them accordingly. Removing the extension or clearing its local data does not delete a previously downloaded backup file; delete that file separately when you no longer need it.
 

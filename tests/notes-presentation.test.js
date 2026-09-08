@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
+const noteExport = require("../note-export.js");
 
 const root = path.resolve(__dirname, "..");
 const read = (file) => fs.readFileSync(path.join(root, file), "utf8");
@@ -178,4 +179,146 @@ test("source metadata shows channel, platform and note count", () => {
     "B 站 · 1 条笔记",
     "missing channel is omitted, not rendered blank",
   );
+});
+
+// --- Phase 0: "original" must be the verbatim caption line ------------------
+
+test("original mode returns the verbatim caption line, not the AI cleanup", () => {
+  const { helpers } = loadRuntime();
+
+  // `text` is what cleanupNoteText() produced; `rawText` is the caption as it
+  // was actually spoken. Recall depends on the verbatim line, so it wins.
+  const note = {
+    rawText: "we shipped it on a Friday and it broke",
+    text: "We shipped the release on a Friday, and it broke.",
+  };
+
+  assert.equal(
+    helpers.noteOriginalText(note),
+    "we shipped it on a Friday and it broke",
+  );
+});
+
+test("original mode falls back to text for legacy notes without rawText", () => {
+  const { helpers } = loadRuntime();
+
+  assert.equal(
+    helpers.noteOriginalText({ text: "A note saved before rawText existed." }),
+    "A note saved before rawText existed.",
+  );
+  assert.equal(
+    helpers.noteOriginalText({ rawText: "", text: "Empty rawText falls back." }),
+    "Empty rawText falls back.",
+  );
+  assert.equal(
+    helpers.noteOriginalText({
+      rawText: "   ",
+      text: "Blank rawText falls back.",
+    }),
+    "Blank rawText falls back.",
+  );
+});
+
+test("English bilingual notes use the polished text while original stays verbatim", () => {
+  const { helpers } = loadRuntime();
+  const rawText = "second reason I lied is much more";
+  const polishedText =
+    "And the second reason I lied is much more important, because right now, you could expose my lie.";
+  const translatedText =
+    "而我撒谎的第二个原因重要得多，因为现在你可以揭穿我的谎言。";
+  const note = {
+    platform: "youtube",
+    sourceLanguage: "en",
+    textLanguage: "",
+    rawText,
+    text: polishedText,
+    translatedText,
+    translatedValidated: true,
+    translatedValidationVersion: 2,
+  };
+
+  const original = helpers.renderNoteLanguageContent(note, "original");
+  assert.match(original, new RegExp(`>“${rawText}”</span>`));
+  assert.doesNotMatch(original, /And the second reason/);
+  assert.equal(helpers.noteCopyTextForMode(note, "original"), rawText);
+
+  const bilingual = helpers.renderNoteLanguageContent(note, "bilingual");
+  assert.match(bilingual, /And the second reason/);
+  assert.match(bilingual, new RegExp(translatedText));
+  assert.doesNotMatch(bilingual, new RegExp(`>“${rawText}”</span>`));
+  assert.equal(
+    helpers.noteCopyTextForMode(note, "bilingual"),
+    `${polishedText}\n${translatedText}`,
+  );
+
+  const resolved = helpers.resolveNoteExportEntry(note);
+  const txt = noteExport.buildAllNotesText(
+    [
+      {
+        platform: "youtube",
+        sourceLanguage: "en",
+        titleOriginal: "People Have No Idea What’s About To Happen",
+        descriptionStatus: "confirmed-empty",
+        notes: [{ timestampSeconds: 83, ...resolved }],
+      },
+    ],
+    "original",
+    { date: "2026-09-07T00:00:00.000Z" },
+  );
+  assert.match(txt, new RegExp(rawText));
+  assert.doesNotMatch(txt, /And the second reason/);
+});
+
+test("unmarked legacy Chinese notes keep the verbatim text in bilingual mode", () => {
+  const { helpers } = loadRuntime();
+  const note = {
+    platform: "youtube",
+    sourceLanguage: "",
+    textLanguage: "",
+    rawText: "这是旧笔记的逐字原文。",
+    text: "旧字段里无法证明来源的改写。",
+  };
+
+  const bilingual = helpers.renderNoteLanguageContent(note, "bilingual");
+  assert.match(bilingual, /这是旧笔记的逐字原文。/);
+  assert.doesNotMatch(bilingual, /无法证明来源的改写/);
+  assert.equal(
+    helpers.noteCopyTextForMode(note, "bilingual"),
+    "这是旧笔记的逐字原文。",
+  );
+});
+
+test("trusted Chinese rawText stays original in display and TXT export", () => {
+  const { helpers } = loadRuntime();
+  const note = {
+    platform: "youtube",
+    sourceLanguage: "zh-CN",
+    textLanguage: "zh-CN",
+    timestampSeconds: 12,
+    rawText: "RAW: 这是字幕原话。",
+    text: "CLEANED: 这是整理后的中文正文。",
+  };
+
+  assert.equal(helpers.noteOriginalText(note), "RAW: 这是字幕原话。");
+
+  const rendered = helpers.renderNoteLanguageContent(note, "original");
+  assert.match(rendered, /RAW: 这是字幕原话。/);
+  assert.doesNotMatch(rendered, /CLEANED:/);
+
+  const resolved = helpers.resolveNoteExportEntry(note);
+  const txt = noteExport.buildAllNotesText(
+    [
+      {
+        platform: "youtube",
+        sourceLanguage: "zh-CN",
+        titleOriginal: "测试视频",
+        descriptionStatus: "confirmed-empty",
+        notes: [{ timestampSeconds: note.timestampSeconds, ...resolved }],
+      },
+    ],
+    "original",
+    { date: "2026-09-04T00:00:00.000Z" },
+  );
+  assert.match(txt, /RAW: 这是字幕原话。/);
+  assert.doesNotMatch(txt, /CLEANED:/);
 });

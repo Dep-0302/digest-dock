@@ -6,7 +6,7 @@
  */
 
 const DEBUG = false;
-const REQUIRED_RUNTIME_PROTOCOL_VERSION = 12;
+const REQUIRED_RUNTIME_PROTOCOL_VERSION = 14;
 const EXPORT_CONTENT_CONTRACT_VERSION = 4;
 const OVERVIEW_CACHE_SCHEMA_VERSION = 2;
 const ANALYSIS_TIMESTAMP_ANCHOR_VERSION = 1;
@@ -114,6 +114,281 @@ let errorAction = null;
 let errorSecondaryAction = null;
 let tabCheckGeneration = 0;
 let digestGeneration = 0;
+let extensionDataGeneration = 0;
+let extensionDataRuntimeInstanceId = "";
+let extensionDataFenceRevision = 0;
+let extensionDataResetInProgress = false;
+
+function extensionDataFenceSnapshot() {
+  return {
+    runtimeInstanceId: extensionDataRuntimeInstanceId,
+    dataGeneration: extensionDataGeneration,
+    revision: extensionDataFenceRevision,
+  };
+}
+
+function captureExtensionDataFence() {
+  const snapshot = extensionDataFenceSnapshot();
+  return !extensionDataResetInProgress &&
+    snapshot.runtimeInstanceId &&
+    Number.isSafeInteger(snapshot.dataGeneration) &&
+    snapshot.dataGeneration % 2 === 0
+    ? snapshot
+    : null;
+}
+
+function extensionDataFenceIsCurrent(token) {
+  return Boolean(
+    token &&
+      !extensionDataResetInProgress &&
+      token.revision === extensionDataFenceRevision &&
+      token.runtimeInstanceId === extensionDataRuntimeInstanceId &&
+      token.dataGeneration === extensionDataGeneration &&
+      token.dataGeneration % 2 === 0,
+  );
+}
+
+function adoptExtensionDataFence(
+  nextRuntimeInstanceId,
+  value,
+  { requestFence = null, resetNotification = false } = {},
+) {
+  const nextId = String(nextRuntimeInstanceId || "");
+  const generation = Number(value);
+  if (!nextId || !Number.isSafeInteger(generation) || generation < 0) {
+    return false;
+  }
+  if (requestFence) {
+    const localUnchanged =
+      requestFence.revision === extensionDataFenceRevision &&
+      requestFence.runtimeInstanceId === extensionDataRuntimeInstanceId &&
+      requestFence.dataGeneration === extensionDataGeneration;
+    if (!localUnchanged) return false;
+  } else if (resetNotification) {
+    // A reset-start event is the only unsolicited authority allowed to switch
+    // worker identity. Completion must belong to the worker whose start we
+    // accepted, so a delayed old completion cannot release a newer fence.
+    if (
+      generation % 2 === 0 &&
+      extensionDataRuntimeInstanceId &&
+      nextId !== extensionDataRuntimeInstanceId
+    ) {
+      return false;
+    }
+  } else if (
+    extensionDataRuntimeInstanceId &&
+    nextId !== extensionDataRuntimeInstanceId
+  ) {
+    return false;
+  }
+  if (
+    nextId !== extensionDataRuntimeInstanceId ||
+    generation !== extensionDataGeneration
+  ) {
+    extensionDataFenceRevision += 1;
+  }
+  extensionDataRuntimeInstanceId = nextId;
+  extensionDataGeneration = generation;
+  extensionDataResetInProgress = generation % 2 === 1;
+  return true;
+}
+
+function extensionDataGenerationIsCurrent(expectedDataGeneration) {
+  return (
+    !extensionDataResetInProgress &&
+    Number.isSafeInteger(expectedDataGeneration) &&
+    expectedDataGeneration === extensionDataGeneration &&
+    expectedDataGeneration % 2 === 0
+  );
+}
+
+function assertCurrentExtensionDataGeneration(expectedDataGeneration) {
+  if (extensionDataGenerationIsCurrent(expectedDataGeneration)) return;
+  const error = new Error("扩展数据已重置，请重试。");
+  error.code = "EXTENSION_DATA_RESET";
+  throw error;
+}
+
+function assertCurrentExtensionDataFence(expectedFence) {
+  if (extensionDataFenceIsCurrent(expectedFence)) return;
+  const error = new Error("扩展后台已重启或数据已重置，请重试。");
+  error.code = "EXTENSION_DATA_RESET";
+  throw error;
+}
+
+function applyExtensionDataResetFence(runtimeInstanceId, dataGeneration) {
+  if (
+    String(runtimeInstanceId || "") === extensionDataRuntimeInstanceId &&
+    Number(dataGeneration) === extensionDataGeneration &&
+    extensionDataResetInProgress
+  ) {
+    return false;
+  }
+  if (
+    !adoptExtensionDataFence(runtimeInstanceId, dataGeneration, {
+      resetNotification: true,
+    })
+  ) {
+    return false;
+  }
+  extensionDataResetInProgress = true;
+  tabCheckGeneration += 1;
+  digestGeneration += 1;
+  translationGeneration += 1;
+  exportTranslationGeneration += 1;
+  notesLoadGeneration += 1;
+  notesTranslationGeneration += 1;
+  noteExportAuthorizationGeneration += 1;
+  activeNoteExportAuthorization = null;
+  activeExportJobId = "";
+  pendingNoteNavigation = null;
+  activeNotesOnlyContext = null;
+  currentAnalysis = null;
+  currentNotes = [];
+  currentPersistedNoteSource = null;
+  transcriptParagraphCache.clear();
+  activeTranslationQueue = null;
+  isAnalysisLoading = false;
+  isOverviewTranslationLoading = false;
+  isNotesLoading = false;
+  isNotesTranslationLoading = false;
+  if (transcriptScrollObserver) transcriptScrollObserver.disconnect();
+  transcriptScrollObserver = null;
+  sidepanelMvpTaskGate?.clear?.();
+  sidepanelMvpConsentVault?.clear?.();
+  return true;
+}
+
+function resetFailureCanRefreshWorker(result, expectedFence, adopted) {
+  return Boolean(
+    adopted &&
+      result?.success !== true &&
+      result?.code === "EXTENSION_DATA_RESET" &&
+      typeof result.runtimeInstanceId === "string" &&
+      result.runtimeInstanceId &&
+      result.runtimeInstanceId !== expectedFence?.runtimeInstanceId &&
+      Number.isSafeInteger(result.dataGeneration) &&
+      result.dataGeneration % 2 === 0,
+  );
+}
+
+async function sendResetFencedStorageMessageOnce(
+  message,
+  expectedFence,
+  allowWorkerRefreshRetry,
+) {
+  if (!extensionDataFenceIsCurrent(expectedFence)) {
+    return {
+      success: false,
+      code: "EXTENSION_DATA_RESET",
+      runtimeInstanceId: extensionDataRuntimeInstanceId,
+      dataGeneration: extensionDataGeneration,
+    };
+  }
+  const requestFence = { ...expectedFence };
+  const result = await chrome.runtime.sendMessage({
+    ...message,
+    runtimeInstanceId: requestFence.runtimeInstanceId,
+    dataGeneration: requestFence.dataGeneration,
+  });
+  const adopted = adoptExtensionDataFence(
+    result?.runtimeInstanceId,
+    result?.dataGeneration,
+    { requestFence },
+  );
+  if (
+    allowWorkerRefreshRetry &&
+    resetFailureCanRefreshWorker(result, requestFence, adopted)
+  ) {
+    const refreshedFence = captureExtensionDataFence();
+    if (
+      refreshedFence?.runtimeInstanceId === result.runtimeInstanceId &&
+      refreshedFence.dataGeneration === result.dataGeneration
+    ) {
+      Object.assign(expectedFence, refreshedFence);
+      return sendResetFencedStorageMessageOnce(
+        message,
+        refreshedFence,
+        false,
+      );
+    }
+  }
+  if (result?.success && !extensionDataFenceIsCurrent(requestFence)) {
+    return {
+      success: false,
+      code: "EXTENSION_DATA_RESET",
+      runtimeInstanceId: extensionDataRuntimeInstanceId,
+      dataGeneration: extensionDataGeneration,
+    };
+  }
+  return result;
+}
+
+function sendResetFencedStorageMessage(
+  message,
+  expectedFence = captureExtensionDataFence(),
+) {
+  return sendResetFencedStorageMessageOnce(message, expectedFence, true);
+}
+
+function sendResetFencedTranslationMessageOnce(
+  message,
+  expectedFence,
+  allowWorkerRefreshRetry,
+) {
+  if (!extensionDataFenceIsCurrent(expectedFence)) {
+    return Promise.resolve({
+      success: false,
+      code: "EXTENSION_DATA_RESET",
+      runtimeInstanceId: extensionDataRuntimeInstanceId,
+      dataGeneration: extensionDataGeneration,
+    });
+  }
+  const requestFence = { ...expectedFence };
+  return sendTranslationMessage({
+    ...message,
+    runtimeInstanceId: requestFence.runtimeInstanceId,
+    dataGeneration: requestFence.dataGeneration,
+  }).then((result) => {
+    const adopted = adoptExtensionDataFence(
+      result?.runtimeInstanceId,
+      result?.dataGeneration,
+      { requestFence },
+    );
+    if (
+      allowWorkerRefreshRetry &&
+      resetFailureCanRefreshWorker(result, requestFence, adopted)
+    ) {
+      const refreshedFence = captureExtensionDataFence();
+      if (
+        refreshedFence?.runtimeInstanceId === result.runtimeInstanceId &&
+        refreshedFence.dataGeneration === result.dataGeneration
+      ) {
+        Object.assign(expectedFence, refreshedFence);
+        return sendResetFencedTranslationMessageOnce(
+          message,
+          refreshedFence,
+          false,
+        );
+      }
+    }
+    return result?.success && !extensionDataFenceIsCurrent(requestFence)
+      ? {
+          success: false,
+          code: "EXTENSION_DATA_RESET",
+          runtimeInstanceId: extensionDataRuntimeInstanceId,
+          dataGeneration: extensionDataGeneration,
+        }
+      : result;
+  });
+}
+
+function sendResetFencedTranslationMessage(
+  message,
+  expectedFence = captureExtensionDataFence(),
+) {
+  return sendResetFencedTranslationMessageOnce(message, expectedFence, true);
+}
 
 function hasConfiguredAiService(config = currentConfigStatus) {
   return config?.hasAiKey === true;
@@ -184,10 +459,11 @@ let activeExportJobId = "";
 let currentPersistedNoteSource = null;
 const TRANSLATION_MESSAGE_TIMEOUT_MS = 130_000;
 const NOTES_MANUAL_RETRY_DEBOUNCE_MS = 400;
-const NOTE_TRANSLATION_VALIDATION_VERSION = 1;
+const NOTE_TRANSLATION_VALIDATION_VERSION = 2;
 const NOTE_TITLE_TRANSLATION_VALIDATION_VERSION = 1;
 const TRANSCRIPT_TRANSLATION_CACHE_VERSION = 2;
 const TRANSCRIPT_SOURCE_POLICY_VERSION = 5;
+const TRANSCRIPT_TIMING_CAPABILITY_VERSION = 1;
 const YOUTUBE_TRANSCRIPT_SOURCES = new Set([
   "youtube-passive",
   "youtube-active",
@@ -716,9 +992,18 @@ function renderSidepanelMvpTranscriptState() {
 }
 
 async function sidepanelMvpRefreshConfig() {
+  const requestFence = extensionDataFenceSnapshot();
   const config = await chrome.runtime.sendMessage({ action: "checkConfig" });
   if (config?.runtimeProtocolVersion === REQUIRED_RUNTIME_PROTOCOL_VERSION) {
-    currentConfigStatus = config;
+    if (
+      adoptExtensionDataFence(
+        config.runtimeInstanceId,
+        config.dataGeneration,
+        { requestFence },
+      )
+    ) {
+      currentConfigStatus = config;
+    }
   }
   return currentConfigStatus || {};
 }
@@ -986,6 +1271,7 @@ const COMPACT_CJK_SEGMENT_LIMITS = Object.freeze({
   maxChars: 120,
   maxSeconds: 12,
 });
+const MAX_TRANSCRIPT_TIMING_POINTS_PER_CUE = 512;
 const SENTENCE_PUNCTUATION_PATTERN = /[.!?;:,。！？；：，]/;
 const COMPACT_CJK_PATTERN = /[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]/g;
 
@@ -996,6 +1282,55 @@ function normalizeCaptionText(text) {
     .replace(/([，。；：！？])\s+(?=[\u3400-\u9fff])/g, "$1")
     .replace(/\s+([,.;:!?，。；：！？])/g, "$1")
     .trim();
+}
+
+function normalizeTranscriptTimingPoints(entry, text, start, duration) {
+  const points = entry?.timingPoints;
+  if (!Array.isArray(points) || !text) return [];
+  const cueEnd = start + duration;
+  const normalized = [];
+  let previousCharIndex = -1;
+  let previousStart = -1;
+
+  for (const point of points.slice(0, MAX_TRANSCRIPT_TIMING_POINTS_PER_CUE)) {
+    const charIndex = point?.charIndex;
+    const pointStart = point?.start;
+    if (
+      typeof charIndex !== "number" ||
+      !Number.isInteger(charIndex) ||
+      charIndex < 0 ||
+      charIndex >= text.length ||
+      typeof pointStart !== "number" ||
+      !Number.isFinite(pointStart) ||
+      pointStart < start ||
+      pointStart > cueEnd ||
+      charIndex <= previousCharIndex ||
+      pointStart < previousStart
+    ) {
+      return [];
+    }
+    normalized.push({ charIndex, start: pointStart });
+    previousCharIndex = charIndex;
+    previousStart = pointStart;
+  }
+  return normalized[0]?.charIndex === 0 ? normalized : [];
+}
+
+function transcriptTimingStartAt(points, charIndex) {
+  const match = points.find((point) => point.charIndex === charIndex);
+  return Number.isFinite(match?.start) ? match.start : null;
+}
+
+function transcriptRequiresTimingCapability(source, language) {
+  const primaryLanguage = String(language || "")
+    .trim()
+    .replace(/_/g, "-")
+    .toLowerCase()
+    .split("-")[0];
+  return (
+    primaryLanguage === "en" &&
+    (source === "youtube-active" || source === "youtube-passive")
+  );
 }
 
 function needsVisualChineseQuotes(text) {
@@ -1051,7 +1386,14 @@ function transcriptSegmentProfile(text, fallback = TRANSCRIPT_SEGMENT_LIMITS) {
   return compactCjk ? COMPACT_CJK_SEGMENT_LIMITS : fallback;
 }
 
-function splitCaptionPiece(text, start, duration, profile, seekStart = start) {
+function splitCaptionPiece(
+  text,
+  start,
+  duration,
+  profile,
+  seekStart = start,
+  preciseStartResolver = null,
+) {
   const normalized = normalizeCaptionText(text);
   if (!normalized) return [];
   const compactCjk = profile === COMPACT_CJK_SEGMENT_LIMITS;
@@ -1074,7 +1416,12 @@ function splitCaptionPiece(text, start, duration, profile, seekStart = start) {
   );
   const parts = splitOversizedThought(normalized, targetChars);
   let consumedChars = 0;
+  let searchFrom = 0;
   return parts.map((part) => {
+    const partCharIndex = normalized.indexOf(part, searchFrom);
+    const normalizedPartCharIndex =
+      partCharIndex >= 0 ? partCharIndex : consumedChars;
+    searchFrom = normalizedPartCharIndex + part.length;
     const startRatio = normalized.length
       ? Math.min(1, consumedChars / normalized.length)
       : 0;
@@ -1082,10 +1429,15 @@ function splitCaptionPiece(text, start, duration, profile, seekStart = start) {
     const endRatio = normalized.length
       ? Math.min(1, consumedChars / normalized.length)
       : 1;
+    const preciseSeekStart =
+      typeof preciseStartResolver === "function"
+        ? preciseStartResolver(normalizedPartCharIndex)
+        : null;
     return {
       text: part,
       start: start + duration * startRatio,
       seekStart,
+      ...(Number.isFinite(preciseSeekStart) ? { preciseSeekStart } : {}),
       end: start + duration * endRatio,
       semanticEnd:
         /[.!?。！？]["')\]”’）】」』]*$/.test(part) || parts.length > 1,
@@ -1110,6 +1462,12 @@ function groupTranscriptEntries(entries, limits = TRANSCRIPT_SEGMENT_LIMITS) {
     if (!text) return;
     const start = Number.isFinite(Number(entry.start)) ? Number(entry.start) : 0;
     const duration = Math.max(0, Number(entry.duration) || 0);
+    const timingPoints = normalizeTranscriptTimingPoints(
+      entry,
+      text,
+      start,
+      duration,
+    );
     const sentenceParts =
       text.match(/[^.!?;:,。！？；：，]+(?:[.!?;:,。！？；：，]+["')\]”’）】」』]*|$)/g) ||
       [text];
@@ -1118,6 +1476,9 @@ function groupTranscriptEntries(entries, limits = TRANSCRIPT_SEGMENT_LIMITS) {
     sentenceParts.forEach((sentencePart) => {
       const cleanPart = normalizeCaptionText(sentencePart);
       if (!cleanPart) return;
+      const foundCharIndex = text.indexOf(cleanPart, consumedChars);
+      const sentenceCharIndex =
+        foundCharIndex >= 0 ? foundCharIndex : consumedChars;
       const ratio = text.length ? Math.min(1, consumedChars / text.length) : 0;
       const sentenceDuration = text.length
         ? duration * (cleanPart.length / text.length)
@@ -1129,6 +1490,11 @@ function groupTranscriptEntries(entries, limits = TRANSCRIPT_SEGMENT_LIMITS) {
         sentenceDuration,
         profile,
         start,
+        (partCharIndex) =>
+          transcriptTimingStartAt(
+            timingPoints,
+            sentenceCharIndex + partCharIndex,
+          ),
       ).forEach((piece, partIndex) => {
         pieces.push({
           ...piece,
@@ -1154,6 +1520,9 @@ function groupTranscriptEntries(entries, limits = TRANSCRIPT_SEGMENT_LIMITS) {
       id: `segment-${index}-${Math.round(current.start * 1000)}`,
       start: current.start,
       seekStart: current.seekStart,
+      ...(Number.isFinite(current.preciseSeekStart)
+        ? { preciseSeekStart: current.preciseSeekStart }
+        : {}),
       text,
       texts: texts.length ? texts : [text],
     });
@@ -1177,6 +1546,7 @@ function groupTranscriptEntries(entries, limits = TRANSCRIPT_SEGMENT_LIMITS) {
       current = {
         start: piece.start,
         seekStart: piece.seekStart,
+        preciseSeekStart: piece.preciseSeekStart,
         end: piece.end,
         text: "",
         visualFragments: [],
@@ -1223,6 +1593,21 @@ function groupTranscriptEntries(entries, limits = TRANSCRIPT_SEGMENT_LIMITS) {
   return grouped;
 }
 
+function transcriptEntrySeekSeconds(segment, preserveSourceCueStart) {
+  return preserveSourceCueStart
+    ? Number(segment?.seekStart ?? segment?.start) || 0
+    : Number(segment?.preciseSeekStart ?? segment?.start) || 0;
+}
+
+function preserveTranscriptSourceCueStart(platform, language) {
+  const primaryLanguage = String(language || "")
+    .trim()
+    .replace(/_/g, "-")
+    .toLowerCase()
+    .split("-")[0];
+  return platform !== "youtube" || primaryLanguage !== "en";
+}
+
 // ============================================================
 // INITIALIZATION
 // ============================================================
@@ -1235,9 +1620,19 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
   await evictOldCacheEntries(20);
 
-  currentConfigStatus = await chrome.runtime.sendMessage({
+  const configRequestFence = extensionDataFenceSnapshot();
+  const initialConfig = await chrome.runtime.sendMessage({
     action: "checkConfig",
   });
+  if (
+    adoptExtensionDataFence(
+      initialConfig?.runtimeInstanceId,
+      initialConfig?.dataGeneration,
+      { requestFence: configRequestFence },
+    )
+  ) {
+    currentConfigStatus = initialConfig;
+  }
 
   if (
     currentConfigStatus?.runtimeProtocolVersion !==
@@ -1252,6 +1647,46 @@ document.addEventListener("DOMContentLoaded", async () => {
 
 // Listen for messages from the Digest button on YouTube page
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (
+    message?.action === "downloadNotesMigrationBackup" &&
+    message?.target === "sidepanel"
+  ) {
+    try {
+      const filename = String(message.filename || "").trim();
+      if (typeof message.backupText !== "string" || !filename) {
+        throw new Error("Invalid notes migration backup download");
+      }
+      downloadTextFile(message.backupText, filename, "application/json");
+      sendResponse({ success: true, filename });
+    } catch (_error) {
+      sendResponse({
+        success: false,
+        code: "NOTES_MIGRATION_BACKUP_DOWNLOAD_FAILED",
+      });
+    }
+    return false;
+  }
+  if (message.action === "extensionDataResetStarted") {
+    applyExtensionDataResetFence(
+      message.runtimeInstanceId,
+      message.dataGeneration,
+    );
+    sendResponse({ success: true });
+    return false;
+  }
+  if (message.action === "extensionDataResetCompleted") {
+    if (
+      adoptExtensionDataFence(
+        message.runtimeInstanceId,
+        message.dataGeneration,
+        { resetNotification: true },
+      )
+    ) {
+      extensionDataResetInProgress = false;
+    }
+    sendResponse({ success: true });
+    return false;
+  }
   if (message.action === "startDigestFromButton") {
     // Load the digest for the current video. Served from cache when we've
     // seen this video before (no API calls); fetched fresh otherwise.
@@ -1475,7 +1910,11 @@ function normalizeNoteNavigationState(value) {
   };
 }
 
-async function persistNoteNavigationState(state) {
+async function persistNoteNavigationState(
+  state,
+  dataFence = captureExtensionDataFence(),
+) {
+  if (!extensionDataFenceIsCurrent(dataFence)) return false;
   const normalized = normalizeNoteNavigationState(state);
   if (!normalized) return false;
   if (normalized.phase === "active") {
@@ -1485,11 +1924,19 @@ async function persistNoteNavigationState(state) {
     pendingNoteNavigation = normalized;
     activeNotesOnlyContext = null;
   }
-  const storage = noteNavigationStorage();
-  if (!storage?.set) return true;
   await queueNoteNavigationStorage(async () => {
     try {
-      await storage.set({ [NOTE_NAVIGATION_SESSION_KEY]: normalized });
+      const result = await sendResetFencedStorageMessage(
+        {
+          action: "mutateResetFencedSession",
+          operation: "set",
+          value: normalized,
+        },
+        dataFence,
+      );
+      if (!result?.success && result?.code !== "EXTENSION_DATA_RESET") {
+        throw new Error(result?.code || "SESSION_MUTATION_FAILED");
+      }
     } catch (error) {
       // The in-memory state still protects the current global panel instance.
       console.warn("[DigestDock] Could not persist note navigation:", error);
@@ -1502,17 +1949,37 @@ async function hydrateNoteNavigationState() {
   if (activeNotesOnlyContext || pendingNoteNavigation) return;
   const storage = noteNavigationStorage();
   if (!storage?.get) return;
+  const dataFence = captureExtensionDataFence();
+  if (!dataFence) return;
   await queueNoteNavigationStorage(async () => {
-    if (activeNotesOnlyContext || pendingNoteNavigation) return;
+    if (
+      activeNotesOnlyContext ||
+      pendingNoteNavigation ||
+      !extensionDataFenceIsCurrent(dataFence)
+    ) {
+      return;
+    }
     try {
       const stored = await storage.get(NOTE_NAVIGATION_SESSION_KEY);
-      if (activeNotesOnlyContext || pendingNoteNavigation) return;
+      if (
+        activeNotesOnlyContext ||
+        pendingNoteNavigation ||
+        !extensionDataFenceIsCurrent(dataFence)
+      ) {
+        return;
+      }
       const normalized = normalizeNoteNavigationState(
         stored?.[NOTE_NAVIGATION_SESSION_KEY],
       );
       if (!normalized) {
-        if (stored?.[NOTE_NAVIGATION_SESSION_KEY] && storage.remove) {
-          await storage.remove(NOTE_NAVIGATION_SESSION_KEY);
+        if (stored?.[NOTE_NAVIGATION_SESSION_KEY]) {
+          await sendResetFencedStorageMessage(
+            {
+              action: "mutateResetFencedSession",
+              operation: "remove",
+            },
+            dataFence,
+          );
         }
         return;
       }
@@ -1528,6 +1995,7 @@ async function hydrateNoteNavigationState() {
 }
 
 async function clearNoteNavigationState(expectedToken = "") {
+  const dataFence = captureExtensionDataFence();
   const token = String(expectedToken || "");
   if (
     token &&
@@ -1539,17 +2007,25 @@ async function clearNoteNavigationState(expectedToken = "") {
   activeNotesOnlyContext = null;
   pendingNoteNavigation = null;
   const storage = noteNavigationStorage();
-  if (!storage?.remove) return true;
   return queueNoteNavigationStorage(async () => {
     try {
-      if (token && storage.get) {
+      if (token && storage?.get) {
         const stored = await storage.get(NOTE_NAVIGATION_SESSION_KEY);
         const storedToken = String(
           stored?.[NOTE_NAVIGATION_SESSION_KEY]?.token || "",
         );
         if (storedToken && storedToken !== token) return false;
       }
-      await storage.remove(NOTE_NAVIGATION_SESSION_KEY);
+      const result = await sendResetFencedStorageMessage(
+        {
+          action: "mutateResetFencedSession",
+          operation: "remove",
+        },
+        dataFence,
+      );
+      if (!result?.success && result?.code !== "EXTENSION_DATA_RESET") {
+        throw new Error(result?.code || "SESSION_MUTATION_FAILED");
+      }
     } catch (error) {
       console.warn("[DigestDock] Could not clear note navigation:", error);
     }
@@ -1885,6 +2361,13 @@ function setupEventListeners() {
   document.getElementById("settingsBtn")?.addEventListener("click", () => {
     chrome.runtime.sendMessage({ action: "openOptions" });
   });
+
+  // The capacity band's recovery route: notes backup lives in Options.
+  document
+    .getElementById("notesCapacityBackup")
+    ?.addEventListener("click", () => {
+      chrome.runtime.sendMessage({ action: "openOptions" });
+    });
 
   // Transcript actions
   document
@@ -2287,8 +2770,7 @@ function resetDigestStateForVideo(videoId, videoUrl, mediaRef, routeKey) {
   currentPersistedNoteSource = null;
   activeExportJobId = "";
   if (previousExportJobId) {
-    chrome.runtime
-      .sendMessage({
+    sendResetFencedStorageMessage({
         action: "cancelExportTranslationJob",
         jobId: previousExportJobId,
       })
@@ -2305,17 +2787,19 @@ async function captureNotesOnlyMetadata(
   locator,
   { requireActiveContext = true } = {},
 ) {
+  const dataFence = captureExtensionDataFence();
   if (!context?.captureMetadata || !noteNavigationMatches(context, tab, locator)) {
     return null;
   }
   return runMetadataCaptureSingleFlight(context.token, async () => {
     const ownsCapture = () =>
-      requireActiveContext
+      extensionDataFenceIsCurrent(dataFence) &&
+      (requireActiveContext
         ? activeNotesOnlyContext?.token === context.token &&
           isActiveNotesOnlyContext()
         : currentVideoId === context.mediaKey &&
           videoTabId === context.tabId &&
-          currentRouteKey === context.routeKey;
+          currentRouteKey === context.routeKey);
     if (!ownsCapture()) return null;
 
     try {
@@ -2413,28 +2897,31 @@ async function captureNotesOnlyMetadata(
         metadata.sourceLanguage || context.sourceLanguage,
       );
 
-      const stored = await YTD_NOTE_SOURCES.readNoteSource(
-        chrome.storage.local,
+      const stored = await readNoteSourceFromBackground(
         context.mediaKey,
+        dataFence,
       );
       if (!ownsCapture()) return null;
-      const persisted = await upsertNoteSourceInBackground({
-        mediaKey: context.mediaKey,
-        platform: context.platform,
-        canonicalUrl: currentMediaRef.canonicalUrl || "",
-        titleOriginal: currentVideoTitle,
-        titleZh: stored?.titleZh || currentVideoTitleZh(),
-        channelName: currentChannelName,
-        descriptionOriginal: currentVideoDescription,
-        descriptionStatus: currentVideoDescriptionState,
-        descriptionTruncated: currentVideoDescriptionTruncated,
-        descriptionZh: stored?.descriptionZh || "",
-        sourceLanguage:
-          stored?.sourceLanguage || currentVideoSourceLanguage || "",
-        transcriptOriginal: stored?.transcriptOriginal || [],
-        transcriptZh: stored?.transcriptZh || [],
-        transcriptTruncated: stored?.transcriptTruncated === true,
-      });
+      const persisted = await upsertNoteSourceInBackground(
+        {
+          mediaKey: context.mediaKey,
+          platform: context.platform,
+          canonicalUrl: currentMediaRef.canonicalUrl || "",
+          titleOriginal: currentVideoTitle,
+          titleZh: stored?.titleZh || currentVideoTitleZh(),
+          channelName: currentChannelName,
+          descriptionOriginal: currentVideoDescription,
+          descriptionStatus: currentVideoDescriptionState,
+          descriptionTruncated: currentVideoDescriptionTruncated,
+          descriptionZh: stored?.descriptionZh || "",
+          sourceLanguage:
+            stored?.sourceLanguage || currentVideoSourceLanguage || "",
+          transcriptOriginal: stored?.transcriptOriginal || [],
+          transcriptZh: stored?.transcriptZh || [],
+          transcriptTruncated: stored?.transcriptTruncated === true,
+        },
+        dataFence,
+      );
       if (!ownsCapture()) return persisted;
 
       applyPersistedSourceToCurrentVideo(persisted);
@@ -2448,16 +2935,19 @@ async function captureNotesOnlyMetadata(
         currentVideoDescriptionState !== "unknown" &&
         !currentVideoDescriptionTruncated;
       if (requireActiveContext) {
-        await persistNoteNavigationState({
-          ...context,
-          phase: "active",
-          captureMetadata: !metadataComplete,
-          videoTitle: currentVideoTitle,
-          channelName: currentChannelName,
-          duration: currentVideoDuration,
-          sourceLanguage: currentVideoSourceLanguage,
-          canonicalUrl: currentMediaRef.canonicalUrl || context.canonicalUrl,
-        });
+        await persistNoteNavigationState(
+          {
+            ...context,
+            phase: "active",
+            captureMetadata: !metadataComplete,
+            videoTitle: currentVideoTitle,
+            channelName: currentChannelName,
+            duration: currentVideoDuration,
+            sourceLanguage: currentVideoSourceLanguage,
+            canonicalUrl: currentMediaRef.canonicalUrl || context.canonicalUrl,
+          },
+          dataFence,
+        );
       }
       setNoteExportStatus(
         metadataComplete
@@ -2666,12 +3156,14 @@ async function runDigestLoad(
   captionRetry = false,
   mvpOptions = {},
 ) {
+  const dataFence = captureExtensionDataFence();
   if (!isCurrentDigest(videoId, generation, routeKey)) return;
   const mvpTask = SIDEPANEL_MVP_AVAILABLE
     ? mvpOptions.mvpTask || sidepanelMvpState?.transcript?.activeTask
     : null;
   const mvpEnvelope = sidepanelMvpTaskResultEnvelope(mvpTask);
   const ownsDigestLoad = () =>
+    extensionDataFenceIsCurrent(dataFence) &&
     isCurrentDigest(videoId, generation, routeKey) &&
     (!SIDEPANEL_MVP_AVAILABLE ||
       (mvpTask && sidepanelMvpTaskGate.isCurrent(mvpEnvelope)));
@@ -2760,6 +3252,7 @@ async function runDigestLoad(
         currentTranscriptLanguage,
         currentTranscriptSource,
         currentTranscriptSelectedTrack,
+        dataFence,
       );
       if (!ownsDigestLoad()) return;
     }
@@ -3134,7 +3627,7 @@ async function runDigestLoad(
   if (currentTranscriptMode !== "original") translateTranscript();
 
   // Save transcript to cache (without analysis)
-  await saveToCache(videoId);
+  await saveToCache(videoId, dataFence);
   if (!ownsDigestLoad()) return;
 
   refreshOverviewForCurrentVideoIfVisible();
@@ -3318,6 +3811,7 @@ async function ensureOverviewOriginal() {
   }
 
   const sourceAnalysis = currentAnalysis;
+  const dataFence = captureExtensionDataFence();
   const videoId = currentVideoId;
   const generation = digestGeneration;
   const sourceLanguage = normalizeLanguageCode(sourceAnalysis.sourceLanguage);
@@ -3334,6 +3828,7 @@ async function ensureOverviewOriginal() {
   }
   let appliedAnalysis = null;
   const ownsRequest = () =>
+    extensionDataFenceIsCurrent(dataFence) &&
     isCurrentDigest(videoId, generation) &&
     (currentAnalysis === sourceAnalysis || currentAnalysis === appliedAnalysis);
   setOverviewTranslationLoading(true);
@@ -3383,8 +3878,11 @@ async function ensureOverviewOriginal() {
       currentAnalysis,
       currentTranscriptTimestamped,
       currentTranscriptLanguage,
+      currentTranscriptSource,
+      currentTranscriptSelectedTrack,
+      dataFence,
     );
-    const digestSaved = await saveToCache(videoId);
+    const digestSaved = await saveToCache(videoId, dataFence);
     if (!overviewSaved && !digestSaved) {
       setOverviewTranslationStatus(
         "概览已生成，但本地保存失败；再次打开可能会重新生成并消耗 AI 额度。",
@@ -3769,14 +4267,22 @@ function renderTranscript() {
   const grouped = groupTranscriptEntries(currentTranscript);
   const originalIsChinese =
     currentPlatformIsBilibili() || currentVideoIsChinese();
+  const preserveSourceCueStart = preserveTranscriptSourceCueStart(
+    currentPlatformIsBilibili() ? "bilibili" : "youtube",
+    currentTranscriptLanguage,
+  );
 
   grouped.forEach((group) => {
     const div = document.createElement("div");
     div.className = "transcript-entry";
-    div.dataset.seconds = group.start;
+    const seekSeconds = transcriptEntrySeekSeconds(
+      group,
+      preserveSourceCueStart,
+    );
+    div.dataset.seconds = seekSeconds;
 
     div.innerHTML = `
-      ${transcriptTimeCellMarkup(group.seekStart ?? group.start)}
+      ${transcriptTimeCellMarkup(seekSeconds)}
       <span class="transcript-text">${
         originalIsChinese
           ? renderTranscriptVisualFragments(group.texts)
@@ -3784,7 +4290,7 @@ function renderTranscript() {
       }</span>
     `;
 
-    attachTranscriptTimeSeek(div, group.seekStart ?? group.start);
+    attachTranscriptTimeSeek(div, seekSeconds);
     transcriptList.appendChild(div);
   });
 
@@ -3893,14 +4399,20 @@ function applyPersistedSourceToCurrentVideo(source) {
 }
 
 async function hydrateCurrentVideoNoteSource() {
+  const dataFence = captureExtensionDataFence();
   const key = currentVideoId || currentMediaRef?.mediaKey || "";
-  if (!key || !currentTranscript?.length) return null;
+  if (!key || !currentTranscript?.length || !dataFence) return null;
   try {
-    const source = await YTD_NOTE_SOURCES.readNoteSource(
-      chrome.storage.local,
+    const source = await readNoteSourceFromBackground(
       key,
+      dataFence,
     );
-    if (key !== currentVideoId) return null;
+    if (
+      !extensionDataFenceIsCurrent(dataFence) ||
+      key !== currentVideoId
+    ) {
+      return null;
+    }
     if (source) applyPersistedSourceToCurrentVideo(source);
     return source || null;
   } catch (error) {
@@ -3909,11 +4421,17 @@ async function hydrateCurrentVideoNoteSource() {
   }
 }
 
-async function upsertNoteSourceInBackground(source) {
-  const result = await chrome.runtime.sendMessage({
-    action: "upsertNoteSource",
-    source,
-  });
+async function upsertNoteSourceInBackground(
+  source,
+  expectedFence = captureExtensionDataFence(),
+) {
+  const result = await sendResetFencedStorageMessage(
+    {
+      action: "upsertNoteSource",
+      source,
+    },
+    expectedFence,
+  );
   if (!result?.success) {
     const error = new Error(result?.message || "视频资料保存失败。");
     error.code = result?.code || "SOURCE_WRITE_FAILED";
@@ -3924,6 +4442,59 @@ async function upsertNoteSourceInBackground(source) {
     currentPersistedNoteSource = result.source;
   }
   return result.source || source;
+}
+
+async function readNoteSourceFromBackground(
+  mediaKey,
+  expectedFence = captureExtensionDataFence(),
+) {
+  const result = await sendResetFencedStorageMessage(
+    {
+      action: "readNoteSource",
+      mediaKey,
+    },
+    expectedFence,
+  );
+  if (!result?.success) {
+    const error = new Error(result?.code || "NOTE_SOURCE_READ_FAILED");
+    error.code = result?.code || "NOTE_SOURCE_READ_FAILED";
+    throw error;
+  }
+  return result.source || null;
+}
+
+async function readAllNoteSourcesFromBackground(
+  expectedFence = captureExtensionDataFence(),
+) {
+  const result = await sendResetFencedStorageMessage(
+    { action: "readAllNoteSources" },
+    expectedFence,
+  );
+  if (!result?.success) {
+    const error = new Error(result?.code || "NOTE_SOURCE_READ_FAILED");
+    error.code = result?.code || "NOTE_SOURCE_READ_FAILED";
+    throw error;
+  }
+  return result.sources || {};
+}
+
+async function removeNoteSourcesInBackground(
+  mediaKeys,
+  expectedFence = captureExtensionDataFence(),
+) {
+  const result = await sendResetFencedStorageMessage(
+    {
+      action: "removeNoteSources",
+      mediaKeys,
+    },
+    expectedFence,
+  );
+  if (!result?.success) {
+    const error = new Error(result?.code || "NOTE_SOURCE_REMOVE_FAILED");
+    error.code = result?.code || "NOTE_SOURCE_REMOVE_FAILED";
+    throw error;
+  }
+  return result.changed === true;
 }
 
 /**
@@ -4155,10 +4726,7 @@ async function exportTranscript() {
           await exportTranscript();
           return;
         }
-        const latestSource = await YTD_NOTE_SOURCES.readNoteSource(
-          chrome.storage.local,
-          mediaKey,
-        );
+        const latestSource = await readNoteSourceFromBackground(mediaKey);
         assertFrozenExportOutcome(outcome, {
           mediaKeys: [mediaKey],
           mode,
@@ -4305,18 +4873,31 @@ function buildCurrentVideoSourceRecord() {
  * references it. Idempotent (the library no-ops when nothing changed), so it is
  * safe to call after saves, translations and cache writes.
  */
-async function persistCurrentVideoNoteSourceIfNoted() {
+async function persistCurrentVideoNoteSourceIfNoted(
+  expectedFence = captureExtensionDataFence(),
+) {
   const key = currentVideoId || currentMediaRef?.mediaKey || "";
-  if (!key) return null;
+  if (!key || !extensionDataFenceIsCurrent(expectedFence)) {
+    return null;
+  }
   try {
-    const stored = await chrome.storage.local.get("ytd_notes");
-    const notes = Array.isArray(stored.ytd_notes) ? stored.ytd_notes : [];
+    const response = await chrome.runtime.sendMessage({
+      action: "getNotes",
+      mediaKey: key,
+      videoId: key,
+    });
+    if (!extensionDataFenceIsCurrent(expectedFence)) {
+      return null;
+    }
+    const notes =
+      response?.success && Array.isArray(response.notes) ? response.notes : [];
     const hasNote = notes.some(
       (note) => String(note?.mediaKey || note?.videoId || "") === key,
     );
     if (!hasNote) return null;
     const persisted = await upsertNoteSourceInBackground(
       buildCurrentVideoSourceRecord(),
+      expectedFence,
     );
     applyPersistedSourceToCurrentVideo(persisted);
     return persisted;
@@ -4404,10 +4985,13 @@ function resolveDigestTranscriptMaterial(mediaKey, digest) {
  * ask to re-translate an already-translated title.
  */
 async function collectAllNotesExport(mediaKeys = null) {
+  const dataFence = captureExtensionDataFence();
+  assertCurrentExtensionDataFence(dataFence);
   const result = await chrome.runtime.sendMessage({
     action: "getNotes",
     videoId: null,
   });
+  assertCurrentExtensionDataFence(dataFence);
   const notes = result?.success && Array.isArray(result.notes) ? result.notes : [];
   const allGroups = sortNoteGroups(
     groupNotesBySource(notes),
@@ -4415,9 +4999,8 @@ async function collectAllNotesExport(mediaKeys = null) {
       noteVideoTitleSortKey(representative, currentNotesMode),
   );
   const groups = filterNoteGroupsByMediaKeys(allGroups, mediaKeys);
-  const storedSources = await YTD_NOTE_SOURCES.readAllSources(
-    chrome.storage.local,
-  );
+  const storedSources = await readAllNoteSourcesFromBackground(dataFence);
+  assertCurrentExtensionDataFence(dataFence);
   const sourcesByKey = {};
   for (const group of groups) {
     const rep = group.representative || group.notes[0] || {};
@@ -4428,6 +5011,7 @@ async function collectAllNotesExport(mediaKeys = null) {
       try {
         const cacheKey = `digest_${group.mediaKey}`;
         const cached = await chrome.storage.local.get(cacheKey);
+        assertCurrentExtensionDataFence(dataFence);
         const digest = cached[cacheKey];
         if (digest) {
           const backfilled = YTD_NOTE_SOURCES.sourceFromDigest(
@@ -4438,10 +5022,13 @@ async function collectAllNotesExport(mediaKeys = null) {
           if (backfilled) {
             sourcesByKey[group.mediaKey] = await upsertNoteSourceInBackground(
               backfilled,
+              dataFence,
             );
+            assertCurrentExtensionDataFence(dataFence);
           }
         }
       } catch (error) {
+        if (error?.code === "EXTENSION_DATA_RESET") throw error;
         console.error("[DigestDock] Backfill source error:", error);
       }
     }
@@ -4466,9 +5053,11 @@ async function collectAllNotesExport(mediaKeys = null) {
     source.channelName = source.channelName || rep.channelName || "";
     source.canonicalUrl = source.canonicalUrl || noteCanonicalUrl(rep);
     sourcesByKey[group.mediaKey] = sourceWasAvailable
-      ? await upsertNoteSourceInBackground(source)
+      ? await upsertNoteSourceInBackground(source, dataFence)
       : source;
+    assertCurrentExtensionDataFence(dataFence);
   }
+  assertCurrentExtensionDataFence(dataFence);
   return {
     notes: groups.flatMap((group) => group.notes),
     groups,
@@ -4664,9 +5253,20 @@ async function grantNoteExportAuthorization(
     (effectivePrecheck.hasBlocking || effectivePrecheck.hasTranslationGaps);
   let providerSnapshot = null;
   if (providerRequired) {
+    const requestFence = captureExtensionDataFence();
+    if (!requestFence) return null;
     const config = await chrome.runtime.sendMessage({ action: "checkConfig" });
     if (noteExportAuthorizationGeneration !== generation) return null;
-    currentConfigStatus = config;
+    if (
+      adoptExtensionDataFence(
+        config?.runtimeInstanceId,
+        config?.dataGeneration,
+        { requestFence },
+      )
+    ) {
+      currentConfigStatus = config;
+    }
+    if (!extensionDataFenceIsCurrent(requestFence)) return null;
     providerSnapshot = exportProviderSnapshot(config);
   }
   if (noteExportAuthorizationGeneration !== generation) return null;
@@ -4711,6 +5311,11 @@ async function validateNoteExportAuthorization(
   }
 
   if (authorization.providerRequired) {
+    const requestFence = captureExtensionDataFence();
+    if (!requestFence) {
+      revokeNoteExportAuthorization(authorization);
+      return false;
+    }
     const config = await chrome.runtime.sendMessage({ action: "checkConfig" });
     if (
       activeNoteExportAuthorization !== authorization ||
@@ -4718,7 +5323,19 @@ async function validateNoteExportAuthorization(
     ) {
       throw noteExportAuthorizationCancelledError();
     }
-    currentConfigStatus = config;
+    if (
+      adoptExtensionDataFence(
+        config?.runtimeInstanceId,
+        config?.dataGeneration,
+        { requestFence },
+      )
+    ) {
+      currentConfigStatus = config;
+    }
+    if (!extensionDataFenceIsCurrent(requestFence)) {
+      revokeNoteExportAuthorization(authorization);
+      return false;
+    }
     if (
       !sameProviderSnapshot(
         exportProviderSnapshot(config),
@@ -4842,8 +5459,10 @@ function abandonActiveExportTranslation() {
   activeExportJobId = "";
   exportTranslationGeneration += 1;
   if (jobId) {
-    chrome.runtime
-      .sendMessage({ action: "cancelExportTranslationJob", jobId })
+    sendResetFencedStorageMessage({
+      action: "cancelExportTranslationJob",
+      jobId,
+    })
       .catch(() => {});
   }
 }
@@ -4870,8 +5489,10 @@ function renderExportTranslationProgress(panel, message, generation, setStatus) 
     summary.textContent = "正在停止；已经发送的当前批次可能仍会完成，但不会继续后续批次。";
     setStatus("正在取消补译…");
     if (jobId) {
-      chrome.runtime
-        .sendMessage({ action: "cancelExportTranslationJob", jobId })
+      sendResetFencedStorageMessage({
+        action: "cancelExportTranslationJob",
+        jobId,
+      })
         .catch(() => {});
     }
   });
@@ -4974,7 +5595,7 @@ function exportJobCursor(job, additionalCompleted = []) {
   return cursor;
 }
 
-function exportRunOwner(scope, mode, generation) {
+function exportRunOwner(scope, mode, generation, dataFence) {
   return {
     scope,
     mode,
@@ -4982,12 +5603,14 @@ function exportRunOwner(scope, mode, generation) {
     videoId: currentVideoId || "",
     routeKey: currentRouteKey || "",
     digestGeneration,
+    dataFence,
   };
 }
 
 function exportRunIsCurrent(owner) {
   if (
     !owner ||
+    !extensionDataFenceIsCurrent(owner.dataFence) ||
     owner.generation !== exportTranslationGeneration ||
     owner.videoId !== (currentVideoId || "") ||
     owner.routeKey !== (currentRouteKey || "") ||
@@ -5017,12 +5640,19 @@ async function readExportJobFromBackground(jobId, { allowMissing = false } = {})
   throw exportJobError(result, "无法读取补译进度。");
 }
 
-async function checkpointExportJobInBackground(jobId, patch) {
-  const result = await chrome.runtime.sendMessage({
-    action: "checkpointExportJob",
-    jobId,
-    patch,
-  });
+async function checkpointExportJobInBackground(
+  jobId,
+  patch,
+  expectedFence = captureExtensionDataFence(),
+) {
+  const result = await sendResetFencedStorageMessage(
+    {
+      action: "checkpointExportJob",
+      jobId,
+      patch,
+    },
+    expectedFence,
+  );
   if (!result?.success || !result.job) {
     throw exportJobError(result, "无法保存补译进度。");
   }
@@ -5137,9 +5767,22 @@ function sameProviderSnapshot(left, right) {
   ].every((field) => String(left?.[field] || "") === String(right?.[field] || ""));
 }
 
-async function assertExportProviderStillCurrent(providerSnapshot) {
+async function assertExportProviderStillCurrent(
+  providerSnapshot,
+  expectedFence,
+) {
+  assertCurrentExtensionDataFence(expectedFence);
   const config = await chrome.runtime.sendMessage({ action: "checkConfig" });
-  currentConfigStatus = config;
+  if (
+    adoptExtensionDataFence(
+      config?.runtimeInstanceId,
+      config?.dataGeneration,
+      { requestFence: expectedFence },
+    )
+  ) {
+    currentConfigStatus = config;
+  }
+  assertCurrentExtensionDataFence(expectedFence);
   if (!config?.hasAiKey) {
     throw new Error("尚未配置当前 AI 服务商的 API 密钥，请先打开设置。");
   }
@@ -5157,6 +5800,7 @@ async function createOrResumeExportJobForRound({
   sourcesByKey,
   groups,
   providerSnapshot,
+  dataFence,
 }) {
   let activeIntent = intent;
   let jobId = YTD_EXPORT_JOBS.jobIdForIntent(activeIntent);
@@ -5224,22 +5868,29 @@ async function createOrResumeExportJobForRound({
       lastError: null,
     });
   }
-  const result = await chrome.runtime.sendMessage({
-    action: "createOrResumeExportJob",
-    job: candidate,
-  });
+  const result = await sendResetFencedStorageMessage(
+    {
+      action: "createOrResumeExportJob",
+      job: candidate,
+    },
+    dataFence,
+  );
   if (!result?.success || !result.job) {
     throw exportJobError(result, "无法创建或恢复补译任务。");
   }
   if (result.job.state !== "running") {
-    return checkpointExportJobInBackground(result.job.jobId, {
-      state: "running",
-      completedUnitKeys: candidate.completedUnitKeys,
-      currentBatch: null,
-      cursor: exportJobCursor(result.job, candidate.completedUnitKeys),
-      exportClaim: null,
-      lastError: null,
-    });
+    return checkpointExportJobInBackground(
+      result.job.jobId,
+      {
+        state: "running",
+        completedUnitKeys: candidate.completedUnitKeys,
+        currentBatch: null,
+        cursor: exportJobCursor(result.job, candidate.completedUnitKeys),
+        exportClaim: null,
+        lastError: null,
+      },
+      dataFence,
+    );
   }
   return result.job;
 }
@@ -5276,6 +5927,8 @@ async function runConfirmedExportTranslationRound({
     digestGeneration,
     mode,
   };
+  const roundDataFence = captureExtensionDataFence();
+  assertCurrentExtensionDataFence(roundDataFence);
   const config = await chrome.runtime.sendMessage({ action: "checkConfig" });
   assertNoteExportAuthorizationCurrent(noteAuthorization);
   const modeStillCurrent =
@@ -5290,7 +5943,16 @@ async function runConfirmedExportTranslationRound({
   ) {
     throw exportCancelledError();
   }
-  currentConfigStatus = config;
+  if (
+    adoptExtensionDataFence(
+      config?.runtimeInstanceId,
+      config?.dataGeneration,
+      { requestFence: roundDataFence },
+    )
+  ) {
+    currentConfigStatus = config;
+  }
+  assertCurrentExtensionDataFence(roundDataFence);
   if (!config?.hasAiKey) {
     throw new Error("尚未配置当前 AI 服务商的 API 密钥，请先打开设置。");
   }
@@ -5299,7 +5961,7 @@ async function runConfirmedExportTranslationRound({
   }
 
   const generation = ++exportTranslationGeneration;
-  const owner = exportRunOwner(scope, mode, generation);
+  const owner = exportRunOwner(scope, mode, generation, roundDataFence);
   const providerSnapshot = exportProviderSnapshot(config);
   if (
     expectedProviderSnapshot &&
@@ -5354,6 +6016,7 @@ async function runConfirmedExportTranslationRound({
       sourcesByKey,
       groups,
       providerSnapshot,
+      dataFence: roundDataFence,
     });
     assertNoteExportAuthorizationCurrent(noteAuthorization);
     const previousJobId = activeExportJobId;
@@ -5363,24 +6026,31 @@ async function runConfirmedExportTranslationRound({
     // cancellation path below can never leave that job running.
     assertExportRunCurrent(owner);
     if (previousJobId && previousJobId !== job.jobId) {
-      await chrome.runtime
-        .sendMessage({
+      await sendResetFencedStorageMessage(
+        {
           action: "cancelExportTranslationJob",
           jobId: previousJobId,
-        })
-        .catch(() => null);
+        },
+        roundDataFence,
+      ).catch(() => null);
     }
     showProgress("准备补译");
     for (const notes of round.noteBatches) {
       assertExportRunCurrent(owner);
-      await assertExportProviderStillCurrent(providerSnapshot);
-      const result = await sendTranslationMessage({
-        action: "translateExportNotesBatch",
-        jobId: job.jobId,
-        unitKeys: notes.map(exportNoteUnitKey),
-        notes,
-        titles: [],
-      });
+      await assertExportProviderStillCurrent(
+        providerSnapshot,
+        roundDataFence,
+      );
+      const result = await sendResetFencedTranslationMessage(
+        {
+          action: "translateExportNotesBatch",
+          jobId: job.jobId,
+          unitKeys: notes.map(exportNoteUnitKey),
+          notes,
+          titles: [],
+        },
+        roundDataFence,
+      );
       assertExportRunCurrent(owner);
       const translatedIds = new Set(
         (result?.translations || [])
@@ -5391,11 +6061,15 @@ async function runConfirmedExportTranslationRound({
         .filter((note) => translatedIds.has(String(note.id || "")))
         .map(exportNoteUnitKey);
       if (completedUnitKeys.length) {
-        job = await checkpointExportJobInBackground(job.jobId, {
-          completedUnitKeys,
-          cursor: exportJobCursor(job, completedUnitKeys),
-          lastError: null,
-        });
+        job = await checkpointExportJobInBackground(
+          job.jobId,
+          {
+            completedUnitKeys,
+            cursor: exportJobCursor(job, completedUnitKeys),
+            lastError: null,
+          },
+          roundDataFence,
+        );
       }
       if (completedUnitKeys.length !== notes.length) {
         throw new Error(result?.error || "笔记补译失败。");
@@ -5406,14 +6080,20 @@ async function runConfirmedExportTranslationRound({
 
     for (const titles of round.titleBatches) {
       assertExportRunCurrent(owner);
-      await assertExportProviderStillCurrent(providerSnapshot);
-      const result = await sendTranslationMessage({
-        action: "translateExportNotesBatch",
-        jobId: job.jobId,
-        unitKeys: titles.map(exportTitleUnitKey),
-        notes: [],
-        titles,
-      });
+      await assertExportProviderStillCurrent(
+        providerSnapshot,
+        roundDataFence,
+      );
+      const result = await sendResetFencedTranslationMessage(
+        {
+          action: "translateExportNotesBatch",
+          jobId: job.jobId,
+          unitKeys: titles.map(exportTitleUnitKey),
+          notes: [],
+          titles,
+        },
+        roundDataFence,
+      );
       assertExportRunCurrent(owner);
       const translatedKeys = new Set(
         (result?.titles || [])
@@ -5424,11 +6104,15 @@ async function runConfirmedExportTranslationRound({
         .filter((title) => translatedKeys.has(String(title.mediaKey || "")))
         .map(exportTitleUnitKey);
       if (completedUnitKeys.length) {
-        job = await checkpointExportJobInBackground(job.jobId, {
-          completedUnitKeys,
-          cursor: exportJobCursor(job, completedUnitKeys),
-          lastError: null,
-        });
+        job = await checkpointExportJobInBackground(
+          job.jobId,
+          {
+            completedUnitKeys,
+            cursor: exportJobCursor(job, completedUnitKeys),
+            lastError: null,
+          },
+          roundDataFence,
+        );
       }
       if (completedUnitKeys.length !== titles.length) {
         throw new Error(result?.error || "标题补译失败。");
@@ -5439,8 +6123,9 @@ async function runConfirmedExportTranslationRound({
 
     for (const units of round.sourceBatches) {
       assertExportRunCurrent(owner);
-      const result = await sendTranslationMessage(
+      const result = await sendResetFencedTranslationMessage(
         sourceBatchMessage(job.jobId, units),
+        roundDataFence,
       );
       assertExportRunCurrent(owner);
       if (!result?.success) {
@@ -5450,9 +6135,9 @@ async function runConfirmedExportTranslationRound({
         throw exportCancelledError();
       }
       job = await readExportJobFromBackground(job.jobId);
-      const storedSource = await YTD_NOTE_SOURCES.readNoteSource(
-        chrome.storage.local,
+      const storedSource = await readNoteSourceFromBackground(
         units[0].mediaKey,
+        roundDataFence,
       );
       assertExportRunCurrent(owner);
       if (storedSource) updateCurrentExportTranslations(storedSource);
@@ -5466,14 +6151,18 @@ async function runConfirmedExportTranslationRound({
       0,
       job.orderedUnitKeys.length - job.completedUnitKeys.length,
     );
-    job = await checkpointExportJobInBackground(job.jobId, {
-      // Final file assembly owns the ready/claim/completed transition. Keep a
-      // fully translated job paused until latest storage has been revalidated.
-      state: "paused",
-      currentBatch: null,
-      cursor: exportJobCursor(job),
-      lastError: null,
-    });
+    job = await checkpointExportJobInBackground(
+      job.jobId,
+      {
+        // Final file assembly owns the ready/claim/completed transition. Keep a
+        // fully translated job paused until latest storage has been revalidated.
+        state: "paused",
+        currentBatch: null,
+        cursor: exportJobCursor(job),
+        lastError: null,
+      },
+      roundDataFence,
+    );
     assertExportRunCurrent(owner);
     if (panel) panel.hidden = true;
     if (remainingCount) {
@@ -5492,29 +6181,34 @@ async function runConfirmedExportTranslationRound({
     };
   } catch (error) {
     if (job?.jobId && exportFlowWasCancelled(error)) {
-      await chrome.runtime
-        .sendMessage({
+      await sendResetFencedStorageMessage(
+        {
           action: "cancelExportTranslationJob",
           jobId: job.jobId,
-        })
-        .catch(() => null);
+        },
+        roundDataFence,
+      ).catch(() => null);
     }
     if (job?.jobId && !exportFlowWasCancelled(error)) {
       try {
         const latest = await readExportJobFromBackground(job.jobId);
         if (["planned", "running", "paused", "failed"].includes(latest.state)) {
-          await checkpointExportJobInBackground(job.jobId, {
-            state:
-              error?.code === "EXPORT_JOB_PROVIDER_MISMATCH"
-                ? "paused"
-                : "failed",
-            currentBatch: null,
-            lastError: {
-              code: error?.code || "EXPORT_TRANSLATION_FAILED",
-              retryable: true,
-              at: Date.now(),
+          await checkpointExportJobInBackground(
+            job.jobId,
+            {
+              state:
+                error?.code === "EXPORT_JOB_PROVIDER_MISMATCH"
+                  ? "paused"
+                  : "failed",
+              currentBatch: null,
+              lastError: {
+                code: error?.code || "EXPORT_TRANSLATION_FAILED",
+                retryable: true,
+                at: Date.now(),
+              },
             },
-          });
+            roundDataFence,
+          );
         }
       } catch (_checkpointError) {
         // Preserve the original provider/validation error for the user.
@@ -6203,9 +6897,19 @@ async function openNoteExportPicker({ selectAll = false } = {}) {
   try {
     if (currentNotesMode !== "original") {
       try {
-        currentConfigStatus = await chrome.runtime.sendMessage({
+        const requestFence = extensionDataFenceSnapshot();
+        const config = await chrome.runtime.sendMessage({
           action: "checkConfig",
         });
+        if (
+          adoptExtensionDataFence(
+            config?.runtimeInstanceId,
+            config?.dataGeneration,
+            { requestFence },
+          )
+        ) {
+          currentConfigStatus = config;
+        }
       } catch (_error) {
         // The picker still works in direct-export mode when settings are
         // temporarily unavailable; the complete action rechecks before AI.
@@ -6700,6 +7404,7 @@ async function triggerAnalysis() {
   setOverviewTranslationStatus();
 
   const videoId = currentVideoId;
+  const dataFence = captureExtensionDataFence();
   const generation = digestGeneration;
   const routeKey = currentRouteKey;
   const mediaRef = currentMediaRef;
@@ -6711,6 +7416,7 @@ async function triggerAnalysis() {
   const videoDescription = currentVideoDescription;
   const videoDuration = currentVideoDuration;
   const ownsRequest = () =>
+    extensionDataFenceIsCurrent(dataFence) &&
     isCurrentDigest(videoId, generation, routeKey) &&
     currentMediaRef?.mediaKey === mediaRef?.mediaKey &&
     currentTranscriptTimestamped === transcriptTimestamped;
@@ -6770,8 +7476,11 @@ async function triggerAnalysis() {
       currentAnalysis,
       transcriptTimestamped,
       sourceLanguage,
+      currentTranscriptSource,
+      currentTranscriptSelectedTrack,
+      dataFence,
     );
-    const digestSaved = await saveToCache(videoId);
+    const digestSaved = await saveToCache(videoId, dataFence);
     if (!overviewSaved && !digestSaved) {
       setOverviewTranslationStatus(
         "概览已生成，但本地保存失败；再次打开可能会重新生成并消耗 AI 额度。",
@@ -7305,6 +8014,22 @@ function validateOverviewCacheRecord(
   return record.analysis;
 }
 
+async function persistResetFencedCacheRecord(
+  key,
+  record,
+  expectedFence = captureExtensionDataFence(),
+) {
+  const result = await sendResetFencedStorageMessage(
+    {
+      action: "persistResetFencedCache",
+      key,
+      record,
+    },
+    expectedFence,
+  );
+  return result?.success === true;
+}
+
 async function saveOverviewToCache(
   videoId,
   analysis,
@@ -7312,6 +8037,7 @@ async function saveOverviewToCache(
   sourceLanguage = currentTranscriptLanguage,
   transcriptSource = currentTranscriptSource,
   selectedTrack = currentTranscriptSelectedTrack,
+  expectedFence = captureExtensionDataFence(),
 ) {
   const key = overviewCacheKey(videoId);
   const record = buildOverviewCacheRecord(
@@ -7324,7 +8050,12 @@ async function saveOverviewToCache(
   );
   if (!key || !record) return false;
   try {
-    await chrome.storage.local.set({ [key]: record });
+    const persisted = await persistResetFencedCacheRecord(
+      key,
+      record,
+      expectedFence,
+    );
+    if (!persisted) return false;
     await evictOldOverviewCacheEntries(OVERVIEW_CACHE_MAX_ENTRIES);
     return true;
   } catch (error) {
@@ -7385,7 +8116,10 @@ async function evictOldOverviewCacheEntries(maxEntries) {
  * without consuming API tokens or Supadata calls.
  * Cache expires after 30 days. Oldest entries evicted when > 20 videos cached.
  */
-async function saveToCache(videoId) {
+async function saveToCache(
+  videoId,
+  expectedFence = captureExtensionDataFence(),
+) {
   if (!videoId || videoId !== currentVideoId || !currentTranscript) return false;
 
   try {
@@ -7424,6 +8158,13 @@ async function saveToCache(videoId) {
       channelName: currentChannelName,
       paragraphCache: paragraphCacheForVideo,
       transcriptSourcePolicyVersion: TRANSCRIPT_SOURCE_POLICY_VERSION,
+      transcriptTimingCapabilityVersion:
+        transcriptRequiresTimingCapability(
+          currentTranscriptSource,
+          currentTranscriptLanguage,
+        )
+          ? TRANSCRIPT_TIMING_CAPABILITY_VERSION
+          : null,
       transcriptRequestedLanguage: currentVideoSourceLanguage || null,
       transcriptRequestedTrackKind: currentPlatformIsBilibili()
         ? null
@@ -7438,7 +8179,12 @@ async function saveToCache(videoId) {
       timestamp: Date.now(),
     };
 
-    await chrome.storage.local.set({ [`digest_${videoId}`]: cacheData });
+    const persisted = await persistResetFencedCacheRecord(
+      `digest_${videoId}`,
+      cacheData,
+      expectedFence,
+    );
+    if (!persisted) return false;
     debugLog(
       "Saved to cache:",
       videoId,
@@ -7450,7 +8196,7 @@ async function saveToCache(videoId) {
 
     // Refresh this video's durable export material (idempotent; only when the
     // video has a note). Captures newly translated transcript/title segments.
-    void persistCurrentVideoNoteSourceIfNoted();
+    void persistCurrentVideoNoteSourceIfNoted(expectedFence);
     return true;
   } catch (error) {
     console.error("Cache save error:", error);
@@ -7599,6 +8345,17 @@ function validateTranscriptCacheRecord(
 
   const transcriptLanguage = normalizeLanguageCode(cached.transcriptLanguage);
   if (
+    !isBilibili &&
+    transcriptRequiresTimingCapability(
+      source,
+      transcriptLanguage || selectedTrack?.language,
+    ) &&
+    cached.transcriptTimingCapabilityVersion !==
+      TRANSCRIPT_TIMING_CAPABILITY_VERSION
+  ) {
+    return null;
+  }
+  if (
     selectedTrack?.language &&
     transcriptLanguage &&
     !languagesSharePrimary(selectedTrack.language, transcriptLanguage)
@@ -7654,7 +8411,7 @@ async function invalidateTranscriptDerivedArtifacts(
     return false;
   }
   await chrome.storage.local.remove(overviewCacheKey(videoId));
-  await YTD_NOTE_SOURCES.removeNoteSources(chrome.storage.local, videoId);
+  await removeNoteSourcesInBackground(videoId);
   currentPersistedNoteSource = null;
   const cachePrefix = transcriptTranslationCachePrefix(videoId);
   for (const key of [...transcriptParagraphCache.keys()]) {
@@ -7689,9 +8446,9 @@ async function loadFromCache(videoId, expected = {}) {
 /**
  * Updates the cache after enhance or translation operations.
  */
-async function updateCache() {
+async function updateCache(expectedFence = captureExtensionDataFence()) {
   if (currentVideoId) {
-    await saveToCache(currentVideoId);
+    await saveToCache(currentVideoId, expectedFence);
   }
 }
 
@@ -7754,17 +8511,65 @@ function noteHasPolishedChineseText(note) {
 }
 
 function noteOriginalText(note) {
-  if (noteHasPolishedChineseText(note)) {
-    return note.text.trim();
+  // "Original" must be the verbatim caption line. `text` may have been
+  // rewritten by an AI cleanup pass, so it is only a fallback for legacy
+  // notes saved before rawText existed.
+  const rawText = String(note?.rawText || "").trim();
+  return rawText || String(note?.text || "").trim();
+}
+
+function notePolishedText(note) {
+  const cleanedText = String(note?.text || "").trim();
+  if (!cleanedText) return noteOriginalText(note);
+
+  // Older Chinese notes did not record which language `text` represents.
+  // Keep their trusted verbatim fallback; newly cleaned Chinese notes carry a
+  // textLanguage, while non-Chinese cleanup has always lived in `text`.
+  const textLanguage = normalizeLanguageCode(note?.textLanguage);
+  if (
+    !textLanguage &&
+    (isChineseLanguage(note?.sourceLanguage) ||
+      looksLikeLegacyChineseNote(noteOriginalText(note)))
+  ) {
+    return noteOriginalText(note);
   }
-  if (noteHasChineseSource(note)) {
-    return String(note?.rawText || note?.text || "").trim();
-  }
-  return String(note?.text || note?.rawText || "").trim();
+  return cleanedText;
+}
+
+function noteTextForChineseGeneration(note) {
+  return notePolishedText(note);
+}
+
+function noteSourceTextForMode(note, mode) {
+  return mode === "original" ? noteOriginalText(note) : notePolishedText(note);
 }
 
 function canonicalStoredNoteText(text) {
   return String(text || "").normalize("NFKC").trim().replace(/\s+/g, " ");
+}
+
+function noteTranslationUsesCurrentSource(note) {
+  if (note?.translatedValidationVersion === NOTE_TRANSLATION_VALIDATION_VERSION) {
+    return true;
+  }
+  if (note?.translatedValidationVersion !== 1) return false;
+
+  const storedText = canonicalStoredNoteText(note?.text);
+  const rawText = canonicalStoredNoteText(noteOriginalText(note));
+  if (!storedText || storedText === rawText) return true;
+  if (
+    note?.translatedUnchanged === true &&
+    canonicalStoredNoteText(note?.translatedText) === storedText
+  ) {
+    return true;
+  }
+
+  const textLanguage = normalizeLanguageCode(note?.textLanguage);
+  return Boolean(
+    note?.platform === "bilibili" &&
+      isChineseLanguage(textLanguage) &&
+      !isConfirmedSimplifiedChineseSource(textLanguage),
+  );
 }
 
 function looksLikeLegacyChineseNote(text) {
@@ -7782,16 +8587,17 @@ function noteChineseText(note) {
   if (!translated) return "";
   if (
     note?.translatedValidated === true &&
-    note?.translatedValidationVersion === NOTE_TRANSLATION_VALIDATION_VERSION
+    noteTranslationUsesCurrentSource(note)
   ) {
     if (note?.translatedUnchanged === true) {
       return canonicalStoredNoteText(translated) ===
-        canonicalStoredNoteText(noteOriginalText(note))
+        canonicalStoredNoteText(notePolishedText(note))
         ? translated
         : "";
     }
     return translated;
   }
+  if (note?.translatedValidated === true) return "";
   return looksLikeLegacyChineseNote(translated) ? translated : "";
 }
 
@@ -7957,7 +8763,7 @@ function notePlatformLabel(note) {
 function renderNoteLanguageContent(note, mode = currentNotesMode) {
   const originalIsChinese = noteHasChineseSource(note);
   return YTD_NOTE_EXPORT.localizedSegments(
-    noteOriginalText(note),
+    noteSourceTextForMode(note, mode),
     noteChineseText(note),
     mode,
   )
@@ -7975,7 +8781,7 @@ function renderNoteLanguageContent(note, mode = currentNotesMode) {
 
 function noteCopyTextForMode(note, mode = currentNotesMode) {
   return YTD_NOTE_EXPORT.localizedPlainText(
-    noteOriginalText(note),
+    noteSourceTextForMode(note, mode),
     noteChineseText(note),
     mode,
   );
@@ -8081,6 +8887,8 @@ async function ensureNotesChinese() {
     return;
   }
 
+  const dataFence = captureExtensionDataFence();
+  if (!dataFence) return;
   const generation = ++notesTranslationGeneration;
   const failureById = new Map();
   setNotesTranslationLoading(true);
@@ -8095,20 +8903,28 @@ async function ensureNotesChinese() {
     // notes continue only after an explicit retry, so a large library cannot
     // multiply requests silently.
     const batch = missingNotes.slice(0, 10);
-    const result = await sendTranslationMessage({
-      action: "translateNotes",
-      notes: batch.map((note) => ({
-        id: note.id,
-        text: noteOriginalText(note),
-        videoTitle: note.videoTitle || "",
-        rawText: note.rawText || "",
-        sourceLanguage: note.sourceLanguage || "",
-        platform: note.platform === "bilibili" ? "bilibili" : "youtube",
-        textLanguage: note.textLanguage || "",
-      })),
-      titles: titleWork,
-    });
-    if (generation !== notesTranslationGeneration) return;
+    const result = await sendResetFencedTranslationMessage(
+      {
+        action: "translateNotes",
+        notes: batch.map((note) => ({
+          id: note.id,
+          text: noteTextForChineseGeneration(note),
+          videoTitle: note.videoTitle || "",
+          rawText: note.rawText || "",
+          sourceLanguage: note.sourceLanguage || "",
+          platform: note.platform === "bilibili" ? "bilibili" : "youtube",
+          textLanguage: note.textLanguage || "",
+        })),
+        titles: titleWork,
+      },
+      dataFence,
+    );
+    if (
+      generation !== notesTranslationGeneration ||
+      !extensionDataFenceIsCurrent(dataFence)
+    ) {
+      return;
+    }
     const translatedById = new Map(
       (result.translations || []).map((note) => [note.id, note]),
     );
@@ -8289,10 +9105,12 @@ async function loadNotes(videoId, { translateMissing = true } = {}) {
       }
     } else {
       setNotesFilter(previousShowAll);
+      if (isNotesMigrationFailure(result)) renderNotesMigrationFailure(result);
     }
   } catch (error) {
     if (!ownsLoad()) return;
     setNotesFilter(previousShowAll);
+    if (isNotesMigrationFailure(error)) renderNotesMigrationFailure(error);
     console.error("[DigestDock Panel] Load notes error:", error);
   } finally {
     if (ownsLoad()) isNotesLoading = false;
@@ -8304,7 +9122,46 @@ async function loadNotes(videoId, { translateMissing = true } = {}) {
  * container per media identity; containers are ordered by visible title and
  * notes inside each container by timecode ascending.
  */
+function isNotesMigrationFailure(value) {
+  const code = String(value?.code || value?.error || "").trim();
+  const message = String(value?.message || value?.error || "").trim();
+  return (
+    value?.migrationFailed === true ||
+    code === "INVALID_STORED_NOTES" ||
+    code.startsWith("NOTES_MIGRATION_") ||
+    /(?:notes? migration|笔记迁移)/i.test(message)
+  );
+}
+
+function renderNotesMigrationFailure(result) {
+  const band = document.getElementById("notesCapacity");
+  const text = document.getElementById("notesCapacityText");
+  const backup = document.getElementById("notesCapacityBackup");
+  if (!band || !text) return;
+
+  const reason = String(result?.message || result?.error || "").trim();
+  text.textContent = `笔记迁移失败，旧笔记保持不变。${
+    reason || "旧笔记数据未通过校验。"
+  } 请先导出备份，再重试。`;
+  band.className = "notes-capacity is-full";
+  band.hidden = false;
+  if (backup) backup.hidden = false;
+}
+
+/** The shared band is reserved for actionable migration failures. */
+function renderNotesCapacity() {
+  const band = document.getElementById("notesCapacity");
+  const text = document.getElementById("notesCapacityText");
+  const backup = document.getElementById("notesCapacityBackup");
+  if (!band || !text) return;
+  band.className = "notes-capacity";
+  band.hidden = true;
+  text.textContent = "";
+  if (backup) backup.hidden = true;
+}
+
 function renderNotes(notes, filteredVideoId) {
+  renderNotesCapacity();
   const notesList = document.getElementById("notesList");
   const notesIntro = document.getElementById("notesIntro");
   const notesIntroText = document.getElementById("notesIntroText");
@@ -8452,8 +9309,7 @@ function buildNoteItemElement(note, filteredVideoId) {
   noteEl.querySelector(".note-delete").addEventListener("click", async (e) => {
     e.stopPropagation();
     closeAllNoteMenus();
-    await deleteNote(note.id);
-    loadNotes(filteredVideoId);
+    if (await deleteNote(note.id)) loadNotes(filteredVideoId);
   });
 
   // Copy text button — copies just the note's text
@@ -8519,13 +9375,20 @@ function ensureNoteMenuDismissHandler() {
  * Deletes a note by ID.
  */
 async function deleteNote(noteId) {
+  const fence = captureExtensionDataFence();
+  if (!fence) return false;
   try {
-    await chrome.runtime.sendMessage({
-      action: "deleteNote",
-      noteId: noteId,
-    });
+    const result = await sendResetFencedStorageMessage(
+      {
+        action: "deleteNote",
+        noteId,
+      },
+      fence,
+    );
+    return result?.success === true && extensionDataFenceIsCurrent(fence);
   } catch (error) {
     console.error("[DigestDock Panel] Delete note error:", error);
+    return false;
   }
 }
 
@@ -9291,6 +10154,10 @@ function renderTranscriptModeRows(segments, mode) {
   transcriptList.innerHTML = "";
 
   renderTranscriptTranslationBadge(mode);
+  const preserveSourceCueStart = preserveTranscriptSourceCueStart(
+    currentPlatformIsBilibili() ? "bilibili" : "youtube",
+    currentTranscriptLanguage,
+  );
 
   const rows = [];
   segments.forEach((segment, index) => {
@@ -9299,15 +10166,19 @@ function renderTranscriptModeRows(segments, mode) {
       transcriptTranslationCacheKey(currentVideoId, segment),
     );
     div.className = `transcript-entry ${cached ? "translated" : "translating"}`;
-    div.dataset.seconds = segment.start;
     div.dataset.segmentId = segment.id;
     div.dataset.segmentIndex = index;
 
+    const seekSeconds = transcriptEntrySeekSeconds(
+      segment,
+      preserveSourceCueStart,
+    );
+    div.dataset.seconds = seekSeconds;
     div.innerHTML = `
-      ${transcriptTimeCellMarkup(segment.seekStart ?? segment.start)}
+      ${transcriptTimeCellMarkup(seekSeconds)}
       ${renderTranscriptSegmentContent(segment, mode, cached, "")}
     `;
-    attachTranscriptTimeSeek(div, segment.seekStart ?? segment.start);
+    attachTranscriptTimeSeek(div, seekSeconds);
     transcriptList.appendChild(div);
     rows.push(div);
   });
@@ -9378,6 +10249,7 @@ async function requestTranscriptTranslationBatch(
   generation,
   videoId,
 ) {
+  const dataFence = captureExtensionDataFence();
   const sourceBatch = indices.map((index) => segments[index]);
   setTranslatingSpinner(true);
   try {
@@ -9392,7 +10264,9 @@ async function requestTranscriptTranslationBatch(
     });
 
     const isStale =
-      generation !== translationGeneration || videoId !== currentVideoId;
+      !extensionDataFenceIsCurrent(dataFence) ||
+      generation !== translationGeneration ||
+      videoId !== currentVideoId;
     if (isStale) return;
 
     const responseSegments = result?.success
@@ -9410,7 +10284,7 @@ async function requestTranscriptTranslationBatch(
         generation,
       );
     });
-    await updateCache();
+    await updateCache(dataFence);
   } catch (error) {
     if (generation !== translationGeneration) return;
     sourceBatch.forEach((segment, batchIndex) => {
@@ -9559,10 +10433,22 @@ function setTranslatingSpinner(show) {
 // not read this object at runtime.
 globalThis.__YTD_TRANSCRIPT_TESTING__ = {
   TRANSCRIPT_SOURCE_POLICY_VERSION,
+  TRANSCRIPT_TIMING_CAPABILITY_VERSION,
   YOUTUBE_TRANSCRIPT_TRACK_KIND,
   hasConfiguredAiService,
   activeAiServiceLabel,
   aiFeatureSetupMessage,
+  sidepanelMvpRefreshConfig,
+  captureExtensionDataFence,
+  extensionDataFenceSnapshot,
+  extensionDataFenceIsCurrent,
+  sendResetFencedStorageMessage,
+  sendResetFencedTranslationMessage,
+  getExtensionDataState: () => ({
+    runtimeInstanceId: extensionDataRuntimeInstanceId,
+    dataGeneration: extensionDataGeneration,
+    resetInProgress: extensionDataResetInProgress,
+  }),
   createSingleFlight,
   buildTranscriptFetchRequest,
   transcriptResponseMatchesRequest,
@@ -9574,6 +10460,7 @@ globalThis.__YTD_TRANSCRIPT_TESTING__ = {
   cachedTranscriptArtifactIdentity,
   digestMediaIdentityChanged,
   validateTranscriptCacheRecord,
+  transcriptRequiresTimingCapability,
   sendTranslationMessage,
   groupTranscriptEntries,
   buildOverviewAnalysisCues,
@@ -9598,6 +10485,7 @@ globalThis.__YTD_TRANSCRIPT_TESTING__ = {
   noteHasChineseSource,
   noteHasPolishedChineseText,
   noteOriginalText,
+  resolveNoteExportEntry,
   noteChineseText,
   noteCopyTextForMode,
   noteOriginalVideoTitle,
@@ -9614,6 +10502,7 @@ globalThis.__YTD_TRANSCRIPT_TESTING__ = {
   noteSourceMetaText,
   summarizeNoteTranslationFailures,
   saveCurrentMomentFromPanel,
+  deleteNote,
   renderNoteLanguageContent,
   renderChapterLanguageContent,
   renderQuoteLanguageContent,
@@ -9646,6 +10535,7 @@ globalThis.__YTD_TRANSCRIPT_TESTING__ = {
   handleNotesModeChange,
   buildNotesExportPrecheck,
   buildNotesExportTranslationPlan,
+  collectAllNotesExport,
   exportAllNotes,
   captureNotesOnlyMetadata,
   playNote,
@@ -9653,6 +10543,7 @@ globalThis.__YTD_TRANSCRIPT_TESTING__ = {
   normalizeExportMediaKeys,
   filterNoteGroupsByMediaKeys,
   buildFrozenExportIntent,
+  createOrResumeExportJobForRound,
   renderExportTranslationProgress,
   exportRunIsCurrent,
   sourceBatchMessage,

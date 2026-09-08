@@ -107,6 +107,10 @@
         if (stored && Object.hasOwn(stored, STORAGE_KEY)) {
           return normalizeReadingDisplay(stored[STORAGE_KEY]);
         }
+        // chrome.storage.local is authoritative once it is reachable. A
+        // missing key means reset/default, never "restore" the stale
+        // first-paint mirror that reset intentionally left behind.
+        return DEFAULT_VALUE;
       } catch (_error) {
         // Fall back to the paint mirror/default without blocking the UI.
       }
@@ -114,30 +118,40 @@
     return readMirror() || DEFAULT_VALUE;
   }
 
-  async function persistReadingDisplay(value) {
+  async function persistReadingDisplay(value, persistValue = null) {
     const next = normalizeReadingDisplay(value);
     const previous = currentReadingDisplay();
     applyReadingDisplay(next);
     writeMirror(next);
     const storage = chromeLocalStorage();
-    if (!storage?.set) return next;
+    const writer =
+      typeof persistValue === "function"
+        ? persistValue
+        : storage?.set
+          ? (storedValue) => storage.set({ [STORAGE_KEY]: storedValue })
+          : null;
+    if (!writer) return next;
     const writeRevision = mutationRevision;
     pendingWriteCount += 1;
     const operation = writeQueue
       .catch(() => undefined)
-      .then(() => storage.set({ [STORAGE_KEY]: next }));
+      .then(() => writer(next));
     writeQueue = operation;
     try {
       await operation;
       return next;
     } catch (error) {
+      const rollbackValue =
+        error?.code === "EXTENSION_DATA_RESET"
+          ? await readStoredReadingDisplay()
+          : previous;
       // A failed older write must not undo a newer optimistic selection.
       if (
         mutationRevision === writeRevision &&
         sameReadingDisplay(latestDesiredValue, next)
       ) {
-        applyReadingDisplay(previous);
-        writeMirror(previous);
+        applyReadingDisplay(rollbackValue);
+        writeMirror(rollbackValue);
       }
       throw error;
     } finally {
@@ -150,12 +164,17 @@
     if (!changes?.addListener) return false;
     changes.addListener((records, areaName) => {
       if (areaName !== "local" || !records || !records[STORAGE_KEY]) return;
+      const storedChange = records[STORAGE_KEY];
+      const removed = storedChange.newValue === undefined;
       const next = normalizeReadingDisplay(
-        records[STORAGE_KEY].newValue || DEFAULT_VALUE,
+        removed ? DEFAULT_VALUE : storedChange.newValue,
       );
       // Chrome can echo an earlier serialized write while a newer local choice
       // is queued. Keep the newest optimistic value until its write settles.
+      // Removal is different: reset made absence authoritative, so it must
+      // invalidate every queued optimistic value immediately.
       if (
+        !removed &&
         pendingWriteCount > 0 &&
         !sameReadingDisplay(next, latestDesiredValue)
       ) {

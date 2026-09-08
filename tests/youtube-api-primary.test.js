@@ -15,6 +15,7 @@ const vm = require("node:vm");
 const root = path.resolve(__dirname, "..");
 const read = (file) => fs.readFileSync(path.join(root, file), "utf8");
 const bilibiliAdapter = require("../bilibili.js");
+const notesBackup = require("../notes-backup.js");
 
 function jsonResponse(body, status = 200) {
   return {
@@ -29,6 +30,50 @@ function textResponse(text, status = 200) {
     ok: status >= 200 && status < 300,
     status,
     text: async () => text,
+  };
+}
+
+function cloneStorageValue(value) {
+  return value === undefined ? undefined : JSON.parse(JSON.stringify(value));
+}
+
+function createPhase1NotesStorage(initial = {}) {
+  const values = {
+    ytd_notes_schema: 1,
+    ytd_note_index: [],
+    ...cloneStorageValue(initial),
+  };
+
+  return {
+    async get(keys) {
+      const defaults =
+        keys && typeof keys === "object" && !Array.isArray(keys)
+          ? cloneStorageValue(keys)
+          : {};
+      const requested =
+        keys === null || keys === undefined
+          ? Object.keys(values)
+          : Array.isArray(keys)
+            ? keys
+            : typeof keys === "object"
+              ? Object.keys(keys)
+              : [keys];
+      for (const key of requested) {
+        if (Object.hasOwn(values, key)) {
+          defaults[key] = cloneStorageValue(values[key]);
+        }
+      }
+      return defaults;
+    },
+    async set(items) {
+      Object.assign(values, cloneStorageValue(items));
+    },
+    readNotes() {
+      return values.ytd_note_index.map((entry) => {
+        const shard = values[`ytd_notes_${entry.mediaKey}`] || [];
+        return cloneStorageValue(shard.find((note) => note.id === entry.id));
+      });
+    },
   };
 }
 
@@ -122,6 +167,13 @@ function loadBackground({
         get: tabsGet,
       },
       scripting: { executeScript },
+    },
+    // Production loads this helper in the service-worker realm. Bridge VM note
+    // objects into the module realm for the same strict schema validation.
+    YTD_NOTES_BACKUP: {
+      ...notesBackup,
+      createBackup: (notes, options) =>
+        notesBackup.createBackup(JSON.parse(JSON.stringify(notes)), options),
     },
     YTD_SETTINGS: {
       STORAGE_KEY: "ytd_settings",
@@ -1093,37 +1145,25 @@ test("the media router keeps Bilibili isolated from Supadata", async () => {
 
 test("a cache-hit YouTube note reuses the cached transcript with no provider call", async () => {
   let supadataCalls = 0;
-  let savedNotes = [];
+  const storage = createPhase1NotesStorage({
+    ytd_settings: { aiApiKey: "test-key", supadataApiKey: "optional-key" },
+    digest_jNQXAC9IVRw: {
+      transcript: [
+        { text: "中文字幕。", start: 0, duration: 3, language: "zh-CN" },
+      ],
+      transcriptSourcePolicyVersion: 5,
+      transcriptSource: "supadata",
+      mediaRef: { platform: "youtube", videoId: "jNQXAC9IVRw" },
+    },
+  });
   const { helpers } = loadBackground({
     settings: { aiApiKey: "test-key", supadataApiKey: "optional-key" },
     fetchImpl: async () => {
       supadataCalls += 1;
       return jsonResponse({});
     },
-    storageGet: async (key) => {
-      if (key === "ytd_settings") {
-        return {
-          ytd_settings: { aiApiKey: "test-key", supadataApiKey: "optional-key" },
-        };
-      }
-      if (key === "digest_jNQXAC9IVRw") {
-        return {
-          digest_jNQXAC9IVRw: {
-            transcript: [
-              { text: "中文字幕。", start: 0, duration: 3, language: "zh-CN" },
-            ],
-            transcriptSourcePolicyVersion: 5,
-            transcriptSource: "supadata",
-            mediaRef: { platform: "youtube", videoId: "jNQXAC9IVRw" },
-          },
-        };
-      }
-      if (key === "ytd_notes") return { ytd_notes: savedNotes };
-      return {};
-    },
-    storageSet: async (items) => {
-      if (Array.isArray(items.ytd_notes)) savedNotes = items.ytd_notes;
-    },
+    storageGet: storage.get,
+    storageSet: storage.set,
   });
 
   const result = await helpers.handleSaveNote(
@@ -1138,12 +1178,24 @@ test("a cache-hit YouTube note reuses the cached transcript with no provider cal
     true,
   );
   assert.equal(result.success, true);
+  const savedNotes = storage.readNotes();
   assert.equal(savedNotes[0].text, "中文字幕。");
   assert.equal(supadataCalls, 0);
 });
 
 test("a legacy v4 YouTube cache cannot masquerade as a current native result", async () => {
   let supadataCalls = 0;
+  const storage = createPhase1NotesStorage({
+    ytd_settings: { aiApiKey: "test-key", supadataApiKey: "optional-key" },
+    digest_jNQXAC9IVRw: {
+      transcript: [
+        { text: "Legacy", start: 0, duration: 3, language: "en" },
+      ],
+      transcriptSourcePolicyVersion: 4,
+      transcriptSource: "youtube-timedtext",
+      mediaRef: { platform: "youtube", videoId: "jNQXAC9IVRw" },
+    },
+  });
   const { helpers } = loadBackground({
     settings: { aiApiKey: "test-key", supadataApiKey: "optional-key" },
     executeScript: async () => pageSnapshot(),
@@ -1151,26 +1203,8 @@ test("a legacy v4 YouTube cache cannot masquerade as a current native result", a
       supadataCalls += 1;
       return jsonResponse({});
     },
-    storageGet: async (key) => {
-      if (key === "ytd_settings") {
-        return {
-          ytd_settings: { aiApiKey: "test-key", supadataApiKey: "optional-key" },
-        };
-      }
-      if (key === "digest_jNQXAC9IVRw") {
-        return {
-          digest_jNQXAC9IVRw: {
-            transcript: [
-              { text: "Legacy", start: 0, duration: 3, language: "en" },
-            ],
-            transcriptSourcePolicyVersion: 4,
-            transcriptSource: "youtube-timedtext",
-            mediaRef: { platform: "youtube", videoId: "jNQXAC9IVRw" },
-          },
-        };
-      }
-      return {};
-    },
+    storageGet: storage.get,
+    storageSet: storage.set,
   });
 
   const result = await helpers.handleSaveNote(
@@ -1190,7 +1224,9 @@ test("a legacy v4 YouTube cache cannot masquerade as a current native result", a
 
 test("a cache-miss YouTube note points the user to the side panel and calls no provider", async () => {
   let supadataCalls = 0;
-  let savedNotes = [];
+  const storage = createPhase1NotesStorage({
+    ytd_settings: { aiApiKey: "test-key", supadataApiKey: "optional-key" },
+  });
   const { helpers } = loadBackground({
     settings: { aiApiKey: "test-key", supadataApiKey: "optional-key" },
     executeScript: async () => pageSnapshot(),
@@ -1198,18 +1234,8 @@ test("a cache-miss YouTube note points the user to the side panel and calls no p
       supadataCalls += 1;
       return jsonResponse({});
     },
-    storageGet: async (key) => {
-      if (key === "ytd_settings") {
-        return {
-          ytd_settings: { aiApiKey: "test-key", supadataApiKey: "optional-key" },
-        };
-      }
-      if (key === "ytd_notes") return { ytd_notes: savedNotes };
-      return {};
-    },
-    storageSet: async (items) => {
-      if (Array.isArray(items.ytd_notes)) savedNotes = items.ytd_notes;
-    },
+    storageGet: storage.get,
+    storageSet: storage.set,
   });
 
   const result = await helpers.handleSaveNote(
@@ -1225,7 +1251,7 @@ test("a cache-miss YouTube note points the user to the side panel and calls no p
   assert.equal(result.error, "TRANSCRIPT_TASK_REQUIRED");
   assert.match(result.message, /侧栏.*字幕任务/);
   assert.equal(supadataCalls, 0);
-  assert.equal(savedNotes.length, 0);
+  assert.equal(storage.readNotes().length, 0);
 });
 
 test("side panel and background stay wired to the Passive-first contract", () => {
@@ -1233,8 +1259,8 @@ test("side panel and background stay wired to the Passive-first contract", () =>
   const background = read("background.js");
 
   // Protocol and cache-policy versions moved forward together.
-  assert.match(panel, /const REQUIRED_RUNTIME_PROTOCOL_VERSION = 12/);
-  assert.match(background, /const RUNTIME_PROTOCOL_VERSION = 12/);
+  assert.match(panel, /const REQUIRED_RUNTIME_PROTOCOL_VERSION = 14/);
+  assert.match(background, /const RUNTIME_PROTOCOL_VERSION = 14/);
   assert.match(panel, /const TRANSCRIPT_SOURCE_POLICY_VERSION = 5/);
   assert.match(background, /const TRANSCRIPT_SOURCE_POLICY_VERSION = 5/);
 

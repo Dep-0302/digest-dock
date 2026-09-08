@@ -15,8 +15,9 @@ var YTD_NOTES_BACKUP = (() => {
   const LEGACY_SCHEMA_VERSION = 1;
   const STRICT_MEDIA_IDENTITY_MIN_VERSION = 2;
   const SUPPORTED_SCHEMA_VERSIONS = new Set([1, 2, 3]);
-  const MAX_NOTES = 100;
-  const MAX_BACKUP_BYTES = 5 * 1024 * 1024;
+  // One shared byte-cap guard bounds untrusted imports and every recoverable
+  // notes state without imposing a fixed note-count ceiling.
+  const MAX_BACKUP_BYTES = 32 * 1024 * 1024;
   const MAX_TIMESTAMP_SECONDS = 31_536_000;
   const MAX_LEGACY_NOTE_TEXT_LENGTH = 50_000;
   const MAX_LEGACY_SOURCE_LANGUAGE_LENGTH = 100;
@@ -416,6 +417,15 @@ var YTD_NOTES_BACKUP = (() => {
     return new TextEncoder().encode(text).byteLength;
   }
 
+  /**
+   * Canonical on-disk representation for a notes backup. Export size checks,
+   * downloads, and import tests must all use these exact bytes so a backup the
+   * extension creates can be read back by the same extension.
+   */
+  function serializeBackup(backup) {
+    return JSON.stringify(backup);
+  }
+
   function validateExportedAt(value) {
     if (
       typeof value !== "string" ||
@@ -428,7 +438,7 @@ var YTD_NOTES_BACKUP = (() => {
   }
 
   function createBackup(notes, { exportedAt, extensionVersion = "" } = {}) {
-    if (!Array.isArray(notes) || notes.length > MAX_NOTES) {
+    if (!Array.isArray(notes)) {
       fail("INVALID_NOTES_BACKUP", { field: "notes" });
     }
 
@@ -442,15 +452,23 @@ var YTD_NOTES_BACKUP = (() => {
       notes: makeBackupNoteIdsUnique(notes.map(noteForBackup)),
     };
 
-    if (byteLength(JSON.stringify(backup)) > MAX_BACKUP_BYTES) {
-      fail("NOTES_BACKUP_TOO_LARGE");
+    const serializedBytes = byteLength(serializeBackup(backup));
+    if (serializedBytes > MAX_BACKUP_BYTES) {
+      fail("NOTES_BACKUP_TOO_LARGE", {
+        actualBytes: serializedBytes,
+        maxBytes: MAX_BACKUP_BYTES,
+      });
     }
     return backup;
   }
 
   function parseBackupText(text) {
-    if (typeof text !== "string" || byteLength(text) > MAX_BACKUP_BYTES) {
-      fail("NOTES_BACKUP_TOO_LARGE");
+    const serializedBytes = typeof text === "string" ? byteLength(text) : 0;
+    if (typeof text !== "string" || serializedBytes > MAX_BACKUP_BYTES) {
+      fail("NOTES_BACKUP_TOO_LARGE", {
+        actualBytes: serializedBytes,
+        maxBytes: MAX_BACKUP_BYTES,
+      });
     }
 
     let parsed;
@@ -470,7 +488,7 @@ var YTD_NOTES_BACKUP = (() => {
     }
     validateExportedAt(parsed.exportedAt);
     normalizeString(parsed.extensionVersion, "extensionVersion", { max: 32 });
-    if (!Array.isArray(parsed.notes) || parsed.notes.length > MAX_NOTES) {
+    if (!Array.isArray(parsed.notes)) {
       fail("INVALID_NOTES_BACKUP", { field: "notes" });
     }
 
@@ -569,7 +587,12 @@ var YTD_NOTES_BACKUP = (() => {
       fail("INVALID_NOTES_BACKUP", { field: "notes" });
     }
 
-    const merged = existingNotes.map(normalizeNote);
+    // Validate and normalize backup-owned fields without discarding local-only
+    // fields that intentionally do not travel in the portable backup schema.
+    const merged = existingNotes.map((note, index) => ({
+      ...note,
+      ...normalizeNote(note, index),
+    }));
     const byId = new Map();
     merged.forEach((note, index) => {
       if (byId.has(note.id)) {
@@ -604,14 +627,6 @@ var YTD_NOTES_BACKUP = (() => {
       importedCount += 1;
     });
 
-    if (merged.length > MAX_NOTES) {
-      fail("NOTES_CAPACITY_EXCEEDED", {
-        total: merged.length,
-        limit: MAX_NOTES,
-        overBy: merged.length - MAX_NOTES,
-      });
-    }
-
     return {
       notes: sortNewestFirst(merged),
       importedCount,
@@ -630,7 +645,6 @@ var YTD_NOTES_BACKUP = (() => {
   return {
     FORMAT,
     SCHEMA_VERSION,
-    MAX_NOTES,
     MAX_BACKUP_BYTES,
     NotesBackupError,
     byteLength,
@@ -639,6 +653,7 @@ var YTD_NOTES_BACKUP = (() => {
     normalizeNote,
     notesBackupFilename,
     parseBackupText,
+    serializeBackup,
   };
 })();
 

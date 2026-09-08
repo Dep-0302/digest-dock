@@ -71,8 +71,10 @@ Examples include:
   timestamped YouTube or Bilibili URLs from validated platform, media identity,
   and timestamp fields instead of trusting a URL supplied by the backup.
 - Import merges with local notes and skips duplicates. If the same note ID has
-  conflicting content, or the merged result would exceed 100 notes, the entire
-  import is rejected. Invalid or failed imports leave existing notes unchanged.
+  conflicting content, or the resulting recovery backup would exceed the 32 MiB
+  capacity guard, the entire import is rejected. Invalid or failed imports leave
+  existing notes unchanged. New saves use the same guard; there is no fixed
+  note-count limit.
 - Export and import are local operations and do not upload the backup. The
   downloaded file is nevertheless plain, unencrypted JSON, so anyone who obtains
   it may be able to read the notes it contains.

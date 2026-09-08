@@ -93,6 +93,8 @@ const YTD_OPTIONS = (() => {
         `Exported ${count} saved note${count === 1 ? "" : "s"}.`,
       noNotesToExport: "There are no saved notes to export.",
       notesExportFailed: "Could not export the saved notes. Nothing was downloaded.",
+      notesExportTooLarge: ({ maxMiB }) =>
+        `The saved notes exceed the ${maxMiB} MiB backup limit. Nothing was downloaded.`,
       importingNotes: "Checking and importing the notes backup…",
       notesImported: ({ imported, duplicates, enriched, total }) => {
         const details = [`Restored ${imported} new note${imported === 1 ? "" : "s"}.`];
@@ -105,14 +107,13 @@ const YTD_OPTIONS = (() => {
         duplicates
           ? `No new notes were added. ${duplicates} duplicate${duplicates === 1 ? " was" : "s were"} already present. ${total} note${total === 1 ? " is" : "s are"} still saved.`
           : "The backup did not contain any notes. Local notes were not changed.",
-      notesBackupTooLarge: "This backup is larger than 5 MiB and was not imported.",
+      notesBackupTooLarge: ({ maxMiB }) =>
+        `This backup is larger than ${maxMiB} MiB and was not imported.`,
       notesBackupInvalid: "This is not a valid DigestDock notes backup. No notes were changed.",
       notesBackupUnsupported:
         "This backup was created by a newer unsupported format. Update DigestDock before importing it.",
       notesBackupConflict:
         "The backup conflicts with an existing note that has the same ID. No notes were changed.",
-      notesBackupCapacity: ({ overBy }) =>
-        `Import would exceed the 100-note limit by ${overBy}. Delete unneeded notes and try again. No notes were changed.`,
       notesImportFailed: "Could not import the notes backup. No notes were changed.",
       clearedDigests: ({ count }) =>
         `Cleared ${count} cached digest${count === 1 ? "" : "s"}.`,
@@ -211,6 +212,8 @@ const YTD_OPTIONS = (() => {
       notesExported: ({ count }) => `已导出 ${count} 条笔记。`,
       noNotesToExport: "当前没有可导出的笔记。",
       notesExportFailed: "无法导出笔记，未生成下载文件。",
+      notesExportTooLarge: ({ maxMiB }) =>
+        `已保存的笔记超过 ${maxMiB} MiB 备份上限，未生成下载文件。`,
       importingNotes: "正在校验并导入笔记备份…",
       notesImported: ({ imported, duplicates, enriched, total }) => {
         const details = [`已恢复 ${imported} 条新笔记。`];
@@ -223,12 +226,11 @@ const YTD_OPTIONS = (() => {
         duplicates
           ? `没有新增笔记；${duplicates} 条均已存在。当前仍保存 ${total} 条笔记。`
           : "备份中没有笔记，本机笔记未改变。",
-      notesBackupTooLarge: "备份文件超过 5 MiB，未执行导入。",
+      notesBackupTooLarge: ({ maxMiB }) =>
+        `备份文件超过 ${maxMiB} MiB，未执行导入。`,
       notesBackupInvalid: "这不是有效的 DigestDock 笔记备份，现有笔记未改变。",
       notesBackupUnsupported: "该备份使用了当前版本不支持的新格式，请更新 DigestDock 后再导入。",
       notesBackupConflict: "备份与本机具有相同 ID 的笔记内容冲突，现有笔记未改变。",
-      notesBackupCapacity: ({ overBy }) =>
-        `导入后将超过 100 条上限，多出 ${overBy} 条。请先删除不需要的笔记后重试，现有笔记未改变。`,
       notesImportFailed: "无法导入笔记备份，现有笔记未改变。",
       clearedDigests: ({ count }) => `已清除 ${count} 条缓存摘要。`,
       notesDeleted: "已删除全部已保存的笔记。",
@@ -353,6 +355,209 @@ const YTD_OPTIONS = (() => {
     };
   }
 
+  function isWritableDataGeneration(value) {
+    return Number.isSafeInteger(value) && value % 2 === 0;
+  }
+
+  function createExtensionDataFence() {
+    let runtimeInstanceId = null;
+    let dataGeneration = null;
+    let localResetPending = false;
+    let revision = 0;
+
+    function observe(nextRuntimeInstanceId, value) {
+      const nextId = String(nextRuntimeInstanceId || "");
+      if (!nextId || !Number.isSafeInteger(value)) return false;
+      if (runtimeInstanceId === nextId && dataGeneration === value) return true;
+      runtimeInstanceId = nextId;
+      dataGeneration = value;
+      revision += 1;
+      return true;
+    }
+
+    function snapshot() {
+      return Object.freeze({ runtimeInstanceId, dataGeneration, revision });
+    }
+
+    function capture() {
+      if (
+        localResetPending ||
+        !runtimeInstanceId ||
+        !isWritableDataGeneration(dataGeneration)
+      ) {
+        return null;
+      }
+      return snapshot();
+    }
+
+    function observeIfUnchanged(
+      nextRuntimeInstanceId,
+      value,
+      expectedRevision,
+    ) {
+      if (revision !== expectedRevision) return false;
+      return observe(nextRuntimeInstanceId, value);
+    }
+
+    function isCurrent(token) {
+      return Boolean(
+        token &&
+          !localResetPending &&
+          revision === token.revision &&
+          runtimeInstanceId === token.runtimeInstanceId &&
+          dataGeneration === token.dataGeneration &&
+          isWritableDataGeneration(dataGeneration),
+      );
+    }
+
+    function beginLocalReset() {
+      localResetPending = true;
+      revision += 1;
+    }
+
+    function endLocalReset() {
+      localResetPending = false;
+      revision += 1;
+    }
+
+    function isBlocked() {
+      return (
+        localResetPending ||
+        !runtimeInstanceId ||
+        !isWritableDataGeneration(dataGeneration)
+      );
+    }
+
+    return Object.freeze({
+      beginLocalReset,
+      capture,
+      endLocalReset,
+      isBlocked,
+      isCurrent,
+      observe,
+      observeIfUnchanged,
+      snapshot,
+    });
+  }
+
+  function resetFenceFailure() {
+    return {
+      success: false,
+      code: "EXTENSION_DATA_RESET",
+    };
+  }
+
+  function optionsResetFailureCanRefreshWorker(result, token, adopted) {
+    return Boolean(
+      adopted &&
+        result?.success !== true &&
+        result?.code === "EXTENSION_DATA_RESET" &&
+        typeof result.runtimeInstanceId === "string" &&
+        result.runtimeInstanceId &&
+        result.runtimeInstanceId !== token?.runtimeInstanceId &&
+        Number.isSafeInteger(result.dataGeneration) &&
+        result.dataGeneration % 2 === 0,
+    );
+  }
+
+  async function sendResetFencedMutation(
+    root,
+    message,
+    token,
+    fence = null,
+  ) {
+    if (
+      !token?.runtimeInstanceId ||
+      !isWritableDataGeneration(token?.dataGeneration)
+    ) {
+      return resetFenceFailure();
+    }
+    const requestToken = { ...token };
+    const send = (activeToken) =>
+      root.chrome.runtime.sendMessage({
+        ...message,
+        runtimeInstanceId: activeToken.runtimeInstanceId,
+        dataGeneration: activeToken.dataGeneration,
+      });
+    let result = await send(requestToken);
+    const adopted = fence
+      ? fence.observeIfUnchanged(
+          result?.runtimeInstanceId,
+          result?.dataGeneration,
+          requestToken.revision,
+        )
+      : false;
+    let acceptedToken = requestToken;
+    if (fence && optionsResetFailureCanRefreshWorker(result, requestToken, adopted)) {
+      const refreshedToken = fence.capture();
+      if (
+        refreshedToken?.runtimeInstanceId === result.runtimeInstanceId &&
+        refreshedToken.dataGeneration === result.dataGeneration
+      ) {
+        acceptedToken = refreshedToken;
+        result = await send(refreshedToken);
+        fence.observeIfUnchanged(
+          result?.runtimeInstanceId,
+          result?.dataGeneration,
+          refreshedToken.revision,
+        );
+      }
+    }
+    return { ...result, resetFenceToken: acceptedToken };
+  }
+
+  function persistResetFencedSettings(root, settings, token, fence = null) {
+    return sendResetFencedMutation(root, {
+      action: "persistResetFencedSettings",
+      settings,
+    }, token, fence);
+  }
+
+  function persistResetFencedReadingDisplay(
+    root,
+    readingDisplay,
+    token,
+    fence = null,
+  ) {
+    return sendResetFencedMutation(root, {
+      action: "persistResetFencedReadingDisplay",
+      readingDisplay,
+    }, token, fence);
+  }
+
+  async function importNotesBackupFile(root, file, token, fence = null) {
+    if (
+      !token?.runtimeInstanceId ||
+      !isWritableDataGeneration(token?.dataGeneration)
+    ) {
+      return resetFenceFailure();
+    }
+    if (file.size > root.YTD_NOTES_BACKUP.MAX_BACKUP_BYTES) {
+      return {
+        success: false,
+        code: "NOTES_BACKUP_TOO_LARGE",
+        maxBytes: root.YTD_NOTES_BACKUP.MAX_BACKUP_BYTES,
+      };
+    }
+    // Read once. A safe worker-identity refresh reuses these exact bytes; it
+    // never asks the user to pick the file again or invokes file.text twice.
+    const backupText = await file.text();
+    if (
+      root.YTD_NOTES_BACKUP.byteLength(backupText) >
+      root.YTD_NOTES_BACKUP.MAX_BACKUP_BYTES
+    ) {
+      return {
+        success: false,
+        code: "NOTES_BACKUP_TOO_LARGE",
+        maxBytes: root.YTD_NOTES_BACKUP.MAX_BACKUP_BYTES,
+      };
+    }
+    return sendResetFencedMutation(root, {
+      action: "importNotesBackup",
+      backupText,
+    }, token, fence);
+  }
+
   async function readPreferredLanguage(storage) {
     const stored = await storage.get(LANGUAGE_STORAGE_KEY);
     return normalizeLanguage(stored[LANGUAGE_STORAGE_KEY]);
@@ -440,13 +645,28 @@ const YTD_OPTIONS = (() => {
     img.src = provider.iconPath;
   }
 
-  function triggerNotesBackupDownload(root, backup, date = new Date()) {
-    const text = `${JSON.stringify(backup, null, 2)}\n`;
+  function backupLimitMiB(root, maxBytes) {
+    const sharedLimit = Number(root?.YTD_NOTES_BACKUP?.MAX_BACKUP_BYTES);
+    const bytes = Number(maxBytes) || sharedLimit;
+    if (!Number.isFinite(bytes) || bytes <= 0) return "";
+    const value = bytes / (1024 * 1024);
+    return Number.isInteger(value) ? String(value) : value.toFixed(1);
+  }
+
+  function triggerNotesBackupDownload(
+    root,
+    backup,
+    date = new Date(),
+    requestedFilename = "",
+  ) {
+    const text = root.YTD_NOTES_BACKUP.serializeBackup(backup);
     const blob = new root.Blob([text], { type: "application/json" });
     const url = root.URL.createObjectURL(blob);
     const link = root.document.createElement("a");
     link.href = url;
-    link.download = root.YTD_NOTES_BACKUP.notesBackupFilename(date);
+    link.download =
+      String(requestedFilename || "").trim() ||
+      root.YTD_NOTES_BACKUP.notesBackupFilename(date);
     link.hidden = true;
     root.document.body.appendChild(link);
     try {
@@ -466,8 +686,6 @@ const YTD_OPTIONS = (() => {
         return "notesBackupUnsupported";
       case "NOTES_BACKUP_CONFLICT":
         return "notesBackupConflict";
-      case "NOTES_CAPACITY_EXCEEDED":
-        return "notesBackupCapacity";
       case "INVALID_NOTES_BACKUP":
       case "INVALID_STORED_NOTES":
         return "notesBackupInvalid";
@@ -626,6 +844,7 @@ const YTD_OPTIONS = (() => {
     const exportNotesBtn = doc.getElementById("exportNotesBtn");
     const importNotesBtn = doc.getElementById("importNotesBtn");
     const importNotesFile = doc.getElementById("importNotesFile");
+    const resetBtn = doc.getElementById("resetBtn");
     const languageButtons = [...doc.querySelectorAll("[data-language]")];
     const aiStatus = doc.getElementById("aiStatus");
     const supadataStatus = doc.getElementById("supadataStatus");
@@ -688,6 +907,45 @@ const YTD_OPTIONS = (() => {
       selectableProviderList[0]?.id || settingsApi.DEFAULT_PROVIDER || "deepseek";
     let providerListOpen = false;
     let settingsLoaded = false;
+    let settingsSaveBusy = false;
+    let importBusy = false;
+    let resetBusy = false;
+    let pendingImportFence = null;
+    const extensionDataFence = createExtensionDataFence();
+
+    function syncMutationControls() {
+      const blocked = extensionDataFence.isBlocked();
+      if (saveSettingsBtn) {
+        saveSettingsBtn.disabled =
+          blocked || !settingsLoaded || settingsSaveBusy;
+      }
+      if (importNotesBtn) importNotesBtn.disabled = blocked || importBusy;
+      for (const input of readingSizeInputs) input.disabled = blocked;
+      for (const input of readingWeightInputs) input.disabled = blocked;
+      if (resetBtn) {
+        resetBtn.disabled =
+          resetBusy || extensionDataFence.snapshot().dataGeneration % 2 === 1;
+      }
+    }
+
+    async function refreshExtensionDataGeneration() {
+      const requestSnapshot = extensionDataFence.snapshot();
+      try {
+        const result = await root.chrome.runtime.sendMessage({
+          action: "checkConfig",
+        });
+        const applied = extensionDataFence.observeIfUnchanged(
+          result?.runtimeInstanceId,
+          result?.dataGeneration,
+          requestSnapshot.revision,
+        );
+        syncMutationControls();
+        return applied;
+      } catch (_error) {
+        syncMutationControls();
+        return false;
+      }
+    }
 
     function syncSupadataVisibility({ focus = false } = {}) {
       const requested = supadataOptionsRequested(root.location || {});
@@ -735,8 +993,39 @@ const YTD_OPTIONS = (() => {
       if (!readingApi) return;
       const size = readingSizeInputs.find((input) => input.checked)?.value;
       const weight = readingWeightInputs.find((input) => input.checked)?.value;
+      const saveFence = extensionDataFence.capture();
+      if (!saveFence) {
+        syncReadingControls(readingApi.currentReadingDisplay());
+        readingDisplayStatus?.classList?.toggle("is-error", true);
+        if (readingDisplayStatus) {
+          setStatus(readingDisplayStatus, "readingSaveFailed");
+        }
+        return;
+      }
       try {
-        const saved = await readingApi.persistReadingDisplay({ size, weight });
+        const saved = await readingApi.persistReadingDisplay(
+          { size, weight },
+          async (readingDisplay) => {
+            const result = await persistResetFencedReadingDisplay(
+              root,
+              readingDisplay,
+              saveFence,
+              extensionDataFence,
+            );
+            const acceptedFence = result?.resetFenceToken || saveFence;
+            if (
+              !result?.success ||
+              !extensionDataFence.isCurrent(acceptedFence)
+            ) {
+              const errorCode = result?.success
+                ? "EXTENSION_DATA_RESET"
+                : result?.code || "READING_DISPLAY_PERSIST_FAILED";
+              const error = new Error(errorCode);
+              error.code = errorCode;
+              throw error;
+            }
+          },
+        );
         syncReadingControls(saved);
         readingDisplayStatus?.classList?.toggle("is-error", false);
         if (readingDisplayStatus) setStatus(readingDisplayStatus, "readingApplied");
@@ -1075,13 +1364,37 @@ const YTD_OPTIONS = (() => {
     }
 
     async function loadSettings() {
+      let loadFence = extensionDataFence.capture();
       try {
         const stored = await storage.get(settingsApi.STORAGE_KEY);
+        if (!extensionDataFence.isCurrent(loadFence)) {
+          throw new Error("EXTENSION_DATA_RESET");
+        }
+        const hadStoredSettings = Object.hasOwn(
+          stored,
+          settingsApi.STORAGE_KEY,
+        );
         const migration = settingsApi.migrateLegacy(
           stored[settingsApi.STORAGE_KEY],
         );
         const settings = migration.settings;
-
+        let migrationPersisted = false;
+        if (hadStoredSettings && migration.migrated) {
+          const result = await persistResetFencedSettings(
+            root,
+            settings,
+            loadFence,
+            extensionDataFence,
+          );
+          loadFence = result?.resetFenceToken || loadFence;
+          if (!result?.success) {
+            throw new Error(result?.code || "SETTINGS_PERSIST_FAILED");
+          }
+          migrationPersisted = true;
+        }
+        if (!extensionDataFence.isCurrent(loadFence)) {
+          throw new Error("EXTENSION_DATA_RESET");
+        }
         for (const id of settingsApi.AI_PROVIDER_IDS) {
           providerKeyDrafts[id] = settingsApi.apiKeyFor(settings, id);
         }
@@ -1095,16 +1408,13 @@ const YTD_OPTIONS = (() => {
         syncSupadataVisibility();
         renderActiveProvider();
         updateServiceStatus();
-        if (migration.migrated) {
-          await storage.set({ [settingsApi.STORAGE_KEY]: settings });
-          setStatus(saveStatus, "migrationWarning");
-        }
+        if (migrationPersisted) setStatus(saveStatus, "migrationWarning");
         settingsLoaded = true;
-        if (saveSettingsBtn) saveSettingsBtn.disabled = false;
+        syncMutationControls();
         return true;
       } catch (_error) {
         settingsLoaded = false;
-        if (saveSettingsBtn) saveSettingsBtn.disabled = true;
+        syncMutationControls();
         setStatus(saveStatus, "settingsLoadFailed");
         return false;
       }
@@ -1116,6 +1426,7 @@ const YTD_OPTIONS = (() => {
       } catch (_error) {
         applyLanguage(DEFAULT_LANGUAGE);
       }
+      await refreshExtensionDataGeneration();
       await loadSettings();
       syncSupadataVisibility({ focus: true });
       if (!statusStates.has(saveStatus)) {
@@ -1129,6 +1440,13 @@ const YTD_OPTIONS = (() => {
         setStatus(saveStatus, "settingsLoadFailed");
         return;
       }
+      let saveFence = extensionDataFence.capture();
+      if (!saveFence) {
+        setStatus(saveStatus, "saveFailed");
+        return;
+      }
+      settingsSaveBusy = true;
+      syncMutationControls();
       setStatus(saveStatus, "saving");
 
       // Persist the whole key map in one write: the visible input holds the
@@ -1142,11 +1460,29 @@ const YTD_OPTIONS = (() => {
       providerKeyDrafts[currentProviderId] = aiApiKeyInput.value;
 
       try {
-        await storage.set({ [settingsApi.STORAGE_KEY]: settings });
+        const result = await persistResetFencedSettings(
+          root,
+          settings,
+          saveFence,
+          extensionDataFence,
+        );
+        saveFence = result?.resetFenceToken || saveFence;
+        if (result?.success && !extensionDataFence.isCurrent(saveFence)) {
+          setStatus(saveStatus, "saveFailed");
+          return;
+        }
+        if (!result?.success) {
+          if (result?.code === "EXTENSION_DATA_RESET") await loadSettings();
+          setStatus(saveStatus, "saveFailed");
+          return;
+        }
         syncSupadataVisibility();
         setStatus(saveStatus, "saved");
       } catch (_error) {
         setStatus(saveStatus, "saveFailed");
+      } finally {
+        settingsSaveBusy = false;
+        syncMutationControls();
       }
     }
 
@@ -1157,7 +1493,16 @@ const YTD_OPTIONS = (() => {
         const result = await root.chrome.runtime.sendMessage({
           action: "exportNotesBackup",
         });
-        if (!result?.success) throw new Error(result?.code || "NOTES_EXPORT_FAILED");
+        if (!result?.success) {
+          if (result?.code === "NOTES_BACKUP_TOO_LARGE") {
+            setStatus(backupStatus, "notesExportTooLarge", {
+              maxMiB: backupLimitMiB(root, result.maxBytes),
+            });
+          } else {
+            setStatus(backupStatus, "notesExportFailed");
+          }
+          return;
+        }
         if (!result.count) {
           setStatus(backupStatus, "noNotesToExport");
           return;
@@ -1172,36 +1517,44 @@ const YTD_OPTIONS = (() => {
     }
 
     function openNotesImportPicker() {
+      pendingImportFence = extensionDataFence.capture();
+      if (!pendingImportFence) {
+        setStatus(backupStatus, "notesImportFailed");
+        return;
+      }
       importNotesFile.value = "";
       importNotesFile.click();
     }
 
     async function importNotes(event) {
       const file = event.target.files?.[0];
+      let importFence = pendingImportFence || extensionDataFence.capture();
+      pendingImportFence = null;
       if (!file) return;
+      if (!importFence) {
+        setStatus(backupStatus, "notesImportFailed");
+        importNotesFile.value = "";
+        return;
+      }
 
-      importNotesBtn.disabled = true;
+      importBusy = true;
+      syncMutationControls();
       setStatus(backupStatus, "importingNotes");
       try {
-        if (file.size > root.YTD_NOTES_BACKUP.MAX_BACKUP_BYTES) {
-          setStatus(backupStatus, "notesBackupTooLarge");
+        const result = await importNotesBackupFile(
+          root,
+          file,
+          importFence,
+          extensionDataFence,
+        );
+        importFence = result?.resetFenceToken || importFence;
+        if (result?.success && !extensionDataFence.isCurrent(importFence)) {
+          setStatus(backupStatus, "notesImportFailed");
           return;
         }
-        const backupText = await file.text();
-        if (
-          root.YTD_NOTES_BACKUP.byteLength(backupText) >
-          root.YTD_NOTES_BACKUP.MAX_BACKUP_BYTES
-        ) {
-          setStatus(backupStatus, "notesBackupTooLarge");
-          return;
-        }
-        const result = await root.chrome.runtime.sendMessage({
-          action: "importNotesBackup",
-          backupText,
-        });
         if (!result?.success) {
           setStatus(backupStatus, notesBackupErrorKey(result?.code), {
-            overBy: result?.overBy || 0,
+            maxMiB: backupLimitMiB(root, result?.maxBytes),
           });
           return;
         }
@@ -1221,7 +1574,8 @@ const YTD_OPTIONS = (() => {
       } catch (_error) {
         setStatus(backupStatus, "notesImportFailed");
       } finally {
-        importNotesBtn.disabled = false;
+        importBusy = false;
+        syncMutationControls();
         importNotesFile.value = "";
       }
     }
@@ -1258,20 +1612,92 @@ const YTD_OPTIONS = (() => {
       );
       if (!confirmed) return;
 
+      resetBusy = true;
+      extensionDataFence.beginLocalReset();
+      syncMutationControls();
       try {
         const result = await root.chrome.runtime.sendMessage({
           action: "resetAllExtensionData",
           preferredLanguage: currentLanguage,
         });
+        await refreshExtensionDataGeneration();
+        extensionDataFence.endLocalReset();
+        resetBusy = false;
+        syncMutationControls();
         if (!result?.success) {
+          await loadSettings();
           setStatus(dataStatus, "resetFailed");
           return;
         }
         await loadSettings();
         setStatus(dataStatus, "allDataDeleted");
       } catch (_error) {
+        await refreshExtensionDataGeneration();
+        extensionDataFence.endLocalReset();
+        resetBusy = false;
+        syncMutationControls();
         setStatus(dataStatus, "resetFailed");
+      } finally {
+        if (resetBusy) {
+          extensionDataFence.endLocalReset();
+          resetBusy = false;
+          syncMutationControls();
+        }
       }
+    }
+
+    function handleExtensionDataResetMessage(message, _sender, sendResponse) {
+      if (
+        message?.action === "downloadNotesMigrationBackup" &&
+        message?.target === "options"
+      ) {
+        try {
+          const filename = String(message.filename || "").trim();
+          if (!filename || !message.backup || typeof message.backup !== "object") {
+            throw new Error("Invalid notes migration backup download");
+          }
+          const download = triggerNotesBackupDownload(
+            root,
+            message.backup,
+            undefined,
+            filename,
+          );
+          sendResponse({ success: true, filename: download.filename });
+        } catch (_error) {
+          sendResponse({
+            success: false,
+            code: "NOTES_MIGRATION_BACKUP_DOWNLOAD_FAILED",
+          });
+        }
+        return false;
+      }
+      if (
+        message?.action !== "extensionDataResetStarted" &&
+        message?.action !== "extensionDataResetCompleted"
+      ) {
+        return false;
+      }
+      extensionDataFence.observe(
+        message.runtimeInstanceId,
+        message.dataGeneration,
+      );
+      if (message.action === "extensionDataResetStarted") {
+        settingsLoaded = false;
+        for (const id of settingsApi.AI_PROVIDER_IDS) providerKeyDrafts[id] = "";
+        aiApiKeyInput.value = "";
+        supadataApiKeyInput.value = "";
+        syncSupadataVisibility();
+        updateServiceStatus();
+      } else if (!resetBusy) {
+        // A reset started from this page owns its one post-reset reload in
+        // resetAllData(). The worker broadcasts completion before resolving
+        // that request, so reloading here as well would capture the still-
+        // blocked local fence and leave a false settings-load error behind.
+        // Other pages have no local reset in flight and still reload here.
+        void loadSettings();
+      }
+      syncMutationControls();
+      return false;
     }
 
     // Explicit navigation intent (nav click or hash change). While set, the
@@ -1441,6 +1867,9 @@ const YTD_OPTIONS = (() => {
     }
 
     form.addEventListener("submit", saveSettings);
+    root.chrome?.runtime?.onMessage?.addListener?.(
+      handleExtensionDataResetMessage,
+    );
     aiApiKeyInput.addEventListener("input", () => {
       // Keep the active provider's draft in step so a later switch-and-return
       // shows what the user typed.
@@ -1488,7 +1917,7 @@ const YTD_OPTIONS = (() => {
       .getElementById("clearCacheBtn")
       .addEventListener("click", clearCachedDigests);
     doc.getElementById("clearNotesBtn").addEventListener("click", clearNotes);
-    doc.getElementById("resetBtn").addEventListener("click", resetAllData);
+    resetBtn.addEventListener("click", resetAllData);
     for (const button of languageButtons) {
       button.addEventListener("click", async () => {
         const language = button.dataset.language;
@@ -1497,6 +1926,7 @@ const YTD_OPTIONS = (() => {
       });
     }
 
+    syncMutationControls();
     if (doc.readyState === "loading") {
       doc.addEventListener("DOMContentLoaded", loadOptions, { once: true });
     } else {
@@ -1509,7 +1939,12 @@ const YTD_OPTIONS = (() => {
     DEFAULT_LANGUAGE,
     LANGUAGE_STORAGE_KEY,
     createStorageAdapter,
+    createExtensionDataFence,
+    importNotesBackupFile,
+    isWritableDataGeneration,
     normalizeLanguage,
+    persistResetFencedSettings,
+    persistResetFencedReadingDisplay,
     persistPreferredLanguage,
     readPreferredLanguage,
     notesBackupErrorKey,
@@ -1523,6 +1958,7 @@ const YTD_OPTIONS = (() => {
     applySettingsNavState,
     supadataOptionsRequested,
     applySupadataSettingsVisibility,
+    backupLimitMiB,
     initialize,
   };
 })();

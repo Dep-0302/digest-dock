@@ -813,7 +813,9 @@ async function saveCurrentNote() {
       showNoteSavedToast(result.note);
     } else {
       const label =
-        result.error === "TRANSCRIPT_TASK_REQUIRED"
+        result.code === "NOTES_BACKUP_TOO_LARGE"
+          ? "笔记备份容量已满"
+          : result.error === "TRANSCRIPT_TASK_REQUIRED"
           ? "请先打开侧栏字幕"
           : result.error === "SUPADATA_CONSENT_REQUIRED"
             ? "请在侧栏授权"
@@ -851,6 +853,34 @@ async function saveCurrentNote() {
 /**
  * Shows a toast notification when a note is saved.
  */
+function youtubeNoteToastPresentation(note) {
+  const primaryLanguage = (value) =>
+    String(value || "")
+      .trim()
+      .replace(/_/g, "-")
+      .toLowerCase()
+      .split("-")[0];
+  const chineseLanguages = new Set([
+    "zh",
+    "zho",
+    "chi",
+    "cmn",
+    "yue",
+    "wuu",
+    "gan",
+    "hak",
+    "nan",
+    "lzh",
+  ]);
+  const textLanguage = primaryLanguage(note?.textLanguage);
+  const rawText = String(note?.rawText || "").trim();
+  const cleanedText = String(note?.text || "").trim();
+  if (chineseLanguages.has(textLanguage) && cleanedText) {
+    return { label: "", text: cleanedText };
+  }
+  return { label: "字幕原话", text: rawText || cleanedText };
+}
+
 function showNoteSavedToast(note) {
   // Remove existing toast
   const existing = document.getElementById(
@@ -859,11 +889,12 @@ function showNoteSavedToast(note) {
   if (existing) existing.remove();
 
   const toast = document.createElement("div");
+  const presentation = youtubeNoteToastPresentation(note);
   toast.id = DIGESTDOCK_YOUTUBE_DOM_IDS.noteToast;
   toast.innerHTML = `
-    <div style="font-weight: 700; margin-bottom: 6px; color: #c8674f;">📝 笔记已保存</div>
+    <div style="font-weight: 700; margin-bottom: 6px; color: #c8674f;">📝 笔记已保存${presentation.label ? ` · ${escapeHtmlForContent(presentation.label)}` : ""}</div>
     <div style="font-size: 12px; color: #6b6258; margin-bottom: 8px;">${escapeHtmlForContent(note.timestamp)} — ${escapeHtmlForContent(note.videoTitle)}</div>
-    <div style="font-size: 13px; line-height: 1.55; color: #2e2a24;">"${escapeHtmlForContent(note.text)}"</div>
+    <div style="font-size: 13px; line-height: 1.55; color: #2e2a24;">"${escapeHtmlForContent(presentation.text)}"</div>
     <div style="margin-top: 10px; font-size: 11px;">
       <a href="${escapeHtmlForContent(note.timestampedUrl)}" style="color: #c8674f; font-weight: 600; text-decoration: none;">🔗 复制链接</a>
     </div>
@@ -1140,6 +1171,7 @@ Object.assign(globalThis, {
   isExtensionContextInvalidatedError,
   setupButtonObserver,
   setupDigestButtonResizeListener,
+  youtubeNoteToastPresentation,
 });
 globalThis.__YTD_CONTENT_SCRIPT_ACTIVE__ = true;
 })();

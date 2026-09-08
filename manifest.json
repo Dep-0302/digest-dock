@@ -1,8 +1,9 @@
 {
   "manifest_version": 3,
   "name": "DigestDock",
-  "version": "1.4.8",
+  "version": "2.0.0",
   "minimum_chrome_version": "116",
+  "incognito": "not_allowed",
   "description": "把支持平台的视频整理成包含字幕、AI 概览和时间戳笔记的学习资料。",
   "permissions": [
     "sidePanel",

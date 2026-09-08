@@ -46,6 +46,24 @@ function json3Body(text = "passive line") {
   });
 }
 
+function timedJson3Body() {
+  return JSON.stringify({
+    events: [
+      {
+        tStartMs: 62_040,
+        dDurationMs: 6_120,
+        segs: [
+          { utf8: "beginning ", tOffsetMs: 0 },
+          { utf8: "to ", tOffsetMs: 420 },
+          { utf8: "forget. ", tOffsetMs: 920 },
+          { utf8: "The ", tOffsetMs: 1_480 },
+          { utf8: "absence of AI", tOffsetMs: 2_100 },
+        ],
+      },
+    ],
+  });
+}
+
 function pageSnapshot(videoId = VIDEO_ID, options = {}) {
   return [
     {
@@ -87,7 +105,11 @@ function loadBackground({
   scriptingExecuteScript,
   storageLocalGet,
   pageSnapshotOptions = {},
+  pageSnapshotRun,
   bilibiliAdapterImpl = bilibiliAdapter,
+  setTimeoutImpl = setTimeout,
+  clearTimeoutImpl = clearTimeout,
+  nowImpl = Date.now,
 } = {}) {
   const counts = {
     activeInject: 0,
@@ -140,21 +162,30 @@ function loadBackground({
         },
       ];
     }
+    if (typeof pageSnapshotRun === "function") {
+      return pageSnapshotRun(details, pageSnapshotOptions);
+    }
     return pageSnapshot(
       tabVideoIds.get(details.target?.tabId) || VIDEO_ID,
       pageSnapshotOptions,
     );
   };
 
+  const SandboxDate = class extends Date {
+    static now() {
+      return nowImpl();
+    }
+  };
   const sandbox = {
     console,
+    Date: SandboxDate,
     URL,
     TextDecoder,
     TextEncoder,
     Intl,
     AbortController,
-    setTimeout,
-    clearTimeout,
+    setTimeout: setTimeoutImpl,
+    clearTimeout: clearTimeoutImpl,
     fetch: async (...args) => {
       counts.fetch += 1;
       return fetchImpl(...args);
@@ -276,6 +307,49 @@ function nativeOptions(
   };
 }
 
+function createManualTimers() {
+  const timers = new Map();
+  const scheduledDelays = [];
+  let nextId = 1;
+  let now = 0;
+  return {
+    setTimeout(callback, delay) {
+      const id = nextId++;
+      timers.set(id, { callback, delay });
+      scheduledDelays.push(delay);
+      return id;
+    },
+    clearTimeout(id) {
+      timers.delete(id);
+    },
+    delays() {
+      return [...timers.values()].map((timer) => timer.delay);
+    },
+    scheduledDelays() {
+      return [...scheduledDelays];
+    },
+    now() {
+      return now;
+    },
+    advance(delay) {
+      now += delay;
+    },
+    runAll() {
+      for (const [id, timer] of [...timers]) {
+        timers.delete(id);
+        now += timer.delay;
+        timer.callback();
+      }
+    },
+  };
+}
+
+async function flushTurns(count = 4) {
+  for (let index = 0; index < count; index += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+}
+
 test("Passive capture ends the route with zero Active, Panel, and third-party calls", async () => {
   const worker = loadBackground();
   await worker.dispatch(
@@ -328,6 +402,108 @@ test("Passive capture ends the route with zero Active, Panel, and third-party ca
     JSON.stringify(worker.sessionState.youtube_passive_session_buffer),
     /https?:|signature|expire/i,
   );
+});
+
+test("Passive JSON3 preserves exact word timing without changing the cue", async () => {
+  const worker = loadBackground();
+  await worker.dispatch(
+    {
+      action: "youtubePassiveState",
+      payload: {
+        type: "inflight",
+        videoId: VIDEO_ID,
+        language: "en",
+        kind: "asr",
+        status: 0,
+        inFlight: true,
+      },
+    },
+    { tab: { id: 1 } },
+  );
+  await worker.dispatch(
+    {
+      action: "youtubePassiveState",
+      payload: {
+        type: "capture",
+        videoId: VIDEO_ID,
+        language: "en",
+        kind: "asr",
+        status: 200,
+        inFlight: false,
+        format: "json3",
+        body: timedJson3Body(),
+      },
+    },
+    { tab: { id: 1 } },
+  );
+
+  const result = await worker.helpers.handleFetchYoutubeNativeTranscript(
+    VIDEO_ID,
+    "en",
+    1,
+    { ...nativeOptions("passive-word-time"), trackKind: "asr" },
+  );
+
+  assert.equal(result.source, "youtube-passive");
+  assert.equal(
+    result.transcript[0].text,
+    "beginning to forget. The absence of AI",
+  );
+  assert.equal(result.transcript[0].start, 62.04);
+  assert.equal(result.transcript[0].duration, 6.12);
+  assert.deepEqual(JSON.parse(JSON.stringify(result.transcript[0].timingPoints)), [
+    { charIndex: 0, start: 62.04 },
+    { charIndex: 10, start: 62.46 },
+    { charIndex: 13, start: 62.96 },
+    { charIndex: 21, start: 63.52 },
+    { charIndex: 25, start: 64.14 },
+  ]);
+  assert.equal(worker.counts.activeRun, 0);
+  assert.equal(worker.counts.panelRun, 0);
+  assert.equal(worker.counts.fetch, 0);
+});
+
+test("Active normalization preserves exact word timing through the background whitelist", async () => {
+  const worker = loadBackground({
+    pageSnapshotOptions: {
+      captionTrackCountKnown: true,
+      captionTrackCount: 1,
+      availableTracks: [{ language: "en", kind: "asr" }],
+      pageDefaultTrack: { language: "en", kind: "asr" },
+    },
+    activeResult: {
+      ...transcriptResult("timed Active"),
+      selectedTrack: { language: "en", kind: "asr" },
+      transcript: [
+        {
+          text: "beginning to forget. The absence of AI",
+          start: 62.04,
+          duration: 6.12,
+          language: "en",
+          timingPoints: [
+            { charIndex: 0, start: 62.04 },
+            { charIndex: 21, start: 63.52 },
+          ],
+        },
+      ],
+    },
+  });
+
+  const result = await worker.helpers.handleFetchYoutubeNativeTranscript(
+    VIDEO_ID,
+    "en",
+    1,
+    { ...nativeOptions("active-word-time"), trackKind: "asr" },
+  );
+
+  assert.equal(result.source, "youtube-active");
+  assert.deepEqual(JSON.parse(JSON.stringify(result.transcript[0].timingPoints)), [
+    { charIndex: 0, start: 62.04 },
+    { charIndex: 21, start: 63.52 },
+  ]);
+  assert.equal(worker.counts.activeRun, 1);
+  assert.equal(worker.counts.panelRun, 0);
+  assert.equal(worker.counts.fetch, 0);
 });
 
 test("concurrent Passive inflight and capture preserve arrival order across delayed tab checks", async () => {
@@ -775,8 +951,127 @@ test("Passive bridge health requires a live runtime roundtrip, not only a stale 
   }
 });
 
+test("an empty Passive gate enters Active without arming the 1.5 second wait", async () => {
+  const timers = createManualTimers();
+  const worker = loadBackground({
+    setTimeoutImpl: timers.setTimeout,
+    clearTimeoutImpl: timers.clearTimeout,
+    pageSnapshotOptions: {
+      captionTrackCountKnown: true,
+      captionTrackCount: 1,
+      availableTracks: [{ language: "en", kind: "manual" }],
+      pageDefaultTrack: { language: "en", kind: "manual" },
+    },
+    activeResult: transcriptResult("immediate Active"),
+  });
+
+  const pending = worker.helpers.handleFetchYoutubeNativeTranscript(
+    VIDEO_ID,
+    "en",
+    1,
+    nativeOptions("empty-fast"),
+  );
+  await flushTurns();
+
+  const activeRunsBeforeAnyTimer = worker.counts.activeRun;
+  const waitsBeforeActive = timers.delays();
+  // Release an old implementation's bounded waiter so the red test always
+  // settles cleanly instead of leaving a fake timer or route promise behind.
+  timers.runAll();
+  const result = await pending;
+
+  assert.deepEqual(
+    { activeRunsBeforeAnyTimer, waitsBeforeActive },
+    { activeRunsBeforeAnyTimer: 1, waitsBeforeActive: [] },
+    "an empty Passive buffer must reach Active without arming the 1.5 second budget",
+  );
+  assert.equal(result.success, true);
+  assert.equal(result.source, "youtube-active");
+});
+
+test("a Passive capture arriving during the page snapshot wins before Active starts", async () => {
+  let releaseSnapshot;
+  let markSnapshotStarted;
+  const snapshotStarted = new Promise((resolve) => {
+    markSnapshotStarted = resolve;
+  });
+  const snapshotGate = new Promise((resolve) => {
+    releaseSnapshot = resolve;
+  });
+  const worker = loadBackground({
+    pageSnapshotOptions: {
+      captionTrackCountKnown: true,
+      captionTrackCount: 1,
+      availableTracks: [{ language: "en", kind: "manual" }],
+      pageDefaultTrack: { language: "en", kind: "manual" },
+    },
+    pageSnapshotRun: async (_details, options) => {
+      markSnapshotStarted();
+      await snapshotGate;
+      return pageSnapshot(VIDEO_ID, options);
+    },
+    activeResult: transcriptResult("must not start"),
+  });
+
+  const pending = worker.helpers.handleFetchYoutubeNativeTranscript(
+    VIDEO_ID,
+    "en",
+    1,
+    nativeOptions("snapshot-race"),
+  );
+  await snapshotStarted;
+  assert.equal(
+    worker.counts.activeRun,
+    0,
+    "the route is still reading the page track snapshot",
+  );
+
+  await worker.dispatch(
+    {
+      action: "youtubePassiveState",
+      payload: {
+        type: "inflight",
+        videoId: VIDEO_ID,
+        language: "en",
+        kind: "manual",
+        status: 0,
+        inFlight: true,
+      },
+    },
+    { tab: { id: 1 } },
+  );
+  await worker.dispatch(
+    {
+      action: "youtubePassiveState",
+      payload: {
+        type: "capture",
+        videoId: VIDEO_ID,
+        language: "en",
+        kind: "manual",
+        status: 200,
+        inFlight: false,
+        body: json3Body("captured during page snapshot"),
+      },
+    },
+    { tab: { id: 1 } },
+  );
+  releaseSnapshot();
+
+  const result = await pending;
+  assert.equal(result.success, true);
+  assert.equal(result.source, "youtube-passive");
+  assert.equal(result.transcript[0].text, "captured during page snapshot");
+  assert.equal(worker.counts.activeInject, 0);
+  assert.equal(worker.counts.activeRun, 0);
+});
+
 test("an in-flight Passive response waits once and wins before the CC prompt", async () => {
-  const worker = loadBackground();
+  const timers = createManualTimers();
+  const worker = loadBackground({
+    setTimeoutImpl: timers.setTimeout,
+    clearTimeoutImpl: timers.clearTimeout,
+    nowImpl: timers.now,
+  });
   await worker.dispatch(
     {
       action: "youtubePassiveState",
@@ -798,7 +1093,9 @@ test("an in-flight Passive response waits once and wins before the CC prompt", a
     1,
     nativeOptions("8"),
   );
-  await Promise.resolve();
+  await flushTurns();
+  assert.deepEqual(timers.delays(), [1_500]);
+  assert.equal(worker.counts.activeRun, 0);
   await worker.dispatch(
     {
       action: "youtubePassiveState",
@@ -818,20 +1115,23 @@ test("an in-flight Passive response waits once and wins before the CC prompt", a
   assert.equal(result.source, "youtube-passive");
   assert.equal(result.transcript[0].text, "arrived while waiting");
   assert.equal(worker.counts.activeRun, 0);
+  assert.deepEqual(timers.delays(), []);
 });
 
-test("an initially empty Passive gate accepts a capture that registers within the same bounded wait", async () => {
-  const worker = loadBackground();
-  const pending = worker.helpers.awaitYoutubePassiveGate({
-    tabId: 1,
-    videoId: VIDEO_ID,
-    preferredLanguage: "en",
-    trackKind: "manual-first",
+test("two Passive gate checks share one total 1.5 second deadline", async () => {
+  const timers = createManualTimers();
+  const worker = loadBackground({
+    setTimeoutImpl: timers.setTimeout,
+    clearTimeoutImpl: timers.clearTimeout,
+    nowImpl: timers.now,
+    pageSnapshotOptions: {
+      captionTrackCountKnown: true,
+      captionTrackCount: 1,
+      availableTracks: [{ language: "en", kind: "manual" }],
+      pageDefaultTrack: { language: "en", kind: "manual" },
+    },
+    activeResult: transcriptResult("active after one Passive budget"),
   });
-
-  // Let the first empty storage read complete. The old implementation returned
-  // null here immediately, before a just-starting page request could register.
-  await new Promise((resolve) => setImmediate(resolve));
   await worker.dispatch(
     {
       action: "youtubePassiveState",
@@ -846,26 +1146,404 @@ test("an initially empty Passive gate accepts a capture that registers within th
     },
     { tab: { id: 1 } },
   );
+
+  const pending = worker.helpers.handleFetchYoutubeNativeTranscript(
+    VIDEO_ID,
+    "en",
+    1,
+    nativeOptions("one-total-budget"),
+  );
+  await flushTurns();
+  assert.deepEqual(timers.delays(), [1_500]);
+  timers.runAll();
+  const result = await pending;
+
+  assert.equal(result.success, true);
+  assert.equal(result.source, "youtube-active");
+  assert.equal(worker.counts.activeRun, 1);
+  assert.deepEqual(timers.scheduledDelays(), [1_500]);
+});
+
+test("an aged Passive request waits only the remainder of its original 1.5 second budget", async () => {
+  const timers = createManualTimers();
+  const worker = loadBackground({
+    setTimeoutImpl: timers.setTimeout,
+    clearTimeoutImpl: timers.clearTimeout,
+    nowImpl: timers.now,
+    pageSnapshotOptions: {
+      captionTrackCountKnown: true,
+      captionTrackCount: 1,
+      availableTracks: [{ language: "zh-Hans", kind: "manual" }],
+      pageDefaultTrack: { language: "zh-Hans", kind: "manual" },
+    },
+    activeResult: transcriptResult("active after aged Passive budget"),
+  });
   await worker.dispatch(
+    {
+      action: "youtubePassiveState",
+      payload: {
+        type: "inflight",
+        videoId: VIDEO_ID,
+        language: "zh-Hans",
+        kind: "manual",
+        status: 0,
+        inFlight: true,
+      },
+    },
+    { tab: { id: 1 } },
+  );
+  timers.advance(1_400);
+
+  const pending = worker.helpers.handleFetchYoutubeNativeTranscript(
+    VIDEO_ID,
+    "zh-Hans",
+    1,
+    nativeOptions("aged-passive"),
+  );
+  await flushTurns();
+  assert.deepEqual(timers.delays(), [100]);
+  timers.runAll();
+  const result = await pending;
+
+  assert.equal(result.success, true);
+  assert.equal(result.source, "youtube-active");
+  assert.equal(worker.counts.activeRun, 1);
+  assert.deepEqual(timers.scheduledDelays(), [100]);
+});
+
+test("damaged Passive startedAt values fall back to a valid updatedAt without starting Active early", async () => {
+  for (const damagedStartedAt of [null, "", false, 9_999]) {
+    const timers = createManualTimers();
+    timers.advance(1_000);
+    const worker = loadBackground({
+      setTimeoutImpl: timers.setTimeout,
+      clearTimeoutImpl: timers.clearTimeout,
+      nowImpl: timers.now,
+    });
+    await worker.dispatch(
+      {
+        action: "youtubePassiveState",
+        payload: {
+          type: "inflight",
+          videoId: VIDEO_ID,
+          language: "zh-Hans",
+          kind: "manual",
+          status: 0,
+          inFlight: true,
+        },
+      },
+      { tab: { id: 1 } },
+    );
+    const [entry] = worker.sessionState.youtube_passive_session_buffer;
+    entry.startedAt = damagedStartedAt;
+    entry.updatedAt = 1_000;
+    timers.advance(400);
+
+    const pending = worker.helpers.awaitYoutubePassiveGate(
+      {
+        tabId: 1,
+        videoId: VIDEO_ID,
+        preferredLanguage: "zh-Hans",
+        trackKind: "manual-first",
+      },
+      timers.now() + 1_500,
+    );
+    await flushTurns();
+    assert.deepEqual(
+      timers.delays(),
+      [1_100],
+      `startedAt=${String(damagedStartedAt)} must use the fresh updatedAt`,
+    );
+    timers.runAll();
+    assert.equal(await pending, null);
+  }
+});
+
+test("repeated inflight and concurrent capture never refill the Passive startedAt budget", async () => {
+  const timers = createManualTimers();
+  const worker = loadBackground({ nowImpl: timers.now });
+  const send = (payload) =>
+    worker.dispatch(
+      {
+        action: "youtubePassiveState",
+        payload: {
+          videoId: VIDEO_ID,
+          language: "zh-Hans",
+          kind: "manual",
+          status: 0,
+          inFlight: true,
+          ...payload,
+        },
+      },
+      { tab: { id: 1 } },
+    );
+
+  await send({ type: "inflight" });
+  assert.equal(
+    worker.sessionState.youtube_passive_session_buffer[0].startedAt,
+    0,
+  );
+  timers.advance(600);
+  await send({ type: "inflight" });
+  assert.equal(
+    worker.sessionState.youtube_passive_session_buffer[0].startedAt,
+    0,
+    "a duplicate begin must retain the first observed start",
+  );
+  timers.advance(300);
+  await send({
+    type: "capture",
+    status: 200,
+    body: json3Body("capture with another request still running"),
+  });
+  assert.equal(
+    worker.sessionState.youtube_passive_session_buffer[0].startedAt,
+    0,
+    "a capture that reports concurrent work must not renew the budget",
+  );
+});
+
+test("a fresh independent Passive identity keeps its own bounded wait beside an older request", async () => {
+  const timers = createManualTimers();
+  const worker = loadBackground({
+    setTimeoutImpl: timers.setTimeout,
+    clearTimeoutImpl: timers.clearTimeout,
+    nowImpl: timers.now,
+    pageSnapshotOptions: {
+      captionTrackCountKnown: true,
+      captionTrackCount: 1,
+      availableTracks: [{ language: "zh-Hans", kind: "manual" }],
+      pageDefaultTrack: { language: "zh-Hans", kind: "manual" },
+    },
+    activeResult: transcriptResult("active after independent Passive budget"),
+  });
+  const begin = (language) =>
+    worker.dispatch(
+      {
+        action: "youtubePassiveState",
+        payload: {
+          type: "inflight",
+          videoId: VIDEO_ID,
+          language,
+          kind: "manual",
+          status: 0,
+          inFlight: true,
+        },
+      },
+      { tab: { id: 1 } },
+    );
+
+  await begin("en");
+  timers.advance(1_400);
+  await begin("zh-Hans");
+
+  const pending = worker.helpers.handleFetchYoutubeNativeTranscript(
+    VIDEO_ID,
+    "zh-Hans",
+    1,
+    nativeOptions("independent-passive"),
+  );
+  await flushTurns();
+  assert.deepEqual(
+    timers.delays(),
+    [1_500],
+    "the old identity must not force Active to overlap the fresh request",
+  );
+  timers.runAll();
+  const result = await pending;
+
+  assert.equal(result.success, true);
+  assert.equal(result.source, "youtube-active");
+  assert.equal(worker.counts.activeRun, 1);
+  assert.deepEqual(timers.scheduledDelays(), [1_500]);
+});
+
+test("a fresh identity observed during an old wait can use the remaining shared request budget", async () => {
+  const timers = createManualTimers();
+  const worker = loadBackground({
+    setTimeoutImpl: timers.setTimeout,
+    clearTimeoutImpl: timers.clearTimeout,
+    nowImpl: timers.now,
+  });
+  const send = (payload) =>
+    worker.dispatch(
+      {
+        action: "youtubePassiveState",
+        payload: {
+          videoId: VIDEO_ID,
+          kind: "manual",
+          status: 0,
+          inFlight: true,
+          ...payload,
+        },
+      },
+      { tab: { id: 1 } },
+    );
+
+  await send({ type: "inflight", language: "en" });
+  timers.advance(1_400);
+  const pending = worker.helpers.handleFetchYoutubeNativeTranscript(
+    VIDEO_ID,
+    "zh-Hans",
+    1,
+    nativeOptions("fresh-during-wait"),
+  );
+  await flushTurns();
+  assert.deepEqual(timers.delays(), [100]);
+
+  await send({ type: "inflight", language: "zh-Hans" });
+  await flushTurns();
+  assert.deepEqual(
+    timers.delays(),
+    [1_500],
+    "the new identity may wait only until the original request deadline",
+  );
+
+  await send({
+    type: "capture",
+    language: "zh-Hans",
+    status: 200,
+    inFlight: false,
+    body: json3Body("fresh identity capture"),
+  });
+  const result = await pending;
+  assert.equal(result.source, "youtube-passive");
+  assert.equal(result.transcript[0].text, "fresh identity capture");
+  assert.equal(worker.counts.activeRun, 0);
+  assert.deepEqual(timers.delays(), []);
+});
+
+test("an over-age Passive entry falls through without a timer and remains available for a late 429", async () => {
+  const timers = createManualTimers();
+  const worker = loadBackground({
+    setTimeoutImpl: timers.setTimeout,
+    clearTimeoutImpl: timers.clearTimeout,
+    nowImpl: timers.now,
+    pageSnapshotOptions: {
+      captionTrackCountKnown: true,
+      captionTrackCount: 1,
+      availableTracks: [{ language: "zh-Hans", kind: "manual" }],
+      pageDefaultTrack: { language: "zh-Hans", kind: "manual" },
+    },
+    activeResult: transcriptResult("active after expired Passive budget"),
+  });
+  await worker.dispatch(
+    {
+      action: "youtubePassiveState",
+      payload: {
+        type: "inflight",
+        videoId: VIDEO_ID,
+        language: "zh-Hans",
+        kind: "manual",
+        status: 0,
+        inFlight: true,
+      },
+    },
+    { tab: { id: 1 } },
+  );
+  timers.advance(1_501);
+
+  const result = await worker.helpers.handleFetchYoutubeNativeTranscript(
+    VIDEO_ID,
+    "zh-Hans",
+    1,
+    nativeOptions("expired-passive"),
+  );
+  assert.equal(result.success, true);
+  assert.equal(result.source, "youtube-active");
+  assert.equal(worker.counts.activeRun, 1);
+  assert.deepEqual(timers.scheduledDelays(), []);
+  assert.equal(
+    worker.sessionState.youtube_passive_session_buffer.length,
+    1,
+    "timeout must not delete evidence needed by a late response",
+  );
+
+  const observed = await worker.dispatch(
     {
       action: "youtubePassiveState",
       payload: {
         type: "capture",
         videoId: VIDEO_ID,
-        language: "en",
+        language: "zh-Hans",
         kind: "manual",
-        status: 200,
+        status: 429,
         inFlight: false,
-        body: json3Body("registered after the empty read"),
+        body: "bounded error body",
+      },
+    },
+    { tab: { id: 1 } },
+  );
+  assert.equal(observed.ok, true);
+  assert.equal(observed.state, "rate-limited");
+  assert.equal(worker.sessionState.youtube_passive_session_buffer.length, 0);
+  assert.ok(
+    Number(worker.sessionState.youtube_native_cooldown_until) > timers.now(),
+  );
+});
+
+test("a Passive 429 observed during the bounded wait prevents every automatic fallback", async () => {
+  const timers = createManualTimers();
+  const worker = loadBackground({
+    setTimeoutImpl: timers.setTimeout,
+    clearTimeoutImpl: timers.clearTimeout,
+    nowImpl: timers.now,
+    pageSnapshotOptions: {
+      captionTrackCountKnown: true,
+      captionTrackCount: 1,
+      availableTracks: [{ language: "zh-Hans", kind: "manual" }],
+      pageDefaultTrack: { language: "zh-Hans", kind: "manual" },
+    },
+  });
+  await worker.dispatch(
+    {
+      action: "youtubePassiveState",
+      payload: {
+        type: "inflight",
+        videoId: VIDEO_ID,
+        language: "zh-Hans",
+        kind: "manual",
+        status: 0,
+        inFlight: true,
       },
     },
     { tab: { id: 1 } },
   );
 
+  const pending = worker.helpers.handleFetchYoutubeNativeTranscript(
+    VIDEO_ID,
+    "zh-Hans",
+    1,
+    nativeOptions("passive-429-during-wait"),
+  );
+  await flushTurns();
+  assert.deepEqual(timers.delays(), [1_500]);
+
+  const observed = await worker.dispatch(
+    {
+      action: "youtubePassiveState",
+      payload: {
+        type: "capture",
+        videoId: VIDEO_ID,
+        language: "zh-Hans",
+        kind: "manual",
+        status: 429,
+        inFlight: false,
+        body: "bounded error body",
+      },
+    },
+    { tab: { id: 1 } },
+  );
   const result = await pending;
-  assert.equal(result?.source, "youtube-passive");
-  assert.equal(result?.transcript?.[0]?.text, "registered after the empty read");
+
+  assert.equal(observed.ok, true);
+  assert.equal(observed.state, "rate-limited");
+  assert.equal(result.success, false);
+  assert.equal(result.routeOutcome, "RATE_LIMITED");
+  assert.equal(worker.counts.activeRun, 0);
+  assert.equal(worker.counts.panelRun, 0);
   assert.equal(worker.counts.fetch, 0);
+  assert.deepEqual(timers.delays(), []);
 });
 
 test("URL updates preserve the current video's Passive capture and clear only old video identities", async () => {
@@ -1424,6 +2102,7 @@ test("an unexpected YouTube orchestration error still echoes run identity", asyn
 });
 
 test("Bilibili keeps its existing adapter path", async () => {
+  const timers = createManualTimers();
   const mediaRef = {
     platform: "bilibili",
     bvid: "BV1zfg36ZEXi",
@@ -1433,6 +2112,8 @@ test("Bilibili keeps its existing adapter path", async () => {
     canonicalUrl: "https://www.bilibili.com/video/BV1zfg36ZEXi/",
   };
   const worker = loadBackground({
+    setTimeoutImpl: timers.setTimeout,
+    clearTimeoutImpl: timers.clearTimeout,
     bilibiliAdapterImpl: {
       ...bilibiliAdapter,
       async fetchTranscript() {
@@ -1459,4 +2140,9 @@ test("Bilibili keeps its existing adapter path", async () => {
   assert.equal(worker.counts.activeRun, 0);
   assert.equal(worker.counts.panelRun, 0);
   assert.equal(worker.counts.fetch, 0);
+  assert.deepEqual(
+    timers.delays(),
+    [],
+    "Bilibili must never enter the YouTube Passive wait budget",
+  );
 });

@@ -70,7 +70,7 @@ test("manifest uses minimized install-time permissions", () => {
   assert.equal(passiveBridge?.world, "ISOLATED");
   assert.deepEqual(passiveBridge?.matches, ["https://www.youtube.com/*"]);
   assert.equal(Object.hasOwn(manifest, "optional_host_permissions"), false);
-  assert.equal(manifest.version, "1.4.8");
+  assert.equal(manifest.version, "2.0.0");
 });
 
 test("large local caches use explicit permission and remain user-clearable", () => {
@@ -217,7 +217,7 @@ test("cross-platform runtime dependencies match the Passive-first then fixed-Act
     3,
     "only the icon-adjacent DigestDock brand word must emphasize D, D, and K",
   );
-  assert.match(optionsPage, /<p class="settings-version">DigestDock 1\.4\.8<\/p>/);
+  assert.match(optionsPage, /<p class="settings-version">DigestDock 2\.0\.0<\/p>/);
   assert.match(optionsPage, /<p class="eyebrow">DIGESTDOCK<\/p>/);
   assert.match(optionsStyles, /\.brand-letter\s*\{[^}]*font-weight:\s*750/);
   assert.doesNotMatch(optionsPage, /#1F2933|#F26A4F/);
@@ -435,8 +435,12 @@ test("release copy documents current scope without em dashes", () => {
   assert.match(optionsPage, /id="providerSelectButton"[\s\S]*?role="combobox"/);
   assert.match(optionsPage, /id="providerSelectList"[\s\S]*?role="listbox"/);
   assert.doesNotMatch(optionsStyles, /\.data-card\s*\{[^}]*margin-top/);
-  // A one-time legacy-shape migration is still persisted exactly once.
-  assert.match(optionsScript, /migration\.migrated[\s\S]*storage\.set/);
+  // A stored legacy shape is migrated through the reset-fenced background
+  // write. An absent post-reset settings record must remain absent.
+  assert.match(
+    optionsScript,
+    /hadStoredSettings\s*&&\s*migration\.migrated[\s\S]*persistResetFencedSettings/,
+  );
   assert.doesNotMatch(optionsPage, /~\/Documents\/(?:youtube-digest|digest-dock)/);
   assert.doesNotMatch(optionsPage, /%USERPROFILE%\\Documents\\(?:youtube-digest|digest-dock)/);
 

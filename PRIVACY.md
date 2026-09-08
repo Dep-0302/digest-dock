@@ -72,7 +72,7 @@ YouTube, Bilibili, Supadata, and your selected AI provider process data under th
 DigestDock uses Chrome's local extension storage, not a DigestDock cloud service.
 
 - The Supadata key and each AI provider's settings and key remain on the device in Chrome's extension storage.
-- Saved notes remain until you delete them or remove/clear the extension's data. The extension keeps up to 100 notes.
+- Saved notes remain until you delete them or remove/clear the extension's data. There is no fixed note-count limit; a new save is rejected atomically if the resulting recovery backup would exceed the 32 MiB capacity guard.
 - Recent transcript, digest, and per-segment translation cache entries are stored
   locally. The cache is limited to 20 videos, and entries older than 30 days are
   removed when the side panel opens.
@@ -103,8 +103,9 @@ DigestDock uses Chrome's local extension storage, not a DigestDock cloud service
   developer, or another network service.
 - Import validates and merges the file with existing notes, skips duplicates,
   and may fill content missing from an existing matching note. A conflicting
-  note ID or a merged total above 100 rejects the entire import. A failed import
-  does not change the notes already stored by the extension.
+  note ID or a merged recovery backup above the 32 MiB capacity guard rejects
+  the entire import. A failed import does not change the notes already stored by
+  the extension.
 - Imported timestamp URLs are rebuilt from validated YouTube or Bilibili media
   fields. A URL supplied by the backup file is not trusted as the source of
   media identity.

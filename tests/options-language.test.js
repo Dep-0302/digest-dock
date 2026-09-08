@@ -4,6 +4,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const options = require("../options.js");
+const notesBackup = require("../notes-backup.js");
 
 const root = path.resolve(__dirname, "..");
 const read = (file) => fs.readFileSync(path.join(root, file), "utf8");
@@ -29,6 +30,205 @@ function createLocalStorage() {
   };
 }
 
+function deferred() {
+  let resolve;
+  const promise = new Promise((settle) => {
+    resolve = settle;
+  });
+  return { promise, resolve };
+}
+
+function createFakeOptionsElement(id = "") {
+  const listeners = new Map();
+  const classes = new Set();
+  return {
+    id,
+    value: "",
+    textContent: "",
+    innerHTML: "",
+    dataset: {},
+    style: {},
+    disabled: false,
+    hidden: false,
+    files: [],
+    classList: {
+      add(name) {
+        classes.add(name);
+      },
+      contains(name) {
+        return classes.has(name);
+      },
+      toggle(name, force) {
+        const active = force === undefined ? !classes.has(name) : Boolean(force);
+        if (active) classes.add(name);
+        else classes.delete(name);
+        return active;
+      },
+    },
+    attributes: {},
+    setAttribute(name, value) {
+      this.attributes[name] = String(value);
+    },
+    removeAttribute(name) {
+      delete this.attributes[name];
+    },
+    addEventListener(type, listener) {
+      const registered = listeners.get(type) || [];
+      registered.push(listener);
+      listeners.set(type, registered);
+    },
+    async dispatch(type, event = {}) {
+      const dispatched = {
+        preventDefault() {},
+        target: this,
+        ...event,
+      };
+      await Promise.all(
+        (listeners.get(type) || []).map((listener) => listener(dispatched)),
+      );
+    },
+    appendChild() {},
+    contains() {
+      return false;
+    },
+    focus() {},
+    click() {},
+    querySelector() {
+      return null;
+    },
+    querySelectorAll() {
+      return [];
+    },
+  };
+}
+
+async function flushOptionsRuntime() {
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+}
+
+async function createOptionsResetRuntimeFixture({ initialSettings } = {}) {
+  const settingsApi = require("../settings.js");
+  const elements = new Map();
+  const stored = {
+    [options.LANGUAGE_STORAGE_KEY]: "zh-CN",
+  };
+  if (initialSettings) stored[settingsApi.STORAGE_KEY] = initialSettings;
+  let settingsReadCount = 0;
+  let dataGeneration = 0;
+  const runtimeInstanceId = "runtime-options-reset";
+  const messageListeners = [];
+
+  const element = (id) => {
+    if (!elements.has(id)) elements.set(id, createFakeOptionsElement(id));
+    return elements.get(id);
+  };
+  const document = {
+    readyState: "complete",
+    documentElement: { lang: "" },
+    title: "",
+    body: createFakeOptionsElement("body"),
+    getElementById: element,
+    querySelector() {
+      return null;
+    },
+    querySelectorAll() {
+      return [];
+    },
+    createElement() {
+      return createFakeOptionsElement();
+    },
+    addEventListener() {},
+  };
+
+  const broadcast = (action, generation = dataGeneration) => {
+    const message = {
+      action,
+      runtimeInstanceId,
+      dataGeneration: generation,
+    };
+    for (const listener of messageListeners) listener(message, {}, () => {});
+  };
+
+  const storage = {
+    async get(keys) {
+      if (keys === settingsApi.STORAGE_KEY) settingsReadCount += 1;
+      if (keys === null) return { ...stored };
+      const requested = Array.isArray(keys) ? keys : [keys];
+      return Object.fromEntries(
+        requested
+          .filter((key) => Object.hasOwn(stored, key))
+          .map((key) => [key, stored[key]]),
+      );
+    },
+    async set(items) {
+      Object.assign(stored, items);
+    },
+    async remove(keys) {
+      for (const key of Array.isArray(keys) ? keys : [keys]) delete stored[key];
+    },
+    async clear() {
+      for (const key of Object.keys(stored)) delete stored[key];
+    },
+  };
+
+  const root = {
+    document,
+    location: { hash: "", search: "" },
+    confirm: () => true,
+    YTD_SETTINGS: settingsApi,
+    chrome: {
+      storage: { local: storage },
+      runtime: {
+        onMessage: {
+          addListener(listener) {
+            messageListeners.push(listener);
+          },
+        },
+        async sendMessage(message) {
+          if (message.action === "checkConfig") {
+            return { runtimeInstanceId, dataGeneration };
+          }
+          if (message.action === "resetAllExtensionData") {
+            dataGeneration += 1;
+            broadcast("extensionDataResetStarted");
+            await storage.clear();
+            await storage.set({
+              [options.LANGUAGE_STORAGE_KEY]: message.preferredLanguage,
+            });
+            dataGeneration += 1;
+            broadcast("extensionDataResetCompleted");
+            return {
+              success: true,
+              runtimeInstanceId,
+              dataGeneration,
+            };
+          }
+          throw new Error(`Unexpected options message: ${message.action}`);
+        },
+      },
+    },
+  };
+
+  options.initialize(root);
+  await flushOptionsRuntime();
+
+  return {
+    broadcast(action, generation) {
+      dataGeneration = generation;
+      broadcast(action, generation);
+    },
+    element,
+    get settingsReadCount() {
+      return settingsReadCount;
+    },
+    replaceSettings(nextSettings) {
+      stored[settingsApi.STORAGE_KEY] = nextSettings;
+    },
+    settingsApi,
+  };
+}
+
 test("Settings copy covers English and Simplified Chinese", () => {
   assert.equal(options.translate("en", "pageTitle"), "DigestDock Settings");
   assert.equal(options.translate("zh-CN", "pageTitle"), "DigestDock 设置");
@@ -39,6 +239,26 @@ test("Settings copy covers English and Simplified Chinese", () => {
   assert.equal(
     options.translate("zh-CN", "clearedDigests", { count: 2 }),
     "已清除 2 条缓存摘要。",
+  );
+  const maxMiB = options.backupLimitMiB({ YTD_NOTES_BACKUP: notesBackup });
+  assert.equal(maxMiB, "32");
+  assert.equal(Object.hasOwn(options.COPY.en, "notesBackupCapacity"), false);
+  assert.equal(Object.hasOwn(options.COPY["zh-CN"], "notesBackupCapacity"), false);
+  assert.match(
+    options.translate("en", "notesBackupTooLarge", { maxMiB }),
+    /32 MiB/,
+  );
+  assert.match(
+    options.translate("zh-CN", "notesBackupTooLarge", { maxMiB }),
+    /32 MiB/,
+  );
+  assert.match(
+    options.translate("en", "notesExportTooLarge", { maxMiB }),
+    /32 MiB/,
+  );
+  assert.match(
+    options.translate("zh-CN", "notesExportTooLarge", { maxMiB }),
+    /32 MiB/,
   );
 
   assert.deepEqual(
@@ -275,7 +495,7 @@ test("free mode and Supadata-only settings save without an AI key", () => {
   );
   assert.match(
     optionsScript,
-    /settingsLoaded = true[\s\S]*?saveSettingsBtn\.disabled = false/,
+    /settingsLoaded = true[\s\S]*?syncMutationControls\(\)/,
   );
 
   const settingsApi = require("../settings.js");
@@ -302,4 +522,404 @@ test("free mode and Supadata-only settings save without an AI key", () => {
   assert.match(options.translate("zh-CN", "fieldRequired"), /AI 功能/);
   assert.match(options.translate("en", "lede"), /No API key/i);
   assert.match(options.translate("zh-CN", "lede"), /无需 API 密钥/);
+});
+
+test("options freeze one writable data generation across reset boundaries", () => {
+  const fence = options.createExtensionDataFence();
+  assert.equal(fence.capture(), null, "unknown background state must fail closed");
+
+  assert.equal(fence.observe("runtime-a", 0), true);
+  const beforeReset = fence.capture();
+  assert.equal(beforeReset.dataGeneration, 0);
+
+  fence.observe("runtime-a", 1);
+  assert.equal(fence.capture(), null, "an odd reset generation is never writable");
+  fence.observe("runtime-a", 2);
+  assert.equal(fence.capture().dataGeneration, 2);
+  assert.equal(
+    fence.observeIfUnchanged("runtime-a", 0, beforeReset.revision),
+    false,
+    "a late pre-reset response cannot roll the page back to its old generation",
+  );
+
+  fence.beginLocalReset();
+  assert.equal(fence.capture(), null, "the initiating page blocks writes immediately");
+  fence.observe("runtime-b", 0);
+  assert.equal(fence.capture(), null, "a local reset stays blocked until its request settles");
+  fence.endLocalReset();
+  assert.equal(fence.capture().runtimeInstanceId, "runtime-b");
+  assert.equal(fence.capture().dataGeneration, 0);
+});
+
+test("an options-page reset owns one post-reset settings reload without a false failure", async () => {
+  const fixture = await createOptionsResetRuntimeFixture({
+    initialSettings: require("../settings.js").normalize({
+      aiApiKeys: { deepseek: "synthetic-before-reset" },
+    }),
+  });
+  const saveStatus = fixture.element("saveStatus");
+  const dataStatus = fixture.element("dataStatus");
+  const saveButton = fixture.element("saveSettingsBtn");
+
+  assert.equal(saveStatus.textContent, "设置没有未保存的更改。");
+  assert.equal(fixture.settingsReadCount, 1);
+
+  await fixture.element("resetBtn").dispatch("click");
+  await flushOptionsRuntime();
+
+  assert.equal(
+    fixture.settingsReadCount,
+    2,
+    "the local reset path, not its completion broadcast, owns the single reload",
+  );
+  assert.equal(saveStatus.textContent, "设置没有未保存的更改。");
+  assert.equal(dataStatus.textContent, "已删除全部 DigestDock 数据。");
+  assert.equal(saveButton.disabled, false);
+});
+
+test("an externally initiated reset completion still reloads options settings", async () => {
+  const fixture = await createOptionsResetRuntimeFixture({
+    initialSettings: require("../settings.js").normalize({
+      aiApiKeys: { deepseek: "synthetic-before-external-reset" },
+    }),
+  });
+  const aiKeyInput = fixture.element("aiApiKey");
+  const saveButton = fixture.element("saveSettingsBtn");
+  const refreshedSettings = fixture.settingsApi.normalize({
+    aiApiKeys: { deepseek: "synthetic-after-external-reset" },
+  });
+
+  assert.equal(aiKeyInput.value, "synthetic-before-external-reset");
+  fixture.broadcast("extensionDataResetStarted", 1);
+  assert.equal(aiKeyInput.value, "");
+  assert.equal(saveButton.disabled, true);
+
+  fixture.replaceSettings(refreshedSettings);
+  fixture.broadcast("extensionDataResetCompleted", 2);
+  await flushOptionsRuntime();
+
+  assert.equal(fixture.settingsReadCount, 2);
+  assert.equal(aiKeyInput.value, "synthetic-after-external-reset");
+  assert.equal(saveButton.disabled, false);
+});
+
+test("a backup import keeps its pre-read generation when file.text crosses reset", async () => {
+  const textGate = deferred();
+  const sent = [];
+  let currentRuntimeInstanceId = "runtime-a";
+  let currentGeneration = 0;
+  const runtime = {
+    chrome: {
+      runtime: {
+        async sendMessage(message) {
+          sent.push(message);
+          return message.runtimeInstanceId === currentRuntimeInstanceId &&
+            message.dataGeneration === currentGeneration
+            ? {
+                success: true,
+                changed: true,
+                runtimeInstanceId: currentRuntimeInstanceId,
+                dataGeneration: currentGeneration,
+              }
+            : {
+                success: false,
+                code: "EXTENSION_DATA_RESET",
+                runtimeInstanceId: currentRuntimeInstanceId,
+                dataGeneration: currentGeneration,
+              };
+        },
+      },
+    },
+    YTD_NOTES_BACKUP: notesBackup,
+  };
+  const fence = options.createExtensionDataFence();
+  fence.observe("runtime-a", 0);
+  const importFence = fence.capture();
+  const file = {
+    size: 128,
+    text: () => textGate.promise,
+  };
+
+  const importing = options.importNotesBackupFile(
+    runtime,
+    file,
+    importFence,
+  );
+  currentRuntimeInstanceId = "runtime-b";
+  currentGeneration = 0;
+  fence.observe("runtime-b", 0);
+  textGate.resolve("{\"format\":\"digest-dock-notes\"}");
+
+  const result = await importing;
+  assert.equal(result.success, false);
+  assert.equal(result.code, "EXTENSION_DATA_RESET");
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].action, "importNotesBackup");
+  assert.equal(sent[0].runtimeInstanceId, "runtime-a");
+  assert.equal(sent[0].dataGeneration, 0);
+});
+
+test("a normal worker restart retries backup import once with the same file text", async () => {
+  const sent = [];
+  let fileReads = 0;
+  const runtime = {
+    chrome: {
+      runtime: {
+        async sendMessage(message) {
+          sent.push(message);
+          return sent.length === 1
+            ? {
+                success: false,
+                code: "EXTENSION_DATA_RESET",
+                runtimeInstanceId: "runtime-b",
+                dataGeneration: 0,
+              }
+            : {
+                success: true,
+                changed: true,
+                runtimeInstanceId: "runtime-b",
+                dataGeneration: 0,
+              };
+        },
+      },
+    },
+    YTD_NOTES_BACKUP: notesBackup,
+  };
+  const fence = options.createExtensionDataFence();
+  fence.observe("runtime-a", 0);
+  const result = await options.importNotesBackupFile(
+    runtime,
+    {
+      size: 32,
+      async text() {
+        fileReads += 1;
+        return '{"format":"digest-dock-notes"}';
+      },
+    },
+    fence.capture(),
+    fence,
+  );
+
+  assert.equal(result.success, true);
+  assert.equal(fileReads, 1);
+  assert.deepEqual(
+    sent.map(({ runtimeInstanceId, dataGeneration }) => ({
+      runtimeInstanceId,
+      dataGeneration,
+    })),
+    [
+      { runtimeInstanceId: "runtime-a", dataGeneration: 0 },
+      { runtimeInstanceId: "runtime-b", dataGeneration: 0 },
+    ],
+  );
+  assert.equal(fence.isCurrent(result.resetFenceToken), true);
+});
+
+test("options never retry across reset notification or same-worker generation change", async () => {
+  const responseGate = deferred();
+  const sent = [];
+  const runtime = {
+    chrome: {
+      runtime: {
+        sendMessage(message) {
+          sent.push(message);
+          return responseGate.promise;
+        },
+      },
+    },
+  };
+  const fence = options.createExtensionDataFence();
+  fence.observe("runtime-a", 0);
+  const saving = options.persistResetFencedSettings(
+    runtime,
+    { provider: "deepseek", aiApiKeys: {}, supadataApiKey: "" },
+    fence.capture(),
+    fence,
+  );
+  fence.observe("runtime-a", 1);
+  fence.observe("runtime-a", 2);
+  responseGate.resolve({
+    success: false,
+    code: "EXTENSION_DATA_RESET",
+    runtimeInstanceId: "runtime-b",
+    dataGeneration: 0,
+  });
+  assert.equal((await saving).success, false);
+  assert.equal(sent.length, 1, "a reset notification forbids identity retry");
+
+  const sameWorkerSent = [];
+  const sameWorkerFence = options.createExtensionDataFence();
+  sameWorkerFence.observe("runtime-a", 0);
+  const sameWorkerResult = await options.persistResetFencedSettings(
+    {
+      chrome: {
+        runtime: {
+          async sendMessage(message) {
+            sameWorkerSent.push(message);
+            return {
+              success: false,
+              code: "EXTENSION_DATA_RESET",
+              runtimeInstanceId: "runtime-a",
+              dataGeneration: 2,
+            };
+          },
+        },
+      },
+    },
+    { provider: "deepseek", aiApiKeys: {}, supadataApiKey: "" },
+    sameWorkerFence.capture(),
+    sameWorkerFence,
+  );
+  assert.equal(sameWorkerResult.success, false);
+  assert.equal(sameWorkerSent.length, 1);
+});
+
+test("options reject reset-period mutations and allow genuinely post-reset ones", async () => {
+  const sent = [];
+  const runtime = {
+    chrome: {
+      runtime: {
+        async sendMessage(message) {
+          sent.push(message);
+          return {
+            success: true,
+            changed: true,
+            runtimeInstanceId: "runtime-a",
+            dataGeneration: 2,
+          };
+        },
+      },
+    },
+    YTD_NOTES_BACKUP: notesBackup,
+  };
+  const fence = options.createExtensionDataFence();
+  fence.observe("runtime-a", 1);
+
+  const blockedSettings = await options.persistResetFencedSettings(
+    runtime,
+    { provider: "deepseek", aiApiKeys: {}, supadataApiKey: "" },
+    fence.capture(),
+  );
+  let fileRead = false;
+  const blockedImport = await options.importNotesBackupFile(
+    runtime,
+    {
+      size: 1,
+      async text() {
+        fileRead = true;
+        return "{}";
+      },
+    },
+    fence.capture(),
+  );
+  assert.equal(blockedSettings.code, "EXTENSION_DATA_RESET");
+  assert.equal(blockedImport.code, "EXTENSION_DATA_RESET");
+  assert.equal(fileRead, false, "a reset-period click must not even read the file");
+  assert.deepEqual(sent, []);
+
+  fence.observe("runtime-a", 2);
+  const fresh = fence.capture();
+  const saved = await options.persistResetFencedSettings(
+    runtime,
+    { provider: "deepseek", aiApiKeys: {}, supadataApiKey: "" },
+    fresh,
+  );
+  const imported = await options.importNotesBackupFile(
+    runtime,
+    { size: 2, async text() { return "{}"; } },
+    fresh,
+  );
+  assert.equal(saved.success, true);
+  assert.equal(imported.success, true);
+  assert.deepEqual(
+    sent.map(({ action, runtimeInstanceId, dataGeneration }) => ({
+      action,
+      runtimeInstanceId,
+      dataGeneration,
+    })),
+    [
+      {
+        action: "persistResetFencedSettings",
+        runtimeInstanceId: "runtime-a",
+        dataGeneration: 2,
+      },
+      {
+        action: "importNotesBackup",
+        runtimeInstanceId: "runtime-a",
+        dataGeneration: 2,
+      },
+    ],
+  );
+});
+
+test("settings persistence is reset-fenced and an empty post-reset store is not rewritten", () => {
+  const source = read("options.js");
+  assert.match(source, /action:\s*"persistResetFencedSettings"/);
+  assert.doesNotMatch(
+    source.match(/async function saveSettings\(event\)[\s\S]*?\n    }/)?.[0] || "",
+    /storage\.set\(/,
+  );
+  assert.match(
+    source,
+    /hadStoredSettings\s*&&\s*migration\.migrated/,
+    "missing settings after reset must remain absent instead of recreating an empty key map",
+  );
+});
+
+test("reading display persistence carries the complete reset fence token", async () => {
+  const sent = [];
+  const runtime = {
+    chrome: {
+      runtime: {
+        async sendMessage(message) {
+          sent.push(message);
+          return {
+            success: true,
+            runtimeInstanceId: "runtime-reading",
+            dataGeneration: 4,
+          };
+        },
+      },
+    },
+  };
+  const token = {
+    runtimeInstanceId: "runtime-reading",
+    dataGeneration: 4,
+    revision: 7,
+  };
+
+  const result = await options.persistResetFencedReadingDisplay(
+    runtime,
+    { size: "xlarge", weight: "bold" },
+    token,
+  );
+  assert.equal(result.success, true);
+  assert.deepEqual(sent, [
+    {
+      action: "persistResetFencedReadingDisplay",
+      readingDisplay: { size: "xlarge", weight: "bold" },
+      runtimeInstanceId: "runtime-reading",
+      dataGeneration: 4,
+    },
+  ]);
+
+  const blocked = await options.persistResetFencedReadingDisplay(
+    runtime,
+    { size: "small", weight: "regular" },
+    { runtimeInstanceId: "runtime-reading", dataGeneration: 5, revision: 8 },
+  );
+  assert.equal(blocked.code, "EXTENSION_DATA_RESET");
+  assert.equal(sent.length, 1);
+});
+
+test("the Options reading-display caller uses the background writer", () => {
+  const source = read("options.js");
+  const body =
+    source.match(
+      /async function saveReadingDisplayChoice\(\)[\s\S]*?\n    async function initializeReadingDisplay/,
+    )?.[0] || "";
+  assert.match(body, /extensionDataFence\.capture\(\)/);
+  assert.match(body, /readingApi\.persistReadingDisplay\([\s\S]*?async \(readingDisplay\)/);
+  assert.match(body, /persistResetFencedReadingDisplay\(/);
+  assert.match(body, /extensionDataFence\.isCurrent\(acceptedFence\)/);
 });

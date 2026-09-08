@@ -27,13 +27,12 @@ importScripts("export-jobs.js");
 const DEBUG = false;
 const ANALYSIS_SCHEMA_VERSION = 3;
 const ANALYSIS_TIMESTAMP_ANCHOR_VERSION = 1;
-const RUNTIME_PROTOCOL_VERSION = 12;
+const RUNTIME_PROTOCOL_VERSION = 14;
 const ANALYSIS_BASE_LANGUAGE = "zh-Hans";
 const TRANSCRIPT_SOURCE_POLICY_VERSION = 5;
 const AI_PROVIDER_IDLE_TIMEOUT_MS = 50_000;
 const AI_PROVIDER_HARD_TIMEOUT_MS = 120_000;
 const AI_PROVIDER_MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
-const MAX_SAVED_NOTES = 100;
 const NOTE_TRANSLATION_JOB_TIMEOUT_MS = 110_000;
 const EXPORT_SOURCE_BATCH_MAX_UNITS = 4;
 const EXPORT_SOURCE_BATCH_MAX_CHARACTERS = 12_000;
@@ -56,6 +55,7 @@ const YOUTUBE_PASSIVE_WAIT_MS = 1_500;
 const YOUTUBE_PASSIVE_MAX_BODY_BYTES = 8 * 1024 * 1024;
 const YOUTUBE_PASSIVE_MAX_STATE_BYTES = 6 * 1024 * 1024;
 const YOUTUBE_PASSIVE_MAX_ENTRIES = 6;
+const YOUTUBE_MAX_TIMING_POINTS_PER_CUE = 512;
 const YOUTUBE_ACTIVE_PRODUCT_FILE = "youtube-transcript-active.js";
 const YOUTUBE_TRANSCRIPT_CACHE_SOURCES = new Set([
   "youtube-passive",
@@ -90,6 +90,218 @@ const exportSourceBatchInFlight = new Map();
 let exportSourceBatchQueueTail = Promise.resolve();
 let exportSourceStorageGeneration = 0;
 let youtubeSupadataCooldownUntil = 0;
+// `extensionDataGeneration` is intentionally process-local, so it returns to
+// zero whenever Chrome restarts the MV3 service worker. Pair it with a unique
+// boot identity: an old UI request carrying `{ old-id, 0 }` must never be
+// accepted by a new worker that also happens to be at generation zero.
+const runtimeInstanceId = (() => {
+  try {
+    const value = globalThis.crypto?.randomUUID?.();
+    if (typeof value === "string" && value) return value;
+  } catch (_error) {
+    // Tests and older runtimes can use the bounded fallback below.
+  }
+  return `runtime-${Date.now().toString(36)}-${Math.random()
+    .toString(36)
+    .slice(2, 14)}`;
+})();
+// Even values are stable writable epochs. A reset holds an odd epoch for its
+// whole destructive transaction, then advances to the next even epoch. Work
+// captured before or during reset can therefore never commit afterward.
+let extensionDataGeneration = 0;
+let extensionDataMutationQueue = Promise.resolve();
+
+function extensionDataGenerationIsWritable(expectedGeneration) {
+  return (
+    Number.isSafeInteger(expectedGeneration) &&
+    expectedGeneration === extensionDataGeneration &&
+    expectedGeneration % 2 === 0
+  );
+}
+
+function extensionDataFenceIsWritable(
+  expectedRuntimeInstanceId,
+  expectedGeneration,
+) {
+  return (
+    typeof expectedRuntimeInstanceId === "string" &&
+    expectedRuntimeInstanceId === runtimeInstanceId &&
+    extensionDataGenerationIsWritable(expectedGeneration)
+  );
+}
+
+function getRuntimeInstanceId() {
+  return runtimeInstanceId;
+}
+
+function getExtensionDataGeneration() {
+  return extensionDataGeneration;
+}
+
+function queueExtensionDataMutation(operation) {
+  const task = extensionDataMutationQueue.then(operation, operation);
+  extensionDataMutationQueue = task.catch(() => {});
+  return task;
+}
+
+function extensionDataMutationResult(success, code = "OK", extra = {}) {
+  return {
+    success,
+    code,
+    runtimeInstanceId,
+    dataGeneration: extensionDataGeneration,
+    ...extra,
+  };
+}
+
+function validResetFencedCacheKey(value) {
+  const key = String(value || "");
+  return /^(?:digest_|overview_)[A-Za-z0-9:_-]{1,220}$/.test(key)
+    ? key
+    : "";
+}
+
+function handlePersistResetFencedCache(
+  message,
+  expectedRuntimeInstanceId = runtimeInstanceId,
+) {
+  const key = validResetFencedCacheKey(message?.key);
+  const record = message?.record;
+  const expectedGeneration = Number(message?.dataGeneration);
+  if (!key || !record || typeof record !== "object" || Array.isArray(record)) {
+    return Promise.resolve(
+      extensionDataMutationResult(false, "INVALID_CACHE_RECORD"),
+    );
+  }
+  return queueExtensionDataMutation(async () => {
+    if (
+      !extensionDataFenceIsWritable(
+        expectedRuntimeInstanceId,
+        expectedGeneration,
+      )
+    ) {
+      return extensionDataMutationResult(false, "EXTENSION_DATA_RESET");
+    }
+    await chrome.storage.local.set({ [key]: record });
+    return extensionDataMutationResult(true);
+  });
+}
+
+function handlePersistResetFencedSettings(
+  message,
+  expectedRuntimeInstanceId = runtimeInstanceId,
+) {
+  const settings = message?.settings;
+  const expectedGeneration = message?.dataGeneration;
+  if (!settings || typeof settings !== "object" || Array.isArray(settings)) {
+    return Promise.resolve(
+      extensionDataMutationResult(false, "INVALID_SETTINGS"),
+    );
+  }
+  return queueExtensionDataMutation(async () => {
+    if (
+      !extensionDataFenceIsWritable(
+        expectedRuntimeInstanceId,
+        expectedGeneration,
+      )
+    ) {
+      return extensionDataMutationResult(false, "EXTENSION_DATA_RESET");
+    }
+    const normalizedSettings = YTD_SETTINGS.normalize(settings);
+    await chrome.storage.local.set({
+      [YTD_SETTINGS.STORAGE_KEY]: normalizedSettings,
+    });
+    return extensionDataMutationResult(true);
+  });
+}
+
+const READING_DISPLAY_SIZES = new Set([
+  "small",
+  "standard",
+  "large",
+  "xlarge",
+]);
+const READING_DISPLAY_WEIGHTS = new Set(["regular", "bold"]);
+
+function normalizeResetFencedReadingDisplay(value) {
+  return {
+    size: READING_DISPLAY_SIZES.has(value?.size) ? value.size : "standard",
+    weight: READING_DISPLAY_WEIGHTS.has(value?.weight)
+      ? value.weight
+      : "regular",
+  };
+}
+
+function handlePersistResetFencedReadingDisplay(
+  message,
+  expectedRuntimeInstanceId = runtimeInstanceId,
+) {
+  const readingDisplay = message?.readingDisplay;
+  const expectedGeneration = Number(message?.dataGeneration);
+  if (
+    !readingDisplay ||
+    typeof readingDisplay !== "object" ||
+    Array.isArray(readingDisplay)
+  ) {
+    return Promise.resolve(
+      extensionDataMutationResult(false, "INVALID_READING_DISPLAY"),
+    );
+  }
+  return queueExtensionDataMutation(async () => {
+    if (
+      !extensionDataFenceIsWritable(
+        expectedRuntimeInstanceId,
+        expectedGeneration,
+      )
+    ) {
+      return extensionDataMutationResult(false, "EXTENSION_DATA_RESET");
+    }
+    await chrome.storage.local.set({
+      ytd_reading_display:
+        normalizeResetFencedReadingDisplay(readingDisplay),
+    });
+    return extensionDataMutationResult(true);
+  });
+}
+
+function handleResetFencedSessionMutation(
+  message,
+  expectedRuntimeInstanceId = runtimeInstanceId,
+) {
+  const operation = String(message?.operation || "");
+  const expectedGeneration = Number(message?.dataGeneration);
+  if (!["set", "remove"].includes(operation)) {
+    return Promise.resolve(
+      extensionDataMutationResult(false, "INVALID_SESSION_MUTATION"),
+    );
+  }
+  return queueYoutubePassiveMutation(async () => {
+    if (
+      !extensionDataFenceIsWritable(
+        expectedRuntimeInstanceId,
+        expectedGeneration,
+      )
+    ) {
+      return extensionDataMutationResult(false, "EXTENSION_DATA_RESET");
+    }
+    const storage = chrome.storage?.session;
+    if (!storage) {
+      return extensionDataMutationResult(false, "SESSION_STORAGE_UNAVAILABLE");
+    }
+    if (operation === "set") {
+      if (typeof storage.set !== "function") {
+        return extensionDataMutationResult(false, "SESSION_STORAGE_UNAVAILABLE");
+      }
+      await storage.set({ ytd_note_navigation: message.value });
+    } else {
+      if (typeof storage.remove !== "function") {
+        return extensionDataMutationResult(false, "SESSION_STORAGE_UNAVAILABLE");
+      }
+      await storage.remove("ytd_note_navigation");
+    }
+    return extensionDataMutationResult(true);
+  });
+}
 
 function youtubeTabNavigationEpoch(tabId) {
   return Number.isInteger(tabId)
@@ -126,6 +338,7 @@ function runYoutubeSupadataSingleFlight(key, task) {
 }
 
 async function readYoutubeSupadataCooldownUntil() {
+  const dataGeneration = extensionDataGeneration;
   let cooldownUntil = youtubeSupadataCooldownUntil;
   const now = Date.now();
   try {
@@ -144,11 +357,15 @@ async function readYoutubeSupadataCooldownUntil() {
   } catch (_error) {
     // A transient storage failure must not bypass the in-memory cooldown.
   }
+  if (!extensionDataGenerationIsWritable(dataGeneration)) {
+    return youtubeSupadataCooldownUntil;
+  }
   youtubeSupadataCooldownUntil = cooldownUntil;
   return cooldownUntil;
 }
 
-async function startYoutubeSupadataCooldown() {
+async function commitYoutubeSupadataCooldown(expectedGeneration) {
+  if (!extensionDataGenerationIsWritable(expectedGeneration)) return 0;
   const cooldownUntil = Date.now() + SUPADATA_RATE_LIMIT_COOLDOWN_MS;
   youtubeSupadataCooldownUntil = cooldownUntil;
   try {
@@ -162,6 +379,14 @@ async function startYoutubeSupadataCooldown() {
     // The in-memory value still protects the current worker lifetime.
   }
   return cooldownUntil;
+}
+
+function startYoutubeSupadataCooldown(
+  expectedGeneration = extensionDataGeneration,
+) {
+  return queueYoutubePassiveMutation(() =>
+    commitYoutubeSupadataCooldown(expectedGeneration),
+  );
 }
 
 function runYoutubeNativeSingleFlight(key, task) {
@@ -179,6 +404,7 @@ function runYoutubeNativeSingleFlight(key, task) {
 }
 
 async function readYoutubeNativeCooldownUntil() {
+  const dataGeneration = extensionDataGeneration;
   let cooldownUntil = youtubeNativeCooldownUntil;
   const now = Date.now();
   try {
@@ -201,11 +427,15 @@ async function readYoutubeNativeCooldownUntil() {
   } catch (_error) {
     // The in-memory timestamp still protects this worker lifetime.
   }
+  if (!extensionDataGenerationIsWritable(dataGeneration)) {
+    return youtubeNativeCooldownUntil;
+  }
   youtubeNativeCooldownUntil = cooldownUntil;
   return cooldownUntil;
 }
 
-async function startYoutubeNativeCooldown() {
+async function commitYoutubeNativeCooldown(expectedGeneration) {
+  if (!extensionDataGenerationIsWritable(expectedGeneration)) return 0;
   const cooldownUntil = Date.now() + YOUTUBE_NATIVE_RATE_LIMIT_COOLDOWN_MS;
   youtubeNativeCooldownUntil = cooldownUntil;
   try {
@@ -219,6 +449,17 @@ async function startYoutubeNativeCooldown() {
     // The in-memory timestamp still protects this worker lifetime.
   }
   return cooldownUntil;
+}
+
+function startYoutubeNativeCooldown(
+  expectedGeneration = extensionDataGeneration,
+  { alreadyQueued = false } = {},
+) {
+  return alreadyQueued
+    ? commitYoutubeNativeCooldown(expectedGeneration)
+    : queueYoutubePassiveMutation(() =>
+        commitYoutubeNativeCooldown(expectedGeneration),
+      );
 }
 
 const CHINESE_LANGUAGE_CODES = new Set([
@@ -719,6 +960,78 @@ function cleanPassiveText(value) {
     .trim();
 }
 
+function normalizeYoutubeTimingPoints(points, text, start, duration) {
+  const cueStart = Number(start);
+  const cueDuration = Number(duration);
+  const cueEnd = cueStart + cueDuration;
+  const fallback =
+    text && Number.isFinite(cueStart) && cueStart >= 0
+      ? [{ charIndex: 0, start: cueStart }]
+      : [];
+  if (!Array.isArray(points) || !points.length) return fallback;
+
+  const normalized = [];
+  let previousCharIndex = -1;
+  let previousStart = -1;
+  for (const point of points.slice(0, YOUTUBE_MAX_TIMING_POINTS_PER_CUE)) {
+    const charIndex = point?.charIndex;
+    const pointStart = point?.start;
+    if (
+      typeof charIndex !== "number" ||
+      !Number.isInteger(charIndex) ||
+      charIndex < 0 ||
+      charIndex >= text.length ||
+      typeof pointStart !== "number" ||
+      !Number.isFinite(pointStart) ||
+      pointStart < cueStart ||
+      pointStart > cueEnd ||
+      charIndex <= previousCharIndex ||
+      pointStart < previousStart
+    ) {
+      return fallback;
+    }
+    normalized.push({ charIndex, start: pointStart });
+    previousCharIndex = charIndex;
+    previousStart = pointStart;
+  }
+  return normalized[0]?.charIndex === 0 ? normalized : fallback;
+}
+
+function passiveJson3TimingPoints(event, text, start, duration) {
+  const segments = Array.isArray(event?.segs) ? event.segs : [];
+  const eventStartMs = Number(event?.tStartMs || 0);
+  const points = [];
+  let searchFrom = 0;
+
+  for (const segment of segments.slice(0, YOUTUBE_MAX_TIMING_POINTS_PER_CUE)) {
+    const segmentText = cleanPassiveText(segment?.utf8);
+    if (!segmentText) continue;
+    const charIndex = text.indexOf(segmentText, searchFrom);
+    if (charIndex < 0) return [];
+    searchFrom = charIndex + segmentText.length;
+
+    const hasOffset = segment?.tOffsetMs !== undefined;
+    if (!hasOffset && charIndex !== 0) continue;
+    const offsetMs = hasOffset ? segment.tOffsetMs : 0;
+    if (
+      typeof offsetMs !== "number" ||
+      !Number.isFinite(offsetMs) ||
+      offsetMs < 0
+    ) {
+      return [];
+    }
+    points.push({
+      charIndex,
+      start: (eventStartMs + offsetMs) / 1000,
+    });
+  }
+
+  if (points[0]?.charIndex !== 0) {
+    points.unshift({ charIndex: 0, start });
+  }
+  return normalizeYoutubeTimingPoints(points, text, start, duration);
+}
+
 function normalizePassiveSegments(rows, language) {
   return (Array.isArray(rows) ? rows : [])
     .map((row) => {
@@ -734,10 +1047,17 @@ function normalizePassiveSegments(rows, language) {
       ) {
         return null;
       }
+      const timingPoints = normalizeYoutubeTimingPoints(
+        row?.timingPoints,
+        text,
+        start,
+        duration,
+      );
       return {
         text,
         start,
         duration,
+        timingPoints,
         language:
           normalizeLanguageCode(language) ||
           normalizeLanguageCode(row?.language) ||
@@ -758,10 +1078,21 @@ function parsePassiveJson3(body, language) {
   const rows = [];
   for (const event of Array.isArray(payload?.events) ? payload.events : []) {
     if (!Array.isArray(event?.segs) || event.aAppend === 1) continue;
+    const text = cleanPassiveText(
+      event.segs.map((segment) => segment?.utf8 || "").join(""),
+    );
+    const start = Number(event.tStartMs || 0) / 1000;
+    const duration = Number(event.dDurationMs || 0) / 1000;
     rows.push({
-      text: event.segs.map((segment) => segment?.utf8 || "").join(""),
-      start: Number(event.tStartMs || 0) / 1000,
-      duration: Number(event.dDurationMs || 0) / 1000,
+      text,
+      start,
+      duration,
+      timingPoints: passiveJson3TimingPoints(
+        event,
+        text,
+        start,
+        duration,
+      ),
     });
   }
   return normalizePassiveSegments(rows, language);
@@ -958,7 +1289,24 @@ function waitForYoutubePassiveChange(maxWaitMs, observedRevision) {
   });
 }
 
+function youtubePassiveEntryStartedAt(entry, now = Date.now()) {
+  for (const value of [entry?.startedAt, entry?.updatedAt]) {
+    if (
+      typeof value === "number" &&
+      Number.isFinite(value) &&
+      value >= 0 &&
+      value <= now
+    ) {
+      return value;
+    }
+  }
+  // Session entries created by an older build or damaged state must never
+  // extend a request beyond the request-level 1.5 second ceiling.
+  return now;
+}
+
 async function handleYoutubePassiveState(payload, sender) {
+  const dataGeneration = extensionDataGeneration;
   const type = String(payload?.type || "");
   const tabId = sender?.tab?.id;
   const videoId = validYoutubeVideoId(payload?.videoId);
@@ -972,6 +1320,9 @@ async function handleYoutubePassiveState(payload, sender) {
     return { ok: false, error: "INVALID_PASSIVE_STATE" };
   }
   return queueYoutubePassiveMutation(async () => {
+    if (!extensionDataGenerationIsWritable(dataGeneration)) {
+      return { ok: false, error: "EXTENSION_DATA_RESET" };
+    }
     // Keep the tab/video validation inside the same arrival-order queue as the
     // buffer mutation.  The bridge deliberately sends `inflight` and
     // `capture` without blocking the page; if their independent tabs.get()
@@ -994,11 +1345,17 @@ async function handleYoutubePassiveState(payload, sender) {
       previous
     ) {
       await writeYoutubePassiveEntries(next);
-      await startYoutubeNativeCooldown();
+      await startYoutubeNativeCooldown(dataGeneration, { alreadyQueued: true });
       notifyYoutubePassiveWaiters();
       return { ok: true, state: "rate-limited" };
     }
     if (type === "inflight") {
+      const now = Date.now();
+      const startedAt =
+        previous &&
+        (previous.state === "inflight" || previous.inFlight === true)
+          ? youtubePassiveEntryStartedAt(previous, now)
+          : now;
       next.push({
         identity,
         tabId,
@@ -1007,7 +1364,8 @@ async function handleYoutubePassiveState(payload, sender) {
         trackKind,
         state: "inflight",
         inFlight: true,
-        updatedAt: Date.now(),
+        startedAt,
+        updatedAt: now,
       });
     } else if (type === "capture") {
       if (
@@ -1039,6 +1397,7 @@ async function handleYoutubePassiveState(payload, sender) {
         inFlight:
           payload?.inFlight === true || Number(payload?.inFlight) > 0,
         capture: capture.result,
+        startedAt: youtubePassiveEntryStartedAt(previous),
         updatedAt: Date.now(),
       });
     }
@@ -1054,8 +1413,10 @@ async function handleYoutubePassiveState(payload, sender) {
 
 async function clearYoutubePassiveTab(tabId, keepVideoId = "") {
   if (!Number.isInteger(tabId)) return;
+  const dataGeneration = extensionDataGeneration;
   const retainedVideoId = validYoutubeVideoId(keepVideoId) || "";
   return queueYoutubePassiveMutation(async () => {
+    if (!extensionDataGenerationIsWritable(dataGeneration)) return;
     const entries = await readYoutubePassiveEntries();
     const next = entries.filter(
       (entry) =>
@@ -1123,38 +1484,59 @@ async function readYoutubePassiveGate(request) {
   const capture = entries.find(
     (entry) => entry.state === "capture" && entry.capture?.success === true,
   );
+  const inFlightEntries = entries.filter(
+    (entry) =>
+      entry.state === "inflight" ||
+      (entry.state === "capture" && entry.inFlight === true),
+  );
+  const now = Date.now();
   return {
     capture: capture?.capture || null,
-    inFlight: entries.some(
-      (entry) =>
-        entry.state === "inflight" ||
-        (entry.state === "capture" && entry.inFlight === true),
-    ),
+    inFlight: inFlightEntries.length > 0,
+    inFlightStartedAt: inFlightEntries.length
+      ? Math.max(
+          ...inFlightEntries.map((entry) =>
+            youtubePassiveEntryStartedAt(entry, now),
+          ),
+        )
+      : null,
   };
 }
 
-async function awaitYoutubePassiveGate(request) {
-  const startedAt = Date.now();
-  while (true) {
-    let gate = await readYoutubePassiveGate(request);
-    if (gate.capture) return gate.capture;
-    const remaining = YOUTUBE_PASSIVE_WAIT_MS - (Date.now() - startedAt);
+async function awaitYoutubePassiveGate(
+  request,
+  deadlineAt = Date.now() + YOUTUBE_PASSIVE_WAIT_MS,
+) {
+  const requestDeadlineAt = Number.isFinite(Number(deadlineAt))
+    ? Number(deadlineAt)
+    : Date.now() + YOUTUBE_PASSIVE_WAIT_MS;
+  const gateDeadlineAt = (gate) => {
+    const startedAt = Number(gate?.inFlightStartedAt);
+    return Number.isFinite(startedAt)
+      ? Math.min(requestDeadlineAt, startedAt + YOUTUBE_PASSIVE_WAIT_MS)
+      : requestDeadlineAt;
+  };
+  let gate = await readYoutubePassiveGate(request);
+  // A completed page capture always wins. The bounded wait is reserved for a
+  // page request we have actually observed in flight; an empty buffer falls
+  // through immediately to the existing Active route instead of adding a
+  // guaranteed 1.5 seconds to every cold YouTube load.
+  if (gate.capture || !gate.inFlight) return gate.capture;
+  while (gate.inFlight) {
+    let remaining = gateDeadlineAt(gate) - Date.now();
     if (remaining <= 0) return null;
     const observedRevision = youtubePassiveRevision;
-    // Re-read before sleeping: if the first inflight/capture signal arrived
-    // between the previous read and waiter registration, the revision check
-    // resolves immediately. An initially empty buffer receives the same single
-    // bounded budget; it never starts a page request and never waits beyond the
-    // existing 1.5 second total.
+    // Re-read before sleeping: if a capture arrived between the previous read
+    // and waiter registration, the revision check resolves immediately.
     gate = await readYoutubePassiveGate(request);
-    if (gate.capture) return gate.capture;
+    if (gate.capture || !gate.inFlight) return gate.capture;
+    remaining = gateDeadlineAt(gate) - Date.now();
+    if (remaining <= 0) return null;
     await waitForYoutubePassiveChange(remaining, observedRevision);
     gate = await readYoutubePassiveGate(request);
     if (gate.capture) return gate.capture;
-    // No revision means the bounded waiter expired. A revision without a
-    // capture loops only for the time still left in the original total budget.
-    if (youtubePassiveRevision === observedRevision) return null;
   }
+  return null;
 }
 
 // ============================================================
@@ -1673,9 +2055,38 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.action === "translateNotes") {
-    handleTranslateNotes({ notes: message.notes, titles: message.titles })
-      .then(sendResponse)
-      .catch((err) => sendResponse({ success: false, error: err.message }));
+    if (
+      !extensionDataFenceIsWritable(
+        message.runtimeInstanceId,
+        message.dataGeneration,
+      )
+    ) {
+      sendResponse(extensionDataMutationResult(false, "EXTENSION_DATA_RESET"));
+      return false;
+    }
+    handleTranslateNotes(
+      { notes: message.notes, titles: message.titles },
+      {
+        dataGeneration: message.dataGeneration,
+        runtimeInstanceId: message.runtimeInstanceId,
+      },
+    )
+      .then((result) =>
+        sendResponse(
+          extensionDataMutationResult(
+            result?.success === true,
+            result?.code || (result?.success ? "OK" : "PROVIDER_ERROR"),
+            result,
+          ),
+        ),
+      )
+      .catch((err) =>
+        sendResponse(
+          extensionDataMutationResult(false, err.code || "PROVIDER_ERROR", {
+            error: err.message,
+          }),
+        ),
+      );
     return true;
   }
 
@@ -1719,7 +2130,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message.action === "deleteNote") {
     // Delete a specific note
-    handleDeleteNote(message.noteId)
+    handleDeleteNote(
+      message.noteId,
+      Number(message.dataGeneration),
+      String(message.runtimeInstanceId || ""),
+    )
       .then(sendResponse)
       .catch((err) => sendResponse({ success: false, error: err.message }));
     return true;
@@ -1735,7 +2150,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.action === "importNotesBackup") {
-    handleImportNotesBackup(message.backupText)
+    handleImportNotesBackup(
+      message.backupText,
+      message.dataGeneration,
+      String(message.runtimeInstanceId || ""),
+    )
       .then(sendResponse)
       .catch((err) =>
         sendResponse({ success: false, code: err.code || "NOTES_IMPORT_FAILED" }),
@@ -1757,6 +2176,62 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       .then(sendResponse)
       .catch((err) =>
         sendResponse({ success: false, code: err.code || "RESET_DATA_FAILED" }),
+      );
+    return true;
+  }
+
+  if (message.action === "persistResetFencedCache") {
+    handlePersistResetFencedCache(
+      message,
+      String(message.runtimeInstanceId || ""),
+    )
+      .then(sendResponse)
+      .catch(() =>
+        sendResponse(
+          extensionDataMutationResult(false, "CACHE_PERSIST_FAILED"),
+        ),
+      );
+    return true;
+  }
+
+  if (message.action === "persistResetFencedSettings") {
+    handlePersistResetFencedSettings(
+      message,
+      String(message.runtimeInstanceId || ""),
+    )
+      .then(sendResponse)
+      .catch(() =>
+        sendResponse(
+          extensionDataMutationResult(false, "SETTINGS_PERSIST_FAILED"),
+        ),
+      );
+    return true;
+  }
+
+  if (message.action === "persistResetFencedReadingDisplay") {
+    handlePersistResetFencedReadingDisplay(
+      message,
+      String(message.runtimeInstanceId || ""),
+    )
+      .then(sendResponse)
+      .catch(() =>
+        sendResponse(
+          extensionDataMutationResult(false, "READING_DISPLAY_PERSIST_FAILED"),
+        ),
+      );
+    return true;
+  }
+
+  if (message.action === "mutateResetFencedSession") {
+    handleResetFencedSessionMutation(
+      message,
+      String(message.runtimeInstanceId || ""),
+    )
+      .then(sendResponse)
+      .catch(() =>
+        sendResponse(
+          extensionDataMutationResult(false, "SESSION_MUTATION_FAILED"),
+        ),
       );
     return true;
   }
@@ -1793,13 +2268,26 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message.action === "translateExportNotesBatch") {
     handleTranslateExportNotesBatch(message)
-      .then(sendResponse)
+      .then((result) =>
+        sendResponse(
+          extensionDataMutationResult(
+            result?.success === true,
+            result?.code ||
+              (result?.success ? "OK" : "EXPORT_SOURCE_BATCH_FAILED"),
+            result,
+          ),
+        ),
+      )
       .catch((error) => sendResponse(exportSourceBatchFailure(error)));
     return true;
   }
 
   if (message.action === "cancelExportTranslationJob") {
-    handleCancelExportTranslationJob(message.jobId)
+    handleCancelExportTranslationJob(
+      message.jobId,
+      message.dataGeneration,
+      String(message.runtimeInstanceId || ""),
+    )
       .then(sendResponse)
       .catch((error) => sendResponse(exportSourceBatchFailure(error)));
     return true;
@@ -1820,14 +2308,23 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.action === "createOrResumeExportJob") {
-    handleCreateOrResumeExportJob(message.job)
+    handleCreateOrResumeExportJob(
+      message.job,
+      message.dataGeneration,
+      String(message.runtimeInstanceId || ""),
+    )
       .then(sendResponse)
       .catch((error) => sendResponse(exportSourceBatchFailure(error)));
     return true;
   }
 
   if (message.action === "checkpointExportJob") {
-    handleCheckpointExportJob(message.jobId, message.patch)
+    handleCheckpointExportJob(
+      message.jobId,
+      message.patch,
+      message.dataGeneration,
+      String(message.runtimeInstanceId || ""),
+    )
       .then(sendResponse)
       .catch((error) => sendResponse(exportSourceBatchFailure(error)));
     return true;
@@ -1837,9 +2334,57 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     message.action === "upsertNoteSource" ||
     message.action === "persistNoteSource"
   ) {
-    handleUpsertNoteSource(message.source)
+    handleUpsertNoteSource(
+      message.source,
+      message.dataGeneration,
+      String(message.runtimeInstanceId || ""),
+    )
       .then(sendResponse)
       .catch((error) => sendResponse(exportSourceBatchFailure(error)));
+    return true;
+  }
+
+  if (message.action === "readNoteSource") {
+    handleReadNoteSource(
+      message.mediaKey,
+      message.dataGeneration,
+      String(message.runtimeInstanceId || ""),
+    )
+      .then(sendResponse)
+      .catch(() =>
+        sendResponse(
+          extensionDataMutationResult(false, "NOTE_SOURCE_READ_FAILED"),
+        ),
+      );
+    return true;
+  }
+
+  if (message.action === "readAllNoteSources") {
+    handleReadAllNoteSources(
+      message.dataGeneration,
+      String(message.runtimeInstanceId || ""),
+    )
+      .then(sendResponse)
+      .catch(() =>
+        sendResponse(
+          extensionDataMutationResult(false, "NOTE_SOURCE_READ_FAILED"),
+        ),
+      );
+    return true;
+  }
+
+  if (message.action === "removeNoteSources") {
+    handleRemoveNoteSources(
+      message.mediaKeys,
+      message.dataGeneration,
+      String(message.runtimeInstanceId || ""),
+    )
+      .then(sendResponse)
+      .catch(() =>
+        sendResponse(
+          extensionDataMutationResult(false, "NOTE_SOURCE_REMOVE_FAILED"),
+        ),
+      );
     return true;
   }
 
@@ -1863,6 +2408,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 routeKey: `${provider?.id || ""}:${provider?.model || ""}`,
               }
             : null,
+          runtimeInstanceId,
+          dataGeneration: extensionDataGeneration,
           runtimeProtocolVersion: RUNTIME_PROTOCOL_VERSION,
         });
       })
@@ -2687,6 +3234,7 @@ async function handleFetchYoutubeSupadataTranscript(
   tabId = null,
   supadataConsent = false,
 ) {
+  const dataGeneration = extensionDataGeneration;
   // Read-only, no-network page gate. Binds the current tab to this exact video
   // so an SPA navigation cannot send an old video to Supadata, and surfaces
   // clear login/age/members/unavailable states before any provider request.
@@ -2769,7 +3317,7 @@ async function handleFetchYoutubeSupadataTranscript(
 
   // Collapse duplicate authorized requests (init, button, page-complete,
   // multi-window) for the same tab+video+language into one provider call.
-  const flightKey = `${Number.isInteger(tabId) ? tabId : "no-tab"}::${videoId}::${requestedLanguage}`;
+  const flightKey = `${dataGeneration}::${Number.isInteger(tabId) ? tabId : "no-tab"}::${videoId}::${requestedLanguage}`;
   const result = await runYoutubeSupadataSingleFlight(flightKey, () =>
     handleFetchTranscript(videoId, requestedLanguage, () =>
       youtubeTabStillMatches(tabId, videoId),
@@ -2781,7 +3329,7 @@ async function handleFetchYoutubeSupadataTranscript(
   // provider cooldown must prevent another paid request from starting.
   const rateLimitCooldownUntil =
     result?.error === "RATE_LIMITED"
-      ? await startYoutubeSupadataCooldown()
+      ? await startYoutubeSupadataCooldown(dataGeneration)
       : 0;
 
   // Supadata (or its async job polling) can outlast a YouTube SPA navigation.
@@ -2875,6 +3423,7 @@ function youtubePanelRows(result) {
         : Number.isFinite(nextStart) && nextStart >= start
           ? nextStart - start
           : 0,
+      timingPoints: row?.timingPoints,
       language: row?.language || result?.language,
     };
   });
@@ -3089,7 +3638,7 @@ async function runYoutubeNativeRouteLeader(request) {
   );
   const active = normalizeYoutubeNativeProviderResult(activeRaw, "active");
   if (active.routeOutcome === "RATE_LIMITED") {
-    await startYoutubeNativeCooldown();
+    await startYoutubeNativeCooldown(request.dataGeneration);
     return {
       ...active,
       routeOutcome: "RATE_LIMITED",
@@ -3142,6 +3691,7 @@ async function handleFetchYoutubeNativeTranscript(
     trackKind: routeIdentity.trackKind,
     tabId,
     runId: routeIdentity.runId,
+    dataGeneration: extensionDataGeneration,
   };
   request.language = request.preferredLanguage;
   if (!request.videoId || !Number.isInteger(tabId)) {
@@ -3171,7 +3721,8 @@ async function handleFetchYoutubeNativeTranscript(
     );
   }
 
-  const passive = await awaitYoutubePassiveGate(request);
+  const passiveDeadlineAt = Date.now() + YOUTUBE_PASSIVE_WAIT_MS;
+  const passive = await awaitYoutubePassiveGate(request, passiveDeadlineAt);
   if (!(await requestStillCurrent())) {
     return withYoutubeRouteIdentity(
       {
@@ -3272,6 +3823,28 @@ async function handleFetchYoutubeNativeTranscript(
   }
   request.pageCaptionEvidence = pageCaptionEvidence;
 
+  // The page may begin its own caption request while we read the track list.
+  // Recheck once immediately before Active: an empty gate still adds no wait,
+  // while a newly observed in-flight Passive request keeps the routes
+  // sequential and may win within the existing bounded budget.
+  const passiveBeforeActive = await awaitYoutubePassiveGate(
+    request,
+    passiveDeadlineAt,
+  );
+  if (!(await requestStillCurrent())) {
+    return withYoutubeRouteIdentity(
+      {
+        ...pageContextChangedResult(),
+        routeOutcome: "PAGE_CONTEXT_CHANGED",
+        supadataEligible: false,
+      },
+      routeIdentity,
+    );
+  }
+  if (passiveBeforeActive?.success) {
+    return withYoutubeRouteIdentity(passiveBeforeActive, routeIdentity);
+  }
+
   const cooldownUntil = await readYoutubeNativeCooldownUntil();
   if (Date.now() < cooldownUntil) {
     return withYoutubeRouteIdentity(
@@ -3300,6 +3873,7 @@ async function handleFetchYoutubeNativeTranscript(
       request.language = automaticTrack.language;
       request.trackKind = automaticTrack.kind;
       const flightKey = [
+        request.dataGeneration,
         request.videoId,
         request.language,
         request.trackKind,
@@ -3983,10 +4557,8 @@ function shouldUseBilibiliChinese(platform, sourceLanguage) {
   );
 }
 
-function shouldUseChineseNoteCleanup(platform, sourceLanguage) {
-  return platform === "bilibili"
-    ? isConfirmedSimplifiedChineseSource(sourceLanguage)
-    : isChineseLanguage(sourceLanguage);
+function shouldUseChineseNoteCleanup(_platform, sourceLanguage) {
+  return isChineseLanguage(sourceLanguage);
 }
 
 function normalizeAnalysisCues(cues, transcriptText = "") {
@@ -4469,6 +5041,10 @@ async function handleSaveNote(
 ) {
   const saveGeneration = noteStorageGeneration;
   const sourceStorageGeneration = exportSourceStorageGeneration;
+  const dataGeneration = extensionDataGeneration;
+  if (!extensionDataGenerationIsWritable(dataGeneration)) {
+    return noteSaveFailureResponse(false);
+  }
   try {
     const mediaRef = await resolveMediaRef(mediaInput, sourceUrl);
     const mediaKey = mediaRef.mediaKey || mediaRef.videoId;
@@ -4486,6 +5062,7 @@ async function handleSaveNote(
       throw pageChangedError;
     }
     await requireExactTabRoute(tabId, actionRouteKey);
+
     const resolvedVideoTitle = videoTitle || mediaRef.title || "Untitled Video";
     const resolvedChannelName = channelName || mediaRef.channelName || "";
     const safeTimestamp = Math.max(0, Math.floor(Number(timestamp) || 0));
@@ -4568,6 +5145,8 @@ async function handleSaveNote(
     let matchedLine = null;
     let matchedIndex = 0;
     let contextLines = [];
+    let triggerWindow = [];
+    let triggerWindowMatchedIndex = 0;
     let beforeLine = null; // a few sentences before
     let afterLine = null; // a few sentences after
 
@@ -4580,11 +5159,11 @@ async function handleSaveNote(
         matchedLine = line;
         matchedIndex = i;
 
-        // Build a buffer of 2 lines before and 4 lines after the target.
-        // This gives the model enough text to find a natural sentence boundary
-        // and complete a thought that spans multiple short caption chunks.
+        // Bias the cleanup buffer toward what the user just heard: reactions
+        // happen after the useful phrase, especially across short ASR cues.
+        // Two following cues remain available for completing a sentence.
         const beforeLines = [];
-        for (let j = 1; j <= 2 && i - j >= 0; j++) {
+        for (let j = 1; j <= 4 && i - j >= 0; j++) {
           beforeLines.unshift(transcript[i - j].text);
         }
         if (beforeLines.length > 0) {
@@ -4592,7 +5171,7 @@ async function handleSaveNote(
         }
 
         const afterLines = [];
-        for (let j = 1; j <= 4 && i + j < transcript.length; j++) {
+        for (let j = 1; j <= 2 && i + j < transcript.length; j++) {
           afterLines.push(transcript[i + j].text);
         }
         if (afterLines.length > 0) {
@@ -4604,6 +5183,13 @@ async function handleSaveNote(
         const endIdx = Math.min(transcript.length - 1, i + 12);
         for (let j = startIdx; j <= endIdx; j++) {
           contextLines.push(transcript[j].text);
+          if (j === matchedIndex) {
+            triggerWindowMatchedIndex = triggerWindow.length;
+          }
+          triggerWindow.push({
+            t: transcript[j].start,
+            text: transcript[j].text,
+          });
         }
         break;
       }
@@ -4620,7 +5206,7 @@ async function handleSaveNote(
       matchedLine = transcript[matchedIndex];
 
       const beforeLines = [];
-      for (let j = 1; j <= 2 && matchedIndex - j >= 0; j++) {
+      for (let j = 1; j <= 4 && matchedIndex - j >= 0; j++) {
         beforeLines.unshift(transcript[matchedIndex - j].text);
       }
       if (beforeLines.length > 0) {
@@ -4628,7 +5214,7 @@ async function handleSaveNote(
       }
 
       const afterLines = [];
-      for (let j = 1; j <= 4 && matchedIndex + j < transcript.length; j++) {
+      for (let j = 1; j <= 2 && matchedIndex + j < transcript.length; j++) {
         afterLines.push(transcript[matchedIndex + j].text);
       }
       if (afterLines.length > 0) {
@@ -4639,7 +5225,62 @@ async function handleSaveNote(
       const endIdx = Math.min(transcript.length - 1, matchedIndex + 12);
       for (let j = startIdx; j <= endIdx; j++) {
         contextLines.push(transcript[j].text);
+        if (j === matchedIndex) {
+          triggerWindowMatchedIndex = triggerWindow.length;
+        }
+        triggerWindow.push({
+          t: transcript[j].start,
+          text: transcript[j].text,
+        });
       }
+    }
+
+    const triggerWindowMaxBytes = 20 * 1024;
+    let trimFromStart = true;
+    while (
+      new TextEncoder().encode(JSON.stringify(triggerWindow)).byteLength >
+        triggerWindowMaxBytes &&
+      triggerWindow.length > 1
+    ) {
+      const canTrimStart = triggerWindowMatchedIndex > 0;
+      const canTrimEnd =
+        triggerWindowMatchedIndex < triggerWindow.length - 1;
+      if (canTrimStart && (trimFromStart || !canTrimEnd)) {
+        triggerWindow.shift();
+        triggerWindowMatchedIndex -= 1;
+      } else if (canTrimEnd) {
+        triggerWindow.pop();
+      } else {
+        break;
+      }
+      trimFromStart = !trimFromStart;
+    }
+    if (
+      triggerWindow.length === 1 &&
+      new TextEncoder().encode(JSON.stringify(triggerWindow)).byteLength >
+        triggerWindowMaxBytes
+    ) {
+      const row = triggerWindow[0];
+      const sourceText = String(row.text || "");
+      let low = 0;
+      let high = sourceText.length;
+      while (low < high) {
+        const middle = Math.ceil((low + high) / 2);
+        const candidate = [{ ...row, text: sourceText.slice(0, middle) }];
+        if (
+          new TextEncoder().encode(JSON.stringify(candidate)).byteLength <=
+          triggerWindowMaxBytes
+        ) {
+          low = middle;
+        } else {
+          high = middle - 1;
+        }
+      }
+      let slicedText = sourceText.slice(0, low);
+      if (/[\uD800-\uDBFF]$/.test(slicedText)) {
+        slicedText = slicedText.slice(0, -1);
+      }
+      triggerWindow = [{ ...row, text: slicedText }];
     }
 
     const matchedLanguage = normalizeLanguageCode(matchedLine.language);
@@ -4722,17 +5363,20 @@ async function handleSaveNote(
       sourceLanguage: storedSourceLanguage,
       textLanguage: directChineseNote ? matchedLanguage : "",
       createdAt: Date.now(),
+      thought: "",
+      thoughtAt: null,
+      triggerWindow,
     };
 
     // Save to storage
     await requireExactTabRoute(tabId, actionRouteKey);
-    const saved = await saveNoteToStorage(note, saveGeneration);
-    if (!saved) {
-      return {
-        success: false,
-        code: "NOTE_SAVE_CANCELED",
-        error: "笔记保存已因清空或重置操作取消。",
-      };
+    const saved = await saveNoteToStorage(
+      note,
+      saveGeneration,
+      dataGeneration,
+    );
+    if (saved !== true) {
+      return noteSaveFailureResponse(saved);
     }
 
     // A note and the material needed to export it belong to the same user
@@ -4877,9 +5521,413 @@ async function persistSavedNoteSourceBestEffort({
   }
 }
 
+function normalizeNoteCleanupSignalText(value) {
+  return String(value || "")
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim();
+}
+
+function noteCleanupMeaningMarkers(value) {
+  const text = String(value || "").normalize("NFKC").toLowerCase();
+  const contractionSafe = text.replace(/[’']/g, "");
+  const negated =
+    /\b(?:not|no|never|without|cannot|cant|dont|doesnt|didnt|wont|isnt|arent|shouldnt|wouldnt|couldnt|mustnt)\b/.test(
+      contractionSafe,
+    ) ||
+    /(?:不(?!丹)|没|未(?!来)|并非|从不|绝不|禁止|无须|无需|无权|别)/.test(
+      text,
+    );
+  const numbers = (text.match(/\d+(?:[.,]\d+)?%?/g) || []).map((number) =>
+    number.replace(/,/g, ""),
+  );
+  const directions = new Set();
+  if (
+    /\b(?:increase|increased|increases|increasing|rise|rose|rising|higher|more|grow|grew|growing|up)\b/.test(
+      text,
+    ) || /(?:增加|提高|上升|上涨|增长|更多|更高|变多)/.test(text)
+  ) {
+    directions.add("up");
+  }
+  if (
+    /\b(?:decrease|decreased|decreases|decreasing|fall|fell|falling|lower|less|fewer|drop|dropped|reduce|reduced|down)\b/.test(
+      text,
+    ) || /(?:减少|降低|下降|下跌|更少|更低|变少)/.test(text)
+  ) {
+    directions.add("down");
+  }
+  if (/\b(?:before|earlier|previous|prior)\b/.test(text) || /(?:之前|此前|先前)/.test(text)) {
+    directions.add("before");
+  }
+  if (/\b(?:after|later|next)\b/.test(text) || /(?:之后|此后|随后)/.test(text)) {
+    directions.add("after");
+  }
+  return { negated, numbers, directions };
+}
+
+function noteCleanupEnglishUnitMatches(left, right) {
+  if (left === right) return true;
+  if (!left || !right) return false;
+
+  for (const [base, inflected] of [
+    [left, right],
+    [right, left],
+  ]) {
+    if (base.length < 3) continue;
+    if (
+      inflected === `${base}s` ||
+      inflected === `${base}es` ||
+      inflected === `${base}ed` ||
+      inflected === `${base}ing` ||
+      (base.endsWith("e") && inflected === `${base.slice(0, -1)}ing`) ||
+      (base.endsWith("y") &&
+        inflected === `${base.slice(0, -1)}ies`)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function noteCleanupOrderedCoverage(
+  targetUnits,
+  candidateUnits,
+  unitsMatch = (left, right) => left === right,
+) {
+  if (!targetUnits.length || !candidateUnits.length) return 0;
+  let matched = 0;
+  let candidateIndex = 0;
+  for (const unit of targetUnits) {
+    let nextIndex = -1;
+    for (let index = candidateIndex; index < candidateUnits.length; index += 1) {
+      if (unitsMatch(unit, candidateUnits[index])) {
+        nextIndex = index;
+        break;
+      }
+    }
+    if (nextIndex === -1) continue;
+    matched += 1;
+    candidateIndex = nextIndex + 1;
+  }
+  return matched / targetUnits.length;
+}
+
+const NOTE_CLEANUP_ENGLISH_GROUNDING_STOP_WORDS = new Set([
+  "a",
+  "an",
+  "and",
+  "are",
+  "as",
+  "at",
+  "be",
+  "but",
+  "by",
+  "for",
+  "from",
+  "in",
+  "is",
+  "of",
+  "on",
+  "or",
+  "the",
+  "to",
+  "was",
+  "were",
+  "with",
+]);
+
+function noteCleanupCoverageUnits(value, hasCjk) {
+  if (hasCjk) {
+    let source = String(value || "").normalize("NFKC").toLowerCase();
+    const filler =
+      /(^|[\s，,。！？!?；;：:、])(?:对吧|就是|然后|那么|这个|那个|其实|啊|呃|嗯)(?=$|[\s，,。！？!?；;：:、])/g;
+    for (let pass = 0; pass < 2; pass += 1) {
+      source = source.replace(filler, "$1");
+    }
+    const normalized = normalizeNoteCleanupSignalText(source);
+    return Array.from(normalized.replace(/\s+/g, ""));
+  }
+  const source = String(value || "")
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(
+      /^(?:(?:um|uh|like|you know|sort of|kind of)\s*[,;:]\s*)+/i,
+      "",
+    );
+  const normalized = normalizeNoteCleanupSignalText(source);
+  return normalized
+    .split(/\s+/)
+    .filter(
+      (word) =>
+        word && !NOTE_CLEANUP_ENGLISH_GROUNDING_STOP_WORDS.has(word),
+    );
+}
+
+function noteCleanupSequenceContained(required, available) {
+  if (!required.length) return true;
+  return noteCleanupOrderedCoverage(required, available) === 1;
+}
+
+function noteCleanupTargetSourceScope(fullContext, target) {
+  const contextText = String(fullContext || "");
+  const targetText = String(target || "");
+  const targetIndex = contextText.indexOf(targetText);
+  if (!contextText || !targetText || targetIndex < 0) return contextText || targetText;
+
+  const boundaryPattern = /[.!?。！？;；]/;
+  let start = targetIndex;
+  while (start > 0 && !boundaryPattern.test(contextText[start - 1])) start -= 1;
+
+  const targetEnd = targetIndex + targetText.length;
+  let end = targetEnd;
+  if (!boundaryPattern.test(targetText.trimEnd().slice(-1))) {
+    while (end < contextText.length && !boundaryPattern.test(contextText[end])) {
+      end += 1;
+    }
+    if (end < contextText.length) end += 1;
+  }
+  return contextText.slice(start, end).trim() || targetText;
+}
+
+function noteCleanupActionMarkers(value) {
+  const text = String(value || "").normalize("NFKC").toLowerCase();
+  const actions = new Set();
+  if (
+    /\b(?:keep|keeps|kept|preserve|preserves|preserved|retain|retains|retained|save|saves|saved|backup|backups|backed up|recover|recovers|recovered)\b/.test(
+      text,
+    ) || /(?:保留|保存|备份|留存|恢复)/.test(text)
+  ) {
+    actions.add("preserve");
+  }
+  if (
+    /\b(?:delete|deletes|deleted|remove|removes|removed|discard|discards|discarded|destroy|destroys|destroyed|erase|erases|erased|clear|clears|cleared)\b/.test(
+      text,
+    ) || /(?:删除|移除|丢弃|销毁|抹除|清除)/.test(text)
+  ) {
+    actions.add("destroy");
+  }
+  return actions;
+}
+
+function noteCleanupStartsWithThoughtLink(value, hasCjk) {
+  const text = String(value || "").trim();
+  if (hasCjk) {
+    return /^(?:然后|接着|而且|并且|但是|所以|因此|因为|如果|虽然|不过|然而|这样|同时|从而|于是|这|那|它|他|她|其|再|也|而|但|则|才)/.test(
+      text,
+    );
+  }
+  return /^(?:and|but|because|so|therefore|however|that|this|these|those|it|they|he|she|which|who|when|while|if|although|though|as|once|instead|also|then)\b/i.test(
+    text,
+  );
+}
+
+function noteCleanupClausesStayWithTarget(candidateText, targetUnits, hasCjk) {
+  const clauses = String(candidateText || "")
+    .split(
+      /[.!?。！？;；]+|,\s+(?=(?:and|but|then|so)\b)|，\s*(?=(?:然后|但是|所以|而且|并且|不过|然而|但|而|则))/iu,
+    )
+    .map((clause) => clause.trim())
+    .filter(Boolean);
+  if (clauses.length <= 1) return true;
+
+  const unitsMatch = hasCjk
+    ? (left, right) => left === right
+    : noteCleanupEnglishUnitMatches;
+  const clauseUnits = clauses.map((clause) =>
+    noteCleanupCoverageUnits(clause, hasCjk),
+  );
+  let targetClauseIndex = 0;
+  let bestTargetCoverage = 0;
+  for (let index = 0; index < clauseUnits.length; index += 1) {
+    const coverage = noteCleanupOrderedCoverage(
+      targetUnits,
+      clauseUnits[index],
+      unitsMatch,
+    );
+    if (coverage > bestTargetCoverage) {
+      bestTargetCoverage = coverage;
+      targetClauseIndex = index;
+    }
+  }
+
+  const targetClause = clauses[targetClauseIndex];
+  const targetClauseUnits = clauseUnits[targetClauseIndex];
+  const targetActions = noteCleanupActionMarkers(targetClause);
+  const targetCjkText = hasCjk ? targetClauseUnits.join("") : "";
+  const targetCjkPairs = new Set(
+    Array.from({ length: Math.max(0, targetCjkText.length - 1) }, (_, index) =>
+      targetCjkText.slice(index, index + 2),
+    ),
+  );
+
+  for (let index = 0; index < clauses.length; index += 1) {
+    if (index === targetClauseIndex) continue;
+    const units = clauseUnits[index];
+    if (!units.length) continue;
+    const meaningfulTargetUnits = hasCjk
+      ? []
+      : targetUnits.filter(
+          (unit) =>
+            unit.length >= 3 &&
+            !NOTE_CLEANUP_ENGLISH_GROUNDING_STOP_WORDS.has(unit),
+        );
+    const meaningfulUnits = hasCjk
+      ? []
+      : units.filter(
+          (unit) =>
+            unit.length >= 3 &&
+            !NOTE_CLEANUP_ENGLISH_GROUNDING_STOP_WORDS.has(unit),
+        );
+    const repeatsTarget =
+      meaningfulTargetUnits.length > 0 &&
+      noteCleanupOrderedCoverage(
+        meaningfulTargetUnits,
+        meaningfulUnits,
+        unitsMatch,
+      ) >= 0.5;
+    let sharesSubject = false;
+    if (hasCjk) {
+      const text = units.join("");
+      for (let pairIndex = 0; pairIndex + 1 < text.length; pairIndex += 1) {
+        if (targetCjkPairs.has(text.slice(pairIndex, pairIndex + 2))) {
+          sharesSubject = true;
+          break;
+        }
+      }
+    } else {
+      sharesSubject = units.some(
+        (unit) =>
+          unit.length >= 3 &&
+          !NOTE_CLEANUP_ENGLISH_GROUNDING_STOP_WORDS.has(unit) &&
+          targetClauseUnits.some((targetUnit) =>
+            noteCleanupEnglishUnitMatches(unit, targetUnit),
+          ),
+      );
+    }
+    const clauseActions = noteCleanupActionMarkers(clauses[index]);
+    const actionConflict =
+      (targetActions.has("preserve") && clauseActions.has("destroy")) ||
+      (targetActions.has("destroy") && clauseActions.has("preserve"));
+    if (actionConflict) return false;
+    const sharesAction = Array.from(clauseActions).some((action) =>
+      targetActions.has(action),
+    );
+    const linked =
+      noteCleanupStartsWithThoughtLink(clauses[index], hasCjk) ||
+      (index < targetClauseIndex &&
+        noteCleanupStartsWithThoughtLink(targetClause, hasCjk));
+    const pairedSequence = hasCjk
+      ? /先/.test(targetClause) && /^(?:然后|再|接着)/.test(clauses[index])
+      : /\bfirst\b/i.test(targetClause) && /^(?:then|next)\b/i.test(clauses[index]);
+    if (
+      !linked ||
+      (!repeatsTarget && !sharesSubject && !sharesAction && !pairedSequence)
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Rejects a fluent answer that silently abandons TARGET for surrounding cues.
+ * Cleanup may repair punctuation and ASR noise, but the saved thought still
+ * needs recognizable lexical evidence from the cue the user chose.
+ */
+function noteCleanupPreservesTarget(candidate, target, fullContext = target) {
+  const candidateText = String(candidate || "");
+  const targetText = String(target || "");
+  const contextText = String(fullContext || targetText);
+  const targetSourceScope = noteCleanupTargetSourceScope(contextText, targetText);
+  const normalizedCandidate = normalizeNoteCleanupSignalText(candidateText);
+  const normalizedTarget = normalizeNoteCleanupSignalText(targetText);
+  if (!normalizedCandidate || !normalizedTarget) return false;
+
+  // A narrator-style wrapper is a summary, not a cleaned source quotation.
+  const summaryVoice =
+    /(?:视频|本视频)?(?:作者|博主|讲者|说话者)(?:提到|表示|认为|指出|说道|讲述)|(?:他|她)(?:提到|表示|认为|指出|说道|讲述)|据(?:视频|本视频)?(?:作者|博主|讲者|说话者|他|她)(?:所说|介绍|表示)|\baccording\s+to\s+(?:(?:the\s+)?(?:speaker|author|creator)|him|her)\b|\b(?:the\s+)?(?:speaker|author|video|creator)\s+(?:says?|said|mentions?|mentioned|explains?|explained|discusses?|discussed)\b|^(?:(?:in summary|overall|in short)\b|总之|总体而言|简而言之)/i;
+  if (summaryVoice.test(candidateText) && !summaryVoice.test(targetSourceScope)) {
+    return false;
+  }
+
+  const firstPerson =
+    /\b(?:i|we|me|us|my|our|mine|ours)\b|(?:我|我们|咱|咱们|本人)/i;
+  if (firstPerson.test(targetText) && !firstPerson.test(candidateText)) {
+    return false;
+  }
+
+  const targetMarkers = noteCleanupMeaningMarkers(targetText);
+  const candidateMarkers = noteCleanupMeaningMarkers(candidateText);
+  const contextMarkers = noteCleanupMeaningMarkers(targetSourceScope);
+  if (targetMarkers.negated && !candidateMarkers.negated) return false;
+  if (candidateMarkers.negated && !contextMarkers.negated) return false;
+  if (!noteCleanupSequenceContained(targetMarkers.numbers, candidateMarkers.numbers)) {
+    return false;
+  }
+  if (!noteCleanupSequenceContained(candidateMarkers.numbers, contextMarkers.numbers)) {
+    return false;
+  }
+  for (const direction of targetMarkers.directions) {
+    if (!candidateMarkers.directions.has(direction)) return false;
+  }
+  for (const direction of candidateMarkers.directions) {
+    if (!contextMarkers.directions.has(direction)) return false;
+  }
+  if (
+    (targetMarkers.directions.has("up") && candidateMarkers.directions.has("down")) ||
+    (targetMarkers.directions.has("down") && candidateMarkers.directions.has("up")) ||
+    (targetMarkers.directions.has("before") && candidateMarkers.directions.has("after")) ||
+    (targetMarkers.directions.has("after") && candidateMarkers.directions.has("before"))
+  ) {
+    return false;
+  }
+
+  const hasCjkTarget = /[\u3400-\u9fff]/.test(normalizedTarget);
+  const targetUnits = noteCleanupCoverageUnits(targetText, hasCjkTarget);
+  const candidateUnits = noteCleanupCoverageUnits(candidateText, hasCjkTarget);
+  const contextUnits = noteCleanupCoverageUnits(contextText, hasCjkTarget);
+  const unitsMatch = hasCjkTarget
+    ? (left, right) => left === right
+    : noteCleanupEnglishUnitMatches;
+  const minimumTargetCoverage = hasCjkTarget ? 0.6 : 0.7;
+  if (
+    !targetUnits.length ||
+    noteCleanupOrderedCoverage(targetUnits, candidateUnits, unitsMatch) <
+      minimumTargetCoverage
+  ) {
+    return false;
+  }
+  const candidateGroundingUnits = hasCjkTarget
+    ? candidateUnits
+    : candidateUnits.filter(
+        (unit) => !NOTE_CLEANUP_ENGLISH_GROUNDING_STOP_WORDS.has(unit),
+      );
+  const contextGroundingUnits = hasCjkTarget
+    ? contextUnits
+    : contextUnits.filter(
+        (unit) => !NOTE_CLEANUP_ENGLISH_GROUNDING_STOP_WORDS.has(unit),
+      );
+  const minimumSourceCoverage = hasCjkTarget ? 0.75 : 0.85;
+  if (
+    !candidateGroundingUnits.length ||
+    noteCleanupOrderedCoverage(
+      candidateGroundingUnits,
+      contextGroundingUnits,
+      unitsMatch,
+    ) < minimumSourceCoverage
+  ) {
+    return false;
+  }
+  if (!noteCleanupClausesStayWithTarget(candidateText, targetUnits, hasCjkTarget)) {
+    return false;
+  }
+  return true;
+}
+
 /**
  * Cleans up transcript lines using DeepSeek.
- * Takes the target line plus buffer sentences (1 before, 1 after).
+ * Takes the target line plus a reaction-aware buffer (4 before, 2 after).
  * Uses JSON output to prevent any preambles from appearing.
  */
 async function cleanupNoteText(
@@ -4934,7 +5982,10 @@ async function cleanupNoteText(
     try {
       const parsed = parseLooseJson(result);
       if (typeof parsed.quote === "string" && parsed.quote.trim()) {
-        return parsed.quote.trim().slice(0, 3000);
+        const candidate = parsed.quote.trim().slice(0, 3000);
+        return noteCleanupPreservesTarget(candidate, targetText, fullContext)
+          ? candidate
+          : String(targetText || "").trim().slice(0, 3000);
       }
     } catch (parseError) {
       console.warn(
@@ -4954,7 +6005,10 @@ async function cleanupNoteText(
       result = result.replace(/^["']|["']$/g, "");
     }
 
-    return result.slice(0, 3000);
+    const candidate = result.slice(0, 3000);
+    return noteCleanupPreservesTarget(candidate, targetText, fullContext)
+      ? candidate
+      : String(targetText || "").trim().slice(0, 3000);
   } catch (e) {
     console.error("[DigestDock] Cleanup error:", e);
   }
@@ -4968,6 +6022,7 @@ async function cleanupNoteText(
  */
 let noteStorageWriteQueue = Promise.resolve();
 let noteStorageGeneration = 0;
+let notesMigrationPromise = null;
 
 function createNoteId({
   now = Date.now,
@@ -4984,26 +6039,724 @@ function getNoteStorageGeneration() {
   return noteStorageGeneration;
 }
 
+function assertNoteStorageGeneration(
+  expectedGeneration,
+  expectedDataGeneration,
+  expectedRuntimeInstanceId = runtimeInstanceId,
+) {
+  if (
+    expectedGeneration === noteStorageGeneration &&
+    extensionDataFenceIsWritable(
+      expectedRuntimeInstanceId,
+      expectedDataGeneration,
+    )
+  ) {
+    return;
+  }
+  const error = new Error("笔记存储已被重置，本次旧任务不会写入。");
+  error.code = "NOTE_STORAGE_RESET";
+  throw error;
+}
+
 function withNoteStorageWrite(task) {
   const run = noteStorageWriteQueue.then(task);
   noteStorageWriteQueue = run.catch(() => {});
   return run;
 }
 
-function saveNoteToStorage(note, expectedGeneration = noteStorageGeneration) {
-  return withNoteStorageWrite(async () => {
-    if (expectedGeneration !== noteStorageGeneration) return false;
-    const result = await chrome.storage.local.get("ytd_notes");
-    const notes = Array.isArray(result.ytd_notes) ? result.ytd_notes : [];
-    notes.unshift(note); // Add to beginning (newest first)
+/**
+ * Lazily migrates the legacy flat note array to the Phase 1 index + per-media
+ * shards. The retained Promise is both the single-flight gate and the fast
+ * path for the rest of this service-worker lifetime. Only a missing download
+ * receiver clears the gate for an in-lifetime retry; deterministic data/write
+ * failures remain settled until the worker restarts, preventing download loops.
+ */
+function ensureNotesMigrated() {
+  if (notesMigrationPromise) return notesMigrationPromise;
 
-    // Keep only the newest notes to prevent storage bloat.
-    if (notes.length > MAX_SAVED_NOTES) {
-      notes.splice(MAX_SAVED_NOTES);
+  const migration = withNoteStorageWrite(async () => {
+    const schemaResult = await chrome.storage.local.get("ytd_notes_schema");
+    if (schemaResult.ytd_notes_schema === 1) return { success: true };
+
+    const legacyResult = await chrome.storage.local.get("ytd_notes");
+    const hasLegacyNotes = Object.hasOwn(legacyResult, "ytd_notes");
+    const legacyNotes = legacyResult.ytd_notes;
+    if (!hasLegacyNotes || (Array.isArray(legacyNotes) && legacyNotes.length === 0)) {
+      let wroteIndex = false;
+      try {
+        await chrome.storage.local.set({ ytd_note_index: [] });
+        wroteIndex = true;
+        await chrome.storage.local.set({ ytd_notes_schema: 1 });
+        return { success: true };
+      } catch (cause) {
+        if (wroteIndex) {
+          try {
+            await chrome.storage.local.remove("ytd_note_index");
+          } catch (_rollbackError) {
+            // The absent schema marker keeps the empty migration incomplete.
+          }
+        }
+        const error = new Error(
+          `笔记迁移失败：写入空索引失败（${cause?.message || "unknown"}）。`,
+        );
+        error.code = "NOTES_MIGRATION_FAILED";
+        error.cause = cause;
+        throw error;
+      }
     }
 
-    await chrome.storage.local.set({ ytd_notes: notes });
-    return true;
+    if (!Array.isArray(legacyNotes)) {
+      const error = new Error(
+        "笔记迁移失败：ytd_notes 必须是数组。请先导出备份并检查原始数据。",
+      );
+      error.code = "NOTES_MIGRATION_FAILED";
+      throw error;
+    }
+    let backup;
+    try {
+      const exportedAt = new Date().toISOString();
+      const extensionVersion = chrome.runtime.getManifest?.().version || "";
+      backup = YTD_NOTES_BACKUP.createBackup(legacyNotes, {
+        exportedAt,
+        extensionVersion,
+      });
+    } catch (cause) {
+      const field = String(cause?.details?.field || "").trim();
+      const error = new Error(
+        `笔记迁移失败：旧笔记${field ? `字段 ${field}` : "数据"}无法生成安全备份。`,
+      );
+      error.code = cause?.code || "NOTES_MIGRATION_FAILED";
+      error.cause = cause;
+      throw error;
+    }
+
+    const filename = YTD_NOTES_BACKUP.notesBackupFilename(new Date());
+    const backupText = YTD_NOTES_BACKUP.serializeBackup(backup);
+    let downloaded = false;
+    for (const target of ["sidepanel", "options"]) {
+      try {
+        const response = await chrome.runtime.sendMessage({
+          action: "downloadNotesMigrationBackup",
+          target,
+          filename,
+          ...(target === "sidepanel" ? { backupText } : { backup }),
+        });
+        if (
+          response?.success === true &&
+          String(response.filename || "").trim() === filename
+        ) {
+          downloaded = true;
+          break;
+        }
+      } catch (_error) {
+        // Try the other existing extension-page download surface.
+      }
+    }
+    if (!downloaded) {
+      const error = new Error(
+        "笔记迁移失败：迁移前备份未能下载，旧笔记保持不变。",
+      );
+      error.code = "NOTES_MIGRATION_BACKUP_DOWNLOAD_FAILED";
+      throw error;
+    }
+
+    const seenIds = new Set();
+    const shards = new Map();
+    const index = [];
+    try {
+      for (let position = 0; position < legacyNotes.length; position += 1) {
+        const note = legacyNotes[position];
+        if (!note || typeof note !== "object" || Array.isArray(note)) {
+          const error = new Error(`笔记迁移失败：第 ${position + 1} 条不是对象。`);
+          error.code = "NOTES_MIGRATION_FAILED";
+          throw error;
+        }
+        if (typeof note.id !== "string" || !note.id.trim()) {
+          const error = new Error(
+            `笔记迁移失败：第 ${position + 1} 条缺少有效 id。`,
+          );
+          error.code = "NOTES_MIGRATION_FAILED";
+          throw error;
+        }
+        if (seenIds.has(note.id)) {
+          const error = new Error(
+            `笔记迁移失败：第 ${position + 1} 条 id 重复。`,
+          );
+          error.code = "NOTES_MIGRATION_FAILED";
+          throw error;
+        }
+        seenIds.add(note.id);
+
+        const mediaKey =
+          typeof note.mediaKey === "string" && note.mediaKey.trim()
+            ? note.mediaKey
+            : typeof note.videoId === "string" && note.videoId.trim()
+              ? note.videoId
+              : "";
+        if (!mediaKey) {
+          const error = new Error(
+            `笔记迁移失败：第 ${position + 1} 条缺少 mediaKey 与 videoId。`,
+          );
+          error.code = "NOTES_MIGRATION_FAILED";
+          throw error;
+        }
+        if (mediaKey === "schema") {
+          const error = new Error(
+            `笔记迁移失败：第 ${position + 1} 条 mediaKey 与存储保留键冲突。`,
+          );
+          error.code = "NOTES_MIGRATION_FAILED";
+          throw error;
+        }
+
+        const stringFields = [
+          "id",
+          "videoId",
+          "mediaKey",
+          "platform",
+          "canonicalUrl",
+          "bvid",
+          "videoTitle",
+          "channelName",
+          "timestamp",
+          "timestampedUrl",
+          "text",
+          "translatedText",
+          "rawText",
+          "sourceLanguage",
+          "textLanguage",
+        ];
+        const badStringField = stringFields.find(
+          (field) =>
+            note[field] !== undefined && note[field] !== null &&
+            typeof note[field] !== "string",
+        );
+        if (badStringField) {
+          const error = new Error(
+            `笔记迁移失败：第 ${position + 1} 条字段 ${badStringField} 类型错误。`,
+          );
+          error.code = "NOTES_MIGRATION_FAILED";
+          throw error;
+        }
+        for (const field of ["timestampSeconds", "createdAt"]) {
+          if (!Number.isSafeInteger(note[field]) || note[field] < 0) {
+            const error = new Error(
+              `笔记迁移失败：第 ${position + 1} 条字段 ${field} 类型错误。`,
+            );
+            error.code = "NOTES_MIGRATION_FAILED";
+            throw error;
+          }
+        }
+        for (const field of ["cid", "page"]) {
+          if (
+            note[field] !== undefined && note[field] !== null &&
+            !Number.isSafeInteger(note[field])
+          ) {
+            const error = new Error(
+              `笔记迁移失败：第 ${position + 1} 条字段 ${field} 类型错误。`,
+            );
+            error.code = "NOTES_MIGRATION_FAILED";
+            throw error;
+          }
+        }
+        for (const field of [
+          "translatedValidated",
+          "translatedUnchanged",
+        ]) {
+          if (note[field] !== undefined && typeof note[field] !== "boolean") {
+            const error = new Error(
+              `笔记迁移失败：第 ${position + 1} 条字段 ${field} 类型错误。`,
+            );
+            error.code = "NOTES_MIGRATION_FAILED";
+            throw error;
+          }
+        }
+        if (
+          note.translatedValidationVersion !== undefined &&
+          !Number.isSafeInteger(note.translatedValidationVersion)
+        ) {
+          const error = new Error(
+            `笔记迁移失败：第 ${position + 1} 条字段 translatedValidationVersion 类型错误。`,
+          );
+          error.code = "NOTES_MIGRATION_FAILED";
+          throw error;
+        }
+        if (
+          note.platform !== undefined &&
+          note.platform !== "youtube" &&
+          note.platform !== "bilibili"
+        ) {
+          const error = new Error(
+            `笔记迁移失败：第 ${position + 1} 条字段 platform 类型错误。`,
+          );
+          error.code = "NOTES_MIGRATION_FAILED";
+          throw error;
+        }
+
+        if (!shards.has(mediaKey)) shards.set(mediaKey, []);
+        shards.get(mediaKey).push(note);
+        const searchText = [
+          "",
+          note.rawText,
+          note.videoTitle,
+          note.channelName,
+        ]
+          .filter((value) => typeof value === "string" && value.trim())
+          .join(" ")
+          .normalize("NFKC")
+          .trim()
+          .replace(/\s+/g, " ");
+        index.push({
+          id: note.id,
+          mediaKey,
+          platform: note.platform || "youtube",
+          videoTitle: note.videoTitle || "",
+          channelName: note.channelName || "",
+          timestampSeconds: note.timestampSeconds,
+          savedAt: note.createdAt,
+          hasThought: false,
+          searchText,
+        });
+      }
+    } catch (cause) {
+      if (cause?.code === "NOTES_MIGRATION_FAILED") throw cause;
+      const error = new Error("笔记迁移失败：旧笔记字段校验失败。");
+      error.code = "NOTES_MIGRATION_FAILED";
+      error.cause = cause;
+      throw error;
+    }
+
+    const writtenKeys = [];
+    try {
+      for (const [mediaKey, notes] of shards) {
+        const key = `ytd_notes_${mediaKey}`;
+        await chrome.storage.local.set({
+          [key]: [...notes].sort(
+            (left, right) =>
+              left.timestampSeconds - right.timestampSeconds,
+          ),
+        });
+        writtenKeys.push(key);
+      }
+      await chrome.storage.local.set({ ytd_note_index: index });
+      writtenKeys.push("ytd_note_index");
+      await chrome.storage.local.set({ ytd_notes_schema: 1 });
+      return { success: true };
+    } catch (cause) {
+      if (writtenKeys.length) {
+        try {
+          await chrome.storage.local.remove(writtenKeys);
+        } catch (_rollbackError) {
+          // The legacy key remains the truth while schema=1 is absent.
+        }
+      }
+      const error = new Error(
+        `笔记迁移失败：写入新结构失败（${cause?.message || "unknown"}）。`,
+      );
+      error.code = "NOTES_MIGRATION_FAILED";
+      error.cause = cause;
+      throw error;
+    }
+  });
+
+  notesMigrationPromise = migration;
+  migration.catch((error) => {
+    if (
+      error?.code === "NOTES_MIGRATION_BACKUP_DOWNLOAD_FAILED" &&
+      notesMigrationPromise === migration
+    ) {
+      notesMigrationPromise = null;
+    }
+  });
+  return migration;
+}
+
+async function readNoteIndex() {
+  await ensureNotesMigrated();
+  const stored = await chrome.storage.local.get("ytd_note_index");
+  if (!Array.isArray(stored.ytd_note_index)) {
+    const error = new Error("笔记迁移失败：笔记索引缺失或损坏。");
+    error.code = "NOTES_MIGRATION_FAILED";
+    throw error;
+  }
+  const expectedFields = [
+    "channelName",
+    "hasThought",
+    "id",
+    "mediaKey",
+    "platform",
+    "savedAt",
+    "searchText",
+    "timestampSeconds",
+    "videoTitle",
+  ];
+  const seenIds = new Set();
+  for (const entry of stored.ytd_note_index) {
+    const fields =
+      entry && typeof entry === "object" && !Array.isArray(entry)
+        ? Object.keys(entry).sort()
+        : [];
+    const validShape =
+      fields.length === expectedFields.length &&
+      fields.every((field, index) => field === expectedFields[index]);
+    const validValues =
+      typeof entry?.id === "string" &&
+      !!entry.id.trim() &&
+      typeof entry?.mediaKey === "string" &&
+      !!entry.mediaKey.trim() &&
+      entry.mediaKey !== "schema" &&
+      (entry.platform === "youtube" || entry.platform === "bilibili") &&
+      typeof entry.videoTitle === "string" &&
+      typeof entry.channelName === "string" &&
+      Number.isSafeInteger(entry.timestampSeconds) &&
+      entry.timestampSeconds >= 0 &&
+      Number.isSafeInteger(entry.savedAt) &&
+      entry.savedAt >= 0 &&
+      typeof entry.hasThought === "boolean" &&
+      typeof entry.searchText === "string";
+    if (!validShape || !validValues || seenIds.has(entry?.id)) {
+      const error = new Error("笔记迁移失败：笔记索引条目损坏或重复。");
+      error.code = "NOTES_MIGRATION_FAILED";
+      throw error;
+    }
+    seenIds.add(entry.id);
+  }
+  return stored.ytd_note_index;
+}
+
+async function readNotesByMedia(mediaKey) {
+  await ensureNotesMigrated();
+  const normalizedMediaKey = String(mediaKey || "").trim();
+  if (!normalizedMediaKey) return [];
+  if (normalizedMediaKey === "schema") {
+    const error = new Error("笔记迁移失败：mediaKey 与存储保留键冲突。");
+    error.code = "NOTES_MIGRATION_FAILED";
+    throw error;
+  }
+  const index = await readNoteIndex();
+  const expectedIds = new Set(
+    index
+      .filter((entry) => entry.mediaKey === normalizedMediaKey)
+      .map((entry) => entry.id),
+  );
+  const key = `ytd_notes_${normalizedMediaKey}`;
+  const stored = await chrome.storage.local.get(key);
+  if (!Object.hasOwn(stored, key)) {
+    if (!expectedIds.size) return [];
+    const error = new Error(`笔记迁移失败：分片 ${normalizedMediaKey} 缺失。`);
+    error.code = "NOTES_MIGRATION_FAILED";
+    throw error;
+  }
+  if (!Array.isArray(stored[key])) {
+    const error = new Error(`笔记迁移失败：分片 ${normalizedMediaKey} 已损坏。`);
+    error.code = "NOTES_MIGRATION_FAILED";
+    throw error;
+  }
+  const seenIds = new Set();
+  for (const note of stored[key]) {
+    const noteMediaKey = String(note?.mediaKey || note?.videoId || "").trim();
+    if (
+      typeof note?.id !== "string" ||
+      seenIds.has(note.id) ||
+      noteMediaKey !== normalizedMediaKey ||
+      !expectedIds.has(note.id)
+    ) {
+      const error = new Error(`笔记迁移失败：分片 ${normalizedMediaKey} 与索引不一致。`);
+      error.code = "NOTES_MIGRATION_FAILED";
+      throw error;
+    }
+    seenIds.add(note.id);
+  }
+  if (seenIds.size !== expectedIds.size) {
+    const error = new Error(`笔记迁移失败：分片 ${normalizedMediaKey} 与索引不一致。`);
+    error.code = "NOTES_MIGRATION_FAILED";
+    throw error;
+  }
+  return stored[key];
+}
+
+async function readAllNotes() {
+  await ensureNotesMigrated();
+  const index = await readNoteIndex();
+  if (!index.length) return [];
+
+  const mediaKeys = [
+    ...new Set(index.map((entry) => String(entry?.mediaKey || "")).filter(Boolean)),
+  ];
+  const keys = mediaKeys.map((mediaKey) => `ytd_notes_${mediaKey}`);
+  const stored = await chrome.storage.local.get(keys);
+  const notesById = new Map();
+  for (const mediaKey of mediaKeys) {
+    const key = `ytd_notes_${mediaKey}`;
+    if (!Array.isArray(stored[key])) {
+      const error = new Error(`笔记迁移失败：分片 ${mediaKey} 缺失或损坏。`);
+      error.code = "NOTES_MIGRATION_FAILED";
+      throw error;
+    }
+    const expectedIds = new Set(
+      index
+        .filter((entry) => entry.mediaKey === mediaKey)
+        .map((entry) => entry.id),
+    );
+    for (const note of stored[key]) {
+      const noteMediaKey = String(note?.mediaKey || note?.videoId || "").trim();
+      if (
+        typeof note?.id !== "string" ||
+        notesById.has(note.id) ||
+        noteMediaKey !== mediaKey ||
+        !expectedIds.has(note.id)
+      ) {
+        const error = new Error(`笔记迁移失败：分片 ${mediaKey} 与索引不一致。`);
+        error.code = "NOTES_MIGRATION_FAILED";
+        throw error;
+      }
+      notesById.set(note.id, note);
+    }
+    if (stored[key].length !== expectedIds.size) {
+      const error = new Error(`笔记迁移失败：分片 ${mediaKey} 与索引不一致。`);
+      error.code = "NOTES_MIGRATION_FAILED";
+      throw error;
+    }
+  }
+  return index.map((entry) => {
+    const note = notesById.get(entry.id);
+    if (note) return note;
+    const error = new Error(`笔记迁移失败：索引项 ${entry.id || "unknown"} 无对应记录。`);
+    error.code = "NOTES_MIGRATION_FAILED";
+    throw error;
+  });
+}
+
+async function appendNote(note) {
+  await ensureNotesMigrated();
+  const index = await readNoteIndex();
+
+  assertNotesRemainBackupable([note]);
+  const allNotes = await readAllNotes();
+  try {
+    assertNotesRemainBackupable([note, ...allNotes], {
+      allowInvalidStored: true,
+    });
+  } catch (error) {
+    if (error?.code === "NOTES_BACKUP_TOO_LARGE") {
+      return {
+        code: error.code,
+        maxBytes:
+          Number(error?.details?.maxBytes) ||
+          YTD_NOTES_BACKUP.MAX_BACKUP_BYTES,
+        count: index.length,
+      };
+    }
+    throw error;
+  }
+
+  const mediaKey = String(note?.mediaKey || note?.videoId || "").trim();
+  if (!mediaKey || mediaKey === "schema") {
+    const error = new Error(
+      mediaKey
+        ? "笔记 mediaKey 与存储保留键冲突。"
+        : "笔记缺少 mediaKey 与 videoId。",
+    );
+    error.code = "INVALID_STORED_NOTES";
+    throw error;
+  }
+  if (
+    typeof note?.id !== "string" ||
+    !note.id.trim() ||
+    index.some((entry) => entry.id === note.id)
+  ) {
+    const error = new Error("笔记 id 缺失或重复。");
+    error.code = "INVALID_STORED_NOTES";
+    throw error;
+  }
+  const shard = await readNotesByMedia(mediaKey);
+  const nextShard = [...shard, note].sort(
+    (left, right) => left.timestampSeconds - right.timestampSeconds,
+  );
+  const searchText = [
+    note?.thought,
+    note?.rawText,
+    note?.videoTitle,
+    note?.channelName,
+  ]
+    .filter((value) => typeof value === "string" && value.trim())
+    .join(" ")
+    .normalize("NFKC")
+    .trim()
+    .replace(/\s+/g, " ");
+  const nextIndex = [
+    {
+      id: note.id,
+      mediaKey,
+      platform: note.platform || "youtube",
+      videoTitle: note.videoTitle || "",
+      channelName: note.channelName || "",
+      timestampSeconds: note.timestampSeconds,
+      savedAt: note.createdAt,
+      hasThought: !!String(note.thought || "").trim(),
+      searchText,
+    },
+    ...index,
+  ];
+  await chrome.storage.local.set({
+    [`ytd_notes_${mediaKey}`]: nextShard,
+    ytd_note_index: nextIndex,
+  });
+  return true;
+}
+
+async function replaceNotes(notes) {
+  await ensureNotesMigrated();
+  if (!Array.isArray(notes)) {
+    const error = new Error("INVALID_STORED_NOTES");
+    error.code = "INVALID_STORED_NOTES";
+    throw error;
+  }
+
+  const oldIndex = await readNoteIndex();
+  const oldMediaKeys = new Set(
+    oldIndex.map((entry) => String(entry?.mediaKey || "")).filter(Boolean),
+  );
+  const shards = new Map();
+  const nextIndex = [];
+  const seenIds = new Set();
+  for (const note of notes) {
+    const mediaKey = String(note?.mediaKey || note?.videoId || "").trim();
+    if (!mediaKey || mediaKey === "schema") {
+      const error = new Error("INVALID_STORED_NOTES");
+      error.code = "INVALID_STORED_NOTES";
+      throw error;
+    }
+    if (
+      typeof note?.id !== "string" ||
+      !note.id.trim() ||
+      seenIds.has(note.id) ||
+      (note.platform !== undefined &&
+        note.platform !== "youtube" &&
+        note.platform !== "bilibili") ||
+      !Number.isSafeInteger(note.timestampSeconds) ||
+      note.timestampSeconds < 0 ||
+      !Number.isSafeInteger(note.createdAt) ||
+      note.createdAt < 0
+    ) {
+      const error = new Error("INVALID_STORED_NOTES");
+      error.code = "INVALID_STORED_NOTES";
+      throw error;
+    }
+    seenIds.add(note.id);
+    if (!shards.has(mediaKey)) shards.set(mediaKey, []);
+    shards.get(mediaKey).push(note);
+    const searchText = [
+      note?.thought,
+      note?.rawText,
+      note?.videoTitle,
+      note?.channelName,
+    ]
+      .filter((value) => typeof value === "string" && value.trim())
+      .join(" ")
+      .normalize("NFKC")
+      .trim()
+      .replace(/\s+/g, " ");
+    nextIndex.push({
+      id: note.id,
+      mediaKey,
+      platform: note.platform || "youtube",
+      videoTitle: note.videoTitle || "",
+      channelName: note.channelName || "",
+      timestampSeconds: note.timestampSeconds,
+      savedAt: note.createdAt,
+      hasThought: !!String(note.thought || "").trim(),
+      searchText,
+    });
+  }
+
+  const update = { ytd_note_index: nextIndex };
+  for (const [mediaKey, shard] of shards) {
+    update[`ytd_notes_${mediaKey}`] = [...shard].sort(
+      (left, right) => left.timestampSeconds - right.timestampSeconds,
+    );
+    oldMediaKeys.delete(mediaKey);
+  }
+  for (const mediaKey of oldMediaKeys) {
+    update[`ytd_notes_${mediaKey}`] = [];
+  }
+  await chrome.storage.local.set(update);
+  if (oldMediaKeys.size) {
+    await chrome.storage.local.remove(
+      [...oldMediaKeys].map((mediaKey) => `ytd_notes_${mediaKey}`),
+    );
+  }
+  return true;
+}
+
+async function deleteNote(id) {
+  await ensureNotesMigrated();
+  const index = await readNoteIndex();
+  const entry = index.find((candidate) => candidate?.id === id);
+  if (!entry) return { changed: false };
+
+  const shard = await readNotesByMedia(entry.mediaKey);
+  const nextShard = shard.filter((note) => note?.id !== id);
+  const nextIndex = index.filter((candidate) => candidate?.id !== id);
+  if (nextShard.length) {
+    await chrome.storage.local.set({
+      [`ytd_notes_${entry.mediaKey}`]: nextShard,
+      ytd_note_index: nextIndex,
+    });
+  } else {
+    await chrome.storage.local.set({
+      [`ytd_notes_${entry.mediaKey}`]: [],
+      ytd_note_index: nextIndex,
+    });
+    await chrome.storage.local.remove(`ytd_notes_${entry.mediaKey}`);
+  }
+  return { changed: true };
+}
+
+function noteSaveFailureResponse(result) {
+  if (result && result.code === "NOTES_BACKUP_TOO_LARGE") {
+    const maxMiB = result.maxBytes / (1024 * 1024);
+    return {
+      success: false,
+      code: "NOTES_BACKUP_TOO_LARGE",
+      maxBytes: result.maxBytes,
+      count: result.count,
+      error: `笔记库已达到 ${maxMiB} MiB 可备份容量。请先导出备份并删除不再需要的笔记，已保存的笔记不会被自动删除。`,
+    };
+  }
+  return {
+    success: false,
+    code: "NOTE_SAVE_CANCELED",
+    error: "笔记保存已因清空或重置操作取消。",
+  };
+}
+
+function assertNotesRemainBackupable(notes, { allowInvalidStored = false } = {}) {
+  try {
+    const extensionVersion = chrome.runtime.getManifest?.().version || "";
+    YTD_NOTES_BACKUP.createBackup(notes, { extensionVersion });
+  } catch (error) {
+    // Some isolated test fixtures and very old local records predate the full
+    // backup identity schema. Their validity is handled elsewhere; this guard
+    // owns only the byte-cap invariant and must never hide that failure.
+    if (allowInvalidStored && error?.code === "INVALID_NOTES_BACKUP") return;
+    throw error;
+  }
+}
+
+async function saveNoteToStorage(
+  note,
+  expectedGeneration = noteStorageGeneration,
+  expectedDataGeneration = extensionDataGeneration,
+) {
+  await ensureNotesMigrated();
+  return withNoteStorageWrite(async () => {
+    if (
+      expectedGeneration !== noteStorageGeneration ||
+      !extensionDataGenerationIsWritable(expectedDataGeneration)
+    ) {
+      return false;
+    }
+    return appendNote(note);
   });
 }
 
@@ -5011,7 +6764,8 @@ function notesBackupFailure(error, fallbackCode) {
   return {
     success: false,
     code: error?.code || fallbackCode,
-    overBy: Number(error?.details?.overBy) || 0,
+    maxBytes:
+      Number(error?.details?.maxBytes) || YTD_NOTES_BACKUP.MAX_BACKUP_BYTES,
   };
 }
 
@@ -5024,53 +6778,124 @@ function notifyNotesChanged() {
   }
 }
 
+async function notifyExtensionDataReset(action, dataGeneration, success) {
+  try {
+    await chrome.runtime.sendMessage?.({
+      action,
+      runtimeInstanceId,
+      dataGeneration,
+      ...(typeof success === "boolean" ? { success } : {}),
+    });
+  } catch (_error) {
+    // A reset remains authoritative when no side panel is currently open.
+  }
+}
+
 /**
  * Creates a consistent notes-only snapshot after all earlier note writes finish.
  */
-function handleExportNotesBackup() {
-  return withNoteStorageWrite(async () => {
-    try {
-      const stored = await chrome.storage.local.get("ytd_notes");
-      const notes = Array.isArray(stored.ytd_notes) ? stored.ytd_notes : [];
+async function handleExportNotesBackup() {
+  const expectedNoteGeneration = noteStorageGeneration;
+  const expectedDataGeneration = extensionDataGeneration;
+  const expectedRuntimeInstanceId = runtimeInstanceId;
+  try {
+    await ensureNotesMigrated();
+    return await withNoteStorageWrite(async () => {
+      assertNoteStorageGeneration(
+        expectedNoteGeneration,
+        expectedDataGeneration,
+        expectedRuntimeInstanceId,
+      );
+      const notes = await readAllNotes();
       const extensionVersion = chrome.runtime.getManifest?.().version || "";
-      const backup = YTD_NOTES_BACKUP.createBackup(notes, { extensionVersion });
+      const backup = YTD_NOTES_BACKUP.createBackup(notes, {
+        extensionVersion,
+      });
       return { success: true, backup, count: backup.notes.length };
-    } catch (error) {
-      return notesBackupFailure(error, "NOTES_EXPORT_FAILED");
-    }
-  });
+    });
+  } catch (error) {
+    return notesBackupFailure(error, "NOTES_EXPORT_FAILED");
+  }
 }
 
 /**
  * Validates and atomically merges an uploaded backup through the shared note
  * storage queue. A failure never partially updates the stored notes.
  */
-function handleImportNotesBackup(backupText) {
-  return withNoteStorageWrite(async () => {
-    try {
+async function handleImportNotesBackup(
+  backupText,
+  expectedDataGeneration = extensionDataGeneration,
+  expectedRuntimeInstanceId = runtimeInstanceId,
+) {
+  if (
+    !extensionDataFenceIsWritable(
+      expectedRuntimeInstanceId,
+      expectedDataGeneration,
+    )
+  ) {
+    return extensionDataMutationResult(false, "EXTENSION_DATA_RESET");
+  }
+  try {
+    await ensureNotesMigrated();
+    return await withNoteStorageWrite(async () => {
+      if (
+        !extensionDataFenceIsWritable(
+          expectedRuntimeInstanceId,
+          expectedDataGeneration,
+        )
+      ) {
+        return extensionDataMutationResult(false, "EXTENSION_DATA_RESET");
+      }
       const importedNotes = YTD_NOTES_BACKUP.parseBackupText(backupText);
-      const stored = await chrome.storage.local.get("ytd_notes");
-      const existingNotes = Array.isArray(stored.ytd_notes)
-        ? stored.ytd_notes
-        : [];
-      const result = YTD_NOTES_BACKUP.mergeNotes(existingNotes, importedNotes);
+      const existingNotes = await readAllNotes();
+      const result = YTD_NOTES_BACKUP.mergeNotes(
+        existingNotes,
+        importedNotes,
+      );
+
+      // A legacy schema can normalize to a slightly larger current schema, and
+      // merging two individually valid files can exceed the bounded export.
+      // Prove the exact post-import state can be exported before writing any of
+      // it, preserving import atomicity and the recovery contract.
+      assertNotesRemainBackupable(result.notes);
 
       if (result.changed) {
-        await chrome.storage.local.set({ ytd_notes: result.notes });
+        if (
+          !extensionDataFenceIsWritable(
+            expectedRuntimeInstanceId,
+            expectedDataGeneration,
+          )
+        ) {
+          return extensionDataMutationResult(false, "EXTENSION_DATA_RESET");
+        }
+        await replaceNotes(result.notes);
         notifyNotesChanged();
       }
 
       const { notes: _notes, ...summary } = result;
-      return { success: true, ...summary };
-    } catch (error) {
-      return notesBackupFailure(error, "NOTES_IMPORT_FAILED");
-    }
-  });
+      return extensionDataMutationResult(true, "OK", summary);
+    });
+  } catch (error) {
+    return extensionDataMutationResult(
+      false,
+      error?.code || "NOTES_IMPORT_FAILED",
+      notesBackupFailure(error, "NOTES_IMPORT_FAILED"),
+    );
+  }
 }
 
-function handleClearAllNotes() {
-  return withNoteStorageWrite(async () => {
-    try {
+async function handleClearAllNotes() {
+  const expectedNoteGeneration = noteStorageGeneration;
+  const expectedDataGeneration = extensionDataGeneration;
+  const expectedRuntimeInstanceId = runtimeInstanceId;
+  try {
+    await ensureNotesMigrated();
+    return await withNoteStorageWrite(async () => {
+      assertNoteStorageGeneration(
+        expectedNoteGeneration,
+        expectedDataGeneration,
+        expectedRuntimeInstanceId,
+      );
       await preflightExportTranslationStorage();
       noteStorageGeneration += 1;
       exportSourceStorageGeneration += 1;
@@ -5086,77 +6911,176 @@ function handleClearAllNotes() {
       ) {
         await YTD_NOTE_SOURCES.clearNoteSources(chrome.storage.local);
       }
-      await chrome.storage.local.remove("ytd_notes");
+      await replaceNotes([]);
       notifyNotesChanged();
       return { success: true };
-    } catch (error) {
-      return notesBackupFailure(error, "NOTES_CLEAR_FAILED");
-    }
-  });
+    });
+  } catch (error) {
+    return notesBackupFailure(error, "NOTES_CLEAR_FAILED");
+  }
 }
 
 function handleResetAllExtensionData(preferredLanguage) {
-  return withNoteStorageWrite(async () => {
-    try {
-      await preflightExportTranslationStorage();
-      noteStorageGeneration += 1;
-      exportSourceStorageGeneration += 1;
-      if (
-        typeof YTD_EXPORT_JOBS !== "undefined" &&
-        typeof YTD_EXPORT_JOBS.clearExportJobs === "function"
-      ) {
-        await YTD_EXPORT_JOBS.clearExportJobs(chrome.storage.local);
-      }
-      if (
-        typeof YTD_NOTE_SOURCES !== "undefined" &&
-        typeof YTD_NOTE_SOURCES.clearNoteSources === "function"
-      ) {
-        await YTD_NOTE_SOURCES.clearNoteSources(chrome.storage.local);
-      }
-      const safeLanguage = preferredLanguage === "en" ? "en" : "zh-CN";
-      await chrome.storage.local.clear();
-      await chrome.storage.local.set({ ytd_options_language: safeLanguage });
-      notifyNotesChanged();
-      return { success: true };
-    } catch (error) {
-      return notesBackupFailure(error, "RESET_DATA_FAILED");
-    }
-  });
+  return withNoteStorageWrite(() =>
+    queueYoutubePassiveMutation(() =>
+      queueExtensionDataMutation(async () => {
+        let resetGeneration = null;
+        let result;
+        try {
+          await preflightExportTranslationStorage();
+          const sessionStorage = chrome.storage?.session;
+          if (typeof sessionStorage?.clear !== "function") {
+            throw new Error("Session storage reset is unavailable.");
+          }
+
+          noteStorageGeneration += 1;
+          exportSourceStorageGeneration += 1;
+          extensionDataGeneration += 1;
+          resetGeneration = extensionDataGeneration;
+          await notifyExtensionDataReset(
+            "extensionDataResetStarted",
+            resetGeneration,
+          );
+
+          // Both storage queues stay held until the complete reset transaction
+          // has restored its one allowed local preference and returned.
+          await sessionStorage.clear();
+          youtubeSupadataCooldownUntil = 0;
+          youtubeNativeCooldownUntil = 0;
+
+          if (
+            typeof YTD_EXPORT_JOBS !== "undefined" &&
+            typeof YTD_EXPORT_JOBS.clearExportJobs === "function"
+          ) {
+            await YTD_EXPORT_JOBS.clearExportJobs(chrome.storage.local);
+          }
+          if (
+            typeof YTD_NOTE_SOURCES !== "undefined" &&
+            typeof YTD_NOTE_SOURCES.clearNoteSources === "function"
+          ) {
+            await YTD_NOTE_SOURCES.clearNoteSources(chrome.storage.local);
+          }
+          const safeLanguage = preferredLanguage === "en" ? "en" : "zh-CN";
+          await chrome.storage.local.clear();
+          notesMigrationPromise = null;
+          await chrome.storage.local.set({ ytd_options_language: safeLanguage });
+          result = { success: true };
+        } catch (error) {
+          result = notesBackupFailure(error, "RESET_DATA_FAILED");
+        }
+
+        if (resetGeneration !== null) {
+          extensionDataGeneration += 1;
+          await notifyExtensionDataReset(
+            "extensionDataResetCompleted",
+            extensionDataGeneration,
+            result.success === true,
+          );
+        }
+        if (result.success) {
+          notifyYoutubePassiveWaiters();
+          notifyNotesChanged();
+        }
+        return extensionDataMutationResult(
+          result.success === true,
+          result.success === true ? "OK" : result.code || "RESET_DATA_FAILED",
+          result,
+        );
+      }),
+    ),
+  );
 }
 
 /**
  * Gets notes from storage, optionally filtered by video ID
  */
 async function handleGetNotes(videoId) {
+  const expectedNoteGeneration = noteStorageGeneration;
+  const expectedDataGeneration = extensionDataGeneration;
+  const expectedRuntimeInstanceId = runtimeInstanceId;
   try {
-    const result = await chrome.storage.local.get("ytd_notes");
-    let notes = Array.isArray(result.ytd_notes) ? result.ytd_notes : [];
+    await ensureNotesMigrated();
+    return await withNoteStorageWrite(async () => {
+      assertNoteStorageGeneration(
+        expectedNoteGeneration,
+        expectedDataGeneration,
+        expectedRuntimeInstanceId,
+      );
+      const index = await readNoteIndex();
+      const filterKey = String(videoId || "").trim();
+      const hasExactMediaKey =
+        !!filterKey && index.some((entry) => entry.mediaKey === filterKey);
+      const notes = !filterKey
+        ? await readAllNotes()
+        : hasExactMediaKey
+          ? await readNotesByMedia(filterKey)
+          : (await readAllNotes()).filter(
+              (note) => String(note?.videoId || "").trim() === filterKey,
+            );
+      const totalCount = index.length;
 
-    if (videoId) {
-      notes = notes.filter((n) => n.videoId === videoId);
-    }
-
-    return { success: true, notes };
+      return { success: true, notes, totalCount };
+    });
   } catch (error) {
-    return { success: false, error: error.message };
+    if (error?.code === "NOTE_STORAGE_RESET") {
+      return {
+        success: false,
+        code: "NOTE_STORAGE_RESET",
+        error: "笔记库刚刚发生变化，请重试。",
+        message: "笔记库刚刚发生变化，请重试。",
+      };
+    }
+    return {
+      success: false,
+      code: error?.code || "NOTES_MIGRATION_FAILED",
+      error: error?.message || "笔记迁移失败。",
+      message: error?.message || "笔记迁移失败。",
+    };
   }
 }
 
 /**
  * Deletes a note by ID
  */
-async function handleDeleteNote(noteId) {
+async function handleDeleteNote(
+  noteId,
+  expectedDataGeneration = extensionDataGeneration,
+  expectedRuntimeInstanceId = runtimeInstanceId,
+) {
+  if (
+    !extensionDataFenceIsWritable(
+      expectedRuntimeInstanceId,
+      expectedDataGeneration,
+    )
+  ) {
+    return extensionDataMutationResult(false, "EXTENSION_DATA_RESET");
+  }
   try {
+    await ensureNotesMigrated();
     return await withNoteStorageWrite(async () => {
-      const result = await chrome.storage.local.get("ytd_notes");
-      const notes = Array.isArray(result.ytd_notes) ? result.ytd_notes : [];
-      await chrome.storage.local.set({
-        ytd_notes: notes.filter((note) => note.id !== noteId),
-      });
-      return { success: true };
+      if (
+        !extensionDataFenceIsWritable(
+          expectedRuntimeInstanceId,
+          expectedDataGeneration,
+        )
+      ) {
+        return extensionDataMutationResult(false, "EXTENSION_DATA_RESET");
+      }
+      const result = await deleteNote(noteId);
+      if (
+        !extensionDataFenceIsWritable(
+          expectedRuntimeInstanceId,
+          expectedDataGeneration,
+        )
+      ) {
+        return extensionDataMutationResult(false, "EXTENSION_DATA_RESET");
+      }
+      return extensionDataMutationResult(true, "OK", result);
     });
   } catch (error) {
-    return { success: false, error: error.message };
+    return extensionDataMutationResult(false, "NOTE_DELETE_FAILED", {
+      error: error.message,
+    });
   }
 }
 
@@ -5225,6 +7149,7 @@ function exportSourceBatchError(code, message, details = {}) {
 }
 
 const EXPORT_SOURCE_SAFE_ERROR_CODES = new Set([
+  "EXTENSION_DATA_RESET",
   "INVALID_EXPORT_SOURCE_BATCH",
   "INVALID_EXPORT_JOB",
   "INVALID_EXPORT_JOB_PATCH",
@@ -5260,6 +7185,7 @@ function normalizeExportSourceBatchCode(value) {
 
 function exportSourceBatchSafeMessage(code) {
   const messages = {
+    EXTENSION_DATA_RESET: "扩展数据正在重置，本次补译任务未保存，请稍后重试。",
     INVALID_EXPORT_SOURCE_BATCH: "补译批次无效，请刷新后重试。",
     EXPORT_JOB_NOT_FOUND: "补译任务不存在或已被清理，请重新开始导出。",
     EXPORT_JOB_NOT_RUNNING: "补译任务当前未运行，不会启动新的翻译请求。",
@@ -5297,6 +7223,8 @@ function exportSourceBatchFailure(error, overrides = {}) {
   return {
     success: false,
     code,
+    runtimeInstanceId,
+    dataGeneration: extensionDataGeneration,
     error: message,
     jobState: overrides.jobState || error?.jobState || "",
     completedUnitKeys: Array.isArray(overrides.completedUnitKeys)
@@ -5365,6 +7293,42 @@ function assertExportSourceStorageGeneration(expectedGeneration) {
       "Export translation state was cleared before this request could commit.",
     );
   }
+}
+
+function assertExtensionDataGeneration(
+  expectedGeneration,
+  expectedRuntimeInstanceId = runtimeInstanceId,
+) {
+  if (
+    extensionDataFenceIsWritable(
+      expectedRuntimeInstanceId,
+      expectedGeneration,
+    )
+  ) {
+    return;
+  }
+  throw exportSourceBatchError(
+    "EXPORT_JOB_NOT_FOUND",
+    "Extension data was reset before this request could commit.",
+  );
+}
+
+function assertExtensionDataMutationGeneration(
+  expectedGeneration,
+  expectedRuntimeInstanceId = runtimeInstanceId,
+) {
+  if (
+    extensionDataFenceIsWritable(
+      expectedRuntimeInstanceId,
+      expectedGeneration,
+    )
+  ) {
+    return;
+  }
+  throw exportSourceBatchError(
+    "EXTENSION_DATA_RESET",
+    "Extension data is being reset; this mutation will not be persisted.",
+  );
 }
 
 function normalizeExportBatchToken(value, maxLength) {
@@ -5502,7 +7466,7 @@ function validateExportSourceBatchRequest(message) {
 }
 
 function exportSourceBatchFlightKey(request) {
-  return `${request.jobId}\u0000${[...request.unitKeys].sort().join("\u0001")}`;
+  return `${request.runtimeInstanceId}\u0000${request.dataGeneration}\u0000${request.jobId}\u0000${[...request.unitKeys].sort().join("\u0001")}`;
 }
 
 function shortExportBatchHash(value) {
@@ -5544,6 +7508,9 @@ function runExportSourceBatchSingleFlight(request) {
         checkpointedJob = await checkpointExportBatchError(
           request.jobId,
           error,
+          request.storageGeneration,
+          request.dataGeneration,
+          request.runtimeInstanceId,
         );
       }
       return exportSourceBatchFailure(error, {
@@ -5644,22 +7611,11 @@ function sameUnitKeyList(left, right) {
 }
 
 function exportStoredNoteOriginalText(note) {
-  const textLanguage = normalizeLanguageCode(note?.textLanguage);
-  const trustedChineseText =
-    note?.platform === "bilibili"
-      ? isConfirmedSimplifiedChineseSource(textLanguage)
-      : isChineseLanguage(textLanguage);
-  if (
-    trustedChineseText &&
-    typeof note?.text === "string" &&
-    note.text.trim()
-  ) {
-    return note.text.trim();
-  }
-  if (noteHasChineseSource(note)) {
-    return String(note?.rawText || note?.text || "").trim();
-  }
-  return String(note?.text || note?.rawText || "").trim();
+  // "Original" must be the verbatim caption line. `text` may have been
+  // rewritten by an AI cleanup pass, so it is only a fallback for legacy
+  // notes saved before rawText existed.
+  const rawText = String(note?.rawText || "").trim();
+  return rawText || String(note?.text || "").trim();
 }
 
 function exportStoredNoteTitle(note) {
@@ -5690,8 +7646,17 @@ function exportStoredTitleUnitKey(mediaKey, title) {
   return `title:${YTD_NOTE_SOURCES.hashSourceText(mediaKey)}:${YTD_NOTE_SOURCES.hashSourceText(title)}`;
 }
 
-async function assertExportNotesJobCurrent(jobId, storageGeneration) {
+async function assertExportNotesJobCurrent(
+  jobId,
+  storageGeneration,
+  dataGeneration = extensionDataGeneration,
+  expectedRuntimeInstanceId = runtimeInstanceId,
+) {
   assertExportSourceStorageGeneration(storageGeneration);
+  assertExtensionDataMutationGeneration(
+    dataGeneration,
+    expectedRuntimeInstanceId,
+  );
   const job = await YTD_EXPORT_JOBS.readExportJob(chrome.storage.local, jobId);
   if (!job || job.state !== "running") {
     throw exportSourceBatchError(
@@ -5700,8 +7665,7 @@ async function assertExportNotesJobCurrent(jobId, storageGeneration) {
       { jobState: job?.state || "" },
     );
   }
-  const stored = await chrome.storage.local.get("ytd_notes");
-  const notes = Array.isArray(stored?.ytd_notes) ? stored.ytd_notes : [];
+  const notes = await readAllNotes();
   if (exportStoredNotesRevision(notes, job.intent.mediaKeys) !== job.notesRevision) {
     throw exportSourceBatchError(
       "EXPORT_JOB_SOURCE_REVISION_MISMATCH",
@@ -5724,6 +7688,10 @@ async function assertExportNotesJobCurrent(jobId, storageGeneration) {
   }
   const settings = await getSettings();
   assertExportSourceStorageGeneration(storageGeneration);
+  assertExtensionDataMutationGeneration(
+    dataGeneration,
+    expectedRuntimeInstanceId,
+  );
   assertExportProviderSnapshot(job, settings);
   return { job, notes, settings };
 }
@@ -5731,6 +7699,14 @@ async function assertExportNotesJobCurrent(jobId, storageGeneration) {
 async function handleTranslateExportNotesBatch(message) {
   requireExportSourceModules();
   const storageGeneration = exportSourceStorageGeneration;
+  const dataGeneration = message?.dataGeneration;
+  const expectedRuntimeInstanceId = String(
+    message?.runtimeInstanceId || "",
+  );
+  assertExtensionDataMutationGeneration(
+    dataGeneration,
+    expectedRuntimeInstanceId,
+  );
   if (!message || typeof message !== "object" || Array.isArray(message)) {
     throw exportSourceBatchError(
       "INVALID_EXPORT_SOURCE_BATCH",
@@ -5774,7 +7750,12 @@ async function handleTranslateExportNotesBatch(message) {
     );
   }
 
-  let frozen = await assertExportNotesJobCurrent(jobId, storageGeneration);
+  let frozen = await assertExportNotesJobCurrent(
+    jobId,
+    storageGeneration,
+    dataGeneration,
+    expectedRuntimeInstanceId,
+  );
   const ordered = new Set(frozen.job.orderedUnitKeys || []);
   const completed = new Set(frozen.job.completedUnitKeys || []);
   if (requestedKeys.some((key) => !ordered.has(key) || completed.has(key))) {
@@ -5843,7 +7824,12 @@ async function handleTranslateExportNotesBatch(message) {
   }
 
   const beforeProviderCall = async () => {
-    frozen = await assertExportNotesJobCurrent(jobId, storageGeneration);
+    frozen = await assertExportNotesJobCurrent(
+      jobId,
+      storageGeneration,
+      dataGeneration,
+      expectedRuntimeInstanceId,
+    );
     if (requestedKeys.some((key) => frozen.job.completedUnitKeys.includes(key))) {
       throw exportSourceBatchError(
         "EXPORT_BATCH_PROGRESS_STALE",
@@ -5855,7 +7841,12 @@ async function handleTranslateExportNotesBatch(message) {
   };
   const result = await handleTranslateNotes(
     { notes: canonicalNotes, titles: canonicalTitles },
-    { settings: frozen.settings, beforeProviderCall },
+    {
+      settings: frozen.settings,
+      beforeProviderCall,
+      dataGeneration,
+      runtimeInstanceId: expectedRuntimeInstanceId,
+    },
   );
   const translatedCount =
     (Array.isArray(result?.translations) ? result.translations.length : 0) +
@@ -5923,6 +7914,10 @@ async function authorizeExportSourceProviderCall(
   batchId,
   storageGeneration,
 ) {
+  assertExtensionDataGeneration(
+    request.dataGeneration,
+    request.runtimeInstanceId,
+  );
   if (storageGeneration !== exportSourceStorageGeneration) {
     throw exportSourceBatchError(
       "EXPORT_JOB_NOT_FOUND",
@@ -5969,11 +7964,23 @@ async function authorizeExportSourceProviderCall(
       { jobState: job.state, checkpoint: true },
     );
   }
+  assertExtensionDataGeneration(
+    request.dataGeneration,
+    request.runtimeInstanceId,
+  );
   return assertExportProviderSnapshot(job, settings);
 }
 
-async function checkpointExportBatchError(jobId, error) {
+async function checkpointExportBatchError(
+  jobId,
+  error,
+  storageGeneration,
+  dataGeneration,
+  expectedRuntimeInstanceId = runtimeInstanceId,
+) {
   try {
+    assertExportSourceStorageGeneration(storageGeneration);
+    assertExtensionDataGeneration(dataGeneration, expectedRuntimeInstanceId);
     const job = await YTD_EXPORT_JOBS.readExportJob(
       chrome.storage.local,
       jobId,
@@ -5994,6 +8001,8 @@ async function checkpointExportBatchError(jobId, error) {
         nextState = "failed";
       }
     }
+    assertExportSourceStorageGeneration(storageGeneration);
+    assertExtensionDataGeneration(dataGeneration, expectedRuntimeInstanceId);
     const result = await YTD_EXPORT_JOBS.checkpointExportJob(
       chrome.storage.local,
       jobId,
@@ -6018,7 +8027,10 @@ async function checkpointExportBatchError(jobId, error) {
 
 async function executeExportSourceBatch(request) {
   requireExportSourceModules();
-  const storageGeneration = exportSourceStorageGeneration;
+  const storageGeneration = request.storageGeneration;
+  const dataGeneration = request.dataGeneration;
+  assertExportSourceStorageGeneration(storageGeneration);
+  assertExtensionDataGeneration(dataGeneration, request.runtimeInstanceId);
   let job = assertExportJobMatchesRequest(
     await YTD_EXPORT_JOBS.readExportJob(chrome.storage.local, request.jobId),
     request,
@@ -6097,6 +8109,8 @@ async function executeExportSourceBatch(request) {
         { jobState: job.state },
       );
     }
+    assertExportSourceStorageGeneration(storageGeneration);
+    assertExtensionDataGeneration(dataGeneration, request.runtimeInstanceId);
     const checkpoint = await YTD_EXPORT_JOBS.checkpointExportJob(
       chrome.storage.local,
       request.jobId,
@@ -6135,6 +8149,8 @@ async function executeExportSourceBatch(request) {
   const batchId = `source-batch-${shortExportBatchHash(
     request.unitKeys.join("\u0000"),
   )}`;
+  assertExportSourceStorageGeneration(storageGeneration);
+  assertExtensionDataGeneration(dataGeneration, request.runtimeInstanceId);
   const claim = await YTD_EXPORT_JOBS.checkpointExportJob(
     chrome.storage.local,
     request.jobId,
@@ -6207,6 +8223,9 @@ async function executeExportSourceBatch(request) {
     const failedJob = await checkpointExportBatchError(
       request.jobId,
       error,
+      storageGeneration,
+      dataGeneration,
+      request.runtimeInstanceId,
     );
     return exportSourceBatchFailure(error, {
       jobState: failedJob?.state || job.state,
@@ -6236,6 +8255,9 @@ async function executeExportSourceBatch(request) {
     const failedJob = await checkpointExportBatchError(
       request.jobId,
       error,
+      storageGeneration,
+      dataGeneration,
+      request.runtimeInstanceId,
     );
     return exportSourceBatchFailure(error, {
       jobState: failedJob?.state || job.state,
@@ -6268,17 +8290,8 @@ async function executeExportSourceBatch(request) {
       },
     );
   }
-  if (storageGeneration !== exportSourceStorageGeneration) {
-    throw exportSourceBatchError(
-      "EXPORT_JOB_NOT_FOUND",
-      "Export source storage was cleared while the request was in flight.",
-      {
-        actualProviderCalls,
-        jobState: latestJob.state,
-        checkpoint: true,
-      },
-    );
-  }
+  assertExportSourceStorageGeneration(storageGeneration);
+  assertExtensionDataGeneration(dataGeneration, request.runtimeInstanceId);
 
   const commit = await YTD_NOTE_SOURCES.commitExportSourceTranslationBatch(
     chrome.storage.local,
@@ -6323,6 +8336,8 @@ async function executeExportSourceBatch(request) {
     ...(latestJob.completedUnitKeys || []),
     ...request.unitKeys,
   ];
+  assertExportSourceStorageGeneration(storageGeneration);
+  assertExtensionDataGeneration(dataGeneration, request.runtimeInstanceId);
   const checkpoint = await YTD_EXPORT_JOBS.checkpointExportJob(
     chrome.storage.local,
     request.jobId,
@@ -6349,67 +8364,98 @@ async function executeExportSourceBatch(request) {
 async function handleTranslateExportSourceBatch(message) {
   let request;
   try {
-    request = validateExportSourceBatchRequest(message);
+    request = {
+      ...validateExportSourceBatchRequest(message),
+      storageGeneration: exportSourceStorageGeneration,
+      dataGeneration: message?.dataGeneration,
+      runtimeInstanceId: String(message?.runtimeInstanceId || ""),
+    };
+    assertExtensionDataMutationGeneration(
+      request.dataGeneration,
+      request.runtimeInstanceId,
+    );
   } catch (error) {
     return exportSourceBatchFailure(error);
   }
-  return runExportSourceBatchSingleFlight(request);
+  const result = await runExportSourceBatchSingleFlight(request);
+  return extensionDataMutationResult(
+    result?.success === true,
+    result?.code || (result?.success ? "OK" : "EXPORT_SOURCE_BATCH_FAILED"),
+    result,
+  );
 }
 
-async function handleCancelExportTranslationJob(jobId) {
+async function handleCancelExportTranslationJob(
+  jobId,
+  expectedDataGeneration = extensionDataGeneration,
+  expectedRuntimeInstanceId = runtimeInstanceId,
+) {
   requireExportSourceModules();
+  assertExtensionDataMutationGeneration(
+    expectedDataGeneration,
+    expectedRuntimeInstanceId,
+  );
+  const storageGeneration = exportSourceStorageGeneration;
   const normalizedJobId = normalizeExportBatchToken(jobId, 80);
   if (!normalizedJobId) {
     return exportSourceBatchFailure(
       exportSourceBatchError("INVALID_EXPORT_SOURCE_BATCH", "Invalid job id."),
     );
   }
-  const job = await YTD_EXPORT_JOBS.readExportJob(
-    chrome.storage.local,
-    normalizedJobId,
-  );
-  if (!job) {
-    return exportSourceBatchFailure(
-      exportSourceBatchError("EXPORT_JOB_NOT_FOUND", "Export job not found."),
+  return queueExtensionDataMutation(async () => {
+    assertExtensionDataMutationGeneration(
+      expectedDataGeneration,
+      expectedRuntimeInstanceId,
     );
-  }
-  if (job.state === "cancelled") {
-    return {
-      success: true,
-      code: "EXPORT_JOB_CANCELLED",
-      jobState: job.state,
-      completedUnitKeys: job.completedUnitKeys,
-      remainingCount: exportJobRemainingCount(job),
-      actualProviderCalls: 0,
-    };
-  }
-  if (!["planned", "running", "paused", "failed"].includes(job.state)) {
-    return exportSourceBatchFailure(
-      exportSourceBatchError(
-        "EXPORT_JOB_NOT_RUNNING",
-        `Export job cannot be cancelled from ${job.state}.`,
-        { jobState: job.state },
-      ),
-      {
+    assertExportSourceStorageGeneration(storageGeneration);
+    const job = await YTD_EXPORT_JOBS.readExportJob(
+      chrome.storage.local,
+      normalizedJobId,
+    );
+    if (!job) {
+      return exportSourceBatchFailure(
+        exportSourceBatchError("EXPORT_JOB_NOT_FOUND", "Export job not found."),
+      );
+    }
+    if (job.state === "cancelled") {
+      return extensionDataMutationResult(true, "EXPORT_JOB_CANCELLED", {
         jobState: job.state,
         completedUnitKeys: job.completedUnitKeys,
         remainingCount: exportJobRemainingCount(job),
-      },
+        actualProviderCalls: 0,
+      });
+    }
+    if (!["planned", "running", "paused", "failed"].includes(job.state)) {
+      return exportSourceBatchFailure(
+        exportSourceBatchError(
+          "EXPORT_JOB_NOT_RUNNING",
+          `Export job cannot be cancelled from ${job.state}.`,
+          { jobState: job.state },
+        ),
+        {
+          jobState: job.state,
+          completedUnitKeys: job.completedUnitKeys,
+          remainingCount: exportJobRemainingCount(job),
+        },
+      );
+    }
+    assertExtensionDataMutationGeneration(
+      expectedDataGeneration,
+      expectedRuntimeInstanceId,
     );
-  }
-  const checkpoint = await YTD_EXPORT_JOBS.checkpointExportJob(
-    chrome.storage.local,
-    normalizedJobId,
-    { state: "cancelled", currentBatch: null, exportClaim: null },
-  );
-  return {
-    success: true,
-    code: "EXPORT_JOB_CANCELLED",
-    jobState: checkpoint.job.state,
-    completedUnitKeys: checkpoint.job.completedUnitKeys,
-    remainingCount: exportJobRemainingCount(checkpoint.job),
-    actualProviderCalls: 0,
-  };
+    assertExportSourceStorageGeneration(storageGeneration);
+    const checkpoint = await YTD_EXPORT_JOBS.checkpointExportJob(
+      chrome.storage.local,
+      normalizedJobId,
+      { state: "cancelled", currentBatch: null, exportClaim: null },
+    );
+    return extensionDataMutationResult(true, "EXPORT_JOB_CANCELLED", {
+      jobState: checkpoint.job.state,
+      completedUnitKeys: checkpoint.job.completedUnitKeys,
+      remainingCount: exportJobRemainingCount(checkpoint.job),
+      actualProviderCalls: 0,
+    });
+  });
 }
 
 async function handleGetExportTranslationJob(jobId) {
@@ -6483,9 +8529,17 @@ const EXPORT_JOB_PATCH_FIELDS = [
   "lastError",
 ];
 
-async function handleCreateOrResumeExportJob(jobInput) {
+async function handleCreateOrResumeExportJob(
+  jobInput,
+  expectedDataGeneration = extensionDataGeneration,
+  expectedRuntimeInstanceId = runtimeInstanceId,
+) {
   requireExportSourceModules();
   const storageGeneration = exportSourceStorageGeneration;
+  assertExtensionDataMutationGeneration(
+    expectedDataGeneration,
+    expectedRuntimeInstanceId,
+  );
   assertOnlyExportJobFields(
     jobInput,
     EXPORT_JOB_INPUT_FIELDS,
@@ -6498,62 +8552,88 @@ async function handleCreateOrResumeExportJob(jobInput) {
     candidate.jobId,
   );
   assertExportSourceStorageGeneration(storageGeneration);
-  let result = await YTD_EXPORT_JOBS.upsertExportJob(
-    chrome.storage.local,
-    candidate,
-  );
-  assertExportSourceStorageGeneration(storageGeneration);
-  const stored = result.job;
-  if (stored && existing) {
-    // Never clear a running job's durable lease/claim from a duplicate resume.
-    // Resuming a stopped job is an explicit state transition after the frozen
-    // fields have been revalidated by upsertExportJob above.
-    if (stored.state === "running") {
-      return {
-        success: true,
-        code: "OK",
-        changed: result.changed === true,
-        job: stored,
-      };
-    }
-    if (["ready_to_export", "completed", "stale"].includes(stored.state)) {
-      if (candidate.state !== stored.state) {
-        throw exportSourceBatchError(
-          "EXPORT_JOB_NOT_RESUMABLE",
-          `Export job cannot resume from ${stored.state}.`,
-          { jobState: stored.state },
-        );
+  return queueExtensionDataMutation(async () => {
+    assertExtensionDataMutationGeneration(
+      expectedDataGeneration,
+      expectedRuntimeInstanceId,
+    );
+    assertExportSourceStorageGeneration(storageGeneration);
+    let result = await YTD_EXPORT_JOBS.upsertExportJob(
+      chrome.storage.local,
+      candidate,
+    );
+    assertExtensionDataMutationGeneration(
+      expectedDataGeneration,
+      expectedRuntimeInstanceId,
+    );
+    assertExportSourceStorageGeneration(storageGeneration);
+    const stored = result.job;
+    if (stored && existing) {
+      // Never clear a running job's durable lease/claim from a duplicate resume.
+      // Resuming a stopped job is an explicit state transition after the frozen
+      // fields have been revalidated by upsertExportJob above.
+      if (stored.state === "running") {
+        return extensionDataMutationResult(true, "OK", {
+          changed: result.changed === true,
+          job: stored,
+        });
       }
-    } else if (
-      ["planned", "paused", "failed", "cancelled"].includes(stored.state) &&
-      ["planned", "running", "paused"].includes(candidate.state)
-    ) {
-      assertExportSourceStorageGeneration(storageGeneration);
-      result = await YTD_EXPORT_JOBS.checkpointExportJob(
-        chrome.storage.local,
-        candidate.jobId,
-        {
-          state: candidate.state,
-          completedUnitKeys: candidate.completedUnitKeys,
-          currentBatch: null,
-          cursor: candidate.cursor,
-          exportClaim: null,
-          lastError: null,
-        },
-        { allowCancelledResume: stored.state === "cancelled" },
-      );
+      if (["ready_to_export", "completed", "stale"].includes(stored.state)) {
+        if (candidate.state !== stored.state) {
+          throw exportSourceBatchError(
+            "EXPORT_JOB_NOT_RESUMABLE",
+            `Export job cannot resume from ${stored.state}.`,
+            { jobState: stored.state },
+          );
+        }
+      } else if (
+        ["planned", "paused", "failed", "cancelled"].includes(stored.state) &&
+        ["planned", "running", "paused"].includes(candidate.state)
+      ) {
+        assertExtensionDataMutationGeneration(
+          expectedDataGeneration,
+          expectedRuntimeInstanceId,
+        );
+        assertExportSourceStorageGeneration(storageGeneration);
+        result = await YTD_EXPORT_JOBS.checkpointExportJob(
+          chrome.storage.local,
+          candidate.jobId,
+          {
+            state: candidate.state,
+            completedUnitKeys: candidate.completedUnitKeys,
+            currentBatch: null,
+            cursor: candidate.cursor,
+            exportClaim: null,
+            lastError: null,
+          },
+          { allowCancelledResume: stored.state === "cancelled" },
+        );
+        assertExtensionDataMutationGeneration(
+          expectedDataGeneration,
+          expectedRuntimeInstanceId,
+        );
+        assertExportSourceStorageGeneration(storageGeneration);
+      }
     }
-  }
-  return {
-    success: true,
-    code: "OK",
-    changed: result.changed === true,
-    job: result.job,
-  };
+    return extensionDataMutationResult(true, "OK", {
+      changed: result.changed === true,
+      job: result.job,
+    });
+  });
 }
 
-async function handleCheckpointExportJob(jobId, patchInput) {
+async function handleCheckpointExportJob(
+  jobId,
+  patchInput,
+  expectedDataGeneration = extensionDataGeneration,
+  expectedRuntimeInstanceId = runtimeInstanceId,
+) {
   requireExportSourceModules();
+  assertExtensionDataMutationGeneration(
+    expectedDataGeneration,
+    expectedRuntimeInstanceId,
+  );
+  const storageGeneration = exportSourceStorageGeneration;
   const normalizedJobId = normalizeExportBatchToken(jobId, 80);
   if (!normalizedJobId) {
     throw exportSourceBatchError("INVALID_EXPORT_JOB", "Invalid export job id.");
@@ -6581,67 +8661,163 @@ async function handleCheckpointExportJob(jobId, patchInput) {
           : Date.now(),
     };
   }
-  const result = await YTD_EXPORT_JOBS.checkpointExportJob(
-    chrome.storage.local,
-    normalizedJobId,
-    patch,
-    {
-      requireEmptyExportClaim:
-        patch.state === "ready_to_export" && !!patch.exportClaim,
-    },
-  );
-  return {
-    success: true,
-    code: "OK",
-    changed: result.changed === true,
-    job: result.job,
-  };
+  return queueExtensionDataMutation(async () => {
+    assertExtensionDataMutationGeneration(
+      expectedDataGeneration,
+      expectedRuntimeInstanceId,
+    );
+    assertExportSourceStorageGeneration(storageGeneration);
+    const result = await YTD_EXPORT_JOBS.checkpointExportJob(
+      chrome.storage.local,
+      normalizedJobId,
+      patch,
+      {
+        requireEmptyExportClaim:
+          patch.state === "ready_to_export" && !!patch.exportClaim,
+      },
+    );
+    return extensionDataMutationResult(true, "OK", {
+      changed: result.changed === true,
+      job: result.job,
+    });
+  });
 }
 
-async function handleUpsertNoteSource(sourceInput) {
-  requireExportSourceModules();
-  const storageGeneration = exportSourceStorageGeneration;
-  const source = YTD_NOTE_SOURCES.normalizeNoteSource(sourceInput);
-  if (!source) {
-    return exportSourceBatchFailure(
-      exportSourceBatchError(
-        "INVALID_EXPORT_SOURCE_BATCH",
-        "Note source is invalid.",
-      ),
-    );
+async function handleUpsertNoteSource(
+  sourceInput,
+  expectedDataGeneration = extensionDataGeneration,
+  expectedRuntimeInstanceId = runtimeInstanceId,
+) {
+  if (
+    !extensionDataFenceIsWritable(
+      expectedRuntimeInstanceId,
+      expectedDataGeneration,
+    )
+  ) {
+    return extensionDataMutationResult(false, "EXTENSION_DATA_RESET");
   }
-  const stored = await chrome.storage.local.get("ytd_notes");
-  assertExportSourceStorageGeneration(storageGeneration);
-  const protectedKeys = new Set(
-    (Array.isArray(stored?.ytd_notes) ? stored.ytd_notes : [])
-      .map((note) => String(note?.mediaKey || note?.videoId || "").trim())
-      .filter(Boolean),
-  );
-  protectedKeys.add(source.mediaKey);
-  const result = await YTD_NOTE_SOURCES.writeNoteSource(
-    chrome.storage.local,
-    source,
-    { protectedKeys },
-  );
-  assertExportSourceStorageGeneration(storageGeneration);
-  const persisted = await YTD_NOTE_SOURCES.readNoteSource(
-    chrome.storage.local,
-    source.mediaKey,
-  );
-  if (!persisted) {
-    throw exportSourceBatchError(
-      "EXPORT_SOURCE_BATCH_COMMIT_FAILED",
-      "Note source was not persisted.",
+  // Reset owns locks in note -> passive -> extension-data order. Complete the
+  // lazy note migration before entering the extension-data queue so the first
+  // source upsert can never acquire those locks in reverse.
+  await ensureNotesMigrated();
+  return queueExtensionDataMutation(async () => {
+    requireExportSourceModules();
+    if (
+      !extensionDataFenceIsWritable(
+        expectedRuntimeInstanceId,
+        expectedDataGeneration,
+      )
+    ) {
+      return extensionDataMutationResult(false, "EXTENSION_DATA_RESET");
+    }
+    const storageGeneration = exportSourceStorageGeneration;
+    const source = YTD_NOTE_SOURCES.normalizeNoteSource(sourceInput);
+    if (!source) {
+      return exportSourceBatchFailure(
+        exportSourceBatchError(
+          "INVALID_EXPORT_SOURCE_BATCH",
+          "Note source is invalid.",
+        ),
+      );
+    }
+    const noteIndex = await readNoteIndex();
+    assertExportSourceStorageGeneration(storageGeneration);
+    const protectedKeys = new Set(
+      noteIndex
+        .map((entry) => String(entry?.mediaKey || "").trim())
+        .filter(Boolean),
     );
-  }
-  return {
-    success: true,
-    code: "OK",
-    changed: result?.changed === true,
-    mediaKey: persisted.mediaKey,
-    sourceRevision: persisted.sourceRevision,
-    source: persisted,
-  };
+    protectedKeys.add(source.mediaKey);
+    const result = await YTD_NOTE_SOURCES.writeNoteSource(
+      chrome.storage.local,
+      source,
+      { protectedKeys },
+    );
+    assertExportSourceStorageGeneration(storageGeneration);
+    const persisted = await YTD_NOTE_SOURCES.readNoteSource(
+      chrome.storage.local,
+      source.mediaKey,
+    );
+    if (!persisted) {
+      throw exportSourceBatchError(
+        "EXPORT_SOURCE_BATCH_COMMIT_FAILED",
+        "Note source was not persisted.",
+      );
+    }
+    return extensionDataMutationResult(true, "OK", {
+      changed: result?.changed === true,
+      mediaKey: persisted.mediaKey,
+      sourceRevision: persisted.sourceRevision,
+      source: persisted,
+    });
+  });
+}
+
+function handleReadNoteSource(
+  mediaKey,
+  expectedDataGeneration = extensionDataGeneration,
+  expectedRuntimeInstanceId = runtimeInstanceId,
+) {
+  return queueExtensionDataMutation(async () => {
+    requireExportSourceModules();
+    if (
+      !extensionDataFenceIsWritable(
+        expectedRuntimeInstanceId,
+        expectedDataGeneration,
+      )
+    ) {
+      return extensionDataMutationResult(false, "EXTENSION_DATA_RESET");
+    }
+    const source = await YTD_NOTE_SOURCES.readNoteSource(
+      chrome.storage.local,
+      mediaKey,
+    );
+    return extensionDataMutationResult(true, "OK", { source: source || null });
+  });
+}
+
+function handleReadAllNoteSources(
+  expectedDataGeneration = extensionDataGeneration,
+  expectedRuntimeInstanceId = runtimeInstanceId,
+) {
+  return queueExtensionDataMutation(async () => {
+    requireExportSourceModules();
+    if (
+      !extensionDataFenceIsWritable(
+        expectedRuntimeInstanceId,
+        expectedDataGeneration,
+      )
+    ) {
+      return extensionDataMutationResult(false, "EXTENSION_DATA_RESET");
+    }
+    const sources = await YTD_NOTE_SOURCES.readAllSources(chrome.storage.local);
+    return extensionDataMutationResult(true, "OK", { sources });
+  });
+}
+
+function handleRemoveNoteSources(
+  mediaKeys,
+  expectedDataGeneration = extensionDataGeneration,
+  expectedRuntimeInstanceId = runtimeInstanceId,
+) {
+  return queueExtensionDataMutation(async () => {
+    requireExportSourceModules();
+    if (
+      !extensionDataFenceIsWritable(
+        expectedRuntimeInstanceId,
+        expectedDataGeneration,
+      )
+    ) {
+      return extensionDataMutationResult(false, "EXTENSION_DATA_RESET");
+    }
+    const result = await YTD_NOTE_SOURCES.removeNoteSources(
+      chrome.storage.local,
+      mediaKeys,
+    );
+    return extensionDataMutationResult(true, "OK", {
+      changed: result?.changed === true,
+    });
+  });
 }
 
 // ============================================================
@@ -7207,6 +9383,12 @@ function validateNoteTranslationCandidate(candidate, source) {
   let textZh =
     typeof candidate?.textZh === "string" ? candidate.textZh.trim() : "";
   if (!textZh) return { textZh: "", failureCode: "EMPTY_RESPONSE" };
+  // A generated translation must stay within the same durable note-body bound
+  // as the source and cleanup paths. Besides keeping the UI useful, this keeps
+  // the recovery-backup byte guard enforceable for every library size.
+  if (textZh.length > 3000) {
+    return { textZh: "", unchanged: false, failureCode: "INVALID_TRANSLATION" };
+  }
   if (hasExplicitBilingualLabels(textZh)) {
     return { textZh: "", unchanged: false, failureCode: "INVALID_TRANSLATION" };
   }
@@ -7423,15 +9605,20 @@ function noteTranslationUserContent(notes) {
   });
 }
 
-function persistNoteTranslations(translatedById, job) {
+async function persistNoteTranslations(translatedById, job) {
+  await ensureNotesMigrated();
   return withNoteStorageWrite(async () => {
-    const stored = job
+    assertNoteStorageGeneration(
+      job?.storageGeneration,
+      job?.dataGeneration,
+      job?.runtimeInstanceId,
+    );
+    const storedNotes = job
       ? await waitForNoteJobDeadline(
           job,
-          () => chrome.storage.local.get("ytd_notes"),
+          () => readAllNotes(),
         )
-      : await chrome.storage.local.get("ytd_notes");
-    const storedNotes = Array.isArray(stored.ytd_notes) ? stored.ytd_notes : [];
+      : await readAllNotes();
     const updatedNotes = storedNotes.map((note) =>
       translatedById.has(note.id)
         ? {
@@ -7454,7 +9641,13 @@ function persistNoteTranslations(translatedById, job) {
     // Once the commit starts it must remain inside the shared storage queue.
     // Chrome Storage has no cancellation API; releasing the queue early could
     // let a later delete/save race with a late translation write.
-    await chrome.storage.local.set({ ytd_notes: updatedNotes });
+    assertNotesRemainBackupable(updatedNotes, { allowInvalidStored: true });
+    assertNoteStorageGeneration(
+      job?.storageGeneration,
+      job?.dataGeneration,
+      job?.runtimeInstanceId,
+    );
+    await replaceNotes(updatedNotes);
   });
 }
 
@@ -7464,10 +9657,34 @@ let noteTranslationCooldownUntil = 0;
 const NOTE_TRANSLATION_MAX_PROVIDER_CALLS = 5;
 const NOTE_TRANSLATION_RATE_LIMIT_BACKOFF_MS = 1_000;
 const NOTE_TRANSLATION_RATE_LIMIT_COOLDOWN_MS = 5_000;
-const NOTE_TRANSLATION_VALIDATION_VERSION = 1;
+const NOTE_TRANSLATION_VALIDATION_VERSION = 2;
 const NOTE_TITLE_TRANSLATION_VALIDATION_VERSION = 1;
 const NOTE_TITLE_MEDIA_KEY_PATTERN = /^[A-Za-z0-9:_-]{1,64}$/;
 const NOTE_TITLE_TRANSLATION_MAX_TITLES = 10;
+
+function noteTranslationUsesCurrentSource(note) {
+  if (note?.translatedValidationVersion === NOTE_TRANSLATION_VALIDATION_VERSION) {
+    return true;
+  }
+  if (note?.translatedValidationVersion !== 1) return false;
+
+  const storedText = canonicalNoteText(note?.text);
+  const rawText = canonicalNoteText(note?.rawText || note?.text);
+  if (!storedText || storedText === rawText) return true;
+  if (
+    note?.translatedUnchanged === true &&
+    canonicalNoteText(note?.translatedText) === storedText
+  ) {
+    return true;
+  }
+
+  const textLanguage = normalizeLanguageCode(note?.textLanguage);
+  return Boolean(
+    note?.platform === "bilibili" &&
+      isChineseLanguage(textLanguage) &&
+      !isConfirmedSimplifiedChineseSource(textLanguage),
+  );
+}
 
 function noteFailureCode(result, fallback = "PROVIDER_ERROR") {
   if (EXPORT_SOURCE_SAFE_ERROR_CODES.has(result?.code)) return result.code;
@@ -7504,6 +9721,9 @@ function createNoteTranslationJob(dependencies = {}) {
     rateLimitRetries: 0,
     emptyFallbacks: 0,
     stopCode: "",
+    storageGeneration: dependencies.storageGeneration,
+    dataGeneration: dependencies.dataGeneration,
+    runtimeInstanceId: dependencies.runtimeInstanceId || runtimeInstanceId,
     settings: dependencies.settings || null,
     beforeProviderCall:
       typeof dependencies.beforeProviderCall === "function"
@@ -7589,6 +9809,20 @@ async function callNoteTranslationProvider(
     };
   }
 
+  try {
+    assertExtensionDataMutationGeneration(
+      job.dataGeneration,
+      job.runtimeInstanceId,
+    );
+  } catch (error) {
+    job.stopCode = "EXTENSION_DATA_RESET";
+    return {
+      success: false,
+      code: job.stopCode,
+      error: exportSourceBatchSafeMessage(job.stopCode),
+    };
+  }
+
   if (job.beforeProviderCall) {
     try {
       const settings = await waitForNoteJobDeadline(job, () =>
@@ -7643,6 +9877,19 @@ async function callNoteTranslationProvider(
     );
     if (!waited) return stopNoteJobForTimeout(job);
     if (noteJobRemainingMs(job) <= 0) return stopNoteJobForTimeout(job);
+    try {
+      assertExtensionDataMutationGeneration(
+        job.dataGeneration,
+        job.runtimeInstanceId,
+      );
+    } catch (_error) {
+      job.stopCode = "EXTENSION_DATA_RESET";
+      return {
+        success: false,
+        code: job.stopCode,
+        error: exportSourceBatchSafeMessage(job.stopCode),
+      };
+    }
     job.providerCalls += 1;
     result = await waitForNoteJobDeadline(
       job,
@@ -7839,17 +10086,24 @@ function normalizeNoteTitleTranslation(parsed, sourceTitles) {
   });
 }
 
-function persistNoteTitleTranslations(titleByMediaKey, job) {
+async function persistNoteTitleTranslations(titleByMediaKey, job) {
+  await ensureNotesMigrated();
   return withNoteStorageWrite(async () => {
-    const stored = job
+    assertNoteStorageGeneration(
+      job?.storageGeneration,
+      job?.dataGeneration,
+      job?.runtimeInstanceId,
+    );
+    const storedNotes = job
       ? await waitForNoteJobDeadline(job, () =>
-          chrome.storage.local.get("ytd_notes"),
+          readAllNotes(),
         )
-      : await chrome.storage.local.get("ytd_notes");
-    const storedNotes = Array.isArray(stored.ytd_notes) ? stored.ytd_notes : [];
+      : await readAllNotes();
+    const matchedMediaKeys = new Set();
     const updatedNotes = storedNotes.map((note) => {
       const key = noteTitleMediaKey(note);
       if (!key || !titleByMediaKey.has(key)) return note;
+      matchedMediaKeys.add(key);
       const translated = titleByMediaKey.get(key);
       return {
         ...note,
@@ -7865,7 +10119,15 @@ function persistNoteTitleTranslations(titleByMediaKey, job) {
       job.stopCode = error.code;
       throw error;
     }
-    await chrome.storage.local.set({ ytd_notes: updatedNotes });
+    assertNoteStorageGeneration(
+      job?.storageGeneration,
+      job?.dataGeneration,
+      job?.runtimeInstanceId,
+    );
+    if (!matchedMediaKeys.size) return [];
+    assertNotesRemainBackupable(updatedNotes, { allowInvalidStored: true });
+    await replaceNotes(updatedNotes);
+    return [...matchedMediaKeys];
   });
 }
 
@@ -7979,6 +10241,16 @@ function handleTranslateNotes(request, dependencies = {}) {
   const requestDependencies = {
     ...dependencies,
     now,
+    storageGeneration: Number.isSafeInteger(dependencies.storageGeneration)
+      ? dependencies.storageGeneration
+      : noteStorageGeneration,
+    dataGeneration: Number.isSafeInteger(dependencies.dataGeneration)
+      ? dependencies.dataGeneration
+      : extensionDataGeneration,
+    runtimeInstanceId:
+      typeof dependencies.runtimeInstanceId === "string"
+        ? dependencies.runtimeInstanceId
+        : runtimeInstanceId,
     deadlineAt: Number.isFinite(dependencies.deadlineAt)
       ? dependencies.deadlineAt
       : now() + NOTE_TRANSLATION_JOB_TIMEOUT_MS,
@@ -7999,6 +10271,7 @@ async function runTranslateNotes(notes, titles, dependencies = {}) {
   if (!normalizedTitles.length) return bodyResult;
 
   let titleOutcome = { titles: [], failureByKey: new Map() };
+  let titlePersistenceStarted = false;
   try {
     if (!job.settings) {
       const settings = await waitForNoteJobDeadline(job, () => getSettings());
@@ -8007,23 +10280,37 @@ async function runTranslateNotes(notes, titles, dependencies = {}) {
     if (job.settings && YTD_SETTINGS.hasActiveApiKey(job.settings)) {
       titleOutcome = await translateNoteTitlesInJob(job, normalizedTitles);
       if (titleOutcome.titles.length) {
+        titlePersistenceStarted = true;
         const sourceByMediaKey = new Map(
           normalizedTitles.map((title) => [title.mediaKey, title.title]),
         );
-        await persistNoteTitleTranslations(
-          new Map(
-            titleOutcome.titles.map((translated) => [
-              translated.mediaKey,
-              {
-                titleZh: translated.titleZh,
-                sourceHash: YTD_NOTE_SOURCES.hashSourceText(
-                  sourceByMediaKey.get(translated.mediaKey) || "",
-                ),
-              },
-            ]),
+        const persistedTitleKeys = new Set(
+          await persistNoteTitleTranslations(
+            new Map(
+              titleOutcome.titles.map((translated) => [
+                translated.mediaKey,
+                {
+                  titleZh: translated.titleZh,
+                  sourceHash: YTD_NOTE_SOURCES.hashSourceText(
+                    sourceByMediaKey.get(translated.mediaKey) || "",
+                  ),
+                },
+              ]),
+            ),
+            job,
           ),
-          job,
         );
+        titleOutcome.titles = titleOutcome.titles.filter((title) => {
+          if (persistedTitleKeys.has(title.mediaKey)) return true;
+          // A note may be deleted while its title provider call is in flight.
+          // Do not report a title that never reached durable note storage.
+          titleOutcome.failureByKey.set(
+            title.mediaKey,
+            "NOTE_TITLE_PERSIST_FAILED",
+          );
+          return false;
+        });
+        titlePersistenceStarted = false;
       }
     } else {
       normalizedTitles.forEach((t) =>
@@ -8032,9 +10319,20 @@ async function runTranslateNotes(notes, titles, dependencies = {}) {
     }
   } catch (error) {
     // A title failure must never corrupt the body result.
+    const failureCode = error?.code ||
+      (titlePersistenceStarted ? "NOTE_TITLE_PERSIST_FAILED" : "PROVIDER_ERROR");
+    if (titlePersistenceStarted) {
+      titleOutcome.titles.forEach((title) => {
+        titleOutcome.failureByKey.set(title.mediaKey, failureCode);
+      });
+      // Only titles that reached durable storage may be returned as successes.
+      // Otherwise the side panel would render a translation that disappears on
+      // the next load and could mistake it for persisted user data.
+      titleOutcome.titles = [];
+    }
     normalizedTitles.forEach((t) => {
       if (!titleOutcome.failureByKey.has(t.mediaKey)) {
-        titleOutcome.failureByKey.set(t.mediaKey, error?.code || "PROVIDER_ERROR");
+        titleOutcome.failureByKey.set(t.mediaKey, failureCode);
       }
     });
   }
@@ -8042,9 +10340,10 @@ async function runTranslateNotes(notes, titles, dependencies = {}) {
   const successfulTitleKeys = new Set(
     titleOutcome.titles.map((t) => t.mediaKey),
   );
+  const bodySucceeded = (notes || []).length > 0 && bodyResult.success === true;
   return {
     ...bodyResult,
-    success: bodyResult.success || titleOutcome.titles.length > 0,
+    success: bodySucceeded || titleOutcome.titles.length > 0,
     titles: titleOutcome.titles,
     titleFailures: normalizedTitles
       .filter((t) => !successfulTitleKeys.has(t.mediaKey))
@@ -8059,13 +10358,10 @@ async function runTranslateNoteBodies(notes, job) {
   let requestedNotes = [];
   try {
     requestedNotes = validateNoteTranslationRequest(notes);
-    const storedBefore = await waitForNoteJobDeadline(
+    const storedNotesBefore = await waitForNoteJobDeadline(
       job,
-      () => chrome.storage.local.get("ytd_notes"),
+      () => readAllNotes(),
     );
-    const storedNotesBefore = Array.isArray(storedBefore.ytd_notes)
-      ? storedBefore.ytd_notes
-      : [];
     const storedTranslationById = new Map();
     storedNotesBefore.forEach((note) => {
       if (
@@ -8079,8 +10375,7 @@ async function runTranslateNoteBodies(notes, job) {
       let validated;
       if (
         note.translatedValidated === true &&
-        note.translatedValidationVersion ===
-          NOTE_TRANSLATION_VALIDATION_VERSION
+        noteTranslationUsesCurrentSource(note)
       ) {
         const unchangedValid =
           note.translatedUnchanged !== true ||
@@ -8092,11 +10387,13 @@ async function runTranslateNoteBodies(notes, job) {
               unchanged: note.translatedUnchanged === true,
             }
           : { textZh: "", unchanged: false };
-      } else {
+      } else if (note.translatedValidated !== true) {
         validated = validateNoteTranslationCandidate(
           { textZh: note.translatedText },
           { text: sourceText, videoTitle: note.videoTitle || "" },
         );
+      } else {
+        validated = { textZh: "", unchanged: false };
       }
       if (validated.textZh) {
         storedTranslationById.set(note.id, {
@@ -8315,7 +10612,11 @@ async function runTranslateNoteBodies(notes, job) {
         providerDisplayLabel(job.settings),
       );
     }
-    return { success: false, error: error.message || "中文笔记生成失败" };
+    return {
+      success: false,
+      code: error?.code,
+      error: error.message || "中文笔记生成失败",
+    };
   }
 }
 
@@ -8517,8 +10818,22 @@ globalThis.__YTD_TRANSLATION_TESTING__ = {
   handleImportNotesBackup,
   handleClearAllNotes,
   handleResetAllExtensionData,
+  ensureNotesMigrated,
+  readAllNotes,
+  readNotesByMedia,
+  readNoteIndex,
+  appendNote,
+  replaceNotes,
+  deleteNote,
   createNoteId,
   getNoteStorageGeneration,
+  getRuntimeInstanceId,
+  getExtensionDataGeneration,
+  getRuntimeInstanceId,
+  handlePersistResetFencedCache,
+  handlePersistResetFencedSettings,
+  handlePersistResetFencedReadingDisplay,
+  handleResetFencedSessionMutation,
   handleSaveNote,
   persistSavedNoteSourceBestEffort,
   handleTranslateOverviewOriginal,
@@ -8554,9 +10869,13 @@ globalThis.__YTD_TRANSLATION_TESTING__ = {
   handleCreateOrResumeExportJob,
   handleCheckpointExportJob,
   handleUpsertNoteSource,
+  handleReadNoteSource,
+  handleReadAllNoteSources,
+  handleRemoveNoteSources,
   resolveSourceLanguage,
   saveNoteToStorage,
   exportStoredNoteOriginalText,
+  exportStoredNotesRevision,
   sendMessageToContentWithRecovery,
   validateAndFixTimestamps,
   normalizeAnalysisCues,
