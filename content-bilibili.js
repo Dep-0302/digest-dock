@@ -175,6 +175,18 @@ function biliHandleMessage(message, _sender, sendResponse) {
     return false;
   }
 
+  if (action === "getNotePlaybackState") {
+    const video = biliGetVideoElement();
+    const media = biliParseCurrentVideo();
+    sendResponse({
+      available: !!video,
+      ready: !!video && video.readyState >= 1,
+      currentTime: video?.currentTime || 0,
+      routeKey: media ? `bilibili:${media.bvid}:p${media.page || 1}` : "",
+    });
+    return false;
+  }
+
   if (action === "getCurrentTime") {
     const video = biliGetVideoElement();
     sendResponse({

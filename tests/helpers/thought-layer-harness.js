@@ -178,6 +178,7 @@ async function harness(notes = [], { configured = false, platform = "youtube" } 
     ])) : {}) });
   const session = memory(); const messages = [], notifications = [], requests = [], providerCalls = [], navigation = [];
   const listeners = []; const ignored = {addListener() {}}; const time = clock();
+  const createdTabs = new Map(); let nextCreatedTabId = 2;
   const h = {local, session, messages, requests, providerCalls, navigation, time, url:currentUrl, mediaRequests:[],
     aiReply: JSON.stringify([]), failOpen:false, providerGate:null};
   const globals = {
@@ -215,9 +216,9 @@ async function harness(notes = [], { configured = false, platform = "youtube" } 
       sendMessage:async m=>{ notifications.push(clone(m)); return {success:true}; } },
     action:{onClicked:ignored}, sidePanel:{setPanelBehavior(){},setOptions:async()=>{},open:async()=>{}},
     tabs:{ onUpdated:ignored,onActivated:ignored,
-      get:async id=>({id,url:currentUrl.href}),
+      get:async id=>id === 1 ? {id,url:currentUrl.href} : createdTabs.get(id),
       query:async()=>[{id:1,url:currentUrl.href}],
-      create:async options=>{ if(h.failOpen) throw new Error("fixture open failure"); navigation.push({type:"create",...options}); return {id:2,...options}; },
+      create:async options=>{ if(h.failOpen) throw new Error("fixture open failure"); navigation.push({type:"create",...options}); const tab={id:nextCreatedTabId++,...options}; createdTabs.set(tab.id,tab); return tab; },
       update:async(id, options)=>{ navigation.push({type:"activate",id,...options}); return {id,...options}; }, remove:async()=>{},
       sendMessage:async(id, payload)=>{ navigation.push({type:"content",id,payload}); return {success:true}; } },
     windows:{getCurrent:async()=>({id:1})}, scripting:{executeScript:async()=>[]},

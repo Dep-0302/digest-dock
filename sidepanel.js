@@ -438,6 +438,10 @@ let notesSearchGeneration = 0;
 let notesSearchResults = [];
 let notesSearchBusy = false;
 let notesSearchError = "";
+let notesAiBusy = false;
+let notesAiNotice = "";
+let notesAiError = "";
+let noteJumpGeneration = 0;
 let noteExportPickerGroups = [];
 let noteExportPickerPrecheck = null;
 let noteExportPickerSourcesByKey = {};
@@ -2422,6 +2426,7 @@ function setupEventListeners() {
   });
 
   // Notes filter buttons
+  document.getElementById("notesAiFind")?.addEventListener("click", () => void findNotesWithAi());
   document.getElementById("notesSearch")?.addEventListener("input", (event) => {
     notesSearchQuery = normalizeNotesSearchText(event.target.value);
     notesSearchGeneration += 1;
@@ -7568,8 +7573,11 @@ async function seekTo(seconds) {
  */
 async function playNote(
   note,
-  { captureMetadata = false, exportContinuation = null } = {},
+  { captureMetadata = false, exportContinuation = null, verifyPlayback = false } = {},
 ) {
+  const jumpGeneration = ++noteJumpGeneration;
+  const fallback = document.getElementById("noteJumpFallback");
+  if (fallback) fallback.hidden = true;
   const noteMediaKey = note?.mediaKey || note?.videoId;
   if (noteMediaKey && noteMediaKey === currentVideoId) {
     if (captureMetadata && activeNotesOnlyContext) {
@@ -7623,13 +7631,15 @@ async function playNote(
       }
       return !!captured;
     }
-    await seekTo(note.timestampSeconds);
-    return true;
+    const jumped = await seekTo(note.timestampSeconds);
+    if (!jumped) showNoteJumpFallback(note);
+    return jumped;
   }
 
   const targetUrl = String(note?.timestampedUrl || noteCanonicalUrl(note) || "");
   if (!extractMediaLocator(targetUrl)) {
     setNoteExportStatus("该笔记缺少可打开的视频网址。", true);
+    if (!captureMetadata) showNoteJumpFallback(note);
     return false;
   }
 
@@ -7655,6 +7665,7 @@ async function playNote(
       throw new Error("浏览器暂时无法激活视频标签页，请重试。");
     }
     await chrome.tabs.update(createdTab.id, { active: true });
+    if (!captureMetadata && verifyPlayback) void verifyOpenedNotePlayback(createdTab.id, note, jumpGeneration);
     return true;
   } catch (error) {
     if (intent) await clearNoteNavigationState(intent.token);
@@ -7662,8 +7673,51 @@ async function playNote(
       await chrome.tabs.remove(createdTab.id).catch(() => undefined);
     }
     debugLog("[DigestDock Panel] Open saved note failed:", error);
+    if (!captureMetadata) showNoteJumpFallback(note);
     return false;
   }
+}
+
+async function verifyOpenedNotePlayback(tabId, note, generation) {
+  const routeKey = extractMediaLocator(note.timestampedUrl || noteCanonicalUrl(note))?.routeKey;
+  let sought = false;
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    if (generation !== noteJumpGeneration) return;
+    try {
+      const probe = await chrome.runtime.sendMessage({
+        action: "relayToContent", tabId, expectedRouteKey: routeKey,
+        payload: { action: "getNotePlaybackState" },
+      });
+      const state = probe?.success ? probe.response : null;
+      if (generation !== noteJumpGeneration) return;
+      // A different supported video means the user has superseded this jump.
+      if (state?.routeKey && state.routeKey !== routeKey) return;
+      if (state?.available && state.ready) {
+        if (Math.abs(Number(state.currentTime) - note.timestampSeconds) <= 2) return;
+        if (!sought) {
+          const result = await chrome.runtime.sendMessage({
+            action: "relayToContent", tabId, expectedRouteKey: routeKey,
+            payload: { action: "seekTo", seconds: note.timestampSeconds },
+          });
+          sought = result?.success === true && result.response?.success === true;
+        }
+      }
+    } catch (_error) {
+      // The content script may not yet be ready. No subtitle/provider request.
+    }
+    if (attempt < 9) await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+  if (generation === noteJumpGeneration) showNoteJumpFallback(note);
+}
+
+function showNoteJumpFallback(note) {
+  const fallback = document.getElementById("noteJumpFallback");
+  if (!fallback) return;
+  const windowText = (Array.isArray(note.triggerWindow) ? note.triggerWindow : [])
+    .map((row) => `${formatTimecode(row.t)} ${row.text || ""}`).join("\n");
+  fallback.textContent = `没能打开这个视频\n${windowText}`;
+  fallback.style.whiteSpace = "pre-wrap";
+  fallback.hidden = false;
 }
 
 async function highlightMomentsOnPage(moments) {
@@ -9196,6 +9250,9 @@ async function searchNotesLocally() {
   notesSearchResults = [];
   notesSearchBusy = true;
   notesSearchError = "";
+  notesAiBusy = false;
+  notesAiNotice = "";
+  notesAiError = "";
   renderNotes(currentNotes, currentNotesFilterVideoId);
   try {
     const result = await chrome.runtime.sendMessage({ action: "getNotes", videoId: null });
@@ -9218,13 +9275,45 @@ async function searchNotesLocally() {
   renderNotes(currentNotes, currentNotesFilterVideoId);
 }
 
+async function findNotesWithAi() {
+  if (!notesSearchQuery || notesSearchResults.length || notesSearchBusy || notesAiBusy || notesSearchError) return;
+  const generation = notesSearchGeneration;
+  const query = notesSearchQuery;
+  const ownsRequest = () => generation === notesSearchGeneration && query === notesSearchQuery;
+  notesAiBusy = true;
+  notesAiError = "";
+  renderNotes(currentNotes, currentNotesFilterVideoId);
+  try {
+    const result = await chrome.runtime.sendMessage({ action: "findNoteCandidates", query, userInitiated: true });
+    if (!ownsRequest()) return;
+    notesAiNotice = result?.truncated ? `只检索了最近 ${result.searchedCount} 条` : "";
+    if (!result?.success) throw new Error(result?.error || "AI 检索失败，请重试。");
+    const library = await chrome.runtime.sendMessage({ action: "getNotes", videoId: null });
+    if (!ownsRequest()) return;
+    if (!library?.success) throw new Error("读取候选笔记失败，请重试。");
+    const byId = new Map((library.notes || []).map((note) => [note.id, note]));
+    notesSearchResults = [...new Set(Array.isArray(result.noteIds) ? result.noteIds : [])]
+      .filter((id) => typeof id === "string" && byId.has(id)).slice(0, 5).map((id) => byId.get(id))
+      .sort((left, right) =>
+        Number(!!String(right.thought || "").trim()) - Number(!!String(left.thought || "").trim()) ||
+        right.createdAt - left.createdAt,
+      );
+  } catch (error) {
+    if (!ownsRequest()) return;
+    notesAiError = error.message || "AI 检索失败，请重试。";
+  }
+  if (!ownsRequest()) return;
+  notesAiBusy = false;
+  renderNotes(currentNotes, currentNotesFilterVideoId);
+}
+
 function noteLocalDate(note) {
   const date = new Date(note.createdAt);
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 }
 
 function renderThoughtNoteItem(note, editable) {
-  const card = buildNoteItemElement(note, currentNotesFilterVideoId);
+  const card = buildNoteItemElement(note, currentNotesFilterVideoId, { verifyPlayback: true });
   card.dataset.noteId = note.id;
   const body = card.querySelector(".note-text");
   const windowText = (Array.isArray(note.triggerWindow) ? note.triggerWindow : [])
@@ -9303,7 +9392,13 @@ function renderNotes(notes, filteredVideoId) {
   const searchStatus = document.getElementById("notesSearchStatus");
   if (searchStatus) {
     searchStatus.hidden = !notesSearchQuery;
-    searchStatus.textContent = notesSearchError || (notesSearchBusy ? "正在搜索…" : `${notesSearchResults.length} 条结果`);
+    searchStatus.textContent = [notesSearchError || notesAiError ||
+      (notesSearchBusy ? "正在搜索…" : notesAiBusy ? "AI 正在查找…" : `${notesSearchResults.length} 条结果`), notesAiNotice].filter(Boolean).join(" · ");
+  }
+  const aiButton = document.getElementById("notesAiFind");
+  if (aiButton) {
+    aiButton.hidden = !notesSearchQuery || notesSearchBusy || !!notesSearchError || notesSearchResults.length > 0;
+    aiButton.disabled = notesAiBusy;
   }
   if (notesSearchQuery) {
     if (notesIntro) notesIntro.style.display = "none";
@@ -9419,7 +9514,7 @@ function renderNoteSourceGroup(group, filteredVideoId) {
  * Builds a single note row (timecode, mode-aware body, per-note actions). The
  * video title now lives on the enclosing source container, not the row.
  */
-function buildNoteItemElement(note, filteredVideoId) {
+function buildNoteItemElement(note, filteredVideoId, { verifyPlayback = false } = {}) {
   const noteEl = document.createElement("div");
   noteEl.className = "note-item";
   const noteCopyText = noteCopyTextForMode(note);
@@ -9444,11 +9539,11 @@ function buildNoteItemElement(note, filteredVideoId) {
 
   // Timestamp click / keyboard - play from this point (in this tab or a new one)
   const timestampEl = noteEl.querySelector(".note-timestamp");
-  timestampEl.addEventListener("click", () => playNote(note));
+  timestampEl.addEventListener("click", () => playNote(note, { verifyPlayback }));
   timestampEl.addEventListener("keydown", (e) => {
     if (e.key === "Enter" || e.key === " " || e.key === "Spacebar") {
       e.preventDefault();
-      playNote(note);
+      playNote(note, { verifyPlayback });
     }
   });
 
@@ -9497,7 +9592,7 @@ function buildNoteItemElement(note, filteredVideoId) {
   // Play button (in this tab if it's the current video, else a new tab)
   noteEl
     .querySelector(".note-play")
-    .addEventListener("click", () => playNote(note));
+    .addEventListener("click", () => playNote(note, { verifyPlayback }));
 
   return noteEl;
 }

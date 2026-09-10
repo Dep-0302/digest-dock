@@ -277,6 +277,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return false;
   }
 
+  if (message.action === "getNotePlaybackState") {
+    const video = document.querySelector("video.html5-main-video");
+    sendResponse({
+      available: !!video,
+      ready: !!video && video.readyState >= 1,
+      currentTime: video?.currentTime || 0,
+      routeKey: `youtube:${new URLSearchParams(window.location.search).get("v")}`,
+    });
+    return false;
+  }
+
   if (message.action === "getCurrentTime") {
     // Return the current video playback time (used by auto-scroll)
     const video = document.querySelector("video.html5-main-video");

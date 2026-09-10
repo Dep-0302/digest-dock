@@ -367,3 +367,25 @@ test("[T10] unopenable video displays frozen context without inventing a cause",
   assert.match(content,/没能打开这个视频|标签页.*失败|无法打开/); assert.match(content,/Frozen context before/);
   assert.doesNotMatch(content,/已删除|无权限/); assert.equal(h.providerCalls.length,0); assertReadOnly(h,before);
 });
+test("[T10] a created tab without an available player still shows the frozen fallback",async()=>{
+  const h=await harness([note("no-player",{videoId:"video_00002"})]); await h.load(true);
+  h.panel.chrome.tabs.sendMessage=async()=>({available:false,routeKey:"youtube:video_00002"});
+  const before=bytes(h.local); h.resetEvidence(); h.cards()[0].querySelector(".note-play").click();
+  await settle(); await h.time.advance(11000);
+  assert.ok(h.navigation.some(n=>n.type==="create"),"标签页确实已创建");
+  const fallback=h.doc.getElementById("noteJumpFallback"); assert.equal(fallback.hidden,false,"创建成功不能冒充播放器可用");
+  assert.match(fallback.textContent,/没能打开这个视频/); assert.match(fallback.textContent,/Frozen context before/);
+  assert.doesNotMatch(fallback.textContent,/已删除|无权限/); assert.equal(h.providerCalls.length,0); assertReadOnly(h,before);
+});
+test("[T10] the opened player's route and actual seconds are checked after seeking",async()=>{
+  const h=await harness([note("ready",{videoId:"video_00002"})]); await h.load(true); let seconds=0, probes=0;
+  h.panel.chrome.tabs.sendMessage=async(_id,message)=>{
+    if(message.action==="getNotePlaybackState"){probes++;return {available:true,ready:true,routeKey:"youtube:video_00002",currentTime:seconds};}
+    if(message.action==="seekTo") seconds=message.seconds;
+    return {success:true};
+  };
+  const before=bytes(h.local); h.resetEvidence(); h.cards()[0].querySelector(".note-play").click();
+  await settle(); await h.time.advance(11000);
+  assert.ok(probes>=2,"定位后必须再读实际播放秒数"); assert.equal(seconds,30);
+  assert.equal(h.doc.getElementById("noteJumpFallback").hidden,true); assertReadOnly(h,before);
+});
