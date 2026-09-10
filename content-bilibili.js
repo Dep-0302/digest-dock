@@ -95,6 +95,8 @@ let biliObserver = null;
 let biliKeyboardListenerAdded = false;
 let biliResizeListenerAdded = false;
 let biliLastNavigationKey = "";
+let biliNoteToast = null;
+let biliNoteCaptureSequence = 0;
 
 function biliGetAdapter() {
   if (typeof BILI_ADAPTER !== "undefined") return BILI_ADAPTER;
@@ -507,17 +509,22 @@ async function biliSaveCurrentNote() {
   const video = biliGetVideoElement();
   if (!video) return { success: false, error: "No video element" };
 
+  const noteButton = biliNoteButton;
+  const captureSequence = ++biliNoteCaptureSequence;
+  const navigationKey = biliNavigationKey();
+  const ownsCapture = () => captureSequence === biliNoteCaptureSequence &&
+    navigationKey === biliNavigationKey();
   const info = biliExtractVideoInfo();
   const timestamp = Math.max(0, Math.floor(Number(video.currentTime) || 0) - 3);
   const setNoteState = (message) => {
-    if (!biliNoteButton) return;
-    biliNoteButton.setAttribute("title", message);
-    biliNoteButton.setAttribute("aria-label", message);
-    biliNoteButton.textContent = message;
+    if (!noteButton) return;
+    noteButton.setAttribute("title", message);
+    noteButton.setAttribute("aria-label", message);
+    noteButton.textContent = message;
   };
-  if (biliNoteButton) {
+  if (noteButton) {
     setNoteState("正在保存…");
-    biliNoteButton.disabled = true;
+    noteButton.disabled = true;
   }
 
   let result;
@@ -532,39 +539,44 @@ async function biliSaveCurrentNote() {
       channelName: info.channelName,
     });
 
+    if (!ownsCapture()) return result;
     if (result?.success) {
-      if (biliNoteButton) {
-        biliNoteButton.style.backgroundImage =
+      if (noteButton) {
+        noteButton.style.backgroundImage =
           `url("${DIGESTDOCK_BILIBILI_CHECK_ICON}"), ` +
           `linear-gradient(${DIGESTDOCK_BILIBILI_NOTE_SUCCESS_BG}, ${DIGESTDOCK_BILIBILI_NOTE_SUCCESS_BG})`;
-        biliNoteButton.style.backgroundColor = DIGESTDOCK_BILIBILI_NOTE_SUCCESS_BG;
-        biliNoteButton.style.color = "#ffffff";
+        noteButton.style.backgroundColor = DIGESTDOCK_BILIBILI_NOTE_SUCCESS_BG;
+        noteButton.style.color = "#ffffff";
         setNoteState("已保存");
       }
-      if (result.note) biliShowNoteSavedToast(result.note);
+      if (result.note) biliShowNoteSavedToast(result.note, {
+        runtimeInstanceId: result.runtimeInstanceId,
+        dataGeneration: result.dataGeneration,
+      });
     } else {
       setNoteState("出错了");
     }
   } catch (error) {
     result = { success: false, error: error?.message || String(error) };
+    if (!ownsCapture()) return result;
     setNoteState("出错了");
     console.error("[DigestDock/Bilibili] 保存笔记失败", error);
   }
 
   setTimeout(() => {
-    if (!biliNoteButton) return;
-    biliNoteButton.style.backgroundImage =
+    if (!noteButton) return;
+    noteButton.style.backgroundImage =
       `url("${DIGESTDOCK_BILIBILI_NOTE_ICON_MUTED}"), ` +
       DIGESTDOCK_BILIBILI_NOTE_GRADIENT;
-    biliNoteButton.style.backgroundColor = "transparent";
-    biliNoteButton.style.color = "rgba(255, 255, 255, 0.5)";
-    biliNoteButton.textContent = DIGESTDOCK_BILIBILI_NOTE_LABEL;
-    biliNoteButton.setAttribute("title", DIGESTDOCK_BILIBILI_NOTE_LABEL);
-    biliNoteButton.setAttribute(
+    noteButton.style.backgroundColor = "transparent";
+    noteButton.style.color = "rgba(255, 255, 255, 0.5)";
+    noteButton.textContent = DIGESTDOCK_BILIBILI_NOTE_LABEL;
+    noteButton.setAttribute("title", DIGESTDOCK_BILIBILI_NOTE_LABEL);
+    noteButton.setAttribute(
       "aria-label",
       DIGESTDOCK_BILIBILI_NOTE_LABEL,
     );
-    biliNoteButton.disabled = false;
+    noteButton.disabled = false;
   }, 1800);
   return result;
 }
@@ -582,10 +594,13 @@ function biliIsSafeTimestampUrl(input) {
   }
 }
 
-function biliShowNoteSavedToast(note = {}) {
+function biliShowNoteSavedToast(note = {}, fence) {
+  biliDismissNoteToast();
   document.getElementById(BILI_NOTE_TOAST_ID)?.remove();
 
   const toast = biliCreateElement("div", { id: BILI_NOTE_TOAST_ID });
+  const state = { element: toast, note, fence, navigationKey: biliNavigationKey(), editing: false, saving: false };
+  biliNoteToast = state;
   toast.style.cssText = `
     position: fixed;
     right: 20px;
@@ -646,8 +661,90 @@ function biliShowNoteSavedToast(note = {}) {
   }
 
   document.body.appendChild(toast);
-  setTimeout(() => toast.remove(), 5000);
+  state.dismissTimer = setTimeout(() => biliDismissNoteToast(state), 10000);
   return toast;
+}
+
+function biliDismissNoteToast(state = biliNoteToast) {
+  if (!state) return;
+  clearTimeout(state.dismissTimer);
+  state.element.remove();
+  if (biliNoteToast === state) biliNoteToast = null;
+}
+
+function biliOpenNoteThoughtInput() {
+  const state = biliNoteToast;
+  if (!state) return false;
+  if (!state.element.isConnected || state.navigationKey !== biliNavigationKey()) {
+    biliDismissNoteToast(state);
+    return false;
+  }
+  if (state.editing) return true;
+  const video = biliGetVideoElement();
+  if (!video) return false;
+  state.editing = true;
+  clearTimeout(state.dismissTimer);
+  const heading = biliCreateElement("div", { text: "📝 记下想法" });
+  heading.style.cssText = "font-weight:700;color:#c8674f;margin-bottom:8px;";
+  const input = biliCreateElement("textarea");
+  input.setAttribute("aria-label", "想法");
+  input.setAttribute("rows", "3");
+  input.style.cssText = "box-sizing:border-box;width:100%;resize:vertical;font:inherit;line-height:1.55;";
+  input.value = state.note.thought || "";
+  const status = biliCreateElement("div", { text: "Enter 保存 · Esc 关闭" });
+  status.setAttribute("role", "status");
+  status.style.cssText = "margin-top:8px;font-size:12px;color:#6b6258;";
+  state.element.replaceChildren(heading, input, status);
+  let composing = false;
+  input.addEventListener("compositionstart", () => { composing = true; });
+  input.addEventListener("compositionend", () => { composing = false; });
+  input.addEventListener("keydown", async (event) => {
+    event.stopPropagation();
+    if (composing || event.isComposing || event.keyCode === 229) return;
+    if (event.key !== "Enter" && event.key !== "Escape") return;
+    event.preventDefault();
+    if (state.saving) return;
+    if (event.key === "Escape") {
+      biliDismissNoteToast(state);
+      return;
+    }
+    state.saving = true;
+    input.readOnly = true;
+    status.textContent = "正在保存…";
+    const ownsInput = () => biliNoteToast === state && state.element.isConnected &&
+      state.navigationKey === biliNavigationKey();
+    try {
+      const message = { action: "updateNoteThought", noteId: state.note.id, thought: input.value };
+      let result = await chrome.runtime.sendMessage({ ...message, ...state.fence });
+      if (!ownsInput()) return;
+      // Same one-time worker-restart refresh as the YouTube thought input.
+      if (
+        result?.code === "EXTENSION_DATA_RESET" &&
+        typeof result.runtimeInstanceId === "string" && result.runtimeInstanceId &&
+        result.runtimeInstanceId !== state.fence?.runtimeInstanceId &&
+        Number.isSafeInteger(result.dataGeneration) && result.dataGeneration >= 0 &&
+        result.dataGeneration % 2 === 0
+      ) {
+        state.fence = { runtimeInstanceId: result.runtimeInstanceId, dataGeneration: result.dataGeneration };
+        result = await chrome.runtime.sendMessage({ ...message, ...state.fence });
+        if (!ownsInput()) return;
+      }
+      if (result?.success) {
+        biliDismissNoteToast(state);
+        return;
+      }
+      status.textContent = "保存失败，请重试。";
+    } catch (_error) {
+      if (!ownsInput()) return;
+      status.textContent = "保存失败，请重试。";
+    }
+    state.saving = false;
+    input.readOnly = false;
+    input.focus();
+  });
+  video.pause();
+  input.focus();
+  return true;
 }
 
 function biliHandleNoteKeyboardShortcut(event) {
@@ -678,6 +775,7 @@ function biliHandleNoteKeyboardShortcut(event) {
 
   event.preventDefault();
   event.stopPropagation();
+  if (biliOpenNoteThoughtInput()) return;
   biliShowNoteButton();
   biliResetNoteHideTimer();
   void biliSaveCurrentNote();
@@ -694,6 +792,8 @@ function biliNavigationKey() {
 }
 
 function biliCleanupPageArtifacts() {
+  biliNoteCaptureSequence += 1;
+  biliDismissNoteToast();
   document
     .querySelectorAll(
       `#${BILI_DIGEST_BUTTON_ID}, #${BILI_NOTE_BUTTON_ID}, #${BILI_NOTE_TOAST_ID}`,

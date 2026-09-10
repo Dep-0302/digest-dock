@@ -165,13 +165,20 @@ function canonical(value) {
 const bytes = storage => Buffer.from(JSON.stringify(canonical(Object.fromEntries(Object.entries(storage.snapshot()).filter(([k]) => noteKey(k))))));
 const noteWrites = storage => storage.writes.filter(w => w.type === "clear" || w.keys.some(noteKey));
 
-async function harness(notes = [], { configured = false } = {}) {
+async function harness(notes = [], { configured = false, platform = "youtube" } = {}) {
+  const currentUrl = new URL(platform === "bilibili"
+    ? "https://www.bilibili.com/video/BV1e3411j7ZM/"
+    : "https://www.youtube.com/watch?v=video_00001");
+  const transcript = [{start:30,duration:10,text:"Source quote",language:"en"}];
   const local = memory({ ...library(notes), ytd_settings: { provider:"deepseek", aiApiKeys:{ deepseek: configured ? "offline-fixture" : "" } },
     digest_video_00001: { transcriptSource:"youtube-passive", transcriptSourcePolicyVersion:5,
-      transcript:[{start:30,duration:10,text:"Source quote",language:"en"}] } });
+      transcript },
+    ...(platform === "bilibili" ? Object.fromEntries([123,124].map(cid=>[
+      `digest_bilibili:BV1e3411j7ZM:${cid}`, {transcriptSource:"bilibili",transcriptSourcePolicyVersion:5,transcript},
+    ])) : {}) });
   const session = memory(); const messages = [], notifications = [], requests = [], providerCalls = [], navigation = [];
   const listeners = []; const ignored = {addListener() {}}; const time = clock();
-  const h = {local, session, messages, requests, providerCalls, navigation, time,
+  const h = {local, session, messages, requests, providerCalls, navigation, time, url:currentUrl, mediaRequests:[],
     aiReply: JSON.stringify([]), failOpen:false, providerGate:null};
   const globals = {
     console, URL, URLSearchParams, TextDecoder, TextEncoder, AbortController, Blob, Response,
@@ -187,6 +194,20 @@ async function harness(notes = [], { configured = false } = {}) {
       return new Response(JSON.stringify({choices:[{message:{content:h.aiReply},finish_reason:"stop"}]}));
     },
   };
+  if (platform === "bilibili") {
+    // Run the real Bilibili adapter; replace only its remote metadata response.
+    Object.assign(globals, {BILIBILI_ADAPTER: {
+      ...globals.BILIBILI_ADAPTER,
+      ...globals.BILIBILI_ADAPTER.createAdapter({fetchImpl:async url=>{
+        const parsed=new URL(url); h.mediaRequests.push(parsed.href);
+        assert.equal(parsed.pathname,"/x/web-interface/view","字幕已缓存，不允许偷偷获取新字幕");
+        return new Response(JSON.stringify({code:0,data:{bvid:parsed.searchParams.get("bvid"),aid:1,
+          title:"Test video",owner:{name:"Test channel"},duration:200,
+          pages:[{cid:123,page:1,duration:200,part:"Part 1"},{cid:124,page:2,duration:200,part:"Part 2"}],
+        }}));
+      }}),
+    }});
+  }
   const chrome = {
     storage: { local, session, onChanged:ignored },
     runtime:{ id:"test", onInstalled:ignored, onMessage:{addListener:fn=>listeners.push(fn)},
@@ -194,8 +215,8 @@ async function harness(notes = [], { configured = false } = {}) {
       sendMessage:async m=>{ notifications.push(clone(m)); return {success:true}; } },
     action:{onClicked:ignored}, sidePanel:{setPanelBehavior(){},setOptions:async()=>{},open:async()=>{}},
     tabs:{ onUpdated:ignored,onActivated:ignored,
-      get:async id=>({id,url:"https://www.youtube.com/watch?v=video_00001"}),
-      query:async()=>[{id:1,url:"https://www.youtube.com/watch?v=video_00001"}],
+      get:async id=>({id,url:currentUrl.href}),
+      query:async()=>[{id:1,url:currentUrl.href}],
       create:async options=>{ if(h.failOpen) throw new Error("fixture open failure"); navigation.push({type:"create",...options}); return {id:2,...options}; },
       update:async(id, options)=>{ navigation.push({type:"activate",id,...options}); return {id,...options}; }, remove:async()=>{},
       sendMessage:async(id, payload)=>{ navigation.push({type:"content",id,payload}); return {success:true}; } },
@@ -215,12 +236,12 @@ async function harness(notes = [], { configured = false } = {}) {
     messages.push(clone(m));
     return new Promise((resolve,reject) => {
       let asyncResponse = false, answered = false;
-      for (const fn of listeners) { try { asyncResponse = fn(m,{tab:{id:1,url:"https://www.youtube.com/watch?v=video_00001"}}, r=>{answered=true;resolve(r);}) === true || asyncResponse; } catch(e) { reject(e); } }
+      for (const fn of listeners) { try { asyncResponse = fn(m,{tab:{id:1,url:currentUrl.href}}, r=>{answered=true;resolve(r);}) === true || asyncResponse; } catch(e) { reject(e); } }
       if (!asyncResponse && !answered) resolve({success:false,error:`UNHANDLED_ACTION:${m.action}`});
     });
   };
   const doc = documentFor(read("sidepanel.html")); h.doc = doc;
-  const window = {addEventListener(){},getSelection:()=>null,close(){},location:new URL("https://www.youtube.com/watch?v=video_00001"),getComputedStyle:()=>({display:"block",visibility:"visible"})};
+  const window = {addEventListener(){},getSelection:()=>null,close(){},location:currentUrl,getComputedStyle:()=>({display:"block",visibility:"visible"})};
   h.panel = vm.createContext({...globals, ...time, document:doc, window, navigator:{clipboard:{writeText:async()=>{}}},
     IntersectionObserver:class{observe(){}}, CSS:{escape:s=>s}, chrome:{...chrome,runtime:{...chrome.runtime,onMessage:ignored,sendMessage:h.send}}});
   h.run = code => vm.runInContext(code,h.panel);
@@ -237,16 +258,18 @@ async function harness(notes = [], { configured = false } = {}) {
   h.aiButton = () => doc.querySelectorAll("button").find(x=>x.textContent.trim()==="让 AI 找找" && !x.hidden);
   h.allNotes = async () => clone(await h.api.readAllNotes());
   h.resetEvidence = () => { local.writes.length=0; providerCalls.length=0; requests.length=0; messages.length=0; };
-  h.contentDoc = documentFor('<h1 class="ytd-watch-metadata">Test video</h1><video class="html5-main-video"></video>');
+  h.contentDoc = documentFor(platform === "bilibili"
+    ? '<h1 class="video-title">Test video</h1><div id="bilibili-player"><video></video></div>'
+    : '<h1 class="ytd-watch-metadata">Test video</h1><video class="html5-main-video"></video>');
   h.video = h.contentDoc.querySelector("video"); Object.assign(h.video,{currentTime:36,duration:200,paused:false,pauseCalls:0,playCalls:0,
     pause(){this.paused=true;this.pauseCalls++;},play(){this.paused=false;this.playCalls++;}});
   h.content = vm.createContext({...globals,...time,document:h.contentDoc,window,
     navigator:{clipboard:{writeText:async()=>{}}},MutationObserver:class{observe(){}},
     chrome:{runtime:{...chrome.runtime,onMessage:ignored,sendMessage:h.send}}});
-  vm.runInContext(read("content.js"),h.content);
+  vm.runInContext(read(platform === "bilibili" ? "content-bilibili.js" : "content.js"),h.content);
   h.contentDoc.dispatchEvent({type:"DOMContentLoaded",bubbles:false});
   h.press = async (key, extra={}) => { h.contentDoc.activeElement.dispatchEvent({type:"keydown",key,...extra}); await settle(); };
-  h.toast = () => h.contentDoc.getElementById("digestdock-test-youtube-note-toast");
+  h.toast = () => h.contentDoc.getElementById(`digestdock-test-${platform}-note-toast`);
   await settle(); h.resetEvidence(); return h;
 }
 module.exports = {harness,note,settle,bytes,noteWrites,clone,read,documentFor};

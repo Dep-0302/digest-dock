@@ -42,8 +42,11 @@ test("[harness] real current-view rendering and provider spy are live (not a vac
   assert.ok(h.requests.every(r=>r.url.includes("/chat/completions")));
 });
 
-test("[T1] first N saves exactly one empty thought and does not pause playback",async()=>{
-  const h=await harness(); await h.press("n");
+// The same capture assertions run on both production content scripts.
+for (const platform of ["youtube", "bilibili"]) {
+const captureTest = (name, fn) => test(name + (platform === "bilibili" ? " [bilibili]" : ""), fn);
+captureTest("[T1] first N saves exactly one empty thought and does not pause playback",async()=>{
+  const h=await harness([], {platform}); await h.press("n");
   const saved=await h.allNotes(); assert.equal(saved.length,1); assert.ok(h.toast());
   assert.match(h.toast().textContent,/笔记已保存/);
   assert.equal(saved[0].thought,""); assert.equal(saved[0].thoughtAt,null);
@@ -51,14 +54,14 @@ test("[T1] first N saves exactly one empty thought and does not pause playback",
   assert.equal(h.messages.find(m=>m.action==="saveNote").timestamp,33,"保留现有 -3 秒捕获位置");
   assert.equal(saved[0].timestampSeconds,30,"保留原有字幕锚点，不把反应位置写成锚点");
 });
-test("[T1] quote toast survives five seconds and expires after ten seconds",async()=>{
-  const h=await harness(); await h.press("n"); const toast=h.toast();
+captureTest("[T1] quote toast survives five seconds and expires after ten seconds",async()=>{
+  const h=await harness([], {platform}); await h.press("n"); const toast=h.toast();
   await h.time.advance(5500); assert.ok(h.toast()===toast,"toast 不能仍按旧的 5 秒消失");
   await h.time.advance(4900); assert.equal(h.toast(),null);
   assert.equal((await h.allNotes()).length,1);
 });
-test("[T1–T3] N after toast expiry saves a new quote; only its own toast can edit it",async()=>{
-  const h=await harness(); await h.press("n");
+captureTest("[T1–T3] N after toast expiry saves a new quote; only its own toast can edit it",async()=>{
+  const h=await harness([], {platform}); await h.press("n");
   const first=clone((await h.allNotes())[0]);
   await h.time.advance(11000); assert.equal(h.toast(),null);
   await h.press("n"); const notes=await h.allNotes();
@@ -74,14 +77,15 @@ test("[T1–T3] N after toast expiry saves a new quote; only its own toast can e
   assert.equal(edited.thought,THOUGHT); assert.ok(Number.isSafeInteger(edited.thoughtAt));
   unchangedExceptThought(second,edited);
 });
-test("[T2] second N edits the same toast, focuses, pauses and cancels dismissal",async()=>{
-  const h=await harness(); const {toast,input}=await beginThought(h);
+captureTest("[T2] second N edits the same toast, focuses, pauses and cancels dismissal",async()=>{
+  const h=await harness([], {platform}); const {toast,input}=await beginThought(h);
   assert.equal(h.toast(),toast); assert.equal(h.contentDoc.activeElement,input);
+  assert.equal(input.getAttribute("aria-label"),"想法");
   assert.equal((await h.allNotes()).length,1); assert.equal(h.video.paused,true);
   await h.time.advance(20000); assert.equal(h.toast(),toast); assert.equal(input.isConnected,true);
 });
-test("[T3] Enter saves verbatim thought/time in the real worker and never resumes",async()=>{
-  const h=await harness(); const {input}=await beginThought(h);
+captureTest("[T3] Enter saves verbatim thought/time in the real worker and never resumes",async()=>{
+  const h=await harness([], {platform}); const {input}=await beginThought(h);
   const before=(await h.allNotes())[0]; input.value=THOUGHT; const started=Date.now();
   await h.press("Enter"); const after=(await h.allNotes())[0];
   assert.equal(after.thought,THOUGHT); assert.ok(after.thoughtAt>=started && after.thoughtAt<=Date.now());
@@ -89,23 +93,23 @@ test("[T3] Enter saves verbatim thought/time in the real worker and never resume
   assert.equal(h.video.paused,true); assert.equal(h.video.playCalls,0);
   const idx=(await h.api.readNoteIndex())[0]; assert.equal(idx.hasThought,true); assert.ok(idx.searchText.includes("不要替我改写"));
 });
-test("[T3] IME composition Enter confirms a candidate without saving the thought",async()=>{
-  const h=await harness(); const {input}=await beginThought(h); input.value=THOUGHT;
+captureTest("[T3] IME composition Enter confirms a candidate without saving the thought",async()=>{
+  const h=await harness([], {platform}); const {input}=await beginThought(h); input.value=THOUGHT;
   input.dispatchEvent({type:"compositionstart"}); await h.press("Enter",{isComposing:true,keyCode:229});
   assert.ok(h.toast()); assert.equal((await h.allNotes())[0].thought,"");
   input.dispatchEvent({type:"compositionend"}); await h.press("Enter");
   assert.equal((await h.allNotes())[0].thought,THOUGHT);
 });
-test("[T3] failed persistence retains input, reports failure and does not claim success",async()=>{
-  const h=await harness(); const {input}=await beginThought(h); input.value=THOUGHT;
+captureTest("[T3] failed persistence retains input, reports failure and does not claim success",async()=>{
+  const h=await harness([], {platform}); const {input}=await beginThought(h); input.value=THOUGHT;
   const before=bytes(h.local); h.local.set=async()=>{throw new Error("fixture write failure");};
   await h.press("Enter"); assert.ok(h.toast()); assert.equal(input.value,THOUGHT);
   assert.ok(bytes(h.local).equals(before)); assert.match(h.toast().textContent,/失败|重试/);
 });
-test("[T3] a worker restart while the input stays open refreshes the fence once and saves",async()=>{
-  const h=await harness(); const {input}=await beginThought(h); input.value=THOUGHT;
+captureTest("[T3] a worker restart while the input stays open refreshes the fence once and saves",async()=>{
+  const h=await harness([], {platform}); const {input}=await beginThought(h); input.value=THOUGHT;
   const original=clone((await h.allNotes())[0]);
-  const restarted=await harness(); await restarted.local.set(h.local.snapshot());
+  const restarted=await harness([], {platform}); await restarted.local.set(h.local.snapshot());
   assert.notEqual(restarted.runWorker("runtimeInstanceId"),h.runWorker("runtimeInstanceId"));
   h.content.chrome.runtime.sendMessage=restarted.send;
   await h.press("Enter"); const saved=(await restarted.allNotes())[0];
@@ -113,11 +117,38 @@ test("[T3] a worker restart while the input stays open refreshes the fence once 
   assert.equal(h.toast(),null); assert.equal(h.video.paused,true); assert.equal(h.video.playCalls,0);
   assert.equal(restarted.messages.filter(m=>m.action==="updateNoteThought").length,2,"复用现有一次后台刷新重试语义");
 });
-test("[T4] Escape discards draft only, retaining the saved quote",async()=>{
-  const h=await harness(); const {input}=await beginThought(h); input.value=THOUGHT;
+captureTest("[T4] Escape discards draft only, retaining the saved quote",async()=>{
+  const h=await harness([], {platform}); const {input}=await beginThought(h); input.value=THOUGHT;
   const before=bytes(h.local); h.resetEvidence(); await h.press("Escape");
   assert.equal(h.toast(),null); assert.equal((await h.allNotes()).length,1);
   assert.equal((await h.allNotes())[0].thought,""); assertReadOnly(h,before);
+});
+
+}
+
+test("[T2–T4] changing Bilibili part closes the old input; the next toast owns the new CID [bilibili]",async()=>{
+  const h=await harness([], {platform:"bilibili"}); const {input}=await beginThought(h); input.value="上一 P 的未保存草稿";
+  const first=clone((await h.allNotes())[0]); assert.equal(first.cid,123);
+  h.url.search="?p=2"; h.content.biliPollNavigation(); h.contentDoc.body.focus();
+  assert.equal(h.toast(),null); await h.time.advance(200); await h.press("n");
+  const second=(await h.allNotes()).find(n=>n.id!==first.id); assert.ok(second); assert.equal(second.cid,124); assert.equal(second.page,2);
+  await h.press("n"); inputInToast(h).value=THOUGHT; await h.press("Enter");
+  const after=await h.allNotes(); assert.deepEqual(after.find(n=>n.id===first.id),first);
+  assert.equal(after.find(n=>n.id===second.id).thought,THOUGHT);
+});
+test("[T1–T3] an old Bilibili save response cannot replace a newer part's toast [bilibili]",async()=>{
+  const h=await harness([], {platform:"bilibili"}); const send=h.content.chrome.runtime.sendMessage;
+  let release, held=false; const gate=new Promise(r=>{release=r;});
+  h.content.chrome.runtime.sendMessage=async message=>{
+    const result=await send(message); if(message.action==="saveNote" && !held){held=true;await gate;} return result;
+  };
+  await h.press("n"); const first=clone((await h.allNotes())[0]); assert.ok(first); assert.equal(h.toast(),null);
+  h.url.search="?p=2"; h.content.biliPollNavigation(); await h.time.advance(200); await h.press("n");
+  const toast=h.toast(); assert.ok(toast); const second=(await h.allNotes()).find(n=>n.id!==first.id); assert.equal(second.cid,124);
+  release(); await settle(); assert.ok(h.toast()===toast,"迟到响应不能替换新 P 的 toast");
+  await h.press("n"); inputInToast(h).value=THOUGHT; await h.press("Enter");
+  const after=await h.allNotes(); assert.deepEqual(after.find(n=>n.id===first.id),first);
+  assert.equal(after.find(n=>n.id===second.id).thought,THOUGHT);
 });
 
 for(const showAll of [false,true]) test(`[T5/T8] search is global from ${showAll?"all":"current"}; clearing restores that side`,async()=>{
