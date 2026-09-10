@@ -2128,6 +2128,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message.action === "updateNoteThought") {
+    handleUpdateNoteThought(
+      message.noteId,
+      message.thought,
+      Number(message.dataGeneration),
+      String(message.runtimeInstanceId || ""),
+    ).then(sendResponse);
+    return true;
+  }
+
   if (message.action === "deleteNote") {
     // Delete a specific note
     handleDeleteNote(
@@ -5409,7 +5419,7 @@ async function handleSaveNote(
       })
       .catch(() => {});
 
-    return { success: true, note };
+    return { success: true, note, runtimeInstanceId, dataGeneration };
   } catch (error) {
     console.error("[DigestDock] Save note error:", error);
     return {
@@ -7036,6 +7046,68 @@ async function handleGetNotes(videoId) {
       error: error?.message || "笔记迁移失败。",
       message: error?.message || "笔记迁移失败。",
     };
+  }
+}
+
+// A thought is user-authored text. Update one existing record and its derived
+// index in one storage call, without normalization of any other saved field.
+async function handleUpdateNoteThought(
+  noteId,
+  thought,
+  expectedDataGeneration,
+  expectedRuntimeInstanceId,
+) {
+  const expectedNoteGeneration = noteStorageGeneration;
+  if (typeof noteId !== "string" || !noteId || typeof thought !== "string") {
+    return extensionDataMutationResult(false, "INVALID_NOTE_THOUGHT");
+  }
+  if (!extensionDataFenceIsWritable(expectedRuntimeInstanceId, expectedDataGeneration)) {
+    return extensionDataMutationResult(false, "EXTENSION_DATA_RESET");
+  }
+  try {
+    assertNoteStorageGeneration(
+      expectedNoteGeneration, expectedDataGeneration, expectedRuntimeInstanceId,
+    );
+    await ensureNotesMigrated();
+    return await withNoteStorageWrite(async () => {
+      assertNoteStorageGeneration(
+        expectedNoteGeneration, expectedDataGeneration, expectedRuntimeInstanceId,
+      );
+      const index = await readNoteIndex();
+      const entry = index.find((candidate) => candidate.id === noteId);
+      if (!entry) return extensionDataMutationResult(false, "NOTE_NOT_FOUND");
+      const shard = await readNotesByMedia(entry.mediaKey);
+      const note = shard.find((candidate) => candidate.id === noteId);
+      if (!note) return extensionDataMutationResult(false, "NOTE_NOT_FOUND");
+      const nextThought = thought.trim() ? thought : "";
+      const updated = {
+        ...note,
+        thought: nextThought,
+        thoughtAt: nextThought ? Date.now() : null,
+      };
+      const updatedEntry = {
+        ...entry,
+        hasThought: !!nextThought,
+        searchText: [nextThought, note.rawText, note.videoTitle, note.channelName]
+          .filter((value) => typeof value === "string" && value.trim())
+          .join(" ").normalize("NFKC").trim().replace(/\s+/g, " "),
+      };
+      assertNoteStorageGeneration(
+        expectedNoteGeneration, expectedDataGeneration, expectedRuntimeInstanceId,
+      );
+      await chrome.storage.local.set({
+        [`ytd_notes_${entry.mediaKey}`]: shard.map((candidate) =>
+          candidate.id === noteId ? updated : candidate,
+        ),
+        ytd_note_index: index.map((candidate) =>
+          candidate.id === noteId ? updatedEntry : candidate,
+        ),
+      });
+      notifyNotesChanged();
+      return extensionDataMutationResult(true, "OK", { note: updated });
+    });
+  } catch (error) {
+    return extensionDataMutationResult(false, error?.code || "NOTE_THOUGHT_SAVE_FAILED");
   }
 }
 

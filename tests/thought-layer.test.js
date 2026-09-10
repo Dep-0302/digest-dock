@@ -102,6 +102,17 @@ test("[T3] failed persistence retains input, reports failure and does not claim 
   await h.press("Enter"); assert.ok(h.toast()); assert.equal(input.value,THOUGHT);
   assert.ok(bytes(h.local).equals(before)); assert.match(h.toast().textContent,/失败|重试/);
 });
+test("[T3] a worker restart while the input stays open refreshes the fence once and saves",async()=>{
+  const h=await harness(); const {input}=await beginThought(h); input.value=THOUGHT;
+  const original=clone((await h.allNotes())[0]);
+  const restarted=await harness(); await restarted.local.set(h.local.snapshot());
+  assert.notEqual(restarted.runWorker("runtimeInstanceId"),h.runWorker("runtimeInstanceId"));
+  h.content.chrome.runtime.sendMessage=restarted.send;
+  await h.press("Enter"); const saved=(await restarted.allNotes())[0];
+  assert.equal(saved.thought,THOUGHT); unchangedExceptThought(original,saved);
+  assert.equal(h.toast(),null); assert.equal(h.video.paused,true); assert.equal(h.video.playCalls,0);
+  assert.equal(restarted.messages.filter(m=>m.action==="updateNoteThought").length,2,"复用现有一次后台刷新重试语义");
+});
 test("[T4] Escape discards draft only, retaining the saved quote",async()=>{
   const h=await harness(); const {input}=await beginThought(h); input.value=THOUGHT;
   const before=bytes(h.local); h.resetEvidence(); await h.press("Escape");

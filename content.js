@@ -168,6 +168,8 @@ let ytdNoteButton = null;
 let ytdNoteButtonTimer = null;
 let ytdNoteKeyboardListenerAdded = false;
 let ytdNoteButtonRetryTimer = null;
+let ytdNoteToast = null;
+let noteCaptureSequence = 0;
 let ytdDigestButton = null;
 let digestButtonObserver = null;
 let digestButtonReconcileTimer = null;
@@ -753,6 +755,8 @@ function handleNoteKeyboardShortcut(e) {
   e.preventDefault();
   e.stopPropagation();
 
+  if (openNoteThoughtInput()) return;
+
   // Show brief visual feedback on the button, then save
   showNoteButton();
   resetNoteButtonTimer();
@@ -775,6 +779,7 @@ async function saveCurrentNote() {
   const currentTime = Math.max(0, Math.floor(video.currentTime) - 3);
   const videoInfo = extractVideoInfo();
   const videoId = new URLSearchParams(window.location.search).get("v");
+  const captureSequence = ++noteCaptureSequence;
 
   const noteButton = ytdNoteButton;
   const restoreLabel = DIGESTDOCK_NOTE_BUTTON_LABEL;
@@ -804,13 +809,22 @@ async function saveCurrentNote() {
       channelName: videoInfo.channelName,
     });
 
+    if (
+      captureSequence !== noteCaptureSequence ||
+      videoId !== new URLSearchParams(window.location.search).get("v")
+    ) return;
+
     if (result.success) {
       if (noteButton) {
         setNoteButtonState("已保存", DIGESTDOCK_CHECK_ICON_SVG);
         noteButton.style.background = DIGESTDOCK_NOTE_SUCCESS_BG;
         noteButton.style.color = "#ffffff";
       }
-      showNoteSavedToast(result.note);
+      const toast = showNoteSavedToast(result.note);
+      toast.fence = {
+        runtimeInstanceId: result.runtimeInstanceId,
+        dataGeneration: result.dataGeneration,
+      };
     } else {
       const label =
         result.code === "NOTES_BACKUP_TOO_LARGE"
@@ -882,6 +896,7 @@ function youtubeNoteToastPresentation(note) {
 }
 
 function showNoteSavedToast(note) {
+  dismissNoteToast();
   // Remove existing toast
   const existing = document.getElementById(
     DIGESTDOCK_YOUTUBE_DOM_IDS.noteToast,
@@ -890,6 +905,8 @@ function showNoteSavedToast(note) {
 
   const toast = document.createElement("div");
   const presentation = youtubeNoteToastPresentation(note);
+  const state = { element: toast, note, editing: false, saving: false };
+  ytdNoteToast = state;
   toast.id = DIGESTDOCK_YOUTUBE_DOM_IDS.noteToast;
   toast.innerHTML = `
     <div style="font-weight: 700; margin-bottom: 6px; color: #c8674f;">📝 笔记已保存${presentation.label ? ` · ${escapeHtmlForContent(presentation.label)}` : ""}</div>
@@ -938,12 +955,106 @@ function showNoteSavedToast(note) {
 
   document.body.appendChild(toast);
 
-  // Auto-dismiss after 5 seconds
-  setTimeout(() => {
+  // Auto-dismiss a quote after 10 seconds; entering a thought cancels both timers.
+  state.dismissTimer = setTimeout(() => {
     toast.style.animation =
       `${DIGESTDOCK_YOUTUBE_TOAST_ANIMATION} 0.3s ease reverse`;
-    setTimeout(() => toast.remove(), 300);
-  }, 5000);
+    state.removalTimer = setTimeout(() => dismissNoteToast(state), 300);
+  }, 10000);
+  return state;
+}
+
+function dismissNoteToast(state = ytdNoteToast) {
+  if (!state) return;
+  clearTimeout(state.dismissTimer);
+  clearTimeout(state.removalTimer);
+  state.element.remove();
+  if (ytdNoteToast === state) ytdNoteToast = null;
+}
+
+function openNoteThoughtInput() {
+  const state = ytdNoteToast;
+  if (!state) return false;
+  const videoId = new URLSearchParams(window.location.search).get("v");
+  if (!state.element.isConnected || state.note.videoId !== videoId) {
+    dismissNoteToast(state);
+    return false;
+  }
+  if (state.editing) return true;
+  const video = document.querySelector("video.html5-main-video");
+  if (!video) return false;
+  state.editing = true;
+  clearTimeout(state.dismissTimer);
+  clearTimeout(state.removalTimer);
+  state.element.style.animation = "none";
+  state.element.innerHTML = `
+    <div style="font-weight:700;color:#c8674f;margin-bottom:8px;">📝 记下想法</div>
+    <textarea aria-label="想法" rows="3" style="box-sizing:border-box;width:100%;min-width:260px;resize:vertical;font:inherit;line-height:1.55;"></textarea>
+    <div role="status" style="margin-top:8px;font-size:12px;color:#6b6258;">Enter 保存 · Esc 关闭</div>
+  `;
+  const input = state.element.querySelector("textarea");
+  const status = state.element.querySelector('[role="status"]');
+  input.value = state.note.thought || "";
+  let composing = false;
+  input.addEventListener("compositionstart", () => { composing = true; });
+  input.addEventListener("compositionend", () => { composing = false; });
+  input.addEventListener("keydown", async (event) => {
+    event.stopPropagation();
+    if (composing || event.isComposing || event.keyCode === 229) return;
+    if (event.key !== "Enter" && event.key !== "Escape") return;
+    event.preventDefault();
+    if (state.saving) return;
+    if (event.key === "Escape") {
+      dismissNoteToast(state);
+      return;
+    }
+    state.saving = true;
+    input.readOnly = true;
+    status.textContent = "正在保存…";
+    try {
+      const message = {
+        action: "updateNoteThought",
+        noteId: state.note.id,
+        thought: input.value,
+      };
+      let result = await sendExtensionMessage({
+        ...message,
+        ...state.fence,
+      });
+      if (ytdNoteToast !== state || !state.element.isConnected) return;
+      // Match the side panel's one-time worker-restart refresh. Never refresh
+      // a reset in the same worker, and never retry against a different toast.
+      if (
+        result?.code === "EXTENSION_DATA_RESET" &&
+        typeof result.runtimeInstanceId === "string" &&
+        result.runtimeInstanceId &&
+        result.runtimeInstanceId !== state.fence?.runtimeInstanceId &&
+        Number.isSafeInteger(result.dataGeneration) &&
+        result.dataGeneration >= 0 && result.dataGeneration % 2 === 0
+      ) {
+        state.fence = {
+          runtimeInstanceId: result.runtimeInstanceId,
+          dataGeneration: result.dataGeneration,
+        };
+        result = await sendExtensionMessage({ ...message, ...state.fence });
+        if (ytdNoteToast !== state || !state.element.isConnected) return;
+      }
+      if (result?.success) {
+        dismissNoteToast(state);
+        return;
+      }
+      status.textContent = "保存失败，请重试。";
+    } catch (_error) {
+      if (ytdNoteToast !== state || !state.element.isConnected) return;
+      status.textContent = "保存失败，请重试。";
+    }
+    state.saving = false;
+    input.readOnly = false;
+    input.focus();
+  });
+  video.pause();
+  input.focus();
+  return true;
 }
 
 // ============================================================
@@ -1117,6 +1228,8 @@ function escapeHtmlForContent(text) {
  * we clean up old markers and re-inject the button.
  */
 document.addEventListener("yt-navigate-finish", () => {
+  noteCaptureSequence += 1;
+  dismissNoteToast();
   // Clean up old key moment markers when navigating to a new video
   const existingMarkers = document.querySelectorAll(
     `.${DIGESTDOCK_YOUTUBE_MARKER_CLASS}`,
