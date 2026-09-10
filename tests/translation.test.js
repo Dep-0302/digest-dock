@@ -4464,7 +4464,7 @@ function installSidepanelDigestFixture(runtime) {
             disabled: false,
             focused: false,
             listeners: {},
-            classList: { toggle() {}, contains() { return false; } },
+            classList: { toggle() {}, remove() {}, contains() { return false; } },
             setAttribute() {},
             addEventListener(type, listener) { this.listeners[type] = listener; },
             focus() { this.focused = true; },
