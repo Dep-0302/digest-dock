@@ -31,6 +31,10 @@ function assertReadOnly(h,before) {
   assert.ok(bytes(h.local).equals(before),"T7: 笔记分片、索引、schema 必须逐字节不变");
   assert.deepEqual(noteWrites(h.local),[],"T7: 不允许先写后还原");
 }
+async function resetLibrary(h) {
+  await h.runWorker("handleResetAllExtensionData('zh-CN')");
+  h.run("applyExtensionDataResetFence(fenceId,1); adoptExtensionDataFence(fenceId,2,{resetNotification:true}); extensionDataResetInProgress=false;");
+}
 
 test("[harness] real current-view rendering and provider spy are live (not a vacuous zero)",async()=>{
   const h=await harness([note("control")],{configured:true});
@@ -189,6 +193,18 @@ test("[T5] stale global load cannot overwrite a later query or the restored curr
   assert.equal(h.doc.getElementById("notesFilterThis").getAttribute("aria-pressed"),"true");
   assert.equal(h.cards().length,1);
 });
+for(const held of [true,false]) test(`[T5] reset removes ${held?"late":"already displayed"} search results`,async()=>{
+  const h=await harness([note("reset-race",{thought:"unique-reset-word",thoughtAt:1})]); await h.load();
+  let release; const gate=new Promise(r=>{release=r;}); const send=h.panel.chrome.runtime.sendMessage;
+  h.panel.chrome.runtime.sendMessage=async m=>{
+    const result=await send(m); if(held&&m.action==="getNotes"&&m.videoId===null)await gate; return result;
+  };
+  await h.input("unique-reset-word"); if(!held)assert.equal(h.cards().length,1);
+  await resetLibrary(h); release(); await settle();
+  assert.equal(h.local.snapshot().ytd_note_index?.length||0,0);
+  assert.equal(h.cards().length,0,"重置后不能显示已删除笔记的旧搜索回包");
+  assert.doesNotMatch(h.doc.getElementById("notesSearchStatus").textContent,/正在搜索/);
+});
 test("[T6] subtitle-only exact match finds a thought with a homophone typo",async()=>{
   const h=await harness([note("typo",{thought:"复力值得思考",thoughtAt:1,rawText:"复利需要时间"})]);
   await h.load(); await h.input("复利"); assert.deepEqual(ids(h),["typo"]);
@@ -309,6 +325,22 @@ test("[T9] any recent note can be written/edited/cleared, touching only thought 
   }
   assert.equal(h.doc.querySelector(".note-day-group").dataset.date,"2026-09-08");
 });
+test("[T5/T9] found quotes and thoughts can be edited; nonmatching results disappear",async()=>{
+  const quote=note("found-quote",{rawText:"用原句找到我"});
+  const thought=note("found-thought",{thought:"需要修正的旧词",thoughtAt:1});
+  const h=await harness([quote,thought],{configured:true}); await h.load(true); h.resetEvidence();
+  await h.input("用原句找到我"); await edit(h,quote.id,"补写的新想法");
+  let stored=(await h.allNotes()).find(n=>n.id===quote.id);
+  assert.equal(stored.thought,"补写的新想法"); assert.ok(Number.isSafeInteger(stored.thoughtAt)); unchangedExceptThought(quote,stored);
+  await h.input("补写的新想法"); assert.deepEqual(ids(h),[quote.id]);
+  await h.input("旧词"); await edit(h,thought.id,"修正后的表达");
+  assert.equal(h.cards().length,0,"编辑后不再匹配的结果不能残留");
+  assert.doesNotMatch(h.doc.getElementById("notesSearchStatus").textContent,/失败|错误/);
+  stored=(await h.allNotes()).find(n=>n.id===thought.id);
+  assert.equal(stored.thought,"修正后的表达"); assert.ok(Number.isSafeInteger(stored.thoughtAt)); unchangedExceptThought(thought,stored);
+  await h.input("修正后的表达"); assert.deepEqual(ids(h),[thought.id]);
+  assert.equal(h.providerCalls.length,0); assert.equal(h.requests.length,0);
+});
 test("[T9] worker rejects editing a deleted note instead of resurrecting it",async()=>{
   const h=await harness([note("deleted")]); const fence={runtimeInstanceId:h.runWorker("runtimeInstanceId"),dataGeneration:0};
   const existing=await h.send({action:"updateNoteThought",noteId:"deleted",thought:"存在时可编辑",...fence});
@@ -354,6 +386,8 @@ for(const view of ["recent","search"]) for(const platform of ["current","youtube
   if(platform==="current") {
     const seek=h.navigation.find(x=>x.type==="content" && x.payload.action==="seekTo");
     assert.ok(seek,"必须向当前视频发送定位动作"); assert.equal(seek.payload.seconds,30);
+    assert.equal(h.doc.getElementById("noteJumpFallback").hidden,true);
+    assert.equal(card.querySelector(".note-jump-feedback"),null);
   } else {
     const opened=h.navigation.find(x=>x.type==="create"); assert.ok(opened); assert.equal(opened.url,remote.timestampedUrl);
     assert.ok(h.navigation.some(x=>x.type==="activate" && x.id===2));
@@ -370,10 +404,12 @@ test("[T10] unopenable video displays frozen context without inventing a cause",
 test("[T10] a created tab without an available player still shows the frozen fallback",async()=>{
   const h=await harness([note("no-player",{videoId:"video_00002"})]); await h.load(true);
   h.panel.chrome.tabs.sendMessage=async()=>({available:false,routeKey:"youtube:video_00002"});
-  const before=bytes(h.local); h.resetEvidence(); h.cards()[0].querySelector(".note-play").click();
-  await settle(); await h.time.advance(11000);
+  const before=bytes(h.local); h.resetEvidence(); const card=h.cards()[0]; card.querySelector(".note-play").click();
+  await settle(); assert.match(card.textContent,/正在确认视频是否打开/);
+  await h.time.advance(11000);
   assert.ok(h.navigation.some(n=>n.type==="create"),"标签页确实已创建");
   const fallback=h.doc.getElementById("noteJumpFallback"); assert.equal(fallback.hidden,false,"创建成功不能冒充播放器可用");
+  assert.ok(card.contains(fallback),"失败提示必须在被点的卡片内");
   assert.match(fallback.textContent,/没能打开这个视频/); assert.match(fallback.textContent,/Frozen context before/);
   assert.doesNotMatch(fallback.textContent,/已删除|无权限/); assert.equal(h.providerCalls.length,0); assertReadOnly(h,before);
 });
@@ -388,4 +424,34 @@ test("[T10] the opened player's route and actual seconds are checked after seeki
   await settle(); await h.time.advance(11000);
   assert.ok(probes>=2,"定位后必须再读实际播放秒数"); assert.equal(seconds,30);
   assert.equal(h.doc.getElementById("noteJumpFallback").hidden,true); assertReadOnly(h,before);
+});
+test("[T10] pending feedback is immediate and removed from the card after success",async()=>{
+  const h=await harness([note("pending",{videoId:"video_00002"})]); await h.load(true); let ready=false,seconds=0;
+  h.panel.chrome.tabs.sendMessage=async(_id,m)=>{
+    if(m.action==="getNotePlaybackState")return {available:true,ready,routeKey:"youtube:video_00002",currentTime:seconds};
+    if(m.action==="seekTo")seconds=m.seconds; return {success:true};
+  };
+  const card=h.cards()[0]; card.querySelector(".note-play").click(); await settle();
+  assert.match(card.textContent,/正在确认视频是否打开/); ready=true; await h.time.advance(2500);
+  assert.equal(h.doc.getElementById("noteJumpFallback").hidden,true);
+  assert.equal(card.querySelector(".note-jump-feedback"),null); assert.doesNotMatch(card.textContent,/正在确认视频是否打开/);
+});
+test("[T10] an older verification cannot clear or replace the new card's feedback",async()=>{
+  const h=await harness([note("first-jump",{videoId:"video_00002"}),note("second-jump",{videoId:"video_00003"})]); await h.load(true);
+  h.panel.chrome.tabs.sendMessage=async id=>({available:false,routeKey:id===2?"youtube:video_00002":"youtube:video_00003"});
+  const first=item(h,"first-jump"),second=item(h,"second-jump");
+  first.querySelector(".note-play").click(); await settle();
+  second.querySelector(".note-play").click(); await settle(); await h.time.advance(1000);
+  assert.equal(first.querySelector(".note-jump-feedback"),null); assert.match(second.textContent,/正在确认视频是否打开/);
+  await h.time.advance(10000); assert.ok(second.contains(h.doc.getElementById("noteJumpFallback")));
+  assert.match(second.textContent,/没能打开这个视频/);
+});
+test("[T10] reset cancels pending feedback without redisplaying deleted frozen text",async()=>{
+  const h=await harness([note("reset-jump",{videoId:"video_00002"})]); await h.load(true);
+  h.panel.chrome.tabs.sendMessage=async()=>({available:false,routeKey:"youtube:video_00002"});
+  h.cards()[0].querySelector(".note-play").click(); await settle();
+  assert.match(h.doc.getElementById("noteJumpFallback").textContent,/正在确认/);
+  await resetLibrary(h); await h.time.advance(11000);
+  assert.equal(h.doc.getElementById("noteJumpFallback").hidden,true);
+  assert.equal(h.doc.getElementById("noteJumpFallback").textContent,"");
 });

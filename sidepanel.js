@@ -238,6 +238,15 @@ function applyExtensionDataResetFence(runtimeInstanceId, dataGeneration) {
   exportTranslationGeneration += 1;
   notesLoadGeneration += 1;
   notesTranslationGeneration += 1;
+  notesSearchGeneration += 1;
+  notesSearchResults = [];
+  notesSearchBusy = false;
+  notesSearchError = "";
+  notesAiBusy = false;
+  notesAiNotice = "";
+  notesAiError = "";
+  noteJumpGeneration += 1;
+  clearNoteJumpFeedback();
   noteExportAuthorizationGeneration += 1;
   activeNoteExportAuthorization = null;
   activeExportJobId = "";
@@ -256,6 +265,7 @@ function applyExtensionDataResetFence(runtimeInstanceId, dataGeneration) {
   transcriptScrollObserver = null;
   sidepanelMvpTaskGate?.clear?.();
   sidepanelMvpConsentVault?.clear?.();
+  renderNotes(currentNotes, currentNotesFilterVideoId);
   return true;
 }
 
@@ -442,6 +452,9 @@ let notesAiBusy = false;
 let notesAiNotice = "";
 let notesAiError = "";
 let noteJumpGeneration = 0;
+let noteJumpFeedbackElement = null;
+let noteJumpFeedbackHome = null;
+let noteJumpFeedbackGeneration = 0;
 let noteExportPickerGroups = [];
 let noteExportPickerPrecheck = null;
 let noteExportPickerSourcesByKey = {};
@@ -2428,6 +2441,8 @@ function setupEventListeners() {
   // Notes filter buttons
   document.getElementById("notesAiFind")?.addEventListener("click", () => void findNotesWithAi());
   document.getElementById("notesSearch")?.addEventListener("input", (event) => {
+    noteJumpGeneration += 1;
+    clearNoteJumpFeedback();
     notesSearchQuery = normalizeNotesSearchText(event.target.value);
     notesSearchGeneration += 1;
     notesLoadGeneration += 1;
@@ -7573,11 +7588,13 @@ async function seekTo(seconds) {
  */
 async function playNote(
   note,
-  { captureMetadata = false, exportContinuation = null, verifyPlayback = false } = {},
+  { captureMetadata = false, exportContinuation = null, verifyPlayback = false, anchor = null } = {},
 ) {
   const jumpGeneration = ++noteJumpGeneration;
-  const fallback = document.getElementById("noteJumpFallback");
-  if (fallback) fallback.hidden = true;
+  clearNoteJumpFeedback();
+  if (!captureMetadata && verifyPlayback) {
+    showNoteJumpFeedback(note, anchor, "正在确认视频是否打开…", jumpGeneration);
+  }
   const noteMediaKey = note?.mediaKey || note?.videoId;
   if (noteMediaKey && noteMediaKey === currentVideoId) {
     if (captureMetadata && activeNotesOnlyContext) {
@@ -7632,14 +7649,15 @@ async function playNote(
       return !!captured;
     }
     const jumped = await seekTo(note.timestampSeconds);
-    if (!jumped) showNoteJumpFallback(note);
+    if (!jumped) showNoteJumpFallback(note, anchor, jumpGeneration);
+    else clearNoteJumpFeedback(jumpGeneration);
     return jumped;
   }
 
   const targetUrl = String(note?.timestampedUrl || noteCanonicalUrl(note) || "");
   if (!extractMediaLocator(targetUrl)) {
     setNoteExportStatus("该笔记缺少可打开的视频网址。", true);
-    if (!captureMetadata) showNoteJumpFallback(note);
+    if (!captureMetadata) showNoteJumpFallback(note, anchor, jumpGeneration);
     return false;
   }
 
@@ -7665,7 +7683,7 @@ async function playNote(
       throw new Error("浏览器暂时无法激活视频标签页，请重试。");
     }
     await chrome.tabs.update(createdTab.id, { active: true });
-    if (!captureMetadata && verifyPlayback) void verifyOpenedNotePlayback(createdTab.id, note, jumpGeneration);
+    if (!captureMetadata && verifyPlayback) void verifyOpenedNotePlayback(createdTab.id, note, jumpGeneration, anchor);
     return true;
   } catch (error) {
     if (intent) await clearNoteNavigationState(intent.token);
@@ -7673,27 +7691,39 @@ async function playNote(
       await chrome.tabs.remove(createdTab.id).catch(() => undefined);
     }
     debugLog("[DigestDock Panel] Open saved note failed:", error);
-    if (!captureMetadata) showNoteJumpFallback(note);
+    if (!captureMetadata) showNoteJumpFallback(note, anchor, jumpGeneration);
     return false;
   }
 }
 
-async function verifyOpenedNotePlayback(tabId, note, generation) {
+async function verifyOpenedNotePlayback(tabId, note, generation, anchor = null) {
   const routeKey = extractMediaLocator(note.timestampedUrl || noteCanonicalUrl(note))?.routeKey;
   let sought = false;
   for (let attempt = 0; attempt < 10; attempt += 1) {
-    if (generation !== noteJumpGeneration) return;
+    if (generation !== noteJumpGeneration) {
+      clearNoteJumpFeedback(generation);
+      return;
+    }
     try {
       const probe = await chrome.runtime.sendMessage({
         action: "relayToContent", tabId, expectedRouteKey: routeKey,
         payload: { action: "getNotePlaybackState" },
       });
       const state = probe?.success ? probe.response : null;
-      if (generation !== noteJumpGeneration) return;
+      if (generation !== noteJumpGeneration) {
+        clearNoteJumpFeedback(generation);
+        return;
+      }
       // A different supported video means the user has superseded this jump.
-      if (state?.routeKey && state.routeKey !== routeKey) return;
+      if (state?.routeKey && state.routeKey !== routeKey) {
+        clearNoteJumpFeedback(generation);
+        return;
+      }
       if (state?.available && state.ready) {
-        if (Math.abs(Number(state.currentTime) - note.timestampSeconds) <= 2) return;
+        if (Math.abs(Number(state.currentTime) - note.timestampSeconds) <= 2) {
+          clearNoteJumpFeedback(generation);
+          return;
+        }
         if (!sought) {
           const result = await chrome.runtime.sendMessage({
             action: "relayToContent", tabId, expectedRouteKey: routeKey,
@@ -7707,17 +7737,49 @@ async function verifyOpenedNotePlayback(tabId, note, generation) {
     }
     if (attempt < 9) await new Promise((resolve) => setTimeout(resolve, 1000));
   }
-  if (generation === noteJumpGeneration) showNoteJumpFallback(note);
+  if (generation === noteJumpGeneration) showNoteJumpFallback(note, anchor, generation);
 }
 
-function showNoteJumpFallback(note) {
-  const fallback = document.getElementById("noteJumpFallback");
-  if (!fallback) return;
+function getNoteJumpFeedback() {
+  if (!noteJumpFeedbackElement) {
+    noteJumpFeedbackElement = document.getElementById("noteJumpFallback");
+    noteJumpFeedbackHome = noteJumpFeedbackElement?.parentElement || null;
+  }
+  return noteJumpFeedbackElement;
+}
+
+function clearNoteJumpFeedback(generation) {
+  if (generation !== undefined && generation !== noteJumpFeedbackGeneration) return;
+  const element = getNoteJumpFeedback();
+  if (!element) return;
+  element.hidden = true;
+  element.textContent = "";
+  element.classList?.remove("note-jump-feedback");
+  if (noteJumpFeedbackHome?.isConnected) noteJumpFeedbackHome.appendChild(element);
+  noteJumpFeedbackGeneration = 0;
+}
+
+function showNoteJumpFeedback(note, anchor, text, generation) {
+  if (generation !== noteJumpGeneration) return;
+  const element = getNoteJumpFeedback();
+  if (!element) return;
+  // A notes refresh may rebuild the originating card during verification.
+  const card = anchor?.isConnected ? anchor : anchor &&
+    Array.from(document.querySelectorAll(".note-item")).find((item) => item.dataset.noteId === note.id);
+  const host = card || noteJumpFeedbackHome;
+  if (host?.isConnected) host.appendChild(element);
+  element.classList?.add("note-jump-feedback");
+  element.style.whiteSpace = "pre-wrap";
+  element.textContent = text;
+  element.hidden = false;
+  noteJumpFeedbackGeneration = generation;
+}
+
+function showNoteJumpFallback(note, anchor = null, generation = noteJumpGeneration) {
   const windowText = (Array.isArray(note.triggerWindow) ? note.triggerWindow : [])
     .map((row) => `${formatTimecode(row.t)} ${row.text || ""}`).join("\n");
-  fallback.textContent = `没能打开这个视频\n${windowText}`;
-  fallback.style.whiteSpace = "pre-wrap";
-  fallback.hidden = false;
+  showNoteJumpFeedback(note, anchor, `没能打开这个视频\n${windowText}`, generation);
+  if (generation === noteJumpGeneration) getNoteJumpFeedback()?.scrollIntoView?.({ block: "nearest" });
 }
 
 async function highlightMomentsOnPage(moments) {
@@ -9405,7 +9467,7 @@ function renderNotes(notes, filteredVideoId) {
     setNotesTranslationStatus();
     // Search is temporary: export scope still comes from the selected side.
     updateNoteExportMenuContext(groupNotesBySource(notes || []).length);
-    notesSearchResults.forEach((note) => notesList.appendChild(renderThoughtNoteItem(note, false)));
+    notesSearchResults.forEach((note) => notesList.appendChild(renderThoughtNoteItem(note, true)));
     ensureNoteMenuDismissHandler();
     return;
   }
@@ -9539,11 +9601,11 @@ function buildNoteItemElement(note, filteredVideoId, { verifyPlayback = false } 
 
   // Timestamp click / keyboard - play from this point (in this tab or a new one)
   const timestampEl = noteEl.querySelector(".note-timestamp");
-  timestampEl.addEventListener("click", () => playNote(note, { verifyPlayback }));
+  timestampEl.addEventListener("click", () => playNote(note, { verifyPlayback, anchor: noteEl }));
   timestampEl.addEventListener("keydown", (e) => {
     if (e.key === "Enter" || e.key === " " || e.key === "Spacebar") {
       e.preventDefault();
-      playNote(note, { verifyPlayback });
+      playNote(note, { verifyPlayback, anchor: noteEl });
     }
   });
 
@@ -9592,7 +9654,7 @@ function buildNoteItemElement(note, filteredVideoId, { verifyPlayback = false } 
   // Play button (in this tab if it's the current video, else a new tab)
   noteEl
     .querySelector(".note-play")
-    .addEventListener("click", () => playNote(note, { verifyPlayback }));
+    .addEventListener("click", () => playNote(note, { verifyPlayback, anchor: noteEl }));
 
   return noteEl;
 }
