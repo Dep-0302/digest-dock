@@ -2420,6 +2420,67 @@ body {
   outline-offset: -2px;
 }
 
+.notes-search,
+.note-thought-editor textarea {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 9px 10px;
+  border: 1px solid var(--border-heavy);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  color: var(--text);
+  font: 13px/1.6 var(--font-body);
+}
+
+.notes-search:focus-visible,
+.note-thought-editor textarea:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.notes-search-status,
+.note-day-title {
+  margin: 12px 0 6px;
+  font: 600 12px/1.5 var(--font-body);
+  color: var(--text-secondary);
+}
+
+.note-day-group + .note-day-group {
+  margin-top: 20px;
+}
+
+.note-thought {
+  margin-bottom: 10px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-weight: 600;
+}
+
+.note-thought:empty { display: none; }
+
+.note-trigger {
+  color: var(--text-secondary);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.note-thought-source { margin-bottom: 6px; }
+
+.note-trigger-window {
+  margin-top: 6px;
+  padding-left: 10px;
+  border-left: 2px solid var(--border);
+  white-space: pre-wrap;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.note-thought-editor textarea {
+  display: block;
+  margin-bottom: 8px;
+  resize: vertical;
+}
+
 .note-text {
   font-family: var(--font-reading);
   font-size: 13.5px;

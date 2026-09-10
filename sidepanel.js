@@ -433,6 +433,11 @@ let currentNotesMode = "bilingual";
 let currentNotes = [];
 let currentNotesFilterVideoId;
 let notesFilterShowAll = false;
+let notesSearchQuery = "";
+let notesSearchGeneration = 0;
+let notesSearchResults = [];
+let notesSearchBusy = false;
+let notesSearchError = "";
 let noteExportPickerGroups = [];
 let noteExportPickerPrecheck = null;
 let noteExportPickerSourcesByKey = {};
@@ -2417,6 +2422,24 @@ function setupEventListeners() {
   });
 
   // Notes filter buttons
+  document.getElementById("notesSearch")?.addEventListener("input", (event) => {
+    notesSearchQuery = normalizeNotesSearchText(event.target.value);
+    notesSearchGeneration += 1;
+    notesLoadGeneration += 1;
+    notesTranslationGeneration += 1;
+    setNotesTranslationLoading(false);
+    for (const id of ["notesFilterThis", "notesFilterAll"]) {
+      const button = document.getElementById(id);
+      if (button) button.disabled = !!notesSearchQuery;
+    }
+    if (notesSearchQuery) void searchNotesLocally();
+    else {
+      notesSearchResults = [];
+      notesSearchError = "";
+      notesSearchBusy = false;
+      void loadNotes(notesFilterShowAll ? null : currentVideoId, { translateMissing: false });
+    }
+  });
   document.getElementById("notesFilterThis")?.addEventListener("click", () => {
     setNotesFilter(false);
     loadNotes(currentVideoId);
@@ -9076,6 +9099,9 @@ function handleNotesModeChange(mode) {
  * generate missing Chinese note content. Storage-change refreshes stay local.
  */
 async function loadNotes(videoId, { translateMissing = true } = {}) {
+  // A temporary global search never changes the saved filter or starts the
+  // existing missing-Chinese translation path below.
+  if (notesSearchQuery) return searchNotesLocally();
   const loadGeneration = ++notesLoadGeneration;
   const digestSnapshot = digestGeneration;
   const previousShowAll = currentNotesFilterVideoId === null;
@@ -9160,6 +9186,107 @@ function renderNotesCapacity() {
   if (backup) backup.hidden = true;
 }
 
+function normalizeNotesSearchText(value) {
+  return String(value || "").normalize("NFKC").trim().replace(/\s+/g, " ");
+}
+
+async function searchNotesLocally() {
+  const query = notesSearchQuery;
+  const generation = ++notesSearchGeneration;
+  notesSearchResults = [];
+  notesSearchBusy = true;
+  notesSearchError = "";
+  renderNotes(currentNotes, currentNotesFilterVideoId);
+  try {
+    const result = await chrome.runtime.sendMessage({ action: "getNotes", videoId: null });
+    if (generation !== notesSearchGeneration || query !== notesSearchQuery) return;
+    if (!result?.success) throw new Error(result?.message || "读取笔记失败，请重试。");
+    notesSearchResults = (result.notes || []).filter((note) => {
+      const text = [note.thought, note.rawText, note.videoTitle, note.channelName]
+        .filter((value) => typeof value === "string" && value.trim()).join(" ");
+      return normalizeNotesSearchText(text).includes(query);
+    }).sort((left, right) =>
+      Number(!!String(right.thought || "").trim()) - Number(!!String(left.thought || "").trim()) ||
+      right.createdAt - left.createdAt,
+    );
+  } catch (error) {
+    if (generation !== notesSearchGeneration) return;
+    notesSearchError = error.message || "读取笔记失败，请重试。";
+  }
+  if (generation !== notesSearchGeneration) return;
+  notesSearchBusy = false;
+  renderNotes(currentNotes, currentNotesFilterVideoId);
+}
+
+function noteLocalDate(note) {
+  const date = new Date(note.createdAt);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
+function renderThoughtNoteItem(note, editable) {
+  const card = buildNoteItemElement(note, currentNotesFilterVideoId);
+  card.dataset.noteId = note.id;
+  const body = card.querySelector(".note-text");
+  const windowText = (Array.isArray(note.triggerWindow) ? note.triggerWindow : [])
+    .map((row) => `${formatTimecode(row.t)} ${row.text || ""}`).join("\n");
+  body.innerHTML = `
+    <div class="note-thought">${escapeHtml(note.thought || "")}</div>
+    <div class="note-trigger">
+      <div class="note-thought-source">${renderNoteVideoTitle(note)} · ${escapeHtml(note.channelName || "")}</div>
+      <div>${escapeHtml(note.rawText || "")}</div>
+      <div class="note-trigger-window">${escapeHtml(windowText)}</div>
+    </div>
+  `;
+  const exportSource = document.createElement("button");
+  exportSource.type = "button";
+  exportSource.className = "enhance-btn note-source-export";
+  exportSource.textContent = "导出此视频";
+  exportSource.addEventListener("click", () => exportSingleSourceGroup({
+    mediaKey: note.mediaKey || note.videoId, notes: [note],
+  }));
+  card.querySelector(".note-actions").appendChild(exportSource);
+  if (editable) {
+    const edit = document.createElement("button");
+    edit.type = "button";
+    edit.className = "enhance-btn note-edit-thought";
+    edit.textContent = note.thought ? "编辑想法" : "补写想法";
+    edit.addEventListener("click", () => {
+      if (card.querySelector(".note-thought-editor")) return;
+      const editor = document.createElement("div");
+      editor.className = "note-thought-editor";
+      editor.innerHTML = '<textarea aria-label="想法" rows="3"></textarea><button type="button" class="enhance-btn note-save-thought">保存</button> <button type="button" class="enhance-btn note-cancel-thought">取消</button><div role="status"></div>';
+      body.querySelector(".note-thought").replaceChildren(editor);
+      const input = editor.querySelector("textarea");
+      const save = editor.querySelector(".note-save-thought");
+      const cancel = editor.querySelector(".note-cancel-thought");
+      const status = editor.querySelector('[role="status"]');
+      input.value = note.thought || "";
+      input.focus();
+      cancel.addEventListener("click", () => renderNotes(currentNotes, currentNotesFilterVideoId));
+      save.addEventListener("click", async () => {
+        save.disabled = true;
+        cancel.disabled = true;
+        input.readOnly = true;
+        const fence = captureExtensionDataFence();
+        try {
+          const result = fence && await sendResetFencedStorageMessage({
+            action: "updateNoteThought", noteId: note.id, thought: input.value,
+          }, fence);
+          if (!result?.success) throw new Error("保存失败，请重试。");
+          await loadNotes(notesFilterShowAll ? null : currentVideoId, { translateMissing: false });
+        } catch (_error) {
+          status.textContent = "保存失败，请重试。";
+          save.disabled = false;
+          cancel.disabled = false;
+          input.readOnly = false;
+        }
+      });
+    });
+    card.querySelector(".note-actions").appendChild(edit);
+  }
+  return card;
+}
+
 function renderNotes(notes, filteredVideoId) {
   renderNotesCapacity();
   const notesList = document.getElementById("notesList");
@@ -9171,6 +9298,22 @@ function renderNotes(notes, filteredVideoId) {
 
   notesList.innerHTML = "";
   setNotesModeButtons(currentNotesMode);
+  const title = document.getElementById("notesViewTitle");
+  if (title) title.textContent = notesSearchQuery ? "搜索结果" : filteredVideoId === null ? "最近" : "已保存的笔记";
+  const searchStatus = document.getElementById("notesSearchStatus");
+  if (searchStatus) {
+    searchStatus.hidden = !notesSearchQuery;
+    searchStatus.textContent = notesSearchError || (notesSearchBusy ? "正在搜索…" : `${notesSearchResults.length} 条结果`);
+  }
+  if (notesSearchQuery) {
+    if (notesIntro) notesIntro.style.display = "none";
+    setNotesTranslationStatus();
+    // Search is temporary: export scope still comes from the selected side.
+    updateNoteExportMenuContext(groupNotesBySource(notes || []).length);
+    notesSearchResults.forEach((note) => notesList.appendChild(renderThoughtNoteItem(note, false)));
+    ensureNoteMenuDismissHandler();
+    return;
+  }
 
   if (!notes || notes.length === 0) {
     updateNoteExportMenuContext(0);
@@ -9201,9 +9344,26 @@ function renderNotes(notes, filteredVideoId) {
 
   const groups = sortNoteGroups(groupNotesBySource(notes));
   updateNoteExportMenuContext(groups.length);
-  groups.forEach((group) => {
-    notesList.appendChild(renderNoteSourceGroup(group, filteredVideoId));
-  });
+  if (filteredVideoId === null) {
+    const days = new Map();
+    [...notes].sort((left, right) => right.createdAt - left.createdAt).forEach((note) => {
+      const day = noteLocalDate(note);
+      if (!days.has(day)) {
+        const group = document.createElement("div");
+        group.className = "note-day-group";
+        group.dataset.date = day;
+        const heading = document.createElement("h3");
+        heading.className = "note-day-title";
+        heading.textContent = day;
+        group.appendChild(heading);
+        days.set(day, group);
+        notesList.appendChild(group);
+      }
+      days.get(day).appendChild(renderThoughtNoteItem(note, true));
+    });
+  } else {
+    groups.forEach((group) => notesList.appendChild(renderNoteSourceGroup(group, filteredVideoId)));
+  }
 
   ensureNoteMenuDismissHandler();
 }

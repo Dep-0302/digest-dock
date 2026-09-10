@@ -427,7 +427,7 @@
               </button>
             </div>
             <div class="section-header">
-              <div class="section-title">已保存的笔记</div>
+              <div class="section-title" id="notesViewTitle">已保存的笔记</div>
               <div class="notes-header-actions">
                 <div class="notes-filter">
                   <button
@@ -548,6 +548,8 @@
                 </div>
               </fieldset>
             </form>
+            <input id="notesSearch" class="notes-search" type="search" aria-label="搜索全部笔记" placeholder="搜索想法、原句、视频或频道" />
+            <p id="notesSearchStatus" class="notes-search-status" role="status" hidden></p>
             <div
               class="notes-export-precheck"
               id="notesExportPrecheck"
