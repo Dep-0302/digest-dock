@@ -47,6 +47,8 @@ class FakeElement {
     this._className = "";
     this._innerHTML = "";
     this.scrollIntoViewCount = 0;
+    this.scrollCalls = [];
+    this.rect = { top: 0, bottom: 0, height: 0 };
   }
 
   set className(value) {
@@ -142,8 +144,13 @@ class FakeElement {
     return this.querySelectorAll(selector)[0] || null;
   }
 
-  scrollIntoView() {
+  getBoundingClientRect() {
+    return this.rect;
+  }
+
+  scrollIntoView(options) {
     this.scrollIntoViewCount += 1;
+    this.scrollCalls.push(options);
   }
 }
 
@@ -175,6 +182,7 @@ function createHarness({
   element("overviewModeControl");
   element("notesModeControl");
   element("exportTranscriptBtn", "button");
+  element("saveCurrentMomentBtn", "button");
   const stateRegion = element("transcriptStateRegion");
   stateRegion.hidden = true;
   const readyRegion = element("transcriptReadyRegion");
@@ -804,4 +812,158 @@ test("restoring a cue invalidates an older in-flight playback tick", async () =>
   assert.equal(oldCue.classList.contains("active-playback"), false);
   assert.equal(restoredCue.scrollIntoViewCount, 1);
   assert.equal(oldCue.scrollIntoViewCount, 0);
+});
+
+function followingHarness(playback) {
+  const h = createHarness({ sendMessage: async () => ({ success: true, response: playback.value }) });
+  const task = bindCurrentVideo(h, 'video-follow', 1);
+  h.helpers.sidepanelMvpResolveTranscript({ success: true }, task);
+  h.evaluate('currentTranscript = [{start:0,text:"intro"},{start:1800,text:"podcast"}]; autoScrollInterval=1; autoScrollEnabled=true;');
+  h.elements.contentArea.rect = { top: 100, bottom: 700, height: 600 };
+  return h;
+}
+
+test('new YouTube route immediately clears old rows and invalidates old work before metadata arrives', () => {
+  const h = createHarness();
+  const oldTask = bindCurrentVideo(h, 'video-a', 1);
+  h.evaluate('currentTranscript=[{start:0,text:"OLD VIDEO"}]; currentTranscriptText="OLD VIDEO"; currentTranscriptTimestamped="[00:00] OLD VIDEO"; currentVideoTitle="A";');
+  addTranscriptCue(h, 0).textContent = 'OLD VIDEO';
+  h.helpers.sidepanelMvpResolveTranscript({ success: true }, oldTask);
+  const oldCheck = h.evaluate('tabCheckGeneration');
+  h.evaluate('handleFrontTabUrl("https://www.youtube.com/watch?v=video-b", 7)');
+  assert.equal(h.evaluate('currentVideoId'), 'video-b');
+  assert.equal(h.evaluate('currentTranscript'), null);
+  assert.equal(h.transcriptList.textContent, '');
+  assert.equal(h.elements.readyRegion.hidden, true);
+  assert.ok(h.evaluate('tabCheckGeneration') > oldCheck);
+  h.helpers.sidepanelMvpResolveTranscript({ success: true }, oldTask);
+  assert.equal(h.elements.readyRegion.hidden, true, 'late A result cannot expose A under B');
+  assert.equal(h.helpers.getSidepanelMvpState().session.videoId, 'video-b');
+});
+
+test('reset removes old transcript DOM even if new metadata or subtitle work fails', () => {
+  const h = createHarness();
+  bindCurrentVideo(h, 'video-a', 1);
+  addTranscriptCue(h, 0).textContent = 'OLD VIDEO';
+  h.evaluate('currentTranscript=[{start:0,text:"OLD VIDEO"}]; resetDigestStateForVideo("video-b", "https://www.youtube.com/watch?v=video-b", {platform:"youtube",mediaKey:"video-b"}, "youtube:video-b")');
+  assert.equal(h.transcriptList.textContent, '');
+  assert.equal(h.elements.readyRegion.hidden, true);
+  assert.equal(h.evaluate('currentTranscriptText'), null);
+});
+
+test('same-video URL changes preserve subtitle and manual reading state', () => {
+  const h = createHarness();
+  bindCurrentVideo(h, 'video-a', 1);
+  addTranscriptCue(h, 0).textContent = 'SAME VIDEO';
+  h.evaluate('currentTranscript=[{start:0,text:"SAME VIDEO"}]; autoScrollEnabled=false; followManualHoldTab="transcript"; handleFrontTabUrl("https://www.youtube.com/watch?v=video-a&t=90",7)');
+  assert.equal(h.transcriptList.textContent, 'SAME VIDEO');
+  assert.equal(h.evaluate('autoScrollEnabled'), false);
+  assert.equal(h.evaluate('followManualHoldTab'), 'transcript');
+});
+
+test('ad clock at zero never moves a long podcast subtitle to the intro', async () => {
+  const playback = { value: { currentTime: 0, paused: false, isAd: true, ready: true } };
+  const h = followingHarness(playback);
+  const intro = addTranscriptCue(h, 0);
+  const body = addTranscriptCue(h, 1800);
+  body.classList.add('active-playback');
+  assert.equal(await h.evaluate('playbackTrackingTick()'), false);
+  assert.equal(body.classList.contains('active-playback'), true);
+  assert.equal(intro.scrollIntoViewCount, 0);
+  assert.equal(h.evaluate('autoScrollEnabled'), true);
+});
+
+test('unready and missing playback positions are not interpreted as zero', async () => {
+  const playback = { value: { currentTime: 0, paused: false, ready: false } };
+  const h = followingHarness(playback);
+  const intro = addTranscriptCue(h, 0);
+  const body = addTranscriptCue(h, 1800);
+  body.classList.add('active-playback');
+  for (const value of [playback.value, {paused:false,currentTime:null}, {paused:false}]) {
+    playback.value = value;
+    assert.equal(await h.evaluate('playbackTrackingTick()'), false);
+    assert.equal(body.classList.contains('active-playback'), true);
+  }
+  assert.equal(intro.scrollIntoViewCount, 0);
+});
+
+test('after an ad, the current cue is restored instantly even when it was already highlighted', async () => {
+  const playback = { value: { currentTime: 0, paused: false, isAd: true } };
+  const h = followingHarness(playback);
+  addTranscriptCue(h, 0);
+  const body = addTranscriptCue(h, 1800);
+  body.classList.add('active-playback');
+  body.rect = { top: 410, bottom: 510, height: 100 };
+  h.evaluate('window.matchMedia = () => ({matches:false})');
+  await h.evaluate('playbackTrackingTick()');
+  playback.value = { currentTime: 1800, paused: false, ready: false, isAd: false };
+  await h.evaluate('playbackTrackingTick()');
+  assert.equal(body.scrollIntoViewCount, 0);
+  playback.value.ready = true;
+  await h.evaluate('playbackTrackingTick()');
+  assert.equal(body.scrollIntoViewCount, 1);
+  assert.equal(body.scrollCalls[0].behavior, 'auto');
+  await h.evaluate('playbackTrackingTick()');
+  assert.equal(body.scrollIntoViewCount, 1, 'no repeated centering once restored');
+});
+
+test('ad completion respects an explicit manual reading hold', async () => {
+  const playback = { value: { currentTime: 0, paused: false, isAd: true } };
+  const h = followingHarness(playback);
+  const body = addTranscriptCue(h, 1800);
+  h.evaluate('autoScrollEnabled=false; followManualHoldTab="transcript"');
+  assert.equal(h.evaluate('shouldAutoResumeFollow(followPlaybackSnapshot(), {currentTime:0,paused:false,isAd:true})'), false);
+  await h.evaluate('playbackTrackingTick()');
+  playback.value = {currentTime:1801,paused:false,ready:true,isAd:false};
+  await h.evaluate('playbackTrackingTick()');
+  assert.equal(h.evaluate('autoScrollEnabled'), false);
+  assert.equal(h.evaluate('followManualHoldTab'), 'transcript');
+  assert.equal(body.scrollIntoViewCount, 0);
+});
+
+test('consecutive cues already in the reading region update highlight without recentering', () => {
+  const h = followingHarness({value:{}});
+  addTranscriptCue(h, 0).classList.add('active-playback');
+  const next = addTranscriptCue(h, 10);
+  next.rect = {top:300,bottom:440,height:140};
+  h.evaluate('highlightActiveEntry(10)');
+  assert.equal(next.classList.contains('active-playback'), true);
+  assert.equal(next.scrollIntoViewCount, 0);
+});
+
+for (const [label, rect, reduced, behavior] of [
+  ['near the lower edge', {top:600,bottom:740,height:140}, false, 'smooth'],
+  ['far ahead', {top:4000,bottom:4140,height:140}, false, 'auto'],
+  ['far behind', {top:-4000,bottom:-3860,height:140}, false, 'auto'],
+  ['reduced motion', {top:600,bottom:740,height:140}, true, 'auto'],
+]) test(`subtitle reposition ${label} uses ${behavior}`, () => {
+  const h = followingHarness({value:{}});
+  const cue = addTranscriptCue(h, 1800);
+  cue.rect = rect;
+  h.evaluate(`window.matchMedia = () => ({matches:${reduced}}); highlightActiveEntry(1800)`);
+  assert.equal(cue.scrollIntoViewCount, 1);
+  assert.equal(cue.scrollCalls[0].behavior, behavior);
+});
+
+test('programmatic scroll events cannot disable follow even after a long animation', () => {
+  const h = followingHarness({value:{}});
+  h.evaluate('onContentAreaScroll(); onFollowWorkspaceInteraction({type:"scroll"})');
+  assert.equal(h.evaluate('autoScrollEnabled'), true);
+  assert.equal(h.elements.followBar.hidden, true);
+  h.evaluate('onFollowWorkspaceInteraction({type:"wheel"})');
+  assert.equal(h.evaluate('autoScrollEnabled'), false, 'real input still pauses follow');
+  assert.equal(h.elements.followBar.hidden, false);
+});
+
+test('unavailable ad time cannot become a saved note at timestamp zero', async () => {
+  const messages=[];
+  const h=createHarness({sendMessage:async message=>{
+    messages.push(message);
+    return message.action==='relayToContent'
+      ? {success:true,response:{currentTime:null,ready:false,isAd:true,paused:false}}
+      : {success:true};
+  }});
+  bindCurrentVideo(h,'video-a',1);
+  await h.evaluate('saveCurrentMomentFromPanel()');
+  assert.equal(messages.filter(m=>m.action==='saveNote').length,0);
 });

@@ -260,6 +260,43 @@ if (document.readyState === "loading") {
  * When they ask for video info, we read it from the page.
  * When they send key moments, we highlight them on the progress bar.
  */
+// YouTube reuses its video element for ads. Its clock is a content position
+// only when the player is showing a ready, non-seeking body video.
+let playbackVideoId = null;
+let playbackBodyDuration = null;
+let playbackAwaitingBody = false;
+function readYoutubePlaybackState() {
+  const videoId = new URLSearchParams(window.location.search).get("v");
+  if (videoId !== playbackVideoId) {
+    playbackVideoId = videoId;
+    playbackBodyDuration = null;
+    playbackAwaitingBody = false;
+  }
+  const video = document.querySelector("video.html5-main-video");
+  const player = document.getElementById("movie_player");
+  const isAd = !!(player?.classList.contains("ad-showing") ||
+    player?.classList.contains("ad-interrupting"));
+  if (isAd) playbackAwaitingBody = true;
+  // The ad CSS marker may clear one step before the media is restored. For
+  // a known VOD, wait for its duration too. Do not guess from time==0: a user
+  // seeking back to the beginning is a valid content position.
+  const bodyRestored = !playbackAwaitingBody || playbackBodyDuration === null ||
+    (Number.isFinite(video?.duration) && Math.abs(video.duration - playbackBodyDuration) < 2);
+  const ready = !!video && !isAd && bodyRestored && video.readyState >= 2 && !video.seeking;
+  if (ready) {
+    playbackAwaitingBody = false;
+    playbackBodyDuration = Number.isFinite(video.duration) && video.duration > 0
+      ? video.duration : null;
+  }
+  return {
+    available: !!video,
+    ready,
+    isAd,
+    currentTime: ready ? video.currentTime : null,
+    paused: video ? video.paused : true,
+  };
+}
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   debugLog("[DigestDock Content] Received message:", message.action, message);
 
@@ -278,11 +315,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.action === "getNotePlaybackState") {
-    const video = document.querySelector("video.html5-main-video");
     sendResponse({
-      available: !!video,
-      ready: !!video && video.readyState >= 1,
-      currentTime: video?.currentTime || 0,
+      ...readYoutubePlaybackState(),
       routeKey: `youtube:${new URLSearchParams(window.location.search).get("v")}`,
     });
     return false;
@@ -290,10 +324,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message.action === "getCurrentTime") {
     // Return the current video playback time (used by auto-scroll)
-    const video = document.querySelector("video.html5-main-video");
+    const playback = readYoutubePlaybackState();
     sendResponse({
-      currentTime: video ? Math.floor(video.currentTime) : 0,
-      paused: video ? video.paused : true,
+      ...playback,
+      currentTime: playback.ready ? Math.floor(playback.currentTime) : null,
     });
     return false;
   }

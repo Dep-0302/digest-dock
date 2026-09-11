@@ -1269,7 +1269,7 @@ const FOLLOW_IDLE_RESUME_DELAY_MS = 5000;
 const FOLLOW_PLAYBACK_READ_TIMEOUT_MS = 900;
 let autoScrollEnabled = true; // True = scroll transcript to follow video playback
 let autoScrollInterval = null; // setInterval ID for polling video time
-let lastAutoScrollTime = 0; // Timestamp of last programmatic scroll (ignores scroll events within 1s)
+let playbackNeedsReposition = false;
 let playbackTrackingEpoch = 0;
 let playbackTrackingRequestToken = 0;
 let playbackTrackingRequestInFlight = false;
@@ -2238,6 +2238,7 @@ function handleFrontTabUrl(url, tabId = null) {
   }
 
   const newRouteKey = locator.routeKey;
+  const routeChanged = newRouteKey !== currentRouteKey;
   const exactTabChanged =
     Number.isInteger(tabId) &&
     Number.isInteger(videoTabId) &&
@@ -2249,12 +2250,22 @@ function handleFrontTabUrl(url, tabId = null) {
   ) {
     void clearNoteNavigationState(activeNotesOnlyContext.token);
   }
+  // A YouTube URL already identifies the new video. Invalidate old metadata
+  // and subtitle work now, before the debounced metadata lookup can finish.
+  // Bilibili's mediaKey still requires its separate CID resolution below.
+  if (routeChanged && currentVideoId && locator.platform === "youtube") {
+    tabCheckGeneration += 1;
+    currentVideoTitle = "";
+    currentChannelName = "";
+    currentVideoDuration = 0;
+    resetDigestStateForVideo(locator.mediaKey, url, locator, newRouteKey);
+  }
   // Refresh when the video changed, or when we're not currently showing
   // results (e.g. user went home, then clicked back into the same video), or
   // when another tab shows the same route. The latter must rebind videoTabId so
   // note seek/play messages never target a background copy of the video.
   if (
-    newRouteKey !== currentRouteKey ||
+    routeChanged ||
     exactTabChanged ||
     !panelIsShowingResults()
   ) {
@@ -2421,9 +2432,6 @@ function setupEventListeners() {
   for (const eventName of ["pointerdown", "touchstart", "wheel", "keydown", "focusin"]) {
     contentArea?.addEventListener(eventName, onFollowWorkspaceInteraction);
   }
-  contentArea?.addEventListener("scroll", onFollowWorkspaceInteraction, {
-    passive: true,
-  });
   document.addEventListener("selectionchange", onFollowWorkspaceInteraction);
 
   // Follow controls belong only to manual reading inside the Transcript tab.
@@ -2800,7 +2808,6 @@ function resetDigestStateForVideo(videoId, videoUrl, mediaRef, routeKey) {
   currentVideoUrl = videoUrl;
   currentMediaRef = mediaRef;
   currentRouteKey = routeKey;
-  sidepanelMvpBindSession(videoId, routeKey, { forceNewTask: true });
   currentAnalysis = null;
   currentTranscript = null;
   currentTranscriptText = null;
@@ -2811,6 +2818,9 @@ function resetDigestStateForVideo(videoId, videoUrl, mediaRef, routeKey) {
   currentTranscriptSourceAttempt = "";
   currentVideoCaptionSelection = null;
   currentPersistedNoteSource = null;
+  document.getElementById("transcriptList")?.replaceChildren?.();
+  document.getElementById("transcriptSourceBadge")?.remove?.();
+  sidepanelMvpBindSession(videoId, routeKey, { forceNewTask: true });
   activeExportJobId = "";
   if (previousExportJobId) {
     sendResetFencedStorageMessage({
@@ -3448,7 +3458,7 @@ async function runDigestLoad(
     return;
   }
 
-  if (SIDEPANEL_MVP_AVAILABLE) {
+  if (SIDEPANEL_MVP_AVAILABLE && transcriptResult?.success !== true) {
     sidepanelMvpResolveTranscript(transcriptResult, mvpTask, {
       finishTask: transcriptResult?.success !== true,
     });
@@ -3652,6 +3662,9 @@ async function runDigestLoad(
 
   // Render transcript immediately (no LLM needed)
   renderTranscript();
+  if (SIDEPANEL_MVP_AVAILABLE) {
+    sidepanelMvpResolveTranscript(transcriptResult, mvpTask, { finishTask: false });
+  }
   if (currentAnalysis) {
     renderAnalysisResults(currentAnalysis);
     highlightMomentsOnPage(currentAnalysis.keyMoments);
@@ -4093,6 +4106,11 @@ async function saveCurrentMomentFromPanel() {
     );
     if (!contextIsCurrent()) {
       throw new Error("视频页面已切换，请在当前视频重新保存。");
+    }
+    if (!usableFollowPlayback(timing)) {
+      throw new Error(timing.isAd
+        ? "广告结束后再保存当前时刻。"
+        : "播放位置暂未就绪，请稍后再试。");
     }
     const timestamp = Math.max(
       0,
@@ -9844,12 +9862,15 @@ function idleFollowController() {
           !isActiveNotesOnlyContext() &&
           !notesFilterShowAll &&
           (playback == null ||
+            !usableFollowPlayback(playback) ||
             playback?.paused === true ||
             followResumeHasBlockingUi());
         if (shouldRetry) {
           showFollowPlaybackPrompt({
             message:
-              playback?.paused === true
+              playback?.isAd === true
+                ? "广告期间暂停跟随，正文恢复后继续"
+                : playback?.paused === true
                 ? "视频暂停，播放后将回到字幕"
                 : playback == null
                   ? "暂未读到播放位置，将继续重试"
@@ -9890,12 +9911,9 @@ function scheduleFollowIdleResume() {
 
 function onFollowWorkspaceInteraction(event = {}) {
   if (currentWorkspaceTab() !== "transcript") return;
-  if (
-    event.type === "scroll" &&
-    Date.now() - lastAutoScrollTime < 1000
-  ) {
-    return;
-  }
+  // scroll events also come from animations and layout changes. Only actual
+  // input/selection/focus intent can take the user out of following mode.
+  if (event.type === "scroll") return;
   const selectedText = String(window.getSelection?.()?.toString?.() || "").trim();
   const intentionalTranscriptInteraction =
     currentWorkspaceTab() === "transcript" &&
@@ -9964,13 +9982,21 @@ function shouldAutoResumeFollow(snapshot, playback) {
     followPlaybackSnapshotIsCurrent(snapshot) &&
       followContextIsDeparted() &&
       !followResumeHasBlockingUi() &&
+      usableFollowPlayback(playback) &&
       playback?.paused === false &&
       Number.isFinite(Number(playback.currentTime)),
   );
 }
 
-function playbackScrollBehavior() {
-  return window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches
+function usableFollowPlayback(playback) {
+  return !!playback && playback.isAd !== true && playback.ready !== false &&
+    typeof playback.currentTime === "number" &&
+    Number.isFinite(playback.currentTime) && playback.currentTime >= 0;
+}
+
+function playbackScrollBehavior({ instant = false, distance = 0, height = 0 } = {}) {
+  return instant || (height > 0 && distance > height) ||
+    window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches
     ? "auto"
     : "smooth";
 }
@@ -10081,7 +10107,7 @@ function stopPlaybackTracking() {
     autoScrollInterval = null;
   }
   autoScrollEnabled = true; // Reset for next time
-  lastAutoScrollTime = 0;
+  playbackNeedsReposition = false;
   hideFollowPlaybackPrompt();
 
   // Remove active highlights
@@ -10124,8 +10150,15 @@ async function playbackTrackingTick({
       return false;
     }
 
-    const currentTime = playback.currentTime || 0;
-    highlightActiveEntry(currentTime, { forceScroll });
+    if (!usableFollowPlayback(playback)) {
+      playbackNeedsReposition = true;
+      return false;
+    }
+    highlightActiveEntry(playback.currentTime, {
+      forceScroll: forceScroll || playbackNeedsReposition,
+      instant: playbackNeedsReposition,
+    });
+    playbackNeedsReposition = false;
     return true;
   } catch (error) {
     // Silently ignore — YouTube tab might be closed or navigated away
@@ -10140,19 +10173,26 @@ async function playbackTrackingTick({
 /**
  * Scrolls the transcript to the entry currently being spoken (the one
  * carrying the active-playback highlight). Returns false if nothing is
- * highlighted yet. Stamps lastAutoScrollTime BEFORE scrolling so the scroll
- * events from our own smooth animation aren't mistaken for the user
- * scrolling away (which would re-disable auto-scroll immediately).
+ * highlighted yet. Normal playback moves only when the cue leaves the
+ * reading region; explicit restores may reposition even an unchanged cue.
  */
-function scrollToActiveEntry() {
+function scrollToActiveEntry({ forceScroll = true, instant = false } = {}) {
   const activeEntry = document.querySelector(
     "#transcriptList .transcript-entry.active-playback",
   );
   if (!activeEntry) return false;
 
-  lastAutoScrollTime = Date.now();
+  const viewport = document.getElementById("contentArea")?.getBoundingClientRect?.();
+  const cue = activeEntry.getBoundingClientRect?.();
+  const height = Number(viewport?.height) || 0;
+  if (!forceScroll && height > 0 && cue &&
+    cue.top >= viewport.top + height * 0.2 &&
+    cue.bottom <= viewport.bottom - height * 0.2) return true;
+  const distance = height > 0 && cue
+    ? Math.abs((cue.top + cue.bottom) / 2 - (viewport.top + viewport.bottom) / 2)
+    : 0;
   activeEntry.scrollIntoView({
-    behavior: playbackScrollBehavior(),
+    behavior: playbackScrollBehavior({ instant, distance, height }),
     block: "center",
   });
   return true;
@@ -10164,7 +10204,7 @@ function scrollToActiveEntry() {
  *
  * @param {number} currentSeconds - Current video playback time in seconds
  */
-function highlightActiveEntry(currentSeconds, { forceScroll = false } = {}) {
+function highlightActiveEntry(currentSeconds, { forceScroll = false, instant = false } = {}) {
   const transcriptList = document.getElementById("transcriptList");
   if (!transcriptList) return;
 
@@ -10189,7 +10229,7 @@ function highlightActiveEntry(currentSeconds, { forceScroll = false } = {}) {
 
   // Skip if this entry is already highlighted (no DOM thrashing)
   if (activeEntry.classList.contains("active-playback")) {
-    if (forceScroll && autoScrollEnabled) scrollToActiveEntry();
+    if (forceScroll && autoScrollEnabled) scrollToActiveEntry({ forceScroll, instant });
     return;
   }
 
@@ -10199,11 +10239,7 @@ function highlightActiveEntry(currentSeconds, { forceScroll = false } = {}) {
 
   // Only scroll if auto-scroll is enabled
   if (autoScrollEnabled) {
-    lastAutoScrollTime = Date.now();
-    activeEntry.scrollIntoView({
-      behavior: playbackScrollBehavior(),
-      block: "center",
-    });
+    scrollToActiveEntry({ forceScroll, instant });
   }
 }
 
@@ -10213,14 +10249,9 @@ function highlightActiveEntry(currentSeconds, { forceScroll = false } = {}) {
  * can read at their own pace without being yanked back.
  */
 function onContentAreaScroll() {
-  // Ignore scroll events within 1 second of a programmatic scroll
-  // (smooth scroll animations can last longer than a simple boolean flag)
-  if (Date.now() - lastAutoScrollTime < 1000) return;
-
-  // User scrolled manually — disable auto-scroll and show the button
-  if (autoScrollEnabled && autoScrollInterval) {
-    autoScrollEnabled = false;
-    followIntentRevision += 1;
+  // Input listeners already paused follow. Scrollbar drags and momentum may
+  // continue after the initial input; extend the existing reading idle timer.
+  if (!autoScrollEnabled && autoScrollInterval) {
     scheduleFollowIdleResume();
   }
 }
