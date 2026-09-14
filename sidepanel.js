@@ -254,6 +254,7 @@ function applyExtensionDataResetFence(runtimeInstanceId, dataGeneration) {
   activeNotesOnlyContext = null;
   currentAnalysis = null;
   currentNotes = [];
+  notesGroupingMode = "date";
   currentPersistedNoteSource = null;
   transcriptParagraphCache.clear();
   activeTranslationQueue = null;
@@ -444,6 +445,8 @@ let currentNotes = [];
 let currentNotesFilterVideoId;
 let notesFilterShowAll = false;
 let notesSearchQuery = "";
+const NOTES_GROUPING_STORAGE_KEY = "digestdock_notes_grouping";
+let notesGroupingMode = "date";
 let notesSearchGeneration = 0;
 let notesSearchResults = [];
 let notesSearchBusy = false;
@@ -1640,6 +1643,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     showRuntimeVersionError();
     return;
   }
+  await restoreNotesGroupingPreference();
   await evictOldCacheEntries(20);
 
   const configRequestFence = extensionDataFenceSnapshot();
@@ -2447,6 +2451,11 @@ function setupEventListeners() {
   });
 
   // Notes filter buttons
+  document.getElementById("notesGrouping")?.addEventListener("change", (event) => {
+    notesGroupingMode = event.target.value === "video" ? "video" : "date";
+    renderNotes(currentNotes, currentNotesFilterVideoId);
+    chrome.storage.local.set({ [NOTES_GROUPING_STORAGE_KEY]: notesGroupingMode }).catch(() => {});
+  });
   document.getElementById("notesAiFind")?.addEventListener("click", () => void findNotesWithAi());
   document.getElementById("notesSearch")?.addEventListener("input", (event) => {
     noteJumpGeneration += 1;
@@ -9392,28 +9401,59 @@ function noteLocalDate(note) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 }
 
-function renderThoughtNoteItem(note, editable) {
-  const card = buildNoteItemElement(note, currentNotesFilterVideoId, { verifyPlayback: true });
-  card.dataset.noteId = note.id;
-  const body = card.querySelector(".note-text");
-  const windowText = (Array.isArray(note.triggerWindow) ? note.triggerWindow : [])
-    .map((row) => `${formatTimecode(row.t)} ${row.text || ""}`).join("\n");
-  body.innerHTML = `
+async function restoreNotesGroupingPreference() {
+  try {
+    const stored = await chrome.storage.local.get(NOTES_GROUPING_STORAGE_KEY);
+    notesGroupingMode = stored[NOTES_GROUPING_STORAGE_KEY] === "video" ? "video" : "date";
+  } catch (_error) { /* The current view still works without a saved preference. */ }
+}
+
+// This is a display preview. The frozen triggerWindow stays intact in storage.
+function noteContextPreview(note) {
+  const rows = (Array.isArray(note.triggerWindow) ? note.triggerWindow : [])
+    .filter((row) => Number.isFinite(row?.t) && typeof row?.text === "string")
+    .slice().sort((left, right) => left.t - right.t);
+  if (!rows.length) return "";
+  let target = rows.findIndex((row) => row.text === note.rawText);
+  if (target < 0) {
+    target = rows.reduce((best, row, index) =>
+      Math.abs(row.t - note.timestampSeconds) < Math.abs(rows[best].t - note.timestampSeconds)
+        ? index : best, 0);
+  }
+  const start = Math.max(0, Math.min(target - 1, rows.length - 4));
+  return rows.slice(start, start + 4)
+    .map((row) => `${formatTimecode(row.t)} ${row.text}`).join("\n");
+}
+
+function renderNoteCardContent(note, showSource) {
+  const preview = noteContextPreview(note);
+  return `
     <div class="note-thought">${escapeHtml(note.thought || "")}</div>
     <div class="note-trigger">
-      <div class="note-thought-source">${renderNoteVideoTitle(note)} · ${escapeHtml(note.channelName || "")}</div>
-      <div>${escapeHtml(note.rawText || "")}</div>
-      <div class="note-trigger-window">${escapeHtml(windowText)}</div>
+      ${showSource ? `<div class="note-thought-source">${renderNoteVideoTitle(note)} · ${escapeHtml(note.channelName || "")} · ${notePlatformLabel(note)}</div>` : ""}
+      <div class="note-quote">${renderNoteLanguageContent(note)}</div>
+      ${preview ? `<div class="note-trigger-window" aria-label="触发上下文">${escapeHtml(preview)}</div>` : ""}
     </div>
   `;
-  const exportSource = document.createElement("button");
-  exportSource.type = "button";
-  exportSource.className = "enhance-btn note-source-export";
-  exportSource.textContent = "导出此视频";
-  exportSource.addEventListener("click", () => exportSingleSourceGroup({
-    mediaKey: note.mediaKey || note.videoId, notes: [note],
-  }));
-  card.querySelector(".note-actions").appendChild(exportSource);
+}
+
+function renderThoughtNoteItem(note, editable, {
+  showSource = true, exportSource = true, filteredVideoId = currentNotesFilterVideoId,
+} = {}) {
+  const card = buildNoteItemElement(note, filteredVideoId, {
+    verifyPlayback: filteredVideoId === null || !!notesSearchQuery, showSource,
+  });
+  const body = card.querySelector(".note-text");
+  if (exportSource) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "enhance-btn note-source-export";
+    button.textContent = "导出此视频";
+    button.addEventListener("click", () => exportSingleSourceGroup({
+      mediaKey: note.mediaKey || note.videoId, notes: [note],
+    }));
+    card.querySelector(".note-actions").appendChild(button);
+  }
   if (editable) {
     const edit = document.createElement("button");
     edit.type = "button";
@@ -9468,7 +9508,12 @@ function renderNotes(notes, filteredVideoId) {
   notesList.innerHTML = "";
   setNotesModeButtons(currentNotesMode);
   const title = document.getElementById("notesViewTitle");
-  if (title) title.textContent = notesSearchQuery ? "搜索结果" : filteredVideoId === null ? "最近" : "已保存的笔记";
+  if (title) title.textContent = notesSearchQuery ? "搜索结果"
+    : filteredVideoId === null ? (notesGroupingMode === "date" ? "最近" : "全部笔记") : "已保存的笔记";
+  const groupingRow = document.getElementById("notesGroupingRow");
+  if (groupingRow) groupingRow.hidden = filteredVideoId !== null || !!notesSearchQuery;
+  const groupingSelect = document.getElementById("notesGrouping");
+  if (groupingSelect) groupingSelect.value = notesGroupingMode;
   const searchStatus = document.getElementById("notesSearchStatus");
   if (searchStatus) {
     searchStatus.hidden = !notesSearchQuery;
@@ -9517,30 +9562,50 @@ function renderNotes(notes, filteredVideoId) {
     if (!missingCount) setNotesTranslationStatus();
   }
 
-  const groups = sortNoteGroups(groupNotesBySource(notes));
+  const groups = recentNoteSourceGroups(notes);
   updateNoteExportMenuContext(groups.length);
-  if (filteredVideoId === null) {
-    const days = new Map();
-    [...notes].sort((left, right) => right.createdAt - left.createdAt).forEach((note) => {
-      const day = noteLocalDate(note);
-      if (!days.has(day)) {
-        const group = document.createElement("div");
-        group.className = "note-day-group";
-        group.dataset.date = day;
-        const heading = document.createElement("h3");
-        heading.className = "note-day-title";
-        heading.textContent = day;
-        group.appendChild(heading);
-        days.set(day, group);
-        notesList.appendChild(group);
-      }
-      days.get(day).appendChild(renderThoughtNoteItem(note, true));
-    });
+  if (filteredVideoId === null && notesGroupingMode === "date") {
+    for (const [date, dayNotes] of notesByLocalDay(notes)) {
+      const day = buildNoteDaySection(date, "note-day-group", "note-day-title");
+      recentNoteSourceGroups(dayNotes).forEach((group) =>
+        day.appendChild(renderNoteSourceGroup(group, filteredVideoId)));
+      notesList.appendChild(day);
+    }
   } else {
-    groups.forEach((group) => notesList.appendChild(renderNoteSourceGroup(group, filteredVideoId)));
+    groups.forEach((group) => notesList.appendChild(renderNoteSourceGroup(group, filteredVideoId, {
+      showDates: filteredVideoId === null,
+    })));
   }
 
   ensureNoteMenuDismissHandler();
+}
+
+function recentNoteSourceGroups(notes) {
+  const latest = (group) => group.notes.reduce((time, note) =>
+    Math.max(time, Number(note.createdAt) || 0), 0);
+  return groupNotesBySource(notes).sort((left, right) =>
+    latest(right) - latest(left) || left.mediaKey.localeCompare(right.mediaKey));
+}
+
+function notesByLocalDay(notes) {
+  const days = new Map();
+  for (const note of notes) {
+    const date = noteLocalDate(note);
+    if (!days.has(date)) days.set(date, []);
+    days.get(date).push(note);
+  }
+  return [...days].sort(([left], [right]) => right.localeCompare(left));
+}
+
+function buildNoteDaySection(date, className, headingClass) {
+  const section = document.createElement("div");
+  section.className = className;
+  section.dataset.date = date;
+  const heading = document.createElement("h3");
+  heading.className = headingClass;
+  heading.textContent = date;
+  section.appendChild(heading);
+  return section;
 }
 
 /**
@@ -9555,7 +9620,7 @@ function noteSourceMetaText(representative, noteCount) {
     .join(" · ");
 }
 
-function renderNoteSourceGroup(group, filteredVideoId) {
+function renderNoteSourceGroup(group, filteredVideoId, { showDates = false } = {}) {
   const representative = group.representative || group.notes[0];
   const container = document.createElement("div");
   container.className = "note-source-group";
@@ -9583,9 +9648,19 @@ function renderNoteSourceGroup(group, filteredVideoId) {
 
   const list = document.createElement("div");
   list.className = "note-source-list";
-  group.notes.forEach((note) => {
-    list.appendChild(buildNoteItemElement(note, filteredVideoId));
-  });
+  const appendNotes = (parent, notes) => sortNotesByTimecode(notes).forEach((note) =>
+    parent.appendChild(renderThoughtNoteItem(note, true, {
+      filteredVideoId, showSource: false, exportSource: false,
+    })));
+  if (showDates) {
+    for (const [date, dayNotes] of notesByLocalDay(group.notes)) {
+      const day = buildNoteDaySection(date, "note-source-day", "note-source-day-title");
+      appendNotes(day, dayNotes);
+      list.appendChild(day);
+    }
+  } else {
+    appendNotes(list, group.notes);
+  }
   container.appendChild(list);
   return container;
 }
@@ -9594,14 +9669,17 @@ function renderNoteSourceGroup(group, filteredVideoId) {
  * Builds a single note row (timecode, mode-aware body, per-note actions). The
  * video title now lives on the enclosing source container, not the row.
  */
-function buildNoteItemElement(note, filteredVideoId, { verifyPlayback = false } = {}) {
+function buildNoteItemElement(note, filteredVideoId, { verifyPlayback = false, showSource = false } = {}) {
   const noteEl = document.createElement("div");
-  noteEl.className = "note-item";
+  const hasThought = !!String(note.thought || "").trim();
+  noteEl.className = `note-item ${hasThought ? "note-item--thought" : "note-item--quote"}`;
+  noteEl.dataset.noteId = note.id;
   const noteCopyText = noteCopyTextForMode(note);
   const noteTime = formatTimecode(note.timestampSeconds);
   noteEl.innerHTML = `
     <div class="note-header">
       <span class="note-timestamp" role="button" tabindex="0" data-seconds="${Number(note.timestampSeconds) || 0}" title="从 ${escapeHtml(noteTime)} 播放" aria-label="从 ${escapeHtml(noteTime)} 播放">${escapeHtml(noteTime)}</span>
+      <span class="note-kind">${hasThought ? "想法" : "金句"}</span>
       <div class="note-more">
         <button class="note-more-btn" type="button" aria-haspopup="true" aria-expanded="false" title="更多操作" aria-label="更多操作">${UI_ICONS.more}</button>
         <div class="note-more-menu" role="menu" hidden>
@@ -9609,7 +9687,7 @@ function buildNoteItemElement(note, filteredVideoId, { verifyPlayback = false } 
         </div>
       </div>
     </div>
-    <div class="note-text">${renderNoteLanguageContent(note)}</div>
+    <div class="note-text">${renderNoteCardContent(note, showSource)}</div>
     <div class="note-actions">
       <button class="icon-btn primary note-play" type="button" title="从此处播放" aria-label="从此处播放">${UI_ICONS.play}</button>
       <button class="icon-btn note-copy-text" type="button" title="复制文字" aria-label="复制文字">${UI_ICONS.copy}</button>

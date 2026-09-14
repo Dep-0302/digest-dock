@@ -549,6 +549,13 @@
               </fieldset>
             </form>
             <input id="notesSearch" class="notes-search" type="search" aria-label="搜索全部笔记" placeholder="搜索想法、原句、视频或频道" />
+            <div id="notesGroupingRow" class="notes-grouping-row" hidden>
+              <label for="notesGrouping">分组</label>
+              <select id="notesGrouping" aria-label="全部笔记分组方式">
+                <option value="date">按日期</option>
+                <option value="video">按视频</option>
+              </select>
+            </div>
             <p id="notesSearchStatus" class="notes-search-status" role="status" hidden></p>
             <button id="notesAiFind" class="enhance-btn" type="button" hidden>让 AI 找找</button>
             <div id="noteJumpFallback" class="note-trigger" role="status" hidden></div>
