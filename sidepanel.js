@@ -252,6 +252,7 @@ function applyExtensionDataResetFence(runtimeInstanceId, dataGeneration) {
   activeExportJobId = "";
   pendingNoteNavigation = null;
   activeNotesOnlyContext = null;
+  noteNavigationResumeTarget = null;
   currentAnalysis = null;
   currentNotes = [];
   notesGroupingMode = "date";
@@ -417,12 +418,11 @@ function openAiSettings() {
   return chrome.runtime.sendMessage({ action: "openOptions" });
 }
 
-// A cross-video click from the saved-notes library means "open this note",
-// not "start acquiring subtitles".  Keep that intent in session storage so
-// it survives Chrome swapping/recreating the global side-panel document while
-// the new tab is activated.  The pending phase is short-lived and exact-tab
-// bound; after it matches, the active phase lasts only while that tab remains
-// on the same media route or until the user explicitly requests a digest tab.
+// A cross-video click from the saved-notes library keeps Notes selected while
+// a normal YouTube jump may warm cached/free subtitles in the background.
+// Keep that intent in session storage so it survives Chrome recreating the
+// global side-panel document. The pending phase is short-lived and exact-tab
+// bound; the active phase retains a safe return path for CC/provider choices.
 const NOTE_NAVIGATION_SESSION_KEY = "ytd_note_navigation";
 const NOTE_NAVIGATION_SCHEMA_VERSION = 1;
 const NOTE_NAVIGATION_PENDING_TTL_MS = 15_000;
@@ -430,6 +430,7 @@ const NOTE_EXPORT_AUTHORIZATION_TTL_MS = 10 * 60_000;
 let pendingNoteNavigation = null;
 let activeNotesOnlyContext = null;
 let noteNavigationResumePromise = null;
+let noteNavigationResumeTarget = null;
 let noteNavigationStorageQueue = Promise.resolve();
 let noteExportContinuationResumePromise = null;
 let activeNoteExportAuthorization = null;
@@ -1047,7 +1048,7 @@ function sidepanelMvpRunCurrentTask({ captionRetry = false, consentToken = null 
       currentRouteKey,
       Boolean(consentToken),
       captionRetry,
-      { mvpTask: task, consentToken },
+      { mvpTask: task, consentToken, videoTabId },
     ),
   );
 }
@@ -2254,6 +2255,26 @@ function handleFrontTabUrl(url, tabId = null) {
   ) {
     void clearNoteNavigationState(activeNotesOnlyContext.token);
   }
+  if (exactTabChanged) {
+    // The exact tab is part of a check's ownership even when the media route
+    // is identical. Invalidate any metadata relay still owned by the old tab.
+    tabCheckGeneration += 1;
+    const shouldRestartSameMediaTranscript =
+      SIDEPANEL_MVP_AVAILABLE &&
+      locator.platform === "youtube" &&
+      currentVideoId === locator.mediaKey &&
+      currentRouteKey === locator.routeKey &&
+      !currentTranscript;
+    // Rebind immediately so an old-tab response cannot commit while the
+    // debounced inspection of the new tab is still waiting to run.
+    videoTabId = tabId;
+    if (shouldRestartSameMediaTranscript) {
+      digestGeneration += 1;
+      sidepanelMvpBindSession(locator.mediaKey, locator.routeKey, {
+        forceNewTask: true,
+      });
+    }
+  }
   // A YouTube URL already identifies the new video. Invalidate old metadata
   // and subtitle work now, before the debounced metadata lookup can finish.
   // Bilibili's mediaKey still requires its separate CID resolution below.
@@ -2573,6 +2594,26 @@ function setNotesFilter(showAll) {
 // ============================================================
 
 function checkCurrentTab(options = {}) {
+  const resumeNoteNavigationToken = String(
+    options?.resumeNoteNavigationToken || "",
+  );
+  // A tab activation/complete event can arrive just after the user explicitly
+  // asks to recover a saved-note transcript. Reuse that recovery instead of
+  // incrementing the global check generation and cancelling it midway.
+  const resumeTargetIsCurrent =
+    !!noteNavigationResumeTarget &&
+    activeNotesOnlyContext?.token === noteNavigationResumeTarget.token &&
+    activeNotesOnlyContext?.tabId === noteNavigationResumeTarget.tabId &&
+    activeNotesOnlyContext?.routeKey === noteNavigationResumeTarget.routeKey &&
+    videoTabId === noteNavigationResumeTarget.tabId &&
+    currentRouteKey === noteNavigationResumeTarget.routeKey;
+  if (
+    !resumeNoteNavigationToken &&
+    noteNavigationResumePromise &&
+    resumeTargetIsCurrent
+  ) {
+    return noteNavigationResumePromise;
+  }
   const generation = ++tabCheckGeneration;
   return runCheckCurrentTab(generation, options);
 }
@@ -2654,6 +2695,22 @@ async function runCheckCurrentTab(generation, options = {}) {
     // Capture the exact supported tab before any navigation-intent lookup or
     // content relay. Viewing an already-saved note is a local action and must
     // remain available even when no AI key is configured.
+    const shouldReconnectSameMediaTab =
+      SIDEPANEL_MVP_AVAILABLE &&
+      locator.platform === "youtube" &&
+      Number.isInteger(videoTabId) &&
+      videoTabId !== tab.id &&
+      currentVideoId === locator.mediaKey &&
+      currentRouteKey === locator.routeKey &&
+      !currentTranscript;
+    if (shouldReconnectSameMediaTab) {
+      // Direct inspections can discover a tab switch before onActivated does.
+      // Invalidate the old-tab task before any metadata or cache await.
+      digestGeneration += 1;
+      sidepanelMvpBindSession(locator.mediaKey, locator.routeKey, {
+        forceNewTask: true,
+      });
+    }
     videoTabId = tab.id;
     const noteNavigation = await resolveNoteNavigationForTab(tab, locator);
     if (!isLatestCheck()) return;
@@ -2664,9 +2721,20 @@ async function runCheckCurrentTab(generation, options = {}) {
       !!noteNavigation &&
       !!resumeNoteNavigationToken &&
       noteNavigation.token === resumeNoteNavigationToken;
+    const isAutomaticNoteDigestResume =
+      !!noteNavigation &&
+      !isExplicitNoteDigestResume &&
+      SIDEPANEL_MVP_AVAILABLE &&
+      locator.platform === "youtube" &&
+      !noteNavigation.captureMetadata &&
+      !noteNavigation.exportContinuation;
     if (noteNavigation && !isExplicitNoteDigestResume) {
       await enterNotesOnlyView(noteNavigation, tab, locator);
-      return;
+      if (!isLatestCheck() || !isActiveNotesOnlyContext()) return;
+      // A normal YouTube note jump now warms the transcript from cache or the
+      // free native chain. Metadata/export continuations and Bilibili keep
+      // their existing local-only behavior.
+      if (!isAutomaticNoteDigestResume) return;
     }
 
     let nextMediaRef = locator;
@@ -2777,7 +2845,17 @@ async function runCheckCurrentTab(generation, options = {}) {
       nextMediaRef,
       locator.routeKey,
       nextCaptionSelection,
+      { translateMissingNotes: !isAutomaticNoteDigestResume },
     );
+    if (
+      isLatestCheck() &&
+      currentTranscript &&
+      noteNavigation &&
+      activeNotesOnlyContext?.token === noteNavigation.token &&
+      isActiveNotesOnlyContext()
+    ) {
+      await clearNoteNavigationState(noteNavigation.token);
+    }
   } catch (error) {
     if (!isLatestCheck()) return;
     if (isTransientTabLookupError(error)) {
@@ -3128,6 +3206,7 @@ function startDigest(
   mediaRef = currentMediaRef,
   routeKey = currentRouteKey,
   captionSelection = currentVideoCaptionSelection,
+  digestOptions = {},
 ) {
   const nextMediaRef = mediaRef || currentMediaRef;
   const nextRouteKey = routeKey || currentRouteKey;
@@ -3174,6 +3253,7 @@ function startDigest(
   }
 
   const generation = digestGeneration;
+  const requestVideoTabId = videoTabId;
   const requestKey = `${generation}:${videoId}`;
   return runDigestSingleFlight(requestKey, () =>
     runDigestLoad(
@@ -3182,6 +3262,13 @@ function startDigest(
       videoChanged,
       nextMediaRef,
       nextRouteKey,
+      false,
+      false,
+      {
+        videoTabId: requestVideoTabId,
+        translateMissingNotes:
+          digestOptions.translateMissingNotes !== false,
+      },
     ),
   );
 }
@@ -3228,6 +3315,14 @@ async function runDigestLoad(
   mvpOptions = {},
 ) {
   const dataFence = captureExtensionDataFence();
+  const requestVideoTabId = Number.isInteger(mvpOptions.videoTabId)
+    ? mvpOptions.videoTabId
+    : videoTabId;
+  // Freeze this at task entry. Reading/retrying subtitles from a saved-note
+  // context never grants permission to translate missing note text with AI.
+  const translateMissingNotes =
+    mvpOptions.translateMissingNotes !== false &&
+    !isActiveNotesOnlyContext();
   if (!isCurrentDigest(videoId, generation, routeKey)) return;
   const mvpTask = SIDEPANEL_MVP_AVAILABLE
     ? mvpOptions.mvpTask || sidepanelMvpState?.transcript?.activeTask
@@ -3236,6 +3331,7 @@ async function runDigestLoad(
   const ownsDigestLoad = () =>
     extensionDataFenceIsCurrent(dataFence) &&
     isCurrentDigest(videoId, generation, routeKey) &&
+    videoTabId === requestVideoTabId &&
     (!SIDEPANEL_MVP_AVAILABLE ||
       (mvpTask && sidepanelMvpTaskGate.isCurrent(mvpEnvelope)));
   if (!ownsDigestLoad()) return;
@@ -3377,7 +3473,9 @@ async function runDigestLoad(
     // Respect the user's explicit All Notes filter. A saved-note navigation
     // must not silently collapse the library back to the current video after
     // they later request Transcript or Overview.
-    loadNotes(notesFilterShowAll ? null : videoId);
+    loadNotes(notesFilterShowAll ? null : videoId, {
+      translateMissing: translateMissingNotes,
+    });
 
     // Setup explain feature
     setupExplainFeature();
@@ -3413,7 +3511,7 @@ async function runDigestLoad(
     videoId,
     mediaRef: requestMediaRef,
     preferredLanguage: currentVideoSourceLanguage,
-    tabId: videoTabId,
+    tabId: requestVideoTabId,
     generation,
     routeKey,
     supadataConsent,
@@ -3694,7 +3792,9 @@ async function runDigestLoad(
   }
 
   // Preserve an explicitly selected All Notes view across digest loading.
-  loadNotes(notesFilterShowAll ? null : videoId);
+  loadNotes(notesFilterShowAll ? null : videoId, {
+    translateMissing: translateMissingNotes,
+  });
 
   // Setup explain feature for text selection
   setupExplainFeature();
@@ -7324,9 +7424,16 @@ function configureNotesReturnAction(context = activeNotesOnlyContext) {
 }
 
 function resumeDigestFromNotesOnly(tabName) {
-  if (noteNavigationResumePromise) return noteNavigationResumePromise;
   const context = activeNotesOnlyContext;
   if (!context) return Promise.resolve();
+  if (
+    noteNavigationResumePromise &&
+    noteNavigationResumeTarget?.token === context.token &&
+    noteNavigationResumeTarget?.tabId === context.tabId &&
+    noteNavigationResumeTarget?.routeKey === context.routeKey
+  ) {
+    return noteNavigationResumePromise;
+  }
 
   if (SIDEPANEL_MVP_AVAILABLE) {
     sidepanelMvpProgressOverride = {
@@ -7341,7 +7448,12 @@ function resumeDigestFromNotesOnly(tabName) {
       "",
     );
   }
-  noteNavigationResumePromise = checkCurrentTab({
+  noteNavigationResumeTarget = {
+    token: context.token,
+    tabId: context.tabId,
+    routeKey: context.routeKey,
+  };
+  const resumePromise = checkCurrentTab({
     resumeNoteNavigationToken: context.token,
   })
     .then(async () => {
@@ -7361,8 +7473,12 @@ function resumeDigestFromNotesOnly(tabName) {
       );
     })
     .finally(() => {
-      noteNavigationResumePromise = null;
+      if (noteNavigationResumePromise === resumePromise) {
+        noteNavigationResumePromise = null;
+        noteNavigationResumeTarget = null;
+      }
     });
+  noteNavigationResumePromise = resumePromise;
   return noteNavigationResumePromise;
 }
 
@@ -7434,9 +7550,9 @@ function switchTab(tabName, { restoreScroll = true } = {}) {
   updateHeaderLanguageControlsVisibility();
   if (restoreScroll) restoreWorkspaceTabSnapshot(tabName);
 
-  // A saved-note jump intentionally performs no transcript acquisition. The
-  // user's explicit switch to Transcript or Overview is the point at which we
-  // leave that local-only state and resume the ordinary digest/consent flow.
+  // A normal YouTube saved-note jump already warms cache/the free native path
+  // in the background while keeping Notes selected. An explicit switch reuses
+  // that work, or resumes the same guarded flow if it has not completed.
   if (
     (tabName === "transcript" || tabName === "overview") &&
     isActiveNotesOnlyContext() &&
