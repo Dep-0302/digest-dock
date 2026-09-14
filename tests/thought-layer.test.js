@@ -64,12 +64,20 @@ captureTest("[T1] quote toast survives five seconds and expires after ten second
   await h.time.advance(4900); assert.equal(h.toast(),null);
   assert.equal((await h.allNotes()).length,1);
 });
-captureTest("[T1–T3] N after toast expiry saves a new quote; only its own toast can edit it",async()=>{
+captureTest("[T1–T3] N at a new cue after toast expiry saves a new quote; only its own toast can edit it",async()=>{
   const h=await harness([], {platform}); await h.press("n");
   const first=clone((await h.allNotes())[0]);
   await h.time.advance(11000); assert.equal(h.toast(),null);
+  // The 2026-09-14 dedup contract reuses the same cue. Move to a new cue so
+  // this original ownership check continues protecting a genuinely new note.
+  const cacheKey=`digest_${first.mediaKey}`;
+  const cache=h.local.snapshot()[cacheKey];
+  await h.local.set({[cacheKey]:{...cache,transcript:[...cache.transcript,
+    {start:60,duration:10,text:"A new cue",language:"en"},
+  ]}});
+  h.video.currentTime=66;
   await h.press("n"); const notes=await h.allNotes();
-  assert.equal(notes.length,2,"toast 过期后 N 必须新建笔记，不能编辑上一条");
+  assert.equal(notes.length,2,"toast 过期后新位置的 N 必须新建笔记，不能编辑上一条");
   const second=notes.find(n=>n.id!==first.id); assert.ok(second);
   assert.equal(second.thought,""); assert.equal(second.thoughtAt,null);
   assert.deepEqual(notes.find(n=>n.id===first.id),first,"第一条所有字段必须原样保留");

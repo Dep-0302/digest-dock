@@ -4152,8 +4152,9 @@ async function saveCurrentMomentFromPanel() {
     if (!result?.success) {
       throw new Error(result?.message || result?.error || "笔记保存失败。");
     }
-    setLabel("已保存");
-    setNotesTranslationStatus("已保存当前时刻。");
+    setLabel(result.duplicate ? "已记录" : "已保存");
+    if (result.duplicate) await loadNotes(notesFilterShowAll ? null : currentVideoId, { translateMissing: false });
+    setNotesTranslationStatus(result.duplicate ? "已找到此前保存的笔记，没有重复记录。" : "已保存当前时刻。");
   } catch (error) {
     setLabel("保存当前时刻");
     setNotesTranslationStatus(
@@ -4188,7 +4189,7 @@ async function saveQuoteAsNote(quote, btn) {
 
     if (result.success) {
       btn.disabled = false;
-      flashIconDone(btn, "已保存为笔记", restoreTitle);
+      flashIconDone(btn, result.duplicate ? "已记录，未重复保存" : "已保存为笔记", restoreTitle);
       // The background noteSaved broadcast owns the Notes refresh. Calling
       // loadNotes here as well can start two translation jobs for one save.
     } else {

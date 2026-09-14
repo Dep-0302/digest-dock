@@ -341,7 +341,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message.action === "showNoteSavedFeedback") {
     // Show brief feedback that note was saved
-    showNoteSavedToast(message.note);
+    showNoteSavedToast(message.note, message.duplicate === true);
     sendResponse({ success: true });
     return false;
   }
@@ -861,19 +861,23 @@ async function saveCurrentNote() {
 
     if (result.success) {
       if (noteButton) {
-        setNoteButtonState("已保存", DIGESTDOCK_CHECK_ICON_SVG);
+        setNoteButtonState(result.duplicate ? "已记录" : "已保存", DIGESTDOCK_CHECK_ICON_SVG);
         noteButton.style.background = DIGESTDOCK_NOTE_SUCCESS_BG;
         noteButton.style.color = "#ffffff";
       }
-      const toast = showNoteSavedToast(result.note);
+      const toast = showNoteSavedToast(result.note, result.duplicate === true);
       toast.fence = {
         runtimeInstanceId: result.runtimeInstanceId,
         dataGeneration: result.dataGeneration,
       };
+      if (result.duplicate) openNoteThoughtInput();
     } else {
+      if (result.code === "NOTE_DUPLICATE_CONFLICT") showNoteSavedToast({}, false, true);
       const label =
         result.code === "NOTES_BACKUP_TOO_LARGE"
           ? "笔记备份容量已满"
+          : result.code === "NOTE_DUPLICATE_CONFLICT"
+            ? "已有多条想法，请到笔记页查看"
           : result.error === "TRANSCRIPT_TASK_REQUIRED"
           ? "请先打开侧栏字幕"
           : result.error === "SUPADATA_CONSENT_REQUIRED"
@@ -940,7 +944,7 @@ function youtubeNoteToastPresentation(note) {
   return { label: "字幕原话", text: rawText || cleanedText };
 }
 
-function showNoteSavedToast(note) {
+function showNoteSavedToast(note, duplicate = false, conflict = false) {
   dismissNoteToast();
   // Remove existing toast
   const existing = document.getElementById(
@@ -950,16 +954,20 @@ function showNoteSavedToast(note) {
 
   const toast = document.createElement("div");
   const presentation = youtubeNoteToastPresentation(note);
+  const savedHeading = `笔记已保存${presentation.label ? ` · ${escapeHtmlForContent(presentation.label)}` : ""}`;
   const state = { element: toast, note, editing: false, saving: false };
   ytdNoteToast = state;
   toast.id = DIGESTDOCK_YOUTUBE_DOM_IDS.noteToast;
   toast.innerHTML = `
-    <div style="font-weight: 700; margin-bottom: 6px; color: #c8674f;">📝 笔记已保存${presentation.label ? ` · ${escapeHtmlForContent(presentation.label)}` : ""}</div>
+    <div style="font-weight: 700; margin-bottom: 6px; color: #c8674f;">📝 ${conflict ? "已有多条想法" : duplicate ? "已记录，找到上次笔记" : savedHeading}</div>
+    ${conflict ? '<div role="alert">同一句金句已有多条不同想法，请先到笔记页查看。</div>' : `
     <div style="font-size: 12px; color: #6b6258; margin-bottom: 8px;">${escapeHtmlForContent(note.timestamp)} — ${escapeHtmlForContent(note.videoTitle)}</div>
+    ${note.thought ? `<div style="font-size:13px;font-weight:600;white-space:pre-wrap;overflow-wrap:anywhere;margin-bottom:8px;">${escapeHtmlForContent(note.thought)}</div>` : ""}
     <div style="font-size: 13px; line-height: 1.55; color: #2e2a24;">"${escapeHtmlForContent(presentation.text)}"</div>
     <div style="margin-top: 10px; font-size: 11px;">
       <a href="${escapeHtmlForContent(note.timestampedUrl)}" style="color: #c8674f; font-weight: 600; text-decoration: none;">🔗 复制链接</a>
     </div>
+    `}
   `;
 
   toast.style.cssText = `
@@ -972,6 +980,8 @@ function showNoteSavedToast(note) {
     border-radius: 14px;
     padding: 16px 20px;
     max-width: 350px;
+    max-height: 70vh;
+    overflow-y: auto;
     box-shadow: 0 12px 32px rgba(50, 42, 32, 0.2);
     font-family: system-ui, -apple-system, "Roboto", sans-serif;
     animation: ${DIGESTDOCK_YOUTUBE_TOAST_ANIMATION} 0.3s ease;
@@ -988,7 +998,7 @@ function showNoteSavedToast(note) {
   document.head.appendChild(style);
 
   // Copy link handler
-  toast.querySelector("a").addEventListener("click", async (e) => {
+  toast.querySelector("a")?.addEventListener("click", async (e) => {
     e.preventDefault();
     try {
       await navigator.clipboard.writeText(note.timestampedUrl);
@@ -1033,9 +1043,9 @@ function openNoteThoughtInput() {
   clearTimeout(state.removalTimer);
   state.element.style.animation = "none";
   state.element.innerHTML = `
-    <div style="font-weight:700;color:#c8674f;margin-bottom:8px;">📝 记下想法</div>
+    <div style="font-weight:700;color:#c8674f;margin-bottom:8px;">📝 记录想法</div>
     <textarea aria-label="想法" rows="3" style="box-sizing:border-box;width:100%;min-width:260px;resize:vertical;font:inherit;line-height:1.55;"></textarea>
-    <div role="status" style="margin-top:8px;font-size:12px;color:#6b6258;">Enter 保存 · Esc 关闭</div>
+    <div role="status" style="margin-top:8px;font-size:12px;color:#6b6258;">Enter 保存 · Shift+Enter 换行 · Esc 关闭</div>
   `;
   const input = state.element.querySelector("textarea");
   const status = state.element.querySelector('[role="status"]');
@@ -1046,6 +1056,7 @@ function openNoteThoughtInput() {
   input.addEventListener("keydown", async (event) => {
     event.stopPropagation();
     if (composing || event.isComposing || event.keyCode === 229) return;
+    if (event.key === "Enter" && event.shiftKey) return;
     if (event.key !== "Enter" && event.key !== "Escape") return;
     event.preventDefault();
     if (state.saving) return;
@@ -1099,6 +1110,7 @@ function openNoteThoughtInput() {
   });
   video.pause();
   input.focus();
+  input.setSelectionRange?.(input.value.length, input.value.length);
   return true;
 }
 

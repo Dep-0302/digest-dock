@@ -11701,7 +11701,7 @@ test("notes generate Chinese once from polished English and persist it", async (
   const backgroundSource = read("background.js");
   assert.match(
     backgroundSource,
-    /async function handleSaveNote\([\s\S]*?cleanupNoteText\([\s\S]*?saveNoteToStorage\(\s*note,\s*saveGeneration,\s*dataGeneration,\s*\)[\s\S]*?action: "noteSaved"/,
+    /async function handleSaveNote\([\s\S]*?cleanupNoteText\([\s\S]*?saveNoteToStorage\(\s*note,\s*saveGeneration,\s*dataGeneration,\s*true,\s*captureRawText,\s*\)[\s\S]*?action: "noteSaved"/,
   );
   assert.doesNotMatch(backgroundSource, /handleTranslateNotes\(\[note\]\)/);
   assert.match(

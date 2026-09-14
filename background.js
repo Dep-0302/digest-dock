@@ -5044,6 +5044,18 @@ async function handleGetVideoInfo(tabId) {
 // NOTE MANAGEMENT
 // ============================================================
 
+const noteCaptureCleanupInFlight = new Map();
+
+function acquireNoteCaptureCleanup(key, cleanup) {
+  let entry = noteCaptureCleanupInFlight.get(key);
+  if (!entry) {
+    entry = { key, pending: Promise.resolve().then(cleanup), captures: 0 };
+    noteCaptureCleanupInFlight.set(key, entry);
+  }
+  entry.captures += 1;
+  return entry;
+}
+
 /**
  * Saves a note at the current timestamp.
  * Fetches the transcript if needed, finds the relevant line, and cleans it up.
@@ -5062,6 +5074,7 @@ async function handleSaveNote(
   const saveGeneration = noteStorageGeneration;
   const sourceStorageGeneration = exportSourceStorageGeneration;
   const dataGeneration = extensionDataGeneration;
+  let captureCleanup = null;
   if (!extensionDataGenerationIsWritable(dataGeneration)) {
     return noteSaveFailureResponse(false);
   }
@@ -5303,6 +5316,25 @@ async function handleSaveNote(
       triggerWindow = [{ ...row, text: slicedText }];
     }
 
+    // The source cue is the capture identity; the reaction sample and AI
+    // cleanup output must not make a second record for the same moment.
+    const matchedStart = Number(matchedLine?.start);
+    const noteTimestampSeconds = Math.max(
+      0,
+      Math.floor(Number.isFinite(matchedStart) ? matchedStart : safeTimestamp),
+    );
+    const captureRawText = String(matchedLine.text || "").trim();
+    if (saveGeneration !== noteStorageGeneration || !extensionDataGenerationIsWritable(dataGeneration)) {
+      return noteSaveFailureResponse(false);
+    }
+    await ensureNotesMigrated();
+    const existing = await findExistingNoteForCapture(mediaKey, noteTimestampSeconds, captureRawText);
+    await requireExactTabRoute(tabId, actionRouteKey);
+    if (saveGeneration !== noteStorageGeneration || !extensionDataGenerationIsWritable(dataGeneration)) {
+      return noteSaveFailureResponse(false);
+    }
+    if (existing) return { success: true, duplicate: true, note: existing, runtimeInstanceId, dataGeneration };
+
     const matchedLanguage = normalizeLanguageCode(matchedLine.language);
     const storedSourceLanguage =
       matchedLanguage.length <= 20 ? matchedLanguage : "";
@@ -5318,11 +5350,13 @@ async function handleSaveNote(
     const combinedOriginalText = [beforeLine, matchedLine.text, afterLine]
       .filter(Boolean)
       .join(" ");
-    const cleanedText = skipAiCleanup
-      ? combinedOriginalText
-      : isChineseLanguage(matchedLanguage) && !directChineseNote
-        ? String(matchedLine.text || "").trim()
-      : await cleanupNoteText(
+    let cleanedText;
+    if (skipAiCleanup) cleanedText = combinedOriginalText;
+    else if (isChineseLanguage(matchedLanguage) && !directChineseNote) cleanedText = captureRawText;
+    else {
+      captureCleanup = acquireNoteCaptureCleanup(
+        JSON.stringify([saveGeneration, dataGeneration, mediaKey, noteTimestampSeconds, captureRawText]),
+        () => cleanupNoteText(
           matchedLine.text,
           beforeLine,
           afterLine,
@@ -5330,15 +5364,11 @@ async function handleSaveNote(
           resolvedVideoTitle,
           mediaRef.platform,
           matchedLanguage,
-        );
+        ),
+      );
+      cleanedText = await captureCleanup.pending;
+    }
 
-    // Store the source cue that produced the note. The user's reaction-offset
-    // sample is only for choosing a cue and must not become a fake timestamp.
-    const matchedStart = Number(matchedLine?.start);
-    const noteTimestampSeconds = Math.max(
-      0,
-      Math.floor(Number.isFinite(matchedStart) ? matchedStart : safeTimestamp),
-    );
     const minutes = Math.floor(noteTimestampSeconds / 60);
     const seconds = noteTimestampSeconds % 60;
     const formattedTimestamp = `${minutes}:${String(seconds).padStart(2, "0")}`;
@@ -5394,7 +5424,12 @@ async function handleSaveNote(
       note,
       saveGeneration,
       dataGeneration,
+      true,
+      captureRawText,
     );
+    if (saved?.duplicate) return {
+      success: true, duplicate: true, note: saved.note, runtimeInstanceId, dataGeneration,
+    };
     if (saved !== true) {
       return noteSaveFailureResponse(saved);
     }
@@ -5438,6 +5473,13 @@ async function handleSaveNote(
       error: error?.code || error?.message || "NOTE_SAVE_FAILED",
       message: error?.message || "笔记保存失败。",
     };
+  } finally {
+    // Keep the resolved cleanup until every capture has reached storage (or
+    // failed), so a repeat in the cleanup/write gap cannot request AI again.
+    if (captureCleanup && --captureCleanup.captures === 0 &&
+      noteCaptureCleanupInFlight.get(captureCleanup.key) === captureCleanup) {
+      noteCaptureCleanupInFlight.delete(captureCleanup.key);
+    }
   }
 }
 
@@ -6763,10 +6805,46 @@ function assertNotesRemainBackupable(notes, { allowInvalidStored = false } = {})
   }
 }
 
+async function findExistingNoteForCapture(mediaKey, timestampSeconds, rawText) {
+  if (typeof rawText !== "string" || !rawText) return null;
+  const index = await readNoteIndex();
+  const ids = new Set(index.filter((entry) => entry.mediaKey === mediaKey &&
+    entry.timestampSeconds === timestampSeconds).map((entry) => entry.id));
+  if (!ids.size) return null;
+  const shard = await readNotesByMedia(mediaKey);
+  const matches = shard.filter((note) => {
+    if (!ids.has(note.id) || typeof note.rawText !== "string") return false;
+    const savedRaw = note.rawText.trim();
+    if (!savedRaw) return false;
+    if (savedRaw.length !== 3000) return savedRaw === rawText;
+    // A raw cue at the storage limit may be a prefix. Only the full frozen
+    // source can prove equality; missing/truncated evidence stays separate.
+    if (!rawText.startsWith(savedRaw)) return false;
+    const fullCues = (Array.isArray(note.triggerWindow) ? note.triggerWindow : []).filter((row) =>
+      Number.isFinite(row?.t) && Math.floor(row.t) === timestampSeconds &&
+      typeof row.text === "string" && row.text.trim().startsWith(savedRaw));
+    return fullCues.length === 1 && fullCues[0].text.trim() === rawText;
+  });
+  // Historical duplicates are not deleted here. A unique thought can be
+  // revisited without choosing a blank quote over the user's own words.
+  const thoughts = new Set(matches.filter((note) => note.thought?.trim()).map((note) => note.thought));
+  if (thoughts.size > 1) {
+    const error = new Error("同一句金句已有多条不同想法，请先到笔记页查看。");
+    error.code = "NOTE_DUPLICATE_CONFLICT";
+    throw error;
+  }
+  return matches.sort((left, right) =>
+    Number(!!right.thought?.trim()) - Number(!!left.thought?.trim()) ||
+    left.createdAt - right.createdAt || left.id.localeCompare(right.id),
+  )[0] || null;
+}
+
 async function saveNoteToStorage(
   note,
   expectedGeneration = noteStorageGeneration,
   expectedDataGeneration = extensionDataGeneration,
+  reuseExistingCapture = false,
+  captureRawText = note?.rawText,
 ) {
   await ensureNotesMigrated();
   return withNoteStorageWrite(async () => {
@@ -6775,6 +6853,11 @@ async function saveNoteToStorage(
       !extensionDataGenerationIsWritable(expectedDataGeneration)
     ) {
       return false;
+    }
+    if (reuseExistingCapture) {
+      const existing = await findExistingNoteForCapture(note.mediaKey, note.timestampSeconds, captureRawText);
+      if (expectedGeneration !== noteStorageGeneration || !extensionDataGenerationIsWritable(expectedDataGeneration)) return false;
+      if (existing) return { duplicate: true, note: existing };
     }
     return appendNote(note);
   });
