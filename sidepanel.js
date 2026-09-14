@@ -2451,11 +2451,20 @@ function setupEventListeners() {
   });
 
   // Notes filter buttons
-  document.getElementById("notesGrouping")?.addEventListener("change", (event) => {
-    notesGroupingMode = event.target.value === "video" ? "video" : "date";
-    renderNotes(currentNotes, currentNotesFilterVideoId);
-    chrome.storage.local.set({ [NOTES_GROUPING_STORAGE_KEY]: notesGroupingMode }).catch(() => {});
+  document.querySelectorAll("[data-notes-grouping]").forEach((button) => {
+    button.addEventListener("click", () => {
+      notesGroupingMode = button.dataset.notesGrouping === "video" ? "video" : "date";
+      renderNotes(currentNotes, currentNotesFilterVideoId);
+      chrome.storage.local.set({ [NOTES_GROUPING_STORAGE_KEY]: notesGroupingMode }).catch(() => {});
+    });
   });
+  if (typeof ResizeObserver === "function") {
+    const observer = new ResizeObserver(syncNoteStickyHeaders);
+    ["contentArea", "notesToolbar", "notesList"].forEach((id) => {
+      const element = document.getElementById(id);
+      if (element) observer.observe(element);
+    });
+  }
   document.getElementById("notesAiFind")?.addEventListener("click", () => void findNotesWithAi());
   document.getElementById("notesSearch")?.addEventListener("input", (event) => {
     noteJumpGeneration += 1;
@@ -9348,7 +9357,8 @@ async function searchNotesLocally() {
     if (generation !== notesSearchGeneration || query !== notesSearchQuery) return;
     if (!result?.success) throw new Error(result?.message || "读取笔记失败，请重试。");
     notesSearchResults = (result.notes || []).filter((note) => {
-      const text = [note.thought, note.rawText, note.videoTitle, note.channelName]
+      const text = [note.thought, noteOriginalText(note), notePolishedText(note),
+        noteChineseText(note), note.videoTitle, noteChineseVideoTitle(note), note.channelName]
         .filter((value) => typeof value === "string" && value.trim()).join(" ");
       return normalizeNotesSearchText(text).includes(query);
     }).sort((left, right) =>
@@ -9420,19 +9430,23 @@ function noteContextPreview(note) {
       Math.abs(row.t - note.timestampSeconds) < Math.abs(rows[best].t - note.timestampSeconds)
         ? index : best, 0);
   }
-  const start = Math.max(0, Math.min(target - 1, rows.length - 4));
-  return rows.slice(start, start + 4)
-    .map((row) => `${formatTimecode(row.t)} ${row.text}`).join("\n");
+  const start = Math.max(0, Math.min(target - 3, rows.length - 8));
+  return rows.slice(start, start + 8).map((row) => row.text).join("\n");
 }
 
 function renderNoteCardContent(note, showSource) {
   const preview = noteContextPreview(note);
   return `
-    <div class="note-thought">${escapeHtml(note.thought || "")}</div>
+    <div class="note-thought-row">
+      <div class="note-thought">${escapeHtml(note.thought || "")}</div>
+      ${note.thought ? '<button type="button" class="note-delete-thought">删除想法</button>' : ""}
+    </div>
     <div class="note-trigger">
       ${showSource ? `<div class="note-thought-source">${renderNoteVideoTitle(note)} · ${escapeHtml(note.channelName || "")} · ${notePlatformLabel(note)}</div>` : ""}
-      <div class="note-quote">${renderNoteLanguageContent(note)}</div>
-      ${preview ? `<div class="note-trigger-window" aria-label="触发上下文">${escapeHtml(preview)}</div>` : ""}
+      ${preview
+        ? `<button type="button" class="note-quote" aria-expanded="false" title="点击金句展开上下文">${renderNoteLanguageContent(note)}</button>`
+        : `<div class="note-quote">${renderNoteLanguageContent(note)}</div>`}
+      ${preview ? `<div class="note-trigger-window" aria-label="触发上下文" hidden>${escapeHtml(preview)}</div>` : ""}
     </div>
   `;
 }
@@ -9448,19 +9462,23 @@ function renderThoughtNoteItem(note, editable, {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "enhance-btn note-source-export";
-    button.textContent = "导出此视频";
+    button.textContent = "导出本视频笔记";
     button.addEventListener("click", () => exportSingleSourceGroup({
       mediaKey: note.mediaKey || note.videoId, notes: [note],
     }));
     card.querySelector(".note-actions").appendChild(button);
   }
   if (editable) {
+    const removeThought = card.querySelector(".note-delete-thought");
+    removeThought?.addEventListener("click", () => showThoughtDeleteConfirmation(note, card));
     const edit = document.createElement("button");
     edit.type = "button";
     edit.className = "enhance-btn note-edit-thought";
     edit.textContent = note.thought ? "编辑想法" : "补写想法";
     edit.addEventListener("click", () => {
       if (card.querySelector(".note-thought-editor")) return;
+      card.querySelector(".note-thought-delete-confirm")?.remove();
+      if (removeThought) removeThought.disabled = true;
       const editor = document.createElement("div");
       editor.className = "note-thought-editor";
       editor.innerHTML = '<textarea aria-label="想法" rows="3"></textarea><button type="button" class="enhance-btn note-save-thought">保存</button> <button type="button" class="enhance-btn note-cancel-thought">取消</button><div role="status"></div>';
@@ -9496,6 +9514,80 @@ function renderThoughtNoteItem(note, editable, {
   return card;
 }
 
+function showThoughtDeleteConfirmation(note, card) {
+  if (card.querySelector(".note-thought-delete-confirm")) return;
+  const confirmation = document.createElement("div");
+  confirmation.className = "note-thought-delete-confirm";
+  confirmation.setAttribute("role", "alertdialog");
+  confirmation.setAttribute("aria-label", "删除想法确认");
+  confirmation.innerHTML = '<p>删除这条想法？金句和来源会保留。</p><button type="button" class="enhance-btn note-confirm-delete-thought">确认删除</button> <button type="button" class="enhance-btn note-cancel-delete-thought">取消</button><div role="status"></div>';
+  card.querySelector(".note-thought-row").appendChild(confirmation);
+  const confirm = confirmation.querySelector(".note-confirm-delete-thought");
+  const cancel = confirmation.querySelector(".note-cancel-delete-thought");
+  const dismiss = () => {
+    confirmation.remove();
+    card.querySelector(".note-delete-thought")?.focus();
+    syncNoteStickyHeaders();
+  };
+  cancel.addEventListener("click", dismiss);
+  confirmation.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !cancel.disabled) {
+      event.stopPropagation();
+      dismiss();
+    }
+  });
+  confirm.addEventListener("click", async () => {
+    confirm.disabled = true;
+    cancel.disabled = true;
+    const edit = card.querySelector(".note-edit-thought");
+    if (edit) edit.disabled = true;
+    const fence = captureExtensionDataFence();
+    try {
+      const result = fence && await sendResetFencedStorageMessage({
+        action: "updateNoteThought", noteId: note.id, thought: "",
+        expectedThought: { thought: note.thought, thoughtAt: note.thoughtAt },
+      }, fence);
+      if (result?.code === "NOTE_THOUGHT_CHANGED") {
+        await loadNotes(notesFilterShowAll ? null : currentVideoId, { translateMissing: false });
+        const status = document.getElementById("notesSearchStatus");
+        if (status) {
+          status.hidden = false;
+          status.textContent = `${notesSearchQuery ? `${status.textContent} · ` : ""}想法已在别处更新，请重新查看后再删除。`;
+        }
+        return;
+      }
+      if (!result?.success) throw new Error("删除失败");
+      await loadNotes(notesFilterShowAll ? null : currentVideoId, { translateMissing: false });
+    } catch (_error) {
+      confirmation.querySelector('[role="status"]').textContent = "删除失败，请重试。";
+      confirm.disabled = false;
+      cancel.disabled = false;
+      if (edit) edit.disabled = false;
+    }
+  });
+  cancel.focus();
+  syncNoteStickyHeaders();
+}
+
+// A short video group fits on screen without a pinned title. Recalculate when
+// the viewport, toolbar, or expanded context changes size.
+function syncNoteStickyHeaders() {
+  const viewport = document.getElementById("contentArea");
+  const toolbar = document.getElementById("notesToolbar");
+  if (!viewport || !toolbar) return;
+  const toolbarHeight = toolbar.getBoundingClientRect().height;
+  const availableHeight = viewport.getBoundingClientRect().height - toolbarHeight;
+  if (availableHeight <= 0) return;
+  const padding = typeof getComputedStyle === "function"
+    ? parseFloat(getComputedStyle(viewport).paddingTop) || 0 : 18;
+  document.querySelectorAll(".note-source-group").forEach((group) => {
+    const header = group.querySelector(".note-source-header");
+    if (!header) return;
+    header.classList.toggle("is-sticky", group.getBoundingClientRect().height > availableHeight);
+    header.style.top = `${Math.max(0, toolbarHeight - padding)}px`;
+  });
+}
+
 function renderNotes(notes, filteredVideoId) {
   renderNotesCapacity();
   const notesList = document.getElementById("notesList");
@@ -9512,8 +9604,11 @@ function renderNotes(notes, filteredVideoId) {
     : filteredVideoId === null ? (notesGroupingMode === "date" ? "最近" : "全部笔记") : "已保存的笔记";
   const groupingRow = document.getElementById("notesGroupingRow");
   if (groupingRow) groupingRow.hidden = filteredVideoId !== null || !!notesSearchQuery;
-  const groupingSelect = document.getElementById("notesGrouping");
-  if (groupingSelect) groupingSelect.value = notesGroupingMode;
+  document.querySelectorAll("[data-notes-grouping]").forEach((button) => {
+    const selected = button.dataset.notesGrouping === notesGroupingMode;
+    button.classList.toggle("active", selected);
+    button.setAttribute("aria-pressed", String(selected));
+  });
   const searchStatus = document.getElementById("notesSearchStatus");
   if (searchStatus) {
     searchStatus.hidden = !notesSearchQuery;
@@ -9578,6 +9673,7 @@ function renderNotes(notes, filteredVideoId) {
   }
 
   ensureNoteMenuDismissHandler();
+  syncNoteStickyHeaders();
 }
 
 function recentNoteSourceGroups(notes) {
@@ -9635,7 +9731,7 @@ function renderNoteSourceGroup(group, filteredVideoId, { showDates = false } = {
     <div class="note-source-meta">${escapeHtml(metaText)}</div>
     <div class="note-source-actions">
       <button class="note-source-open" type="button" title="打开视频" aria-label="打开视频">打开视频</button>
-      <button class="note-source-export" type="button" title="导出此视频笔记" aria-label="导出此视频笔记">导出此视频</button>
+      <button class="note-source-export" type="button" title="导出本视频的笔记为文本文件" aria-label="导出本视频笔记">导出本视频笔记</button>
     </div>
   `;
   header
@@ -9696,6 +9792,16 @@ function buildNoteItemElement(note, filteredVideoId, { verifyPlayback = false, s
   `;
 
   // Timestamp click / keyboard - play from this point (in this tab or a new one)
+  const quote = noteEl.querySelector(".note-quote");
+  const context = noteEl.querySelector(".note-trigger-window");
+  if (context) quote.addEventListener("click", () => {
+    // Selecting a sentence to copy must not also open or close its context.
+    if (window.getSelection?.()?.toString()) return;
+    context.hidden = !context.hidden;
+    quote.setAttribute("aria-expanded", String(!context.hidden));
+    quote.title = context.hidden ? "点击金句展开上下文" : "点击金句收起上下文";
+    syncNoteStickyHeaders();
+  });
   const timestampEl = noteEl.querySelector(".note-timestamp");
   timestampEl.addEventListener("click", () => playNote(note, { verifyPlayback, anchor: noteEl }));
   timestampEl.addEventListener("keydown", (e) => {

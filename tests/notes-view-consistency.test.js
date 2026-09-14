@@ -15,9 +15,9 @@ const card = (h,id) => {
 };
 const ids = root => root.querySelectorAll('.note-item').map(n=>n.dataset.noteId);
 async function grouping(h,value) {
-  const select=h.doc.getElementById('notesGrouping');
-  assert.ok(select,'all notes must expose grouping selection');
-  select.value=value;select.dispatchEvent({type:'change'});await settle();
+  const button=h.doc.querySelector(`[data-notes-grouping="${value}"]`);
+  assert.ok(button,'all notes must expose grouping selection');
+  button.click();await settle();
 }
 function body(h,id) {
   const item=card(h,id);
@@ -61,15 +61,18 @@ test('thoughts and quotes have distinct visual classes and text labels without a
   assert.ok((await h.allNotes()).every(n=>!Object.hasOwn(n,'type')));
 });
 
-test('context preview keeps at most four nearby cues including the trigger; full storage is preserved',async()=>{
+// The user's 2026-09-14 revision replaces the always-visible four-line preview
+// with a collapsed eight-line context. Stored context must still stay intact.
+test('context preview keeps at most eight nearby cues including the trigger; full storage is preserved',async()=>{
   const window=Array.from({length:12},(_,i)=>({t:i*10,text:`上下文 ${i}`}));
   const n=rich('context',{timestampSeconds:70,rawText:'上下文 7',triggerWindow:window});
   const h=await harness([n]);const before=bytes(h.local);await h.load(true);
   const preview=card(h,n.id).querySelector('.note-trigger-window');assert.ok(preview);
-  const rows=preview.textContent.trim().split('\n');assert.equal(rows.length,4);
+  assert.equal(preview.hidden,true);
+  const rows=preview.textContent.trim().split('\n');assert.equal(rows.length,8);
   assert.ok(rows.some(r=>r.includes('上下文 7')));assert.ok(!rows.some(r=>r.includes('上下文 0')));
   assert.ok(bytes(h.local).equals(before));assert.deepEqual((await h.allNotes())[0].triggerWindow,window);
-  const css=read('sidepanel.css');assert.match(css,/\.note-trigger-window\s*\{[^}]*-webkit-line-clamp:\s*4/s);
+  const css=read('sidepanel.css');assert.match(css,/\.note-trigger-window\s*\{[^}]*-webkit-line-clamp:\s*8/s);
 });
 
 function groupedNotes() {
@@ -83,7 +86,7 @@ function groupedNotes() {
 
 test('date grouping defaults to local day, then distinct stable video sources, then timecodes',async()=>{
   const h=await harness(groupedNotes());await h.load(true);
-  const select=h.doc.getElementById('notesGrouping');assert.ok(select);assert.equal(select.value,'date');
+  const button=h.doc.getElementById('notesGroupDate');assert.ok(button);assert.equal(button.getAttribute('aria-pressed'),'true');
   const days=h.doc.querySelectorAll('.note-day-group');assert.deepEqual(days.map(n=>n.dataset.date),['2026-09-13','2026-09-10']);
   const sources=days[0].querySelectorAll('.note-source-group');
   assert.deepEqual(sources.map(g=>g.dataset.mediaKey),['video_00002','video_00001']);
@@ -107,7 +110,7 @@ test('grouping selection survives search, scope changes, and reopening; never wr
   const h=await harness(groupedNotes());await h.load(true);const before=bytes(h.local);
   await grouping(h,'video');assert.equal(h.local.snapshot().digestdock_notes_grouping,'video');
   await h.input('都是回忆');assert.equal(h.doc.getElementById('notesGroupingRow').hidden,true);
-  await h.input('');assert.equal(h.doc.getElementById('notesGrouping').value,'video');
+  await h.input('');assert.equal(h.doc.getElementById('notesGroupVideo').getAttribute('aria-pressed'),'true');
   await h.load();assert.equal(h.doc.getElementById('notesGroupingRow').hidden,true);
   await h.load(true);assert.equal(h.doc.getElementById('notesGroupingRow').hidden,false);
   h.run('notesGroupingMode="date"');await h.run('restoreNotesGroupingPreference()');
@@ -140,8 +143,8 @@ test('both grouping modes keep global multi-result search flat, thought-first an
 
 test('source header sticks within its video group and context has no nested scroll pane',()=>{
   const css=read('sidepanel.css');
-  assert.match(css,/\.note-source-header\s*\{[^}]*position:\s*sticky/s);
-  assert.match(css,/\.note-source-header\s*\{[^}]*top:\s*0/s);
+  assert.match(css,/\.note-source-header\.is-sticky\s*\{[^}]*position:\s*sticky/s);
+  assert.match(css,/\.note-source-header\.is-sticky\s*\{[^}]*border-radius:\s*0/s);
   assert.doesNotMatch(css.match(/\.note-source-group\s*\{[^}]*\}/s)?.[0]||'',/overflow:\s*(hidden|auto)/);
   assert.doesNotMatch(css.match(/\.note-trigger-window\s*\{[^}]*\}/s)?.[0]||'',/overflow-y:\s*auto/);
 });

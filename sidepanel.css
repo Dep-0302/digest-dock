@@ -432,8 +432,9 @@ body {
    CONTENT AREA
    ============================================================ */
 .content {
+  --notes-panel-inset: 16px;
   flex: 1;
-  padding: 18px 16px 24px;
+  padding: 18px var(--notes-panel-inset) 24px;
   overflow-y: auto;
 }
 
@@ -1754,6 +1755,16 @@ body {
 /* ============================================================
    NOTES TAB — continuous list (not floating cards)
    ============================================================ */
+.notes-toolbar {
+  position: sticky;
+  top: -18px;
+  z-index: 4;
+  margin: -18px calc(-1 * var(--notes-panel-inset)) 10px;
+  padding: 18px var(--notes-panel-inset) 10px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+}
+
 .notes-filter {
   display: flex;
   gap: 2px;
@@ -2088,13 +2099,12 @@ body {
 }
 
 .note-source-export {
-  margin-left: 6px;
-  padding: 3px 9px;
-  font-size: 11px;
-  color: var(--text-muted);
-  background: none;
-  border: 1px solid var(--border);
-  border-radius: 6px;
+  padding: 5px 10px;
+  font: 600 11.5px/1 var(--font-body);
+  color: var(--text-secondary);
+  background: var(--surface);
+  border: 1px solid var(--border-heavy);
+  border-radius: var(--r-sm);
   cursor: pointer;
 }
 
@@ -2129,6 +2139,8 @@ body {
   flex: 1 1 16rem;
   min-width: 0;
 }
+
+.notes-capacity[hidden] { display: none; }
 
 .notes-capacity strong {
   color: var(--ink);
@@ -2209,8 +2221,6 @@ body {
 }
 
 .note-source-header {
-  position: sticky;
-  top: 0;
   z-index: 2;
   display: flex;
   flex-wrap: wrap;
@@ -2220,6 +2230,11 @@ body {
   border-bottom: 1px solid var(--border);
   background: var(--surface-raised);
   border-radius: var(--r-md) var(--r-md) 0 0;
+}
+
+.note-source-header.is-sticky {
+  position: sticky;
+  border-radius: 0;
 }
 
 .note-source-title {
@@ -2480,19 +2495,24 @@ body {
 
 .notes-grouping-row[hidden] { display: none; }
 
-.notes-grouping-row select {
-  padding: 5px 8px;
-  border: 1px solid var(--border-heavy);
-  border-radius: var(--r-sm);
-  font: inherit;
-  color: var(--text);
-  background: var(--surface);
-}
+.note-thought-row { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 0 8px; }
+.note-thought-row .note-thought { flex: 1; min-width: 0; }
 
-.notes-grouping-row select:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
+.note-delete-thought {
+  flex: 0 0 auto;
+  padding: 2px 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  font: 11px/1.6 var(--font-body);
+  cursor: pointer;
 }
+.note-delete-thought:hover { color: var(--danger); }
+.note-delete-thought:disabled { opacity: 0.5; cursor: default; }
+.note-delete-thought:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.note-thought-delete-confirm { flex: 1 1 100%; padding: 8px 0 12px; font-size: 12px; }
+.note-thought-delete-confirm p { margin: 0 0 8px; }
+.note-confirm-delete-thought { color: var(--danger); }
 
 .note-thought {
   margin-bottom: 10px;
@@ -2517,18 +2537,41 @@ body {
   color: var(--text);
 }
 
+button.note-quote {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font-family: inherit;
+  text-align: left;
+  user-select: text;
+  cursor: pointer;
+}
+button.note-quote::after {
+  content: "展开上下文";
+  display: block;
+  margin-top: 4px;
+  font: 11px/1.6 var(--font-body);
+  color: var(--accent);
+}
+button.note-quote[aria-expanded="true"]::after { content: "收起上下文"; }
+button.note-quote:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 2px; }
+
 .note-trigger-window {
   margin-top: 6px;
   padding-left: 10px;
   border-left: 1px solid var(--border);
   display: -webkit-box;
   -webkit-box-orient: vertical;
-  -webkit-line-clamp: 4;
+  -webkit-line-clamp: 8;
   white-space: pre-wrap;
   line-height: 1.6;
-  max-height: 6.4em;
+  max-height: 12.8em;
   overflow: hidden;
 }
+
+.note-trigger-window[hidden] { display: none; }
 
 .note-thought-editor textarea {
   display: block;
@@ -2622,7 +2665,7 @@ body {
   }
 
   .content {
-    padding-inline: 12px;
+    --notes-panel-inset: 12px;
   }
 
   .header-top {

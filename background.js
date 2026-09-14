@@ -2134,6 +2134,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       message.thought,
       Number(message.dataGeneration),
       String(message.runtimeInstanceId || ""),
+      message.expectedThought,
     ).then(sendResponse);
     return true;
   }
@@ -7117,11 +7118,18 @@ async function handleUpdateNoteThought(
   thought,
   expectedDataGeneration,
   expectedRuntimeInstanceId,
+  expectedThought,
 ) {
   const expectedNoteGeneration = noteStorageGeneration;
   if (typeof noteId !== "string" || !noteId || typeof thought !== "string") {
     return extensionDataMutationResult(false, "INVALID_NOTE_THOUGHT");
   }
+  // The delete confirmation carries an ephemeral snapshot, never a stored
+  // state field. Validate it again inside the write queue before clearing.
+  if (expectedThought !== undefined && (
+    thought !== "" || !expectedThought || typeof expectedThought.thought !== "string" ||
+    !(expectedThought.thoughtAt === null || Number.isSafeInteger(expectedThought.thoughtAt))
+  )) return extensionDataMutationResult(false, "INVALID_NOTE_THOUGHT");
   if (!extensionDataFenceIsWritable(expectedRuntimeInstanceId, expectedDataGeneration)) {
     return extensionDataMutationResult(false, "EXTENSION_DATA_RESET");
   }
@@ -7140,6 +7148,9 @@ async function handleUpdateNoteThought(
       const shard = await readNotesByMedia(entry.mediaKey);
       const note = shard.find((candidate) => candidate.id === noteId);
       if (!note) return extensionDataMutationResult(false, "NOTE_NOT_FOUND");
+      if (expectedThought !== undefined && (
+        note.thought !== expectedThought.thought || note.thoughtAt !== expectedThought.thoughtAt
+      )) return extensionDataMutationResult(false, "NOTE_THOUGHT_CHANGED");
       const nextThought = thought.trim() ? thought : "";
       const updated = {
         ...note,
