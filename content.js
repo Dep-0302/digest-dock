@@ -1027,6 +1027,29 @@ function dismissNoteToast(state = ytdNoteToast) {
   if (ytdNoteToast === state) ytdNoteToast = null;
 }
 
+function closeNoteThoughtInput(state, resumePlayback = false) {
+  const video = state?.editingVideo;
+  const currentVideoId = new URLSearchParams(window.location.search).get("v");
+  const player = document.getElementById("movie_player");
+  const shouldResume =
+    resumePlayback === true &&
+    state?.wasPlayingBeforeEdit === true &&
+    ytdNoteToast === state &&
+    state.element?.isConnected &&
+    state.editingVideoId === currentVideoId &&
+    document.querySelector("video.html5-main-video") === video &&
+    !player?.classList.contains("ad-showing") &&
+    !player?.classList.contains("ad-interrupting");
+  dismissNoteToast(state);
+  if (!shouldResume) return;
+  try {
+    video.play()?.catch?.(() => {});
+  } catch {
+    // Playback can reject after a player transition; the closed thought editor
+    // must never target a replacement video.
+  }
+}
+
 function openNoteThoughtInput() {
   const state = ytdNoteToast;
   if (!state) return false;
@@ -1039,6 +1062,9 @@ function openNoteThoughtInput() {
   const video = document.querySelector("video.html5-main-video");
   if (!video) return false;
   state.editing = true;
+  state.wasPlayingBeforeEdit = !video.paused;
+  state.editingVideo = video;
+  state.editingVideoId = videoId;
   clearTimeout(state.dismissTimer);
   clearTimeout(state.removalTimer);
   state.element.style.animation = "none";
@@ -1061,7 +1087,7 @@ function openNoteThoughtInput() {
     event.preventDefault();
     if (state.saving) return;
     if (event.key === "Escape") {
-      dismissNoteToast(state);
+      closeNoteThoughtInput(state, true);
       return;
     }
     state.saving = true;
@@ -1096,7 +1122,7 @@ function openNoteThoughtInput() {
         if (ytdNoteToast !== state || !state.element.isConnected) return;
       }
       if (result?.success) {
-        dismissNoteToast(state);
+        closeNoteThoughtInput(state, true);
         return;
       }
       status.textContent = "保存失败，请重试。";

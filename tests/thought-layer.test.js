@@ -96,14 +96,26 @@ captureTest("[T2] second N edits the same toast, focuses, pauses and cancels dis
   assert.equal((await h.allNotes()).length,1); assert.equal(h.video.paused,true);
   await h.time.advance(20000); assert.equal(h.toast(),toast); assert.equal(input.isConnected,true);
 });
-captureTest("[T3] Enter saves verbatim thought/time in the real worker and never resumes",async()=>{
+captureTest("[T3] Enter saves verbatim thought/time and restores prior playback",async()=>{
   const h=await harness([], {platform}); const {input}=await beginThought(h);
   const before=(await h.allNotes())[0]; input.value=THOUGHT; const started=Date.now();
   await h.press("Enter"); const after=(await h.allNotes())[0];
   assert.equal(after.thought,THOUGHT); assert.ok(after.thoughtAt>=started && after.thoughtAt<=Date.now());
   unchangedExceptThought(before,after); assert.equal(h.toast(),null);
-  assert.equal(h.video.paused,true); assert.equal(h.video.playCalls,0);
+  assert.equal(h.video.paused,false); assert.equal(h.video.playCalls,1);
   const idx=(await h.api.readNoteIndex())[0]; assert.equal(idx.hasThought,true); assert.ok(idx.searchText.includes("不要替我改写"));
+});
+captureTest("[T3] Enter keeps a previously paused video paused after success",async()=>{
+  const h=await harness([], {platform}); h.video.paused=true;
+  const {input}=await beginThought(h); input.value=THOUGHT;
+  await h.press("Enter");
+  assert.equal(h.toast(),null); assert.equal(h.video.paused,true); assert.equal(h.video.playCalls,0);
+});
+captureTest("[T3] duplicate capture edits restore the prior playback after success",async()=>{
+  const h=await harness([], {platform}); await h.press("n"); await h.time.advance(11000);
+  await h.press("n"); const input=inputInToast(h); input.value=THOUGHT;
+  await h.press("Enter");
+  assert.equal(h.toast(),null); assert.equal(h.video.paused,false); assert.equal(h.video.playCalls,1);
 });
 captureTest("[T3] IME composition Enter confirms a candidate without saving the thought",async()=>{
   const h=await harness([], {platform}); const {input}=await beginThought(h); input.value=THOUGHT;
@@ -117,8 +129,9 @@ captureTest("[T3] failed persistence retains input, reports failure and does not
   const before=bytes(h.local); h.local.set=async()=>{throw new Error("fixture write failure");};
   await h.press("Enter"); assert.ok(h.toast()); assert.equal(input.value,THOUGHT);
   assert.ok(bytes(h.local).equals(before)); assert.match(h.toast().textContent,/失败|重试/);
+  assert.equal(h.video.paused,true); assert.equal(h.video.playCalls,0);
 });
-captureTest("[T3] a worker restart while the input stays open refreshes the fence once and saves",async()=>{
+captureTest("[T3] a worker restart refreshes the fence once, saves, and restores playback",async()=>{
   const h=await harness([], {platform}); const {input}=await beginThought(h); input.value=THOUGHT;
   const original=clone((await h.allNotes())[0]);
   const restarted=await harness([], {platform}); await restarted.local.set(h.local.snapshot());
@@ -126,23 +139,53 @@ captureTest("[T3] a worker restart while the input stays open refreshes the fenc
   h.content.chrome.runtime.sendMessage=restarted.send;
   await h.press("Enter"); const saved=(await restarted.allNotes())[0];
   assert.equal(saved.thought,THOUGHT); unchangedExceptThought(original,saved);
-  assert.equal(h.toast(),null); assert.equal(h.video.paused,true); assert.equal(h.video.playCalls,0);
+  assert.equal(h.toast(),null); assert.equal(h.video.paused,false); assert.equal(h.video.playCalls,1);
   assert.equal(restarted.messages.filter(m=>m.action==="updateNoteThought").length,2,"复用现有一次后台刷新重试语义");
 });
-captureTest("[T4] Escape discards draft only, retaining the saved quote",async()=>{
+captureTest("[T4] Escape discards draft, retains the saved quote, and resumes prior playback",async()=>{
   const h=await harness([], {platform}); const {input}=await beginThought(h); input.value=THOUGHT;
   const before=bytes(h.local); h.resetEvidence(); await h.press("Escape");
   assert.equal(h.toast(),null); assert.equal((await h.allNotes()).length,1);
   assert.equal((await h.allNotes())[0].thought,""); assertReadOnly(h,before);
+  assert.equal(h.video.paused,false); assert.equal(h.video.playCalls,1);
+});
+captureTest("[T4] Escape does not start a video that was already paused",async()=>{
+  const h=await harness([], {platform}); h.video.paused=true;
+  await beginThought(h); await h.press("Escape");
+  assert.equal(h.video.paused,true); assert.equal(h.video.playCalls,0);
 });
 
 }
+
+test("[T3] YouTube successful save does not resume an ad player",async()=>{
+  const h=await harness([]); const player=h.contentDoc.createElement("div");
+  player.id="movie_player"; player.classList.add("ad-showing"); h.contentDoc.body.appendChild(player);
+  const {input}=await beginThought(h); input.value=THOUGHT; await h.press("Enter");
+  assert.equal(h.toast(),null); assert.equal(h.video.paused,true); assert.equal(h.video.playCalls,0);
+});
+
+test("[T3] YouTube successful save does not resume a replaced player",async()=>{
+  const h=await harness([]); const {input}=await beginThought(h); input.value=THOUGHT;
+  h.video.remove(); const replacement=h.contentDoc.createElement("video"); replacement.className="html5-main-video";
+  Object.assign(replacement,{paused:true,playCalls:0,play(){this.paused=false;this.playCalls++;}});
+  h.contentDoc.body.appendChild(replacement); await h.press("Enter");
+  assert.equal(h.toast(),null); assert.equal(h.video.paused,true); assert.equal(h.video.playCalls,0);
+  assert.equal(replacement.paused,true); assert.equal(replacement.playCalls,0);
+});
+
+test("[T2–T4] changing YouTube video closes the old input without resuming it",async()=>{
+  const h=await harness([]); await beginThought(h);
+  h.url.search="?v=video_00002";
+  h.contentDoc.dispatchEvent({type:"yt-navigate-finish",bubbles:false});
+  assert.equal(h.toast(),null); assert.equal(h.video.paused,true); assert.equal(h.video.playCalls,0);
+});
 
 test("[T2–T4] changing Bilibili part closes the old input; the next toast owns the new CID [bilibili]",async()=>{
   const h=await harness([], {platform:"bilibili"}); const {input}=await beginThought(h); input.value="上一 P 的未保存草稿";
   const first=clone((await h.allNotes())[0]); assert.equal(first.cid,123);
   h.url.search="?p=2"; h.content.biliPollNavigation(); h.contentDoc.body.focus();
-  assert.equal(h.toast(),null); await h.time.advance(200); await h.press("n");
+  assert.equal(h.toast(),null); assert.equal(h.video.paused,true); assert.equal(h.video.playCalls,0);
+  await h.time.advance(200); await h.press("n");
   const second=(await h.allNotes()).find(n=>n.id!==first.id); assert.ok(second); assert.equal(second.cid,124); assert.equal(second.page,2);
   await h.press("n"); inputInToast(h).value=THOUGHT; await h.press("Enter");
   const after=await h.allNotes(); assert.deepEqual(after.find(n=>n.id===first.id),first);

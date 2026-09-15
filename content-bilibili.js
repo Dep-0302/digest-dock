@@ -697,6 +697,24 @@ function biliDismissNoteToast(state = biliNoteToast) {
   if (biliNoteToast === state) biliNoteToast = null;
 }
 
+function biliCloseNoteThoughtInput(state, resumePlayback = false) {
+  const video = state?.editingVideo;
+  const shouldResume =
+    resumePlayback === true &&
+    state?.wasPlayingBeforeEdit === true &&
+    biliNoteToast === state &&
+    state.element?.isConnected &&
+    state.navigationKey === biliNavigationKey() &&
+    biliGetVideoElement() === video;
+  biliDismissNoteToast(state);
+  if (!shouldResume) return;
+  try {
+    video.play()?.catch?.(() => {});
+  } catch {
+    // A player can be replaced during navigation; never resume the replacement.
+  }
+}
+
 function biliOpenNoteThoughtInput() {
   const state = biliNoteToast;
   if (!state) return false;
@@ -708,6 +726,8 @@ function biliOpenNoteThoughtInput() {
   const video = biliGetVideoElement();
   if (!video) return false;
   state.editing = true;
+  state.wasPlayingBeforeEdit = !video.paused;
+  state.editingVideo = video;
   clearTimeout(state.dismissTimer);
   const heading = biliCreateElement("div", { text: "📝 记录想法" });
   heading.style.cssText = "font-weight:700;color:#c8674f;margin-bottom:8px;";
@@ -731,7 +751,7 @@ function biliOpenNoteThoughtInput() {
     event.preventDefault();
     if (state.saving) return;
     if (event.key === "Escape") {
-      biliDismissNoteToast(state);
+      biliCloseNoteThoughtInput(state, true);
       return;
     }
     state.saving = true;
@@ -756,7 +776,7 @@ function biliOpenNoteThoughtInput() {
         if (!ownsInput()) return;
       }
       if (result?.success) {
-        biliDismissNoteToast(state);
+        biliCloseNoteThoughtInput(state, true);
         return;
       }
       status.textContent = "保存失败，请重试。";

@@ -527,6 +527,22 @@ function transcriptSelectedTrackIdentity(track) {
   ].join(":");
 }
 
+function transcriptTrackMatchesPagePreference(
+  pageTrack,
+  transcriptTrack = currentTranscriptSelectedTrack,
+) {
+  const expected = sanitizeTranscriptSelectedTrack(pageTrack);
+  const current = sanitizeTranscriptSelectedTrack(transcriptTrack);
+  if (!expected?.language) return true;
+  if (!current?.language || current.kind !== expected.kind) return false;
+  if (isChineseLanguage(expected.language)) {
+    return isChineseLanguage(current.language);
+  }
+  return Boolean(
+    current.language === expected.language,
+  );
+}
+
 function transcriptContentFingerprint(transcriptTimestamped, transcriptText = "") {
   return overviewTranscriptFingerprint(
     String(transcriptTimestamped || transcriptText || ""),
@@ -592,6 +608,7 @@ function buildTranscriptFetchRequest({
   videoId,
   mediaRef,
   preferredLanguage = "",
+  pagePreferredTrack = null,
   tabId = null,
   generation,
   routeKey,
@@ -604,6 +621,7 @@ function buildTranscriptFetchRequest({
     videoId: mediaRef?.videoId || videoId,
     mediaRef,
     preferredLanguage,
+    pagePreferredTrack: sanitizeTranscriptSelectedTrack(pagePreferredTrack),
     trackKind: YOUTUBE_TRANSCRIPT_TRACK_KIND,
     tabId,
     runId,
@@ -3239,13 +3257,26 @@ function startDigest(
 
   if (SIDEPANEL_MVP_AVAILABLE && !videoChanged) {
     const transcriptStatus = sidepanelMvpState?.transcript?.status;
+    const transcriptInProgress = [
+      SIDEPANEL_STATE_API.TRANSCRIPT_STATUSES.LOADING,
+      SIDEPANEL_STATE_API.TRANSCRIPT_STATUSES.RETRYING_FREE,
+      SIDEPANEL_STATE_API.TRANSCRIPT_STATUSES.FETCHING_SUPADATA,
+    ].includes(transcriptStatus);
+    const knownChineseTrackChanged =
+      Boolean(currentTranscript) &&
+      isChineseLanguage(currentVideoCaptionSelection?.language) &&
+      !transcriptTrackMatchesPagePreference(currentVideoCaptionSelection);
+    if (knownChineseTrackChanged && !transcriptInProgress) {
+      // A later MAIN-world metadata read may reveal the Chinese track after an
+      // English Passive result was already rendered. Start one new fenced task
+      // so the old READY state cannot mask that stronger page evidence.
+      digestGeneration += 1;
+      sidepanelMvpBindSession(videoId, nextRouteKey, { forceNewTask: true });
+    }
     if (
-      transcriptStatus === SIDEPANEL_STATE_API.TRANSCRIPT_STATUSES.READY ||
-      ![
-        SIDEPANEL_STATE_API.TRANSCRIPT_STATUSES.LOADING,
-        SIDEPANEL_STATE_API.TRANSCRIPT_STATUSES.RETRYING_FREE,
-        SIDEPANEL_STATE_API.TRANSCRIPT_STATUSES.FETCHING_SUPADATA,
-      ].includes(transcriptStatus)
+      !knownChineseTrackChanged &&
+      (transcriptStatus === SIDEPANEL_STATE_API.TRANSCRIPT_STATUSES.READY ||
+        !transcriptInProgress)
     ) {
       renderSidepanelMvpTranscriptState();
       return Promise.resolve();
@@ -3337,7 +3368,13 @@ async function runDigestLoad(
   if (!ownsDigestLoad()) return;
 
   // Check if we already have this video loaded in memory
-  if (!videoChanged && videoId === currentVideoId && currentAnalysis) {
+  if (
+    !videoChanged &&
+    videoId === currentVideoId &&
+    currentAnalysis &&
+    (!isChineseLanguage(currentVideoCaptionSelection?.language) ||
+      transcriptTrackMatchesPagePreference(currentVideoCaptionSelection))
+  ) {
     if (SIDEPANEL_MVP_AVAILABLE && currentTranscript) {
       sidepanelMvpResolveTranscript(
         { success: true, routeOutcome: "HAVE_TRANSCRIPT", source: "memory" },
@@ -3511,6 +3548,7 @@ async function runDigestLoad(
     videoId,
     mediaRef: requestMediaRef,
     preferredLanguage: currentVideoSourceLanguage,
+    pagePreferredTrack: currentVideoCaptionSelection,
     tabId: requestVideoTabId,
     generation,
     routeKey,
@@ -8621,9 +8659,7 @@ function validateTranscriptCacheRecord(
   }
   if (
     expectedTrack?.language &&
-    (!selectedTrack ||
-      selectedTrack.language !== expectedTrack.language ||
-      selectedTrack.kind !== expectedTrack.kind)
+    !transcriptTrackMatchesPagePreference(expectedTrack, selectedTrack)
   ) {
     return null;
   }

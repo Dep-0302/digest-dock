@@ -1254,7 +1254,7 @@ test("a cache-miss YouTube note points the user to the side panel and calls no p
   assert.equal(storage.readNotes().length, 0);
 });
 
-test("side panel and background stay wired to the Passive-first contract", () => {
+test("side panel and background apply page track evidence before Passive", () => {
   const panel = read("sidepanel.js");
   const background = read("background.js");
 
@@ -1297,8 +1297,8 @@ test("side panel and background stay wired to the Passive-first contract", () =>
   assert.doesNotMatch(panel, /重试 YouTube 原生字幕/);
   assert.doesNotMatch(panel, /formatLocalTranscriptDiagnostics/);
 
-  // v5 keeps old positive caches readable. Active is the one fixed automatic
-  // route after Passive; Panel remains experiment-only.
+  // v5 keeps old positive caches readable. The live page track list constrains
+  // Passive before the one fixed Active route; Panel remains experiment-only.
   for (const source of [
     "youtube-passive",
     "youtube-active",
@@ -1313,9 +1313,11 @@ test("side panel and background stay wired to the Passive-first contract", () =>
   )?.[0];
   assert.ok(nativeHandler);
   assert.ok(
-    nativeHandler.indexOf("awaitYoutubePassiveGate") <
+    nativeHandler.indexOf("readYouTubePlayabilitySnapshot") <
       nativeHandler.indexOf("chooseYoutubeAutomaticTrack") &&
       nativeHandler.indexOf("chooseYoutubeAutomaticTrack") <
+        nativeHandler.indexOf("awaitYoutubePassiveGate") &&
+      nativeHandler.indexOf("awaitYoutubePassiveGate") <
         nativeHandler.indexOf("runYoutubeNativeSingleFlight") &&
       nativeHandler.indexOf("runYoutubeNativeSingleFlight") <
       nativeHandler.indexOf("YOUTUBE_CAPTIONS_REQUIRED"),

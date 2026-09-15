@@ -98,6 +98,102 @@ test('an existing thought is reused ahead of a blank historical copy without cha
   assert.ok(bytes(h.local).equals(before));assert.deepEqual(noteWrites(h.local),[]);
 });
 
+test('an adjacent short cue reuses a saved span that ends with its final sentence punctuation',async()=>{
+  const h=await harness([],{configured:true});await replaceTranscript(h,[
+    {start:26,duration:1,text:'Context one',language:'en'},
+    {start:27,duration:1,text:'Context two',language:'en'},
+    {start:28,duration:1,text:'Context three',language:'en'},
+    {start:29,duration:1,text:'Context four',language:'en'},
+    {start:30,duration:1,text:'Start of shared',language:'en'},
+    {start:31,duration:1,text:'sentence.',language:'en'},
+    {start:32,duration:1,text:'Context five',language:'en'},
+    {start:33,duration:1,text:'Context six',language:'en'},
+  ]);
+  h.aiReply=JSON.stringify({quote:'Start of shared sentence.'});h.video.currentTime=33.1;await h.press('n');
+  const first=clone((await h.allNotes())[0]);assert.equal(first.text,'Start of shared sentence.');await expire(h);
+  h.video.currentTime=34.1;const before=bytes(h.local);h.resetEvidence();await h.press('n');
+  assert.deepEqual(await h.allNotes(),[first]);assert.ok(h.toast().querySelector('textarea'));
+  assert.equal(h.providerCalls.length,0);assert.deepEqual(noteWrites(h.local),[]);assert.ok(bytes(h.local).equals(before));
+});
+
+test('a formatted Chinese paragraph reuses its first timestamp from a covered adjacent cue',async()=>{
+  const h=await harness([],{configured:true});await replaceTranscript(h,[
+    '而只有到了老鼠这里','我们的祖先才会想象','才拥有了想象力','拥有了模拟能力',
+    '拥有了想象力之后','那我们那只像老鼠一样的祖先','就不用真的跑出去试一下',
+    '看自己会不会被天上扑下来的翼龙','给叼走了','后文',
+  ].map((text,index)=>({start:26+index,duration:1,text,language:'zh-CN'})));
+  const paragraph='而只有到了老鼠这里，我们的祖先才会想象，才拥有了想象力，拥有了模拟能力；拥有了想象力之后，那我们那只像老鼠一样的祖先，就不用真的跑出去试一下，看自己会不会被天上扑下来的翼龙给叼走了。';
+  h.aiReply=JSON.stringify({quote:paragraph});const first=await h.send({action:'saveNote',videoId:'video_00001',timestamp:30});
+  assert.equal(first.note.text,paragraph);assert.equal(first.note.timestampSeconds,30);
+  for(const timestamp of [31,33,34]) {
+    h.resetEvidence();const reused=await h.send({action:'saveNote',videoId:'video_00001',timestamp});
+    assert.equal(reused.duplicate,true);assert.equal(reused.note.id,first.note.id);assert.equal(reused.note.timestampSeconds,30);
+    assert.equal(h.providerCalls.length,0);assert.equal((await h.allNotes()).length,1);
+  }
+});
+
+test('contextual captures that overlap before either write still converge inside the write queue',async()=>{
+  const h=await harness([],{configured:true});await replaceTranscript(h,[
+    '前文一','前文二','前文三','前文四','开始的共享句','后半句','后文一','后文二',
+  ].map((text,index)=>({start:26+index,duration:1,text,language:'zh-CN'})));
+  h.aiReply=JSON.stringify({quote:'前文一，前文二，前文三，前文四，开始的共享句，后半句，后文一。'});let release;
+  h.providerGate=new Promise(resolve=>{release=resolve;});const pending=Promise.all([
+    h.send({action:'saveNote',videoId:'video_00001',timestamp:30}),
+    h.send({action:'saveNote',videoId:'video_00001',timestamp:31}),
+  ]);await settle();assert.equal(h.providerCalls.length,2);release();const results=await pending;
+  assert.equal(new Set(results.map(result=>result.note.id)).size,1);assert.equal(results.filter(result=>result.duplicate).length,1);
+  assert.equal((await h.allNotes()).length,1);
+});
+
+for(const [name,transcript,firstTimestamp,secondTimestamp,quote] of [
+  ['start',[{start:0,duration:1,text:'Start',language:'en'},{start:1,duration:1,text:'shared',language:'en'},{start:2,duration:1,text:'context',language:'en'},{start:3,duration:1,text:'after',language:'en'}],0,1,'Start shared'],
+  ['end',[{start:0,duration:1,text:'Before',language:'en'},{start:1,duration:1,text:'context',language:'en'},{start:2,duration:1,text:'shared start',language:'en'},{start:3,duration:1,text:'end',language:'en'}],2,3,'shared start end'],
+]) test(`frozen caption evidence at the transcript ${name} still permits one covered paragraph`,async()=>{
+  const h=await harness([],{configured:true});await replaceTranscript(h,transcript);h.aiReply=JSON.stringify({quote});
+  const first=await h.send({action:'saveNote',videoId:'video_00001',timestamp:firstTimestamp});h.resetEvidence();
+  const reused=await h.send({action:'saveNote',videoId:'video_00001',timestamp:secondTimestamp});
+  assert.equal(reused.duplicate,true);assert.equal(reused.note.id,first.note.id);assert.equal(h.providerCalls.length,0);
+});
+
+test('an adjacent repeated word remains separate when the saved text covers only its first cue',async()=>{
+  const h=await harness([],{configured:true});await replaceTranscript(h,[
+    {start:26,duration:1,text:'Context one',language:'en'},
+    {start:27,duration:1,text:'Context two',language:'en'},
+    {start:28,duration:1,text:'Context three',language:'en'},
+    {start:29,duration:1,text:'Context four',language:'en'},
+    {start:30,duration:1,text:'Again',language:'en'},
+    {start:31,duration:1,text:'Again',language:'en'},
+    {start:32,duration:1,text:'Context five',language:'en'},
+    {start:33,duration:1,text:'Context six',language:'en'},
+  ]);
+  h.aiReply=JSON.stringify({quote:'Again'});await h.send({action:'saveNote',videoId:'video_00001',timestamp:30});h.resetEvidence();
+  const later=await h.send({action:'saveNote',videoId:'video_00001',timestamp:31});
+  assert.equal(later.duplicate,undefined);assert.equal((await h.allNotes()).length,2);assert.equal(h.providerCalls.length,1);
+});
+
+test('caption span normalization preserves signed numeric content',async()=>{
+  const h=await harness([]);const rows=[
+    {t:30,text:'增长+5%'},{t:31,text:'增长-5%'},
+  ];
+  assert.equal(h.runWorker(`findSavedCaptionSpan(${JSON.stringify(rows)},[0,1],'增长+5% 增长+5%')`),null);
+});
+
+test('a historical note without frozen context is not treated as an adjacent paragraph match',async()=>{
+  const historical=note('legacy-span',{timestampSeconds:30,rawText:'Start of shared',text:'Start of shared sentence',triggerWindow:[]});
+  const h=await harness([historical],{configured:true});await replaceTranscript(h,[
+    {start:26,duration:1,text:'Context one',language:'en'},
+    {start:27,duration:1,text:'Context two',language:'en'},
+    {start:28,duration:1,text:'Context three',language:'en'},
+    {start:29,duration:1,text:'Context four',language:'en'},
+    {start:30,duration:1,text:'Start of shared',language:'en'},
+    {start:31,duration:1,text:'sentence',language:'en'},
+    {start:32,duration:1,text:'Context five',language:'en'},
+    {start:33,duration:1,text:'Context six',language:'en'},
+  ]);
+  h.aiReply=JSON.stringify({quote:'Start of shared sentence'});const result=await h.send({action:'saveNote',videoId:'video_00001',timestamp:31});
+  assert.equal(result.duplicate,undefined);assert.equal((await h.allNotes()).length,2);assert.equal(h.providerCalls.length,1);
+});
+
 test('concurrent saves of one cue return one durable ID and one index entry',async()=>{
   const h=await harness([]);const request={action:'saveNote',videoId:'video_00001',timestamp:33,skipAiCleanup:true};
   const results=await Promise.all([h.send(request),h.send(request)]);

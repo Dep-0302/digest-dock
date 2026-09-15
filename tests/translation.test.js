@@ -4456,6 +4456,7 @@ function installSidepanelDigestFixture(runtime) {
       const pendingCaches = new Map();
       const events = [];
       const saved = [];
+      let cacheRequestCount = 0;
       let activeTabName = "transcript";
       currentOverviewMode = "zh";
       const element = (id) => {
@@ -4500,12 +4501,14 @@ function installSidepanelDigestFixture(runtime) {
       setOverviewTranslationLoading = (show) => {
         isOverviewTranslationLoading = show;
       };
-      loadFromCache = (videoId) =>
-        new Promise((resolve) => {
+      loadFromCache = (videoId) => {
+        cacheRequestCount += 1;
+        return new Promise((resolve) => {
           const queue = pendingCaches.get(videoId) || [];
           queue.push(resolve);
           pendingCaches.set(videoId, queue);
         });
+      };
       saveToCache = async (videoId) => {
         saved.push({
           videoId,
@@ -4521,6 +4524,7 @@ function installSidepanelDigestFixture(runtime) {
         withOriginal = false,
         mediaRef = null,
         routeKey = null,
+        selectedTrack = null,
       ) => {
         const resolvedMediaRef = mediaRef || {
           platform: "youtube",
@@ -4531,8 +4535,12 @@ function installSidepanelDigestFixture(runtime) {
         const resolvedRouteKey = routeKey;
         const transcriptText = "transcript-" + videoId;
         const transcriptTimestamped = "timestamped-" + videoId;
-        const transcriptSource =
-          resolvedMediaRef.platform === "bilibili" ? "bilibili" : "supadata";
+        const normalizedSelectedTrack = sanitizeTranscriptSelectedTrack(selectedTrack);
+        const transcriptSource = resolvedMediaRef.platform === "bilibili"
+          ? "bilibili"
+          : normalizedSelectedTrack
+            ? "youtube-passive"
+            : "supadata";
         const transcriptFingerprint = transcriptContentFingerprint(
           transcriptTimestamped,
           transcriptText,
@@ -4572,8 +4580,9 @@ function installSidepanelDigestFixture(runtime) {
         transcriptLanguage: sourceLanguage,
         transcriptSource,
         transcriptSourceAttempt: transcriptSource === "bilibili" ? "BILIBILI" : "SUPADATA",
-        transcriptSelectedTrack: null,
-        transcriptSelectedTrackIdentity: "none",
+        transcriptSelectedTrack: normalizedSelectedTrack,
+        transcriptSelectedTrackIdentity:
+          transcriptSelectedTrackIdentity(normalizedSelectedTrack),
         transcriptRequestedLanguage: sourceLanguage,
         transcriptRequestedTrackKind: YOUTUBE_TRANSCRIPT_TRACK_KIND,
         transcriptFingerprint,
@@ -4581,7 +4590,7 @@ function installSidepanelDigestFixture(runtime) {
           source: transcriptSource,
           language: sourceLanguage,
           requestedLanguage: sourceLanguage,
-          selectedTrack: null,
+          selectedTrack: normalizedSelectedTrack,
           fingerprint: transcriptFingerprint,
         }),
         transcriptSourcePolicyVersion: TRANSCRIPT_SOURCE_POLICY_VERSION,
@@ -4602,6 +4611,7 @@ function installSidepanelDigestFixture(runtime) {
             options.videoUrl || "url-" + videoId,
             mediaRef,
             routeKey,
+            options.captionSelection,
           );
         },
         analyze: () => triggerAnalysis(),
@@ -4644,6 +4654,8 @@ function installSidepanelDigestFixture(runtime) {
         }),
         events: () => JSON.stringify(events),
         saved: () => JSON.stringify(saved),
+        cacheRequestCount: () => cacheRequestCount,
+        selectedTrack: () => JSON.stringify(currentTranscriptSelectedTrack),
         setupEvents: () => setupEventListeners(),
         errorSnapshot: () => JSON.stringify({
           title: element("errorTitle").textContent,
@@ -8217,6 +8229,83 @@ test("a newly confirmed audio language does not reset the same video's validated
   assert.equal(snapshot.sourceLanguage, "en");
   assert.equal(snapshot.transcriptText, "transcript-video-a");
   assert.equal(snapshot.overviewMode, "zh");
+});
+
+test("a newly confirmed Chinese caption track replaces same-video English memory once", async () => {
+  const runtime = loadSidepanelRuntime();
+  const fixture = installSidepanelDigestFixture(runtime);
+  fixture.setVideoSourceLanguage("en-US");
+  const englishTrack = { language: "en-US", kind: "manual" };
+  const chineseTrack = { language: "zh-Hans", kind: "manual" };
+
+  const englishLoad = fixture.start("video-a", {
+    captionSelection: englishTrack,
+  });
+  await nextTurn();
+  fixture.resolveCache(
+    "video-a",
+    fixture.makeCache(
+      "video-a",
+      true,
+      "en-US",
+      false,
+      null,
+      null,
+      englishTrack,
+    ),
+  );
+  await englishLoad;
+  assert.equal(fixture.cacheRequestCount(), 1);
+
+  await fixture.start("video-a", { captionSelection: englishTrack });
+  assert.equal(
+    fixture.cacheRequestCount(),
+    1,
+    "the same non-Chinese track must keep the existing zero-repeat shortcut",
+  );
+
+  const chineseLoad = fixture.start("video-a", {
+    captionSelection: chineseTrack,
+  });
+  await nextTurn();
+  assert.equal(
+    fixture.cacheRequestCount(),
+    2,
+    "stronger page track evidence must bypass the READY/memory shortcut",
+  );
+  fixture.resolveCache(
+    "video-a",
+    fixture.makeCache(
+      "video-a",
+      true,
+      "zh-Hans",
+      false,
+      null,
+      null,
+      chineseTrack,
+    ),
+  );
+  await chineseLoad;
+
+  const replaced = JSON.parse(fixture.snapshot());
+  assert.equal(JSON.parse(fixture.selectedTrack()).language, "zh-hans");
+  assert.equal(replaced.sourceLanguage, "zh-Hans");
+
+  await fixture.start("video-a", { captionSelection: chineseTrack });
+  assert.equal(
+    fixture.cacheRequestCount(),
+    2,
+    "the same confirmed track must keep the zero-repeat shortcut",
+  );
+
+  await fixture.start("video-a", {
+    captionSelection: { language: "zh-Hant", kind: "manual" },
+  });
+  assert.equal(
+    fixture.cacheRequestCount(),
+    2,
+    "Simplified and Traditional manual tracks must not trigger a refresh loop",
+  );
 });
 
 test("an active Overview tab starts analysis for the newly selected video", async () => {

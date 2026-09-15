@@ -1440,6 +1440,16 @@ function passiveEntryMatches(entry, request) {
   const requestedKind = normalizeYoutubeTrackKind(request.trackKind);
   if (requestedKind === "manual" && entry.trackKind !== "manual") return false;
   if (requestedKind === "asr" && entry.trackKind !== "asr") return false;
+  // preferredLanguage usually describes the default audio language. Once the
+  // live page proves a Chinese track is available, an older English capture
+  // must not end the task before the Chinese-first route can run.
+  if (
+    isChineseLanguage(request?.pagePreferredTrack?.language) &&
+    (!isChineseLanguage(entry?.language) ||
+      entry?.trackKind !== request.pagePreferredTrack.kind)
+  ) {
+    return false;
+  }
   return true;
 }
 
@@ -1449,7 +1459,7 @@ async function readYoutubePassiveGate(request) {
     .filter((entry) => passiveEntryMatches(entry, request))
     .sort((left, right) => {
       const requestedLanguage = normalizeLanguageCode(
-        request.preferredLanguage,
+        request?.pagePreferredTrack?.language || request.preferredLanguage,
       );
       const requestedPrimaryLanguage = youtubePrimaryLanguage(
         requestedLanguage,
@@ -1979,6 +1989,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       digestGeneration: message.digestGeneration,
       routeKey: message.routeKey,
       trackKind: message.trackKind,
+      pagePreferredTrack: message.pagePreferredTrack,
       captionRetry: message.captionRetry === true,
     };
     const youtubeRequest =
@@ -3178,6 +3189,14 @@ function chooseYoutubeAutomaticTrack(pageCaptionEvidence) {
   );
 }
 
+function normalizeYoutubePagePreferredTrack(track) {
+  const language = normalizeLanguageCode(track?.language);
+  const kind = track?.kind;
+  return language && (kind === "manual" || kind === "asr")
+    ? { language, kind }
+    : null;
+}
+
 /**
  * Classify a YouTube playabilityStatus into a terminal caption-source decision.
  * Clear login, age, members-only, region, and unavailable states are terminal:
@@ -3705,6 +3724,9 @@ async function handleFetchYoutubeNativeTranscript(
   options = {},
 ) {
   const routeIdentity = youtubeRouteIdentity(options);
+  const metadataPreferredTrack = normalizeYoutubePagePreferredTrack(
+    options.pagePreferredTrack,
+  );
   const request = {
     videoId: validYoutubeVideoId(videoId),
     preferredLanguage: normalizeLanguageCode(preferredLanguage) || "",
@@ -3741,22 +3763,9 @@ async function handleFetchYoutubeNativeTranscript(
     );
   }
 
-  const passiveDeadlineAt = Date.now() + YOUTUBE_PASSIVE_WAIT_MS;
-  const passive = await awaitYoutubePassiveGate(request, passiveDeadlineAt);
-  if (!(await requestStillCurrent())) {
-    return withYoutubeRouteIdentity(
-      {
-        ...pageContextChangedResult(),
-        routeOutcome: "PAGE_CONTEXT_CHANGED",
-        supadataEligible: false,
-      },
-      routeIdentity,
-    );
-  }
-  if (passive?.success) {
-    return withYoutubeRouteIdentity(passive, routeIdentity);
-  }
-
+  // Read the live page's text-free track list before accepting a completed
+  // Passive capture. preferredLanguage is commonly the default audio language,
+  // so it cannot by itself express the product's Chinese-first track policy.
   let pageCaptionEvidence = null;
   let pageSnapshot = null;
   try {
@@ -3786,6 +3795,29 @@ async function handleFetchYoutubeNativeTranscript(
       },
       routeIdentity,
     );
+  }
+  const livePagePreferredTrack = chooseYoutubeAutomaticTrack(pageCaptionEvidence);
+  const pagePreferredTrack =
+    livePagePreferredTrack ||
+    (pageCaptionEvidence?.captionTrackCountKnown === true
+      ? null
+      : metadataPreferredTrack);
+  request.pagePreferredTrack = pagePreferredTrack;
+
+  const passiveDeadlineAt = Date.now() + YOUTUBE_PASSIVE_WAIT_MS;
+  const passive = await awaitYoutubePassiveGate(request, passiveDeadlineAt);
+  if (!(await requestStillCurrent())) {
+    return withYoutubeRouteIdentity(
+      {
+        ...pageContextChangedResult(),
+        routeOutcome: "PAGE_CONTEXT_CHANGED",
+        supadataEligible: false,
+      },
+      routeIdentity,
+    );
+  }
+  if (passive?.success) {
+    return withYoutubeRouteIdentity(passive, routeIdentity);
   }
   const terminalPlayabilityMessages = {
     LOGIN_REQUIRED:
@@ -3887,7 +3919,7 @@ async function handleFetchYoutubeNativeTranscript(
   // retry never repeats Active; it only gives Passive one more chance before
   // the existing per-attempt Supadata choice. Panel remains experiment-only.
   if (options.captionRetry !== true) {
-    const automaticTrack = chooseYoutubeAutomaticTrack(pageCaptionEvidence);
+    const automaticTrack = pagePreferredTrack;
     let activeResult = null;
     if (automaticTrack) {
       request.language = automaticTrack.language;
@@ -5324,11 +5356,22 @@ async function handleSaveNote(
       Math.floor(Number.isFinite(matchedStart) ? matchedStart : safeTimestamp),
     );
     const captureRawText = String(matchedLine.text || "").trim();
+    const captureEvidence = {
+      platform: mediaRef.platform,
+      cueStart: matchedStart,
+      rawText: captureRawText,
+      frozenWindow: triggerWindow,
+    };
     if (saveGeneration !== noteStorageGeneration || !extensionDataGenerationIsWritable(dataGeneration)) {
       return noteSaveFailureResponse(false);
     }
     await ensureNotesMigrated();
-    const existing = await findExistingNoteForCapture(mediaKey, noteTimestampSeconds, captureRawText);
+    const existing = await findExistingNoteForCapture(
+      mediaKey,
+      noteTimestampSeconds,
+      captureRawText,
+      captureEvidence,
+    );
     await requireExactTabRoute(tabId, actionRouteKey);
     if (saveGeneration !== noteStorageGeneration || !extensionDataGenerationIsWritable(dataGeneration)) {
       return noteSaveFailureResponse(false);
@@ -6805,26 +6848,170 @@ function assertNotesRemainBackupable(notes, { allowInvalidStored = false } = {})
   }
 }
 
-async function findExistingNoteForCapture(mediaKey, timestampSeconds, rawText) {
-  if (typeof rawText !== "string" || !rawText) return null;
-  const index = await readNoteIndex();
-  const ids = new Set(index.filter((entry) => entry.mediaKey === mediaKey &&
-    entry.timestampSeconds === timestampSeconds).map((entry) => entry.id));
-  if (!ids.size) return null;
-  const shard = await readNotesByMedia(mediaKey);
-  const matches = shard.filter((note) => {
-    if (!ids.has(note.id) || typeof note.rawText !== "string") return false;
-    const savedRaw = note.rawText.trim();
-    if (!savedRaw) return false;
-    if (savedRaw.length !== 3000) return savedRaw === rawText;
-    // A raw cue at the storage limit may be a prefix. Only the full frozen
-    // source can prove equality; missing/truncated evidence stays separate.
-    if (!rawText.startsWith(savedRaw)) return false;
-    const fullCues = (Array.isArray(note.triggerWindow) ? note.triggerWindow : []).filter((row) =>
-      Number.isFinite(row?.t) && Math.floor(row.t) === timestampSeconds &&
-      typeof row.text === "string" && row.text.trim().startsWith(savedRaw));
-    return fullCues.length === 1 && fullCues[0].text.trim() === rawText;
-  });
+function normalizeCaptureText(value) {
+  if (typeof value !== "string") return "";
+  const normalized = value.normalize("NFKC").toLowerCase();
+  if (/[\u3400-\u9fff]/.test(normalized)) {
+    return normalized
+      .replace(/\s+/g, "")
+      .replace(/(?<!\d)[,;:](?!\d)/g, "")
+      .replace(/(?<!\d)\.(?!\d)/g, "")
+      .replace(/[、。！？!?“”‘’"'《》〈〉「」『』【】〔〕…]/gu, "");
+  }
+  return normalized
+      .replace(/(?<!\d)[.!?;:](?!\d)/g, " ")
+      .replace(/(?<!\d),(?!\d)/g, " ")
+      .trim()
+      .replace(/\s+/g, " ");
+}
+
+function findUniqueCaptureCue(rows, predicate) {
+  const matches = (Array.isArray(rows) ? rows : [])
+    .map((row, index) => ({ row, index }))
+    .filter(({ row }) => Number.isFinite(row?.t) && typeof row.text === "string" && predicate(row));
+  return matches.length === 1 ? matches[0] : null;
+}
+
+function hasCompleteFrozenCaptionEvidence(rows) {
+  return Array.isArray(rows) && rows.length > 0 && rows.every((row) =>
+    Number.isFinite(row?.t) && typeof row.text === "string" && row.text.trim());
+}
+
+function findSavedCaptionSpan(rows, requiredIndexes, savedText) {
+  const expected = normalizeCaptureText(savedText);
+  if (!expected || !hasCompleteFrozenCaptionEvidence(rows)) return null;
+  const indexes = [...new Set(requiredIndexes)];
+  if (indexes.some((index) => !Number.isInteger(index) || index < 0 || index >= rows.length)) {
+    return null;
+  }
+  const firstRequired = Math.min(...indexes);
+  const lastRequired = Math.max(...indexes);
+  const matches = [];
+  for (let start = 0; start <= firstRequired; start++) {
+    for (let end = lastRequired; end < rows.length; end++) {
+      const candidate = normalizeCaptureText(
+        rows.slice(start, end + 1).map((row) => row.text).join(" "),
+      );
+      if (candidate === expected) matches.push({ start, end });
+    }
+  }
+  return matches.length === 1 ? matches[0] : null;
+}
+
+function captionSpanStaysInOneStatement(rows, indexes) {
+  const first = Math.min(...indexes);
+  const last = Math.max(...indexes);
+  return rows.slice(first, last).every((row) =>
+    typeof row?.text === "string" && !/[.!?。！？]/.test(row.text));
+}
+
+function captionSpanHasContinuousTiming(rows, indexes) {
+  const first = Math.min(...indexes);
+  const last = Math.max(...indexes);
+  const pathGaps = [];
+  const allGaps = [];
+  for (let index = 1; index < rows.length; index += 1) {
+    const gap = Number(rows[index]?.t) - Number(rows[index - 1]?.t);
+    if (!Number.isFinite(gap) || gap <= 0) continue;
+    allGaps.push(gap);
+    if (index > first && index <= last) pathGaps.push(gap);
+  }
+  // A frozen window with fewer than two ordinary cue gaps cannot distinguish
+  // a nearby caption continuation from the same words much later in a sparse
+  // transcript. This is source-cadence evidence, not a fixed time threshold.
+  if (allGaps.length < 2 || !pathGaps.length) return false;
+  const ordered = [...allGaps].sort((left, right) => left - right);
+  const median = ordered[Math.floor(ordered.length / 2)];
+  return Number.isFinite(median) && median > 0 && pathGaps.every((gap) => gap <= median * 3);
+}
+
+function hasMatchingSavedCaptionSpan(note, timestampSeconds, rawText, captureEvidence) {
+  if (
+    !captureEvidence ||
+    note?.platform !== captureEvidence.platform ||
+    !Number.isFinite(captureEvidence.cueStart) ||
+    typeof captureEvidence.rawText !== "string" ||
+    captureEvidence.rawText !== rawText ||
+    captureEvidence.rawText.length >= 3000 ||
+    typeof note?.rawText !== "string" ||
+    note.rawText.trim().length === 0 ||
+    note.rawText.trim().length >= 3000 ||
+    typeof note?.text !== "string" ||
+    note.text.trim().length === 0 ||
+    note.text.trim().length >= 3000 ||
+    Number(note.timestampSeconds) === timestampSeconds
+  ) {
+    return false;
+  }
+
+  const frozenRows = Array.isArray(note.triggerWindow) ? note.triggerWindow : [];
+  const savedTarget = findUniqueCaptureCue(
+    frozenRows,
+    (row) => Math.floor(row.t) === Number(note.timestampSeconds) && row.text.trim() === note.rawText.trim(),
+  );
+  const currentTargetInFrozen = findUniqueCaptureCue(
+    frozenRows,
+    (row) => row.t === captureEvidence.cueStart && row.text.trim() === captureEvidence.rawText,
+  );
+  if (!savedTarget || !currentTargetInFrozen) {
+    return false;
+  }
+
+  const currentFrozenWindow = Array.isArray(captureEvidence.frozenWindow)
+    ? captureEvidence.frozenWindow
+    : [];
+  const savedTargetInCurrentContext = findUniqueCaptureCue(
+    currentFrozenWindow,
+    (row) => row.t === savedTarget.row.t && row.text.trim() === note.rawText.trim(),
+  );
+  const currentTarget = findUniqueCaptureCue(
+    currentFrozenWindow,
+    (row) => row.t === captureEvidence.cueStart && row.text.trim() === captureEvidence.rawText,
+  );
+  if (!savedTargetInCurrentContext || !currentTarget) {
+    return false;
+  }
+
+  const savedSpan = findSavedCaptionSpan(
+    frozenRows,
+    [savedTarget.index, currentTargetInFrozen.index],
+    note.text,
+  );
+  const currentSpan = findSavedCaptionSpan(
+    currentFrozenWindow,
+    [savedTargetInCurrentContext.index, currentTarget.index],
+    note.text,
+  );
+  return !!savedSpan && !!currentSpan &&
+    hasCompleteFrozenCaptionEvidence(currentFrozenWindow) &&
+    captionSpanStaysInOneStatement(frozenRows, [savedTarget.index, currentTargetInFrozen.index]) &&
+    captionSpanHasContinuousTiming(frozenRows, [savedTarget.index, currentTargetInFrozen.index]) &&
+    captionSpanStaysInOneStatement(
+      currentFrozenWindow,
+      [savedTargetInCurrentContext.index, currentTarget.index],
+    ) && captionSpanHasContinuousTiming(
+      currentFrozenWindow,
+      [savedTargetInCurrentContext.index, currentTarget.index],
+    );
+}
+
+function captureEvidenceFromFrozenNote(note) {
+  const rows = Array.isArray(note?.triggerWindow) ? note.triggerWindow : [];
+  const rawText = typeof note?.rawText === "string" ? note.rawText.trim() : "";
+  const target = findUniqueCaptureCue(
+    rows,
+    (row) => Math.floor(row.t) === Number(note?.timestampSeconds) && row.text.trim() === rawText,
+  );
+  if (!target) return null;
+  return {
+    platform: note.platform,
+    cueStart: target.row.t,
+    rawText,
+    frozenWindow: rows,
+  };
+}
+
+function selectExistingCapture(matches) {
   // Historical duplicates are not deleted here. A unique thought can be
   // revisited without choosing a blank quote over the user's own words.
   const thoughts = new Set(matches.filter((note) => note.thought?.trim()).map((note) => note.thought));
@@ -6837,6 +7024,33 @@ async function findExistingNoteForCapture(mediaKey, timestampSeconds, rawText) {
     Number(!!right.thought?.trim()) - Number(!!left.thought?.trim()) ||
     left.createdAt - right.createdAt || left.id.localeCompare(right.id),
   )[0] || null;
+}
+
+async function findExistingNoteForCapture(mediaKey, timestampSeconds, rawText, captureEvidence = null) {
+  if (typeof rawText !== "string" || !rawText) return null;
+  const index = await readNoteIndex();
+  const ids = new Set(index.filter((entry) => entry.mediaKey === mediaKey &&
+    entry.timestampSeconds === timestampSeconds).map((entry) => entry.id));
+  if (!ids.size && !captureEvidence) return null;
+  const shard = await readNotesByMedia(mediaKey);
+  const exactMatches = shard.filter((note) => {
+    if (!ids.has(note.id) || typeof note.rawText !== "string") return false;
+    const savedRaw = note.rawText.trim();
+    if (!savedRaw) return false;
+    if (savedRaw.length !== 3000) return savedRaw === rawText;
+    // A raw cue at the storage limit may be a prefix. Only the full frozen
+    // source can prove equality; missing/truncated evidence stays separate.
+    if (!rawText.startsWith(savedRaw)) return false;
+    const fullCues = (Array.isArray(note.triggerWindow) ? note.triggerWindow : []).filter((row) =>
+      Number.isFinite(row?.t) && Math.floor(row.t) === timestampSeconds &&
+      typeof row.text === "string" && row.text.trim().startsWith(savedRaw));
+    return fullCues.length === 1 && fullCues[0].text.trim() === rawText;
+  });
+  if (exactMatches.length) return selectExistingCapture(exactMatches);
+  if (!captureEvidence) return null;
+  const contextualMatches = shard.filter((note) =>
+    hasMatchingSavedCaptionSpan(note, timestampSeconds, rawText, captureEvidence));
+  return contextualMatches.length ? selectExistingCapture(contextualMatches) : null;
 }
 
 async function saveNoteToStorage(
@@ -6855,7 +7069,12 @@ async function saveNoteToStorage(
       return false;
     }
     if (reuseExistingCapture) {
-      const existing = await findExistingNoteForCapture(note.mediaKey, note.timestampSeconds, captureRawText);
+      const existing = await findExistingNoteForCapture(
+        note.mediaKey,
+        note.timestampSeconds,
+        captureRawText,
+        captureEvidenceFromFrozenNote(note),
+      );
       if (expectedGeneration !== noteStorageGeneration || !extensionDataGenerationIsWritable(expectedDataGeneration)) return false;
       if (existing) return { duplicate: true, note: existing };
     }
