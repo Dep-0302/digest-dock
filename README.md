@@ -12,7 +12,7 @@ The main workflow is intentionally small:
 - Switch between the original transcript, Simplified Chinese, and an aligned bilingual view.
 - Generate a chapter-based overview, inspect key quotes, and explain selected text.
 - Jump back to the video from transcript rows, overview chapters, or saved notes.
-- Save polished timestamped notes and move them between devices with a versioned JSON backup.
+- Save timestamped quotes and your own thoughts, find them across videos, and move them between devices with a versioned JSON backup.
 - Keep credentials and project data under your control with bring-your-own API keys, local Chrome storage, and no analytics or telemetry.
 
 DigestDock is a personal derivative of [Zara Zhang's original YouTube Digest](https://github.com/zarazhangrui/youtube-digest). It builds on the original side-panel workflow, adds Bilibili subtitle support and cross-platform note backup and restore, and uses a Passive-first YouTube transcript flow. The original project and the public implementations used for Bilibili integration research are credited in [Acknowledgements and references](#acknowledgements-and-references).
@@ -20,6 +20,16 @@ DigestDock is a personal derivative of [Zara Zhang's original YouTube Digest](ht
 The extension is installed locally from GitHub. It is not distributed through the Chrome Web Store, does not include API credits, and does not use a developer-operated backend.
 
 > Free-version scope, September 2, 2026: source transcripts, timestamp jumps, original-language notes, backups, and original exports work without an AI key. AI overviews, explanations, translation, and note polishing are optional enhancements. The fixed IOS/json3 Active route runs only after cache and Passive miss; Panel remains evidence-only. Chrome Web Store distribution has not started.
+
+## New in 3.0.0: capture and return to your thoughts
+
+- Press **N** to save a quote while playback continues. Press **N** again within the 10-second toast to pause and add your own thought. **Enter** saves, **Shift+Enter** adds a line, and **Esc** cancels the draft. Saving or cancelling resumes playback if the video was playing before you opened the editor.
+- Capturing the same saved passage again can reopen its existing thought, even from another subtitle line within that passage. The original timestamp and saved content stay intact; ambiguous historical thoughts are kept separate.
+- Search thoughts, source quotes, saved note text, available translations, video titles, and channels across the whole library. Clearing search restores the previous view. **All notes** offers date or video grouping and remembers your choice.
+- When exact search has no results, **让 AI 找找 (Let AI look)** is an optional click. It can return up to five existing notes. Your thoughts are never rewritten by AI, and writing or editing them needs no API key. You can edit, clear, or delete a thought while keeping its quote and source.
+- YouTube prefers available Chinese subtitle tracks, including Simplified and Traditional Chinese. Saved-note jumps restore available cached or free native subtitles while keeping the Notes tab open.
+
+The upgrade keeps the existing note and JSON backup formats. Update files in the same unpacked extension folder, then reload the extension and refresh video tabs. A recovery backup before updating is useful; you do not need to clear notes or settings.
 
 ## Install with your coding agent
 
@@ -146,7 +156,7 @@ Backups exported before the rename, including files named `youtube-digest-notes-
 
 JSON is the recovery backup format for DigestDock notes and remains separate from reading exports. The Notes tab exports the current video, selected source videos, all notes, or one source group as UTF-8 TXT. Each video section includes title, channel, URL, description, and timecode-sorted saved notes; it does not append the full video transcript. The Transcript tab separately downloads the complete UTF-8 TXT transcript in the current original, Chinese, or bilingual mode.
 
-Original-language reading exports use local material only and make no AI or Supadata request. Note TXT preflight lists only missing metadata, titles, description chunks, and saved-note translations; it never requires translation of the full transcript. When material is incomplete the four explicit choices are **Complete and export**, **Export now**, **Export original**, and **Abandon export**. Export now writes visible missing markers and never passes original text off as Chinese. Complete and export may read metadata only from a video page the user explicitly opens and may translate the selected scope only after that click; it never opens videos in the background or calls Supadata. Transcript TXT completion separately lists missing transcript segments. Long completion work remains bounded and resumable.
+Original-language reading exports use local material only and make no AI or Supadata request. Note TXT preflight lists only missing metadata, titles, description chunks, and saved-note translations; it never requires translation of the full transcript. For incomplete material, **完整导出 (Complete export)** prepares the disclosed source pages and missing translations after your explicit confirmation; **直接导出 (Export now)** downloads available content with visible missing markers. The top language selector determines the export language. Closing the dialog or pressing Esc cancels. Export completion does not call Supadata; long completion work remains bounded and resumable. Transcript TXT completion separately lists missing transcript segments.
 
 ## Current free-version scope
 
@@ -162,7 +172,7 @@ Original-language reading exports use local material only and make no AI or Supa
 - When a note's source subtitle is already Chinese, the original subtitle is reused as the Chinese note and no Chinese-translation request is sent.
 - For Bilibili Chinese subtitles, the overview and polished note are generated directly in Chinese with one AI request each; no English round-trip is made.
 - Local notes, versioned JSON note backup and restore, and bounded local caches for recent transcripts, translations, and up to 100 compact per-video overviews. DigestDock requests Chrome's `unlimitedStorage` permission so long-video caches are not forced through the default 10 MB extension-storage ceiling; the permission does not grant file or network access.
-- All notes grouped by source video and ordered within each source strictly by timecode, plus selectable per-video TXT note exports and language-aware TXT transcript downloads.
+- All notes grouped by date or source video, with newest dates first and timecode order within each day; the current-video list stays in timecode order. Per-video TXT note exports and language-aware TXT transcript downloads remain available.
 - Resumable Chinese and bilingual exports. Note TXT completes only metadata, title, description, and saved-note content in the frozen selected scope; transcript TXT independently completes transcript segments. Verified translations are reused from local storage and every valid batch is persisted before continuing.
 - A preset AI provider you select in Settings powers all AI features: DeepSeek V4 Flash (default), Zhipu GLM-4.7-Flash, Alibaba Bailian Qwen Flash, SiliconFlow Qwen3-8B, or Fireworks DeepSeek V4 Flash. Each provider's endpoint and model are fixed, keys are stored per provider, and there is no custom-endpoint field.
 - The provider picker also shows the official Tencent Hunyuan Translation icon as unavailable. Tencent documents `hunyuan-translation-lite`, but does not document that model on the extension's current single-key OpenAI-compatible route, so DigestDock does not guess the endpoint, model routing, or authentication.

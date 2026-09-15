@@ -212,7 +212,7 @@ async function harness(notes = [], { configured = false, platform = "youtube" } 
   const chrome = {
     storage: { local, session, onChanged:ignored },
     runtime:{ id:"test", onInstalled:ignored, onMessage:{addListener:fn=>listeners.push(fn)},
-      getURL:p=>`chrome-extension://test/${p}`, getManifest:()=>({version:"2.0.0"}),
+      getURL:p=>`chrome-extension://test/${p}`, getManifest:()=>({version:"3.0.0"}),
       sendMessage:async m=>{ notifications.push(clone(m)); return {success:true}; } },
     action:{onClicked:ignored}, sidePanel:{setPanelBehavior(){},setOptions:async()=>{},open:async()=>{}},
     tabs:{ onUpdated:ignored,onActivated:ignored,
