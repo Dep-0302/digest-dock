@@ -5894,7 +5894,7 @@ function noteCleanupClausesStayWithTarget(candidateText, targetUnits, hasCjk) {
 
 /**
  * Rejects a fluent answer that silently abandons TARGET for surrounding cues.
- * Cleanup may repair punctuation and ASR noise, but the saved thought still
+ * Cleanup may repair punctuation and ASR noise, but the cleaned quote still
  * needs recognizable lexical evidence from the cue the user chose.
  */
 function noteCleanupPreservesTarget(candidate, target, fullContext = target) {
