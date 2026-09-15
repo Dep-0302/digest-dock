@@ -1,6 +1,6 @@
 # Privacy
 
-Effective: August 31, 2026
+Effective: September 15, 2026
 
 DigestDock is a GitHub-only, bring-your-own-key Chrome extension. It has no DigestDock account, developer-operated backend, analytics, advertising, or telemetry.
 
@@ -16,7 +16,7 @@ Depending on the feature you use, DigestDock handles:
 - text you select in the transcript and nearby transcript context;
 - transcript context around a timestamped note;
 - content you ask to translate;
-- notes you save;
+- notes you save, including your own thoughts and their frozen source context;
 - per-video reading-export source records containing the title, channel, canonical
   URL, description, complete transcript, source fingerprints, and any verified
   Chinese translations already produced for those fields;
@@ -53,6 +53,9 @@ DigestDock sends AI feature content to the AI provider you select in Settings. D
 - small semantic transcript batches currently needed for progressive Chinese
   translation, or requested source-language overview or explanation content;
 - nearby transcript context and video metadata when polishing a saved note;
+- the search query and a bounded set of existing note IDs, thoughts, source
+  quotes, video titles, and channel names only when you click **让 AI 找找 (Let AI look)**
+  after an exact search returns no results;
 - the polished English note and its video title when generating the separately stored Simplified Chinese note;
 - only the still-missing title, note, description-chunk, or transcript-segment
   units after you explicitly start or continue a Chinese/bilingual reading
@@ -62,6 +65,13 @@ DigestDock sends AI feature content to the AI provider you select in Settings. D
 You select one provider from a preset list and provide that provider's API key; the endpoint, model, request format, and capability limits are fixed per provider, and there is no Base URL or model field. The selectable providers and their fixed endpoints are DeepSeek (`https://api.deepseek.com`), Zhipu GLM (`https://open.bigmodel.cn`), Alibaba Bailian Qwen (`https://dashscope.aliyuncs.com`), SiliconFlow (`https://api.siliconflow.cn`), and Fireworks (`https://api.fireworks.ai`). Each provider's key is stored separately, and DigestDock never sends your content to a provider other than the one you selected, nor does it silently fall back to another provider.
 
 The picker also shows a disabled Tencent Hunyuan Translation entry with its bundled official icon. It has no host permission and cannot receive or use a key because the official documentation does not yet verify `hunyuan-translation-lite` on the extension's single-key OpenAI-compatible route. DigestDock does not guess that configuration.
+
+Writing, editing, and exact-searching your own thoughts are local operations.
+The optional AI note lookup reads the supplied thoughts to select existing
+notes; it never rewrites them or saves generated answers. Results are matched
+to current local note IDs and limited to five. If the input budget cannot fit
+the whole library, the interface shows how many recent notes were searched;
+the extension does not silently start additional lookup requests.
 
 Requests go directly from the extension to YouTube, Bilibili, explicitly authorized Supadata, or your selected AI provider. On YouTube, the free route may passively observe a page-issued caption response or make the bounded credential-free IOS/json3 request described above. Supadata and the AI provider are authenticated with the keys you supply; Bilibili uses the browser's current Bilibili session. DigestDock's developer does not proxy or receive these requests.
 
@@ -73,6 +83,9 @@ DigestDock uses Chrome's local extension storage, not a DigestDock cloud service
 
 - The Supadata key and each AI provider's settings and key remain on the device in Chrome's extension storage.
 - Saved notes remain until you delete them or remove/clear the extension's data. There is no fixed note-count limit; a new save is rejected atomically if the resulting recovery backup would exceed the 32 MiB capacity guard.
+- Your date/video grouping choice is stored locally as a display preference;
+  search queries are not saved as reusable filters. Clearing a thought keeps
+  the quote, source, and original saved date.
 - Recent transcript, digest, and per-segment translation cache entries are stored
   locally. The cache is limited to 20 videos, and entries older than 30 days are
   removed when the side panel opens.

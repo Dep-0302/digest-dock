@@ -411,6 +411,7 @@
           data-panel="notes"
         >
           <div class="section">
+            <div id="notesToolbar" class="notes-toolbar">
             <div
               class="notes-capacity"
               id="notesCapacity"
@@ -427,7 +428,7 @@
               </button>
             </div>
             <div class="section-header">
-              <div class="section-title">已保存的笔记</div>
+              <div class="section-title" id="notesViewTitle">已保存的笔记</div>
               <div class="notes-header-actions">
                 <div class="notes-filter">
                   <button
@@ -493,6 +494,17 @@
                 </div>
               </div>
             </div>
+            <input id="notesSearch" class="notes-search" type="search" aria-label="搜索全部笔记" placeholder="搜索想法、原句、视频或频道" />
+            <div id="notesGroupingRow" class="notes-grouping-row" hidden>
+              <span id="notesGroupingLabel">排列方式</span>
+              <div id="notesGrouping" class="notes-filter" role="group" aria-labelledby="notesGroupingLabel">
+                <button id="notesGroupDate" class="enhance-btn active" type="button" data-notes-grouping="date" aria-pressed="true">按日期</button>
+                <button id="notesGroupVideo" class="enhance-btn" type="button" data-notes-grouping="video" aria-pressed="false">按视频</button>
+              </div>
+            </div>
+            <p id="notesSearchStatus" class="notes-search-status" role="status" hidden></p>
+            <button id="notesAiFind" class="enhance-btn" type="button" hidden>让 AI 找找</button>
+            </div>
             <form
               class="notes-export-picker"
               id="notesExportPicker"
@@ -548,6 +560,7 @@
                 </div>
               </fieldset>
             </form>
+            <div id="noteJumpFallback" class="note-trigger" role="status" hidden></div>
             <div
               class="notes-export-precheck"
               id="notesExportPrecheck"

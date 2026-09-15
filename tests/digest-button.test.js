@@ -782,7 +782,7 @@ test("YouTube save toast labels non-Chinese raw captions and keeps Chinese clean
   );
   assert.match(
     contentScript,
-    /function showNoteSavedToast\(note\)[\s\S]*?const presentation = youtubeNoteToastPresentation\(note\);[\s\S]*?笔记已保存\$\{presentation\.label[\s\S]*?escapeHtmlForContent\(presentation\.text\)/,
+    /function showNoteSavedToast\(note, duplicate = false, conflict = false\)[\s\S]*?const presentation = youtubeNoteToastPresentation\(note\);[\s\S]*?笔记已保存\$\{presentation\.label[\s\S]*?escapeHtmlForContent\(presentation\.text\)/,
   );
   assert.doesNotMatch(contentScript, /result\.code === "NOTE_STORAGE_FULL"/);
   assert.doesNotMatch(contentScript, /笔记已达上限/);

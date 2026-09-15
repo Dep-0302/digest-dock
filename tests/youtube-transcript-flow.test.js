@@ -578,8 +578,16 @@ test("concurrent Passive inflight and capture preserve arrival order across dela
   assert.equal(gate.inFlight, false);
 });
 
-test("Passive falls back to an actually observed non-preferred language", async () => {
-  const worker = loadBackground();
+test("a UI-language preference does not reject Passive when the page has no Chinese track", async () => {
+  const worker = loadBackground({
+    pageSnapshotOptions: {
+      captionTrackCountKnown: true,
+      captionTrackCount: 1,
+      availableTracks: [{ language: "en", kind: "manual" }],
+      pageDefaultTrack: { language: "en", kind: "manual" },
+      pageCurrentTrack: { language: "en", kind: "manual" },
+    },
+  });
   await worker.dispatch(
     {
       action: "youtubePassiveState",
@@ -627,7 +635,18 @@ test("Passive falls back to an actually observed non-preferred language", async 
 });
 
 test("Passive ranks exact language ahead of a manual non-preferred track", async () => {
-  const worker = loadBackground();
+  const worker = loadBackground({
+    pageSnapshotOptions: {
+      captionTrackCountKnown: true,
+      captionTrackCount: 2,
+      availableTracks: [
+        { language: "en", kind: "manual" },
+        { language: "zh-Hans", kind: "asr" },
+      ],
+      pageDefaultTrack: { language: "en", kind: "manual" },
+      pageCurrentTrack: { language: "zh-Hans", kind: "asr" },
+    },
+  });
   for (const track of [
     { language: "en", kind: "manual", text: "manual English" },
     { language: "zh-Hans", kind: "asr", text: "exact Chinese" },
@@ -665,7 +684,7 @@ test("Passive ranks exact language ahead of a manual non-preferred track", async
 
   const result = await worker.helpers.handleFetchYoutubeNativeTranscript(
     VIDEO_ID,
-    "zh-Hans",
+    "en",
     1,
     nativeOptions("72"),
   );
@@ -673,6 +692,7 @@ test("Passive ranks exact language ahead of a manual non-preferred track", async
   assert.equal(result.language, "zh-Hans");
   assert.equal(result.selectedTrack.kind, "asr");
   assert.equal(result.transcript[0].text, "exact Chinese");
+  assert.equal(worker.counts.activeRun, 0);
 });
 
 test("automatic track selection treats Chinese varieties equally and keeps manual source order", () => {
@@ -694,6 +714,220 @@ test("automatic track selection treats Chinese varieties equally and keeps manua
     language: "yue-HK",
     kind: "manual",
   });
+});
+
+for (const chineseLanguage of ["zh-Hans", "zh-Hant"]) {
+  test(`page ${chineseLanguage} evidence rejects an older English Passive capture`, async () => {
+    const worker = loadBackground({
+      pageSnapshotOptions: {
+        captionTrackCountKnown: true,
+        captionTrackCount: 2,
+        availableTracks: [
+          { language: "en-US", kind: "manual" },
+          { language: chineseLanguage, kind: "manual" },
+        ],
+        pageDefaultTrack: { language: "en-US", kind: "manual" },
+        pageCurrentTrack: { language: chineseLanguage, kind: "manual" },
+      },
+      activeRun: async (request) => {
+        assert.equal(request.language, chineseLanguage);
+        assert.equal(request.trackKind, "manual");
+        return {
+          ...transcriptResult("Chinese Active"),
+          language: chineseLanguage,
+          selectedTrack: { language: chineseLanguage, kind: "manual" },
+          transcript: [
+            { text: "中文字幕", start: 0, duration: 2, language: chineseLanguage },
+          ],
+        };
+      },
+    });
+    await worker.dispatch(
+      {
+        action: "youtubePassiveState",
+        payload: {
+          type: "inflight",
+          videoId: VIDEO_ID,
+          language: "en-US",
+          kind: "manual",
+          status: 0,
+          inFlight: true,
+        },
+      },
+      { tab: { id: 1 } },
+    );
+    await worker.dispatch(
+      {
+        action: "youtubePassiveState",
+        payload: {
+          type: "capture",
+          videoId: VIDEO_ID,
+          language: "en-US",
+          kind: "manual",
+          status: 200,
+          inFlight: false,
+          body: json3Body("stale English captions"),
+        },
+      },
+      { tab: { id: 1 } },
+    );
+
+    const result = await worker.helpers.handleFetchYoutubeNativeTranscript(
+      VIDEO_ID,
+      "en-US",
+      1,
+      nativeOptions(`page-${chineseLanguage}`),
+    );
+
+    assert.equal(result.success, true);
+    assert.equal(result.source, "youtube-active");
+    assert.equal(result.language, chineseLanguage);
+    assert.equal(result.transcript[0].text, "中文字幕");
+    assert.equal(worker.counts.activeRun, 1);
+  });
+}
+
+test("fenced metadata track evidence survives a temporarily unavailable page snapshot", async () => {
+  const worker = loadBackground({
+    activeRun: async (request) => {
+      assert.equal(request.language, "zh-Hans");
+      return {
+        ...transcriptResult("Chinese Active"),
+        language: "zh-Hans",
+        selectedTrack: { language: "zh-Hans", kind: "manual" },
+        transcript: [
+          { text: "中文字幕", start: 0, duration: 2, language: "zh-Hans" },
+        ],
+      };
+    },
+  });
+  for (const type of ["inflight", "capture"]) {
+    await worker.dispatch(
+      {
+        action: "youtubePassiveState",
+        payload: {
+          type,
+          videoId: VIDEO_ID,
+          language: "en-US",
+          kind: "manual",
+          status: type === "capture" ? 200 : 0,
+          inFlight: type !== "capture",
+          ...(type === "capture"
+            ? { body: json3Body("stale English captions") }
+            : {}),
+        },
+      },
+      { tab: { id: 1 } },
+    );
+  }
+
+  const result = await worker.helpers.handleFetchYoutubeNativeTranscript(
+    VIDEO_ID,
+    "en-US",
+    1,
+    {
+      ...nativeOptions("metadata-zh"),
+      pagePreferredTrack: { language: "zh-Hans", kind: "manual" },
+    },
+  );
+
+  assert.equal(result.source, "youtube-active");
+  assert.equal(result.language, "zh-Hans");
+  assert.equal(worker.counts.activeRun, 1);
+});
+
+test("a manual Chinese page target rejects an ASR-only Chinese Passive capture", async () => {
+  const worker = loadBackground({
+    pageSnapshotOptions: {
+      captionTrackCountKnown: true,
+      captionTrackCount: 2,
+      availableTracks: [
+        { language: "en-US", kind: "manual" },
+        { language: "zh-Hans", kind: "manual" },
+      ],
+      pageDefaultTrack: { language: "en-US", kind: "manual" },
+    },
+    activeRun: async (request) => {
+      assert.equal(request.language, "zh-Hans");
+      assert.equal(request.trackKind, "manual");
+      return {
+        ...transcriptResult("Chinese Active"),
+        language: "zh-Hans",
+        selectedTrack: { language: "zh-Hans", kind: "manual" },
+      };
+    },
+  });
+  for (const type of ["inflight", "capture"]) {
+    await worker.dispatch(
+      {
+        action: "youtubePassiveState",
+        payload: {
+          type,
+          videoId: VIDEO_ID,
+          language: "zh-Hant",
+          kind: "asr",
+          status: type === "capture" ? 200 : 0,
+          inFlight: type !== "capture",
+          ...(type === "capture" ? { body: json3Body("中文自动字幕") } : {}),
+        },
+      },
+      { tab: { id: 1 } },
+    );
+  }
+
+  const result = await worker.helpers.handleFetchYoutubeNativeTranscript(
+    VIDEO_ID,
+    "en-US",
+    1,
+    nativeOptions("manual-over-asr"),
+  );
+
+  assert.equal(result.source, "youtube-active");
+  assert.equal(result.selectedTrack.kind, "manual");
+  assert.equal(worker.counts.activeRun, 1);
+});
+
+test("Simplified and Traditional manual tracks share one stable Passive choice", async () => {
+  const worker = loadBackground({
+    pageSnapshotOptions: {
+      captionTrackCountKnown: true,
+      captionTrackCount: 3,
+      availableTracks: [
+        { language: "en-US", kind: "manual" },
+        { language: "zh-Hans", kind: "manual" },
+        { language: "zh-Hant", kind: "manual" },
+      ],
+      pageDefaultTrack: { language: "en-US", kind: "manual" },
+    },
+  });
+  for (const type of ["inflight", "capture"]) {
+    await worker.dispatch(
+      {
+        action: "youtubePassiveState",
+        payload: {
+          type,
+          videoId: VIDEO_ID,
+          language: "zh-Hant",
+          kind: "manual",
+          status: type === "capture" ? 200 : 0,
+          inFlight: type !== "capture",
+          ...(type === "capture" ? { body: json3Body("繁體字幕") } : {}),
+        },
+      },
+      { tab: { id: 1 } },
+    );
+  }
+
+  const result = await worker.helpers.handleFetchYoutubeNativeTranscript(
+    VIDEO_ID,
+    "en-US",
+    1,
+    nativeOptions("chinese-variant-passive"),
+  );
+
+  assert.equal(result.source, "youtube-passive");
+  assert.equal(result.language, "zh-Hant");
+  assert.equal(worker.counts.activeRun, 0);
 });
 
 test("without Chinese, automatic selection uses the current track then the page default", () => {

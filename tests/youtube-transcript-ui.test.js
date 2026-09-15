@@ -228,6 +228,14 @@ test("cache validation rejects language, selected-track, and fingerprint drift",
     null,
     "a later explicit page track must invalidate a different cached track",
   );
+  assert.equal(
+    helpers.validateTranscriptCacheRecord(exactTrack, {
+      ...expected,
+      selectedTrack: { language: "zh-Hans", kind: "manual" },
+    }),
+    null,
+    "known Chinese page evidence must invalidate an English cache",
+  );
 });
 
 test("only English Active and Passive caches require the JSON3 timing marker", () => {
@@ -336,6 +344,21 @@ test("cross-language subtitles reuse an exact cache without treating audio langu
   });
 
   assert.ok(helpers.validateTranscriptCacheRecord(record, expected));
+  assert.ok(
+    helpers.validateTranscriptCacheRecord(record, {
+      ...expected,
+      selectedTrack: { language: "zh-Hans", kind: "manual" },
+    }),
+    "Simplified and Traditional manual tracks are the same Chinese preference",
+  );
+  assert.equal(
+    helpers.validateTranscriptCacheRecord(record, {
+      ...expected,
+      selectedTrack: { language: "zh-Hans", kind: "asr" },
+    }),
+    null,
+    "manual and ASR remain distinct even across Chinese varieties",
+  );
 
   const startupUnknownLanguage = {
     ...record,
@@ -514,12 +537,19 @@ test("one transcript request carries the current run identity and rejects late r
     videoId: "video-1",
     mediaRef: { platform: "youtube", videoId: "video-1" },
     preferredLanguage: "en",
+    pagePreferredTrack: { language: "zh-Hans", kind: "manual" },
     tabId: 7,
     generation: 12,
     routeKey: "youtube:video-1",
   });
   assert.equal(request.action, "fetchTranscript");
   assert.equal(request.trackKind, "manual-first");
+  assert.deepEqual(JSON.parse(JSON.stringify(request.pagePreferredTrack)), {
+    language: "zh-hans",
+    kind: "manual",
+    isGenerated: false,
+    label: null,
+  });
   assert.equal(request.runId, "12");
   assert.equal(request.digestGeneration, 12);
   assert.equal(request.routeKey, "youtube:video-1");

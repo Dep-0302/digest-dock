@@ -432,8 +432,9 @@ body {
    CONTENT AREA
    ============================================================ */
 .content {
+  --notes-panel-inset: 16px;
   flex: 1;
-  padding: 18px 16px 24px;
+  padding: 18px var(--notes-panel-inset) 24px;
   overflow-y: auto;
 }
 
@@ -1754,6 +1755,16 @@ body {
 /* ============================================================
    NOTES TAB — continuous list (not floating cards)
    ============================================================ */
+.notes-toolbar {
+  position: sticky;
+  top: -18px;
+  z-index: 4;
+  margin: -18px calc(-1 * var(--notes-panel-inset)) 10px;
+  padding: 18px var(--notes-panel-inset) 10px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+}
+
 .notes-filter {
   display: flex;
   gap: 2px;
@@ -2088,13 +2099,12 @@ body {
 }
 
 .note-source-export {
-  margin-left: 6px;
-  padding: 3px 9px;
-  font-size: 11px;
-  color: var(--text-muted);
-  background: none;
-  border: 1px solid var(--border);
-  border-radius: 6px;
+  padding: 5px 10px;
+  font: 600 11.5px/1 var(--font-body);
+  color: var(--text-secondary);
+  background: var(--surface);
+  border: 1px solid var(--border-heavy);
+  border-radius: var(--r-sm);
   cursor: pointer;
 }
 
@@ -2129,6 +2139,8 @@ body {
   flex: 1 1 16rem;
   min-width: 0;
 }
+
+.notes-capacity[hidden] { display: none; }
 
 .notes-capacity strong {
   color: var(--ink);
@@ -2201,7 +2213,7 @@ body {
   border-radius: var(--r-md);
   background: var(--surface);
   margin-bottom: 12px;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .note-source-group:last-child {
@@ -2209,6 +2221,7 @@ body {
 }
 
 .note-source-header {
+  z-index: 2;
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
@@ -2216,6 +2229,12 @@ body {
   padding: 12px 14px;
   border-bottom: 1px solid var(--border);
   background: var(--surface-raised);
+  border-radius: var(--r-md) var(--r-md) 0 0;
+}
+
+.note-source-header.is-sticky {
+  position: sticky;
+  border-radius: 0;
 }
 
 .note-source-title {
@@ -2247,7 +2266,7 @@ body {
 .note-source-meta {
   flex: 1 1 auto;
   font-size: 11.5px;
-  color: var(--text-muted);
+  color: var(--text-secondary);
 }
 
 .note-source-actions {
@@ -2284,18 +2303,30 @@ body {
 }
 
 .note-item {
-  padding: 14px 2px;
-  background: transparent;
-  border: none;
+  padding: 14px 10px;
+  background: var(--surface);
+  border: 1px solid transparent;
   border-bottom: 1px solid var(--border);
 }
 
-.note-item:first-child {
-  padding-top: 2px;
+.note-item--thought {
+  background: color-mix(in srgb, var(--accent) 8%, var(--surface));
+  border-color: var(--accent-divider);
+  border-radius: var(--r-sm);
+  margin: 8px 0;
 }
 
-.note-item:last-child {
-  border-bottom: none;
+.note-item--quote:last-child {
+  border-bottom-color: transparent;
+}
+
+.note-kind {
+  font: 600 11px/1.5 var(--font-body);
+  color: var(--text-secondary);
+}
+
+.note-item--thought .note-kind {
+  color: var(--accent);
 }
 
 .note-header {
@@ -2420,6 +2451,134 @@ body {
   outline-offset: -2px;
 }
 
+.notes-search,
+.note-thought-editor textarea {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 9px 10px;
+  border: 1px solid var(--border-heavy);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  color: var(--text);
+  font: 13px/1.6 var(--font-body);
+}
+
+.notes-search:focus-visible,
+.note-thought-editor textarea:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.notes-search-status,
+.note-day-title,
+.note-source-day-title {
+  margin: 12px 0 6px;
+  font: 600 12px/1.5 var(--font-body);
+  color: var(--text-secondary);
+}
+
+.note-day-group + .note-day-group {
+  margin-top: 20px;
+}
+
+.note-source-day-title { margin: 12px 10px 4px; }
+
+.notes-grouping-row {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 0 6px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.notes-grouping-row[hidden] { display: none; }
+
+.note-thought-row { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 0 8px; }
+.note-thought-row .note-thought { flex: 1; min-width: 0; }
+
+.note-delete-thought {
+  flex: 0 0 auto;
+  padding: 2px 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  font: 11px/1.6 var(--font-body);
+  cursor: pointer;
+}
+.note-delete-thought:hover { color: var(--danger); }
+.note-delete-thought:disabled { opacity: 0.5; cursor: default; }
+.note-delete-thought:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.note-thought-delete-confirm { flex: 1 1 100%; padding: 8px 0 12px; font-size: 12px; }
+.note-thought-delete-confirm p { margin: 0 0 8px; }
+.note-confirm-delete-thought { color: var(--danger); }
+
+.note-thought {
+  margin-bottom: 10px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-weight: 600;
+}
+
+.note-thought:empty { display: none; }
+
+.note-trigger {
+  color: var(--text-secondary);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.note-thought-source { margin-bottom: 6px; }
+
+.note-quote {
+  font-size: var(--reading-body-size);
+  line-height: 1.6;
+  color: var(--text);
+}
+
+button.note-quote {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font-family: inherit;
+  text-align: left;
+  user-select: text;
+  cursor: pointer;
+}
+button.note-quote::after {
+  content: "展开上下文";
+  display: block;
+  margin-top: 4px;
+  font: 11px/1.6 var(--font-body);
+  color: var(--accent);
+}
+button.note-quote[aria-expanded="true"]::after { content: "收起上下文"; }
+button.note-quote:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 2px; }
+
+.note-trigger-window {
+  margin-top: 6px;
+  padding-left: 10px;
+  border-left: 1px solid var(--border);
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 8;
+  white-space: pre-wrap;
+  line-height: 1.6;
+  max-height: 12.8em;
+  overflow: hidden;
+}
+
+.note-trigger-window[hidden] { display: none; }
+
+.note-thought-editor textarea {
+  display: block;
+  margin-bottom: 8px;
+  resize: vertical;
+}
+
 .note-text {
   font-family: var(--font-reading);
   font-size: 13.5px;
@@ -2506,7 +2665,7 @@ body {
   }
 
   .content {
-    padding-inline: 12px;
+    --notes-panel-inset: 12px;
   }
 
   .header-top {

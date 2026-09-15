@@ -168,6 +168,8 @@ let ytdNoteButton = null;
 let ytdNoteButtonTimer = null;
 let ytdNoteKeyboardListenerAdded = false;
 let ytdNoteButtonRetryTimer = null;
+let ytdNoteToast = null;
+let noteCaptureSequence = 0;
 let ytdDigestButton = null;
 let digestButtonObserver = null;
 let digestButtonReconcileTimer = null;
@@ -258,6 +260,43 @@ if (document.readyState === "loading") {
  * When they ask for video info, we read it from the page.
  * When they send key moments, we highlight them on the progress bar.
  */
+// YouTube reuses its video element for ads. Its clock is a content position
+// only when the player is showing a ready, non-seeking body video.
+let playbackVideoId = null;
+let playbackBodyDuration = null;
+let playbackAwaitingBody = false;
+function readYoutubePlaybackState() {
+  const videoId = new URLSearchParams(window.location.search).get("v");
+  if (videoId !== playbackVideoId) {
+    playbackVideoId = videoId;
+    playbackBodyDuration = null;
+    playbackAwaitingBody = false;
+  }
+  const video = document.querySelector("video.html5-main-video");
+  const player = document.getElementById("movie_player");
+  const isAd = !!(player?.classList.contains("ad-showing") ||
+    player?.classList.contains("ad-interrupting"));
+  if (isAd) playbackAwaitingBody = true;
+  // The ad CSS marker may clear one step before the media is restored. For
+  // a known VOD, wait for its duration too. Do not guess from time==0: a user
+  // seeking back to the beginning is a valid content position.
+  const bodyRestored = !playbackAwaitingBody || playbackBodyDuration === null ||
+    (Number.isFinite(video?.duration) && Math.abs(video.duration - playbackBodyDuration) < 2);
+  const ready = !!video && !isAd && bodyRestored && video.readyState >= 2 && !video.seeking;
+  if (ready) {
+    playbackAwaitingBody = false;
+    playbackBodyDuration = Number.isFinite(video.duration) && video.duration > 0
+      ? video.duration : null;
+  }
+  return {
+    available: !!video,
+    ready,
+    isAd,
+    currentTime: ready ? video.currentTime : null,
+    paused: video ? video.paused : true,
+  };
+}
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   debugLog("[DigestDock Content] Received message:", message.action, message);
 
@@ -275,12 +314,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return false;
   }
 
+  if (message.action === "getNotePlaybackState") {
+    sendResponse({
+      ...readYoutubePlaybackState(),
+      routeKey: `youtube:${new URLSearchParams(window.location.search).get("v")}`,
+    });
+    return false;
+  }
+
   if (message.action === "getCurrentTime") {
     // Return the current video playback time (used by auto-scroll)
-    const video = document.querySelector("video.html5-main-video");
+    const playback = readYoutubePlaybackState();
     sendResponse({
-      currentTime: video ? Math.floor(video.currentTime) : 0,
-      paused: video ? video.paused : true,
+      ...playback,
+      currentTime: playback.ready ? Math.floor(playback.currentTime) : null,
     });
     return false;
   }
@@ -294,7 +341,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message.action === "showNoteSavedFeedback") {
     // Show brief feedback that note was saved
-    showNoteSavedToast(message.note);
+    showNoteSavedToast(message.note, message.duplicate === true);
     sendResponse({ success: true });
     return false;
   }
@@ -753,6 +800,8 @@ function handleNoteKeyboardShortcut(e) {
   e.preventDefault();
   e.stopPropagation();
 
+  if (openNoteThoughtInput()) return;
+
   // Show brief visual feedback on the button, then save
   showNoteButton();
   resetNoteButtonTimer();
@@ -775,6 +824,7 @@ async function saveCurrentNote() {
   const currentTime = Math.max(0, Math.floor(video.currentTime) - 3);
   const videoInfo = extractVideoInfo();
   const videoId = new URLSearchParams(window.location.search).get("v");
+  const captureSequence = ++noteCaptureSequence;
 
   const noteButton = ytdNoteButton;
   const restoreLabel = DIGESTDOCK_NOTE_BUTTON_LABEL;
@@ -804,17 +854,30 @@ async function saveCurrentNote() {
       channelName: videoInfo.channelName,
     });
 
+    if (
+      captureSequence !== noteCaptureSequence ||
+      videoId !== new URLSearchParams(window.location.search).get("v")
+    ) return;
+
     if (result.success) {
       if (noteButton) {
-        setNoteButtonState("已保存", DIGESTDOCK_CHECK_ICON_SVG);
+        setNoteButtonState(result.duplicate ? "已记录" : "已保存", DIGESTDOCK_CHECK_ICON_SVG);
         noteButton.style.background = DIGESTDOCK_NOTE_SUCCESS_BG;
         noteButton.style.color = "#ffffff";
       }
-      showNoteSavedToast(result.note);
+      const toast = showNoteSavedToast(result.note, result.duplicate === true);
+      toast.fence = {
+        runtimeInstanceId: result.runtimeInstanceId,
+        dataGeneration: result.dataGeneration,
+      };
+      if (result.duplicate) openNoteThoughtInput();
     } else {
+      if (result.code === "NOTE_DUPLICATE_CONFLICT") showNoteSavedToast({}, false, true);
       const label =
         result.code === "NOTES_BACKUP_TOO_LARGE"
           ? "笔记备份容量已满"
+          : result.code === "NOTE_DUPLICATE_CONFLICT"
+            ? "已有多条想法，请到笔记页查看"
           : result.error === "TRANSCRIPT_TASK_REQUIRED"
           ? "请先打开侧栏字幕"
           : result.error === "SUPADATA_CONSENT_REQUIRED"
@@ -881,7 +944,8 @@ function youtubeNoteToastPresentation(note) {
   return { label: "字幕原话", text: rawText || cleanedText };
 }
 
-function showNoteSavedToast(note) {
+function showNoteSavedToast(note, duplicate = false, conflict = false) {
+  dismissNoteToast();
   // Remove existing toast
   const existing = document.getElementById(
     DIGESTDOCK_YOUTUBE_DOM_IDS.noteToast,
@@ -890,14 +954,20 @@ function showNoteSavedToast(note) {
 
   const toast = document.createElement("div");
   const presentation = youtubeNoteToastPresentation(note);
+  const savedHeading = `笔记已保存${presentation.label ? ` · ${escapeHtmlForContent(presentation.label)}` : ""}`;
+  const state = { element: toast, note, editing: false, saving: false };
+  ytdNoteToast = state;
   toast.id = DIGESTDOCK_YOUTUBE_DOM_IDS.noteToast;
   toast.innerHTML = `
-    <div style="font-weight: 700; margin-bottom: 6px; color: #c8674f;">📝 笔记已保存${presentation.label ? ` · ${escapeHtmlForContent(presentation.label)}` : ""}</div>
+    <div style="font-weight: 700; margin-bottom: 6px; color: #c8674f;">📝 ${conflict ? "已有多条想法" : duplicate ? "已记录，找到上次笔记" : savedHeading}</div>
+    ${conflict ? '<div role="alert">同一句金句已有多条不同想法，请先到笔记页查看。</div>' : `
     <div style="font-size: 12px; color: #6b6258; margin-bottom: 8px;">${escapeHtmlForContent(note.timestamp)} — ${escapeHtmlForContent(note.videoTitle)}</div>
+    ${note.thought ? `<div style="font-size:13px;font-weight:600;white-space:pre-wrap;overflow-wrap:anywhere;margin-bottom:8px;">${escapeHtmlForContent(note.thought)}</div>` : ""}
     <div style="font-size: 13px; line-height: 1.55; color: #2e2a24;">"${escapeHtmlForContent(presentation.text)}"</div>
     <div style="margin-top: 10px; font-size: 11px;">
       <a href="${escapeHtmlForContent(note.timestampedUrl)}" style="color: #c8674f; font-weight: 600; text-decoration: none;">🔗 复制链接</a>
     </div>
+    `}
   `;
 
   toast.style.cssText = `
@@ -910,6 +980,8 @@ function showNoteSavedToast(note) {
     border-radius: 14px;
     padding: 16px 20px;
     max-width: 350px;
+    max-height: 70vh;
+    overflow-y: auto;
     box-shadow: 0 12px 32px rgba(50, 42, 32, 0.2);
     font-family: system-ui, -apple-system, "Roboto", sans-serif;
     animation: ${DIGESTDOCK_YOUTUBE_TOAST_ANIMATION} 0.3s ease;
@@ -926,7 +998,7 @@ function showNoteSavedToast(note) {
   document.head.appendChild(style);
 
   // Copy link handler
-  toast.querySelector("a").addEventListener("click", async (e) => {
+  toast.querySelector("a")?.addEventListener("click", async (e) => {
     e.preventDefault();
     try {
       await navigator.clipboard.writeText(note.timestampedUrl);
@@ -938,12 +1010,134 @@ function showNoteSavedToast(note) {
 
   document.body.appendChild(toast);
 
-  // Auto-dismiss after 5 seconds
-  setTimeout(() => {
+  // Auto-dismiss a quote after 10 seconds; entering a thought cancels both timers.
+  state.dismissTimer = setTimeout(() => {
     toast.style.animation =
       `${DIGESTDOCK_YOUTUBE_TOAST_ANIMATION} 0.3s ease reverse`;
-    setTimeout(() => toast.remove(), 300);
-  }, 5000);
+    state.removalTimer = setTimeout(() => dismissNoteToast(state), 300);
+  }, 10000);
+  return state;
+}
+
+function dismissNoteToast(state = ytdNoteToast) {
+  if (!state) return;
+  clearTimeout(state.dismissTimer);
+  clearTimeout(state.removalTimer);
+  state.element.remove();
+  if (ytdNoteToast === state) ytdNoteToast = null;
+}
+
+function closeNoteThoughtInput(state, resumePlayback = false) {
+  const video = state?.editingVideo;
+  const currentVideoId = new URLSearchParams(window.location.search).get("v");
+  const player = document.getElementById("movie_player");
+  const shouldResume =
+    resumePlayback === true &&
+    state?.wasPlayingBeforeEdit === true &&
+    ytdNoteToast === state &&
+    state.element?.isConnected &&
+    state.editingVideoId === currentVideoId &&
+    document.querySelector("video.html5-main-video") === video &&
+    !player?.classList.contains("ad-showing") &&
+    !player?.classList.contains("ad-interrupting");
+  dismissNoteToast(state);
+  if (!shouldResume) return;
+  try {
+    video.play()?.catch?.(() => {});
+  } catch {
+    // Playback can reject after a player transition; the closed thought editor
+    // must never target a replacement video.
+  }
+}
+
+function openNoteThoughtInput() {
+  const state = ytdNoteToast;
+  if (!state) return false;
+  const videoId = new URLSearchParams(window.location.search).get("v");
+  if (!state.element.isConnected || state.note.videoId !== videoId) {
+    dismissNoteToast(state);
+    return false;
+  }
+  if (state.editing) return true;
+  const video = document.querySelector("video.html5-main-video");
+  if (!video) return false;
+  state.editing = true;
+  state.wasPlayingBeforeEdit = !video.paused;
+  state.editingVideo = video;
+  state.editingVideoId = videoId;
+  clearTimeout(state.dismissTimer);
+  clearTimeout(state.removalTimer);
+  state.element.style.animation = "none";
+  state.element.innerHTML = `
+    <div style="font-weight:700;color:#c8674f;margin-bottom:8px;">📝 记录想法</div>
+    <textarea aria-label="想法" rows="3" style="box-sizing:border-box;width:100%;min-width:260px;resize:vertical;font:inherit;line-height:1.55;"></textarea>
+    <div role="status" style="margin-top:8px;font-size:12px;color:#6b6258;">Enter 保存 · Shift+Enter 换行 · Esc 关闭</div>
+  `;
+  const input = state.element.querySelector("textarea");
+  const status = state.element.querySelector('[role="status"]');
+  input.value = state.note.thought || "";
+  let composing = false;
+  input.addEventListener("compositionstart", () => { composing = true; });
+  input.addEventListener("compositionend", () => { composing = false; });
+  input.addEventListener("keydown", async (event) => {
+    event.stopPropagation();
+    if (composing || event.isComposing || event.keyCode === 229) return;
+    if (event.key === "Enter" && event.shiftKey) return;
+    if (event.key !== "Enter" && event.key !== "Escape") return;
+    event.preventDefault();
+    if (state.saving) return;
+    if (event.key === "Escape") {
+      closeNoteThoughtInput(state, true);
+      return;
+    }
+    state.saving = true;
+    input.readOnly = true;
+    status.textContent = "正在保存…";
+    try {
+      const message = {
+        action: "updateNoteThought",
+        noteId: state.note.id,
+        thought: input.value,
+      };
+      let result = await sendExtensionMessage({
+        ...message,
+        ...state.fence,
+      });
+      if (ytdNoteToast !== state || !state.element.isConnected) return;
+      // Match the side panel's one-time worker-restart refresh. Never refresh
+      // a reset in the same worker, and never retry against a different toast.
+      if (
+        result?.code === "EXTENSION_DATA_RESET" &&
+        typeof result.runtimeInstanceId === "string" &&
+        result.runtimeInstanceId &&
+        result.runtimeInstanceId !== state.fence?.runtimeInstanceId &&
+        Number.isSafeInteger(result.dataGeneration) &&
+        result.dataGeneration >= 0 && result.dataGeneration % 2 === 0
+      ) {
+        state.fence = {
+          runtimeInstanceId: result.runtimeInstanceId,
+          dataGeneration: result.dataGeneration,
+        };
+        result = await sendExtensionMessage({ ...message, ...state.fence });
+        if (ytdNoteToast !== state || !state.element.isConnected) return;
+      }
+      if (result?.success) {
+        closeNoteThoughtInput(state, true);
+        return;
+      }
+      status.textContent = "保存失败，请重试。";
+    } catch (_error) {
+      if (ytdNoteToast !== state || !state.element.isConnected) return;
+      status.textContent = "保存失败，请重试。";
+    }
+    state.saving = false;
+    input.readOnly = false;
+    input.focus();
+  });
+  video.pause();
+  input.focus();
+  input.setSelectionRange?.(input.value.length, input.value.length);
+  return true;
 }
 
 // ============================================================
@@ -1117,6 +1311,8 @@ function escapeHtmlForContent(text) {
  * we clean up old markers and re-inject the button.
  */
 document.addEventListener("yt-navigate-finish", () => {
+  noteCaptureSequence += 1;
+  dismissNoteToast();
   // Clean up old key moment markers when navigating to a new video
   const existingMarkers = document.querySelectorAll(
     `.${DIGESTDOCK_YOUTUBE_MARKER_CLASS}`,

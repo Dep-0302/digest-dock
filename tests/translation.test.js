@@ -161,6 +161,7 @@ function createMigratedNotesAdapter(storedNotes, extra = {}) {
 
 function loadSidepanelRuntime({
   sendMessage = null,
+  sidepanelMvp = false,
   setTimeoutImpl = () => 0,
   clearTimeoutImpl = () => {},
   storageLocal = {
@@ -346,6 +347,10 @@ function loadSidepanelRuntime({
   };
   sandbox.globalThis = sandbox;
   const context = vm.createContext(sandbox);
+  if (sidepanelMvp) {
+    vm.runInContext(read("sidepanel-state.js"), context);
+    vm.runInContext(read("sidepanel-effects.js"), context);
+  }
   vm.runInContext(read("sidepanel.js"), context);
   vm.runInContext(
     `adoptExtensionDataFence(${JSON.stringify(runtimeInstanceId)}, 0, { requestFence: extensionDataFenceSnapshot() });`,
@@ -4451,6 +4456,7 @@ function installSidepanelDigestFixture(runtime) {
       const pendingCaches = new Map();
       const events = [];
       const saved = [];
+      let cacheRequestCount = 0;
       let activeTabName = "transcript";
       currentOverviewMode = "zh";
       const element = (id) => {
@@ -4464,7 +4470,7 @@ function installSidepanelDigestFixture(runtime) {
             disabled: false,
             focused: false,
             listeners: {},
-            classList: { toggle() {}, contains() { return false; } },
+            classList: { toggle() {}, remove() {}, contains() { return false; } },
             setAttribute() {},
             addEventListener(type, listener) { this.listeners[type] = listener; },
             focus() { this.focused = true; },
@@ -4495,12 +4501,14 @@ function installSidepanelDigestFixture(runtime) {
       setOverviewTranslationLoading = (show) => {
         isOverviewTranslationLoading = show;
       };
-      loadFromCache = (videoId) =>
-        new Promise((resolve) => {
+      loadFromCache = (videoId) => {
+        cacheRequestCount += 1;
+        return new Promise((resolve) => {
           const queue = pendingCaches.get(videoId) || [];
           queue.push(resolve);
           pendingCaches.set(videoId, queue);
         });
+      };
       saveToCache = async (videoId) => {
         saved.push({
           videoId,
@@ -4516,6 +4524,7 @@ function installSidepanelDigestFixture(runtime) {
         withOriginal = false,
         mediaRef = null,
         routeKey = null,
+        selectedTrack = null,
       ) => {
         const resolvedMediaRef = mediaRef || {
           platform: "youtube",
@@ -4526,8 +4535,12 @@ function installSidepanelDigestFixture(runtime) {
         const resolvedRouteKey = routeKey;
         const transcriptText = "transcript-" + videoId;
         const transcriptTimestamped = "timestamped-" + videoId;
-        const transcriptSource =
-          resolvedMediaRef.platform === "bilibili" ? "bilibili" : "supadata";
+        const normalizedSelectedTrack = sanitizeTranscriptSelectedTrack(selectedTrack);
+        const transcriptSource = resolvedMediaRef.platform === "bilibili"
+          ? "bilibili"
+          : normalizedSelectedTrack
+            ? "youtube-passive"
+            : "supadata";
         const transcriptFingerprint = transcriptContentFingerprint(
           transcriptTimestamped,
           transcriptText,
@@ -4567,8 +4580,9 @@ function installSidepanelDigestFixture(runtime) {
         transcriptLanguage: sourceLanguage,
         transcriptSource,
         transcriptSourceAttempt: transcriptSource === "bilibili" ? "BILIBILI" : "SUPADATA",
-        transcriptSelectedTrack: null,
-        transcriptSelectedTrackIdentity: "none",
+        transcriptSelectedTrack: normalizedSelectedTrack,
+        transcriptSelectedTrackIdentity:
+          transcriptSelectedTrackIdentity(normalizedSelectedTrack),
         transcriptRequestedLanguage: sourceLanguage,
         transcriptRequestedTrackKind: YOUTUBE_TRANSCRIPT_TRACK_KIND,
         transcriptFingerprint,
@@ -4576,7 +4590,7 @@ function installSidepanelDigestFixture(runtime) {
           source: transcriptSource,
           language: sourceLanguage,
           requestedLanguage: sourceLanguage,
-          selectedTrack: null,
+          selectedTrack: normalizedSelectedTrack,
           fingerprint: transcriptFingerprint,
         }),
         transcriptSourcePolicyVersion: TRANSCRIPT_SOURCE_POLICY_VERSION,
@@ -4597,6 +4611,7 @@ function installSidepanelDigestFixture(runtime) {
             options.videoUrl || "url-" + videoId,
             mediaRef,
             routeKey,
+            options.captionSelection,
           );
         },
         analyze: () => triggerAnalysis(),
@@ -4639,6 +4654,8 @@ function installSidepanelDigestFixture(runtime) {
         }),
         events: () => JSON.stringify(events),
         saved: () => JSON.stringify(saved),
+        cacheRequestCount: () => cacheRequestCount,
+        selectedTrack: () => JSON.stringify(currentTranscriptSelectedTrack),
         setupEvents: () => setupEventListeners(),
         errorSnapshot: () => JSON.stringify({
           title: element("errorTitle").textContent,
@@ -4690,6 +4707,13 @@ function installNoteNavigationFixture(runtime, options = {}) {
     hasAiKey: options.hasAiKey !== false,
     hasSupadataKey: options.hasSupadataKey !== false,
     authorizedTranscriptSuccess: options.authorizedTranscriptSuccess === true,
+    captionRetryTranscriptSuccess:
+      options.captionRetryTranscriptSuccess === true,
+    freeTranscriptSuccess: options.freeTranscriptSuccess === true,
+    deferFreeTranscript: options.deferFreeTranscript === true,
+    identifyTranscriptTab: options.identifyTranscriptTab === true,
+    identifyMetadataTab: options.identifyMetadataTab === true,
+    missingNoteTranslation: options.missingNoteTranslation === true,
     cachedTranscript: options.cachedTranscript === true,
     authorizedError: String(options.authorizedError || ""),
     omitMetadataVideoId: options.omitMetadataVideoId === true,
@@ -4729,6 +4753,12 @@ function installNoteNavigationFixture(runtime, options = {}) {
       let metadataRelayBlocked = fixtureOptions.deferMetadataRelay;
       const metadataRelayStarted = new Promise((resolve) => {
         resolveMetadataRelayStarted = resolve;
+      });
+      let releaseFreeTranscript = null;
+      let deferredFreeTranscriptUsed = false;
+      let markFreeTranscriptStarted = null;
+      const freeTranscriptStarted = new Promise((resolve) => {
+        markFreeTranscriptStarted = resolve;
       });
 
       const element = (id) => {
@@ -4794,6 +4824,7 @@ function installNoteNavigationFixture(runtime, options = {}) {
           ids: notes.map((note) => note.id),
         });
       };
+      if (SIDEPANEL_MVP_AVAILABLE) renderSidepanelMvpTranscriptState = () => {};
       renderTranscript = () => {};
       renderAnalysisResults = () => {};
       highlightMomentsOnPage = () => {};
@@ -4840,9 +4871,13 @@ function installNoteNavigationFixture(runtime, options = {}) {
         timestampedUrl: targetUrl,
         text: "Saved English note.",
         rawText: "Saved English note.",
-        translatedText: "已保存的中文笔记。",
-        translatedValidated: true,
-        translatedValidationVersion: 1,
+        translatedText: fixtureOptions.missingNoteTranslation
+          ? ""
+          : "已保存的中文笔记。",
+        translatedValidated: !fixtureOptions.missingNoteTranslation,
+        translatedValidationVersion: fixtureOptions.missingNoteTranslation
+          ? 0
+          : 1,
         sourceLanguage: targetPlatform === "bilibili" ? "zh-CN" : "en",
       };
 
@@ -4932,6 +4967,11 @@ function installNoteNavigationFixture(runtime, options = {}) {
             return { ...fixtureOptions.metadataRelayFailure };
           }
           const activeLocator = extractMediaLocator(activeUrlValue);
+          const metadataLanguage = fixtureOptions.identifyMetadataTab
+            ? message.tabId === createdTabs[0]?.id
+              ? "fr"
+              : "de"
+            : "en";
           const metadataResponse = {
             success: true,
             response: {
@@ -4943,14 +4983,21 @@ function installNoteNavigationFixture(runtime, options = {}) {
                       activeLocator?.videoId ??
                       "",
                   }),
-              title: activeLocator?.routeKey === targetRouteKey
-                ? fixtureOptions.metadataTitle
-                : "Unrelated video",
+              title: fixtureOptions.identifyMetadataTab
+                ? "Metadata from tab " + message.tabId
+                : activeLocator?.routeKey === targetRouteKey
+                  ? fixtureOptions.metadataTitle
+                  : "Unrelated video",
               channelName: "Target channel",
               description: "Video description",
               descriptionStatus: "present",
               duration: 1800,
-              sourceLanguage: "en",
+              sourceLanguage: metadataLanguage,
+              captionSelection: {
+                language: metadataLanguage,
+                kind: "manual",
+                name: "Track from tab " + message.tabId,
+              },
             },
           };
           if (metadataRelayBlocked) {
@@ -4995,6 +5042,72 @@ function installNoteNavigationFixture(runtime, options = {}) {
           return { success: true, source: persisted, dataGeneration: 0 };
         }
         if (message.action === "fetchTranscript") {
+          if (
+            message.supadataConsent !== true &&
+            message.captionRetry === true &&
+            fixtureOptions.captionRetryTranscriptSuccess
+          ) {
+            return {
+              success: true,
+              routeOutcome: "HAVE_TRANSCRIPT",
+              runId: message.runId,
+              routeKey: message.routeKey,
+              source: "youtube-passive",
+              sourceAttempt: "PASSIVE_RETRY",
+              selectedTrack: null,
+              transcript: [
+                {
+                  text: "CC retry transcript",
+                  start: 0,
+                  duration: 2,
+                  language: "en",
+                },
+              ],
+              transcriptText: "CC retry transcript",
+              transcriptTextTimestamped: "[0:00] CC retry transcript",
+              language: "en",
+            };
+          }
+          if (
+            message.supadataConsent !== true &&
+            message.captionRetry !== true &&
+            fixtureOptions.freeTranscriptSuccess &&
+            message.videoId === targetMediaKey
+          ) {
+            if (
+              fixtureOptions.deferFreeTranscript &&
+              !deferredFreeTranscriptUsed
+            ) {
+              deferredFreeTranscriptUsed = true;
+              markFreeTranscriptStarted();
+              await new Promise((resolve) => {
+                releaseFreeTranscript = resolve;
+              });
+            }
+            const transcriptText = fixtureOptions.identifyTranscriptTab
+              ? "Free transcript from tab " + message.tabId
+              : "Free target transcript";
+            return {
+              success: true,
+              routeOutcome: "HAVE_TRANSCRIPT",
+              runId: message.runId,
+              routeKey: message.routeKey,
+              source: "youtube-passive",
+              sourceAttempt: "PASSIVE",
+              selectedTrack: null,
+              transcript: [
+                {
+                  text: transcriptText,
+                  start: 0,
+                  duration: 2,
+                  language: "en",
+                },
+              ],
+              transcriptText,
+              transcriptTextTimestamped: "[0:00] " + transcriptText,
+              language: "en",
+            };
+          }
           if (
             message.supadataConsent === true &&
             fixtureOptions.authorizedTranscriptSuccess
@@ -5130,16 +5243,23 @@ function installNoteNavigationFixture(runtime, options = {}) {
           });
         },
         inspectActive: () => checkCurrentTab(),
+        resumeTranscript: () => resumeDigestFromNotesOnly("transcript"),
+        retryFreeTranscript: () =>
+          sidepanelMvpHandleAction(
+            SIDEPANEL_STATE_API.EVENTS.USER_RETRY_FREE,
+          ),
         waitForMetadataRelay: () => metadataRelayStarted,
         releaseMetadataRelay: () => {
           const release = releaseMetadataRelay;
           releaseMetadataRelay = null;
           release?.();
         },
+        waitForFreeTranscript: () => freeTranscriptStarted,
+        releaseFreeTranscript: () => releaseFreeTranscript?.(),
         openTranscript: () => switchTab("transcript"),
         clickConsentPrimary: () => errorAction?.(),
         clickConsentSecondary: () => errorSecondaryAction?.(),
-        navigateFront: (url) => handleFrontTabUrl(url),
+        navigateFront: (url, tabId = null) => handleFrontTabUrl(url, tabId),
         setActiveVideo: (videoId) => {
           activeUrlValue =
             "https://www.youtube.com/watch?v=" + videoId +
@@ -5210,6 +5330,21 @@ function installNoteNavigationFixture(runtime, options = {}) {
             .filter((message) => message.action === "fetchTranscript")
             .map((message) => message.captionRetry),
           currentTranscriptText,
+          currentVideoTitle,
+          currentVideoSourceLanguage,
+          transcriptStatus: SIDEPANEL_MVP_AVAILABLE
+            ? sidepanelMvpState?.transcript?.status || ""
+            : "legacy",
+          translateNotesCount: messages.filter(
+            (message) => message.action === "translateNotes",
+          ).length,
+          hasAiKey: currentConfigStatus?.hasAiKey === true,
+          transcriptRequests: messages
+            .filter((message) => message.action === "fetchTranscript")
+            .map((message) => ({
+              tabId: message.tabId,
+              preferredLanguage: message.preferredLanguage,
+            })),
           noteLoadCount: noteLoadMessages().length,
           noteLoadVideoIds: noteLoadMessages().map((message) =>
             message.videoId === undefined ? "undefined" : message.videoId),
@@ -5468,8 +5603,8 @@ test("duplicate digest starts for the same video share one in-flight task", asyn
   assert.equal(await duplicateVideoA, "a");
 });
 
-test("opening another video's saved note stays in All Notes without requesting Supadata", async () => {
-  const runtime = loadSidepanelRuntime();
+test("opening another video's saved note stays in All Notes while checking the free transcript path", async () => {
+  const runtime = loadSidepanelRuntime({ sidepanelMvp: true });
   const fixture = installNoteNavigationFixture(runtime);
 
   await fixture.playTarget();
@@ -5477,7 +5612,9 @@ test("opening another video's saved note stays in All Notes without requesting S
   await nextTurn();
 
   const snapshot = JSON.parse(fixture.snapshot());
-  assert.equal(snapshot.fetchCount, 0);
+  assert.equal(snapshot.fetchCount, 1);
+  assert.equal(snapshot.transcriptStatus, "needs_cc");
+  assert.deepEqual(snapshot.supadataConsents, [false]);
   assert.equal(snapshot.errorTitle, "");
   assert.equal(snapshot.activeTab, "notes");
   assert.equal(snapshot.resultsVisible, true);
@@ -5704,41 +5841,327 @@ test("supplementing a Bilibili P2 note keeps the exact CID and never uses Supada
   assert.equal(snapshot.sessionCaptureMetadata, false);
 });
 
-test("duplicate navigation events stay note-only until transcript is requested explicitly", async () => {
+test("a saved-note jump automatically restores a cached transcript without leaving MVP loading", async () => {
+  const runtime = loadSidepanelRuntime({ sidepanelMvp: true });
+  const fixture = installNoteNavigationFixture(runtime, {
+    cachedTranscript: true,
+    missingNoteTranslation: true,
+  });
+
+  await fixture.playTarget();
+  await fixture.inspectActive();
+  await nextTurn();
+
+  const completed = JSON.parse(fixture.snapshot());
+  assert.equal(completed.currentTranscriptText, "Cached target transcript");
+  assert.equal(completed.transcriptStatus, "ready");
+  assert.equal(completed.fetchCount, 0);
+  assert.equal(completed.activeTab, "notes");
+  assert.deepEqual(completed.sessionKeys, []);
+  assert.equal(completed.hasAiKey, true);
+  assert.equal(completed.translateNotesCount, 0);
+});
+
+test("a saved-note jump automatically tries only the free transcript path", async () => {
+  const runtime = loadSidepanelRuntime({ sidepanelMvp: true });
+  const fixture = installNoteNavigationFixture(runtime, {
+    freeTranscriptSuccess: true,
+    missingNoteTranslation: true,
+  });
+
+  await fixture.playTarget();
+  await fixture.inspectActive();
+  await nextTurn();
+
+  const completed = JSON.parse(fixture.snapshot());
+  assert.equal(completed.currentTranscriptText, "Free target transcript");
+  assert.equal(completed.transcriptStatus, "ready");
+  assert.equal(completed.activeTab, "notes");
+  assert.deepEqual(completed.supadataConsents, [false]);
+  assert.deepEqual(completed.captionRetries, [false]);
+  assert.deepEqual(completed.sessionKeys, []);
+  assert.equal(completed.hasAiKey, true);
+  assert.equal(completed.translateNotesCount, 0);
+
+  await fixture.inspectActive();
+  await nextTurn();
+  const afterDuplicateInspection = JSON.parse(fixture.snapshot());
+  assert.deepEqual(afterDuplicateInspection.supadataConsents, [false]);
+});
+
+test("an explicit saved-note resume never authorizes missing-note translation", async () => {
   const runtime = loadSidepanelRuntime();
+  const fixture = installNoteNavigationFixture(runtime, {
+    freeTranscriptSuccess: true,
+    missingNoteTranslation: true,
+  });
+
+  await fixture.playTarget();
+  await fixture.inspectActive();
+  await fixture.resumeTranscript();
+  await nextTurn();
+
+  const completed = JSON.parse(fixture.snapshot());
+  assert.equal(completed.currentTranscriptText, "Free target transcript");
+  assert.equal(completed.hasAiKey, true);
+  assert.equal(completed.translateNotesCount, 0);
+  assert.deepEqual(completed.supadataConsents, [false]);
+});
+
+test("a saved-note CC retry never authorizes missing-note translation", async () => {
+  const runtime = loadSidepanelRuntime({ sidepanelMvp: true });
+  const fixture = installNoteNavigationFixture(runtime, {
+    captionRetryTranscriptSuccess: true,
+    missingNoteTranslation: true,
+  });
+
+  await fixture.playTarget();
+  await fixture.inspectActive();
+  assert.equal(JSON.parse(fixture.snapshot()).transcriptStatus, "needs_cc");
+
+  await fixture.retryFreeTranscript();
+  await nextTurn();
+
+  const completed = JSON.parse(fixture.snapshot());
+  assert.equal(completed.currentTranscriptText, "CC retry transcript");
+  assert.equal(completed.transcriptStatus, "ready");
+  assert.equal(completed.hasAiKey, true);
+  assert.equal(completed.translateNotesCount, 0);
+  assert.deepEqual(completed.supadataConsents, [false, false]);
+  assert.deepEqual(completed.captionRetries, [false, true]);
+});
+
+test("a late automatic note-jump transcript cannot cross into another video", async () => {
+  const runtime = loadSidepanelRuntime({ sidepanelMvp: true });
+  const fixture = installNoteNavigationFixture(runtime, {
+    freeTranscriptSuccess: true,
+    deferFreeTranscript: true,
+  });
+
+  await fixture.playTarget();
+  const targetInspection = fixture.inspectActive();
+  await fixture.waitForFreeTranscript();
+
+  const targetTabId = JSON.parse(fixture.snapshot()).createdTabs[0].id;
+  fixture.setActiveTab(
+    "https://www.youtube.com/watch?v=another-video",
+    targetTabId,
+  );
+  await fixture.inspectActive();
+  fixture.releaseFreeTranscript();
+  await targetInspection;
+
+  const completed = JSON.parse(fixture.snapshot());
+  assert.equal(completed.currentVideoId, "another-video");
+  assert.equal(completed.currentRouteKey, "youtube:another-video");
+  assert.equal(completed.currentTranscriptText, null);
+  assert.equal(completed.transcriptStatus, "needs_cc");
+  assert.deepEqual(completed.sessionKeys, []);
+  assert.deepEqual(completed.supadataConsents, [false, false]);
+});
+
+test("duplicate navigation events do not repeat automatic free note-jump recovery", async () => {
+  const runtime = loadSidepanelRuntime({ sidepanelMvp: true });
   const fixture = installNoteNavigationFixture(runtime);
 
   await fixture.playTarget();
   await fixture.inspectActive();
-  // New tabs commonly emit activation, URL and complete events. A consumed
-  // one-shot intent must therefore leave a route-scoped note-only state; a
-  // second automatic inspection must not immediately reopen Supadata consent.
+  // New tabs commonly emit activation, URL and complete events. The first
+  // inspection may try cache/the free native chain; later automatic checks
+  // must preserve the resulting CC state and never advance to Supadata.
   await fixture.inspectActive();
   await nextTurn();
-  assert.equal(JSON.parse(fixture.snapshot()).fetchCount, 0);
+  const completed = JSON.parse(fixture.snapshot());
+  assert.equal(completed.fetchCount, 1);
+  assert.equal(completed.transcriptStatus, "needs_cc");
+  assert.equal(completed.activeTab, "notes");
+  assert.deepEqual(completed.supadataConsents, [false]);
+  assert.deepEqual(completed.captionRetries, [false]);
+  assert.equal(completed.sessionPhase, "active");
+});
 
-  await fixture.openTranscript();
-  await nextTurn();
-  await nextTurn();
-  const afterCcPrompt = JSON.parse(fixture.snapshot());
-  assert.equal(afterCcPrompt.fetchCount, 1);
-  assert.equal(afterCcPrompt.activeTab, "transcript");
-  assert.equal(afterCcPrompt.errorTitle, "请先打开 YouTube 字幕");
-  assert.equal(afterCcPrompt.errorSecondaryText, "返回笔记");
-  assert.deepEqual(afterCcPrompt.supadataConsents, [false]);
-  assert.deepEqual(afterCcPrompt.captionRetries, [false]);
+test("an automatic tab check cannot cancel an explicit saved-note recovery", async () => {
+  const runtime = loadSidepanelRuntime({ sidepanelMvp: true });
+  const fixture = installNoteNavigationFixture(runtime);
 
-  await fixture.clickConsentPrimary();
+  await fixture.playTarget();
+  await fixture.inspectActive();
+
+  const queryGate = runtime.evaluate(`
+    (() => {
+      const originalQuery = chrome.tabs.query;
+      let queryCount = 0;
+      let releaseQuery = null;
+      let markEntered = null;
+      const entered = new Promise((resolve) => { markEntered = resolve; });
+      chrome.tabs.query = async (query) => {
+        queryCount += 1;
+        if (queryCount === 1) {
+          markEntered();
+          await new Promise((resolve) => { releaseQuery = resolve; });
+        }
+        return originalQuery(query);
+      };
+      return {
+        entered,
+        release: () => releaseQuery?.(),
+        count: () => queryCount,
+      };
+    })()
+  `);
+
+  const explicitRecovery = fixture.resumeTranscript();
+  await queryGate.entered;
+  const automaticCheck = fixture.inspectActive();
+  queryGate.release();
+  await Promise.all([explicitRecovery, automaticCheck]);
+
+  assert.equal(queryGate.count(), 1);
+  const completed = JSON.parse(fixture.snapshot());
+  assert.equal(completed.transcriptStatus, "needs_cc");
+  assert.deepEqual(completed.supadataConsents, [false]);
+});
+
+test("a route change bypasses an obsolete explicit-resume promise", async () => {
+  const timers = createFakeTimers();
+  const runtime = loadSidepanelRuntime({
+    sidepanelMvp: true,
+    setTimeoutImpl: timers.setTimeout,
+    clearTimeoutImpl: timers.clearTimeout,
+  });
+  const fixture = installNoteNavigationFixture(runtime);
+
+  await fixture.playTarget();
+  await fixture.inspectActive();
+
+  const queryGate = runtime.evaluate(`
+    (() => {
+      const originalQuery = chrome.tabs.query;
+      let queryCount = 0;
+      let releaseQuery = null;
+      let markEntered = null;
+      const entered = new Promise((resolve) => { markEntered = resolve; });
+      chrome.tabs.query = async (query) => {
+        queryCount += 1;
+        if (queryCount === 1) {
+          markEntered();
+          await new Promise((resolve) => { releaseQuery = resolve; });
+        }
+        return originalQuery(query);
+      };
+      return {
+        entered,
+        release: () => releaseQuery?.(),
+        count: () => queryCount,
+      };
+    })()
+  `);
+
+  const obsoleteResume = fixture.resumeTranscript();
+  await queryGate.entered;
+  const targetTabId = JSON.parse(fixture.snapshot()).createdTabs[0].id;
+  const nextUrl = "https://www.youtube.com/watch?v=another-video";
+  fixture.setActiveTab(nextUrl, targetTabId);
+  fixture.navigateFront(nextUrl, targetTabId);
+  timers.fireActive(600);
   await nextTurn();
-  const afterExplicitTranscript = JSON.parse(fixture.snapshot());
-  assert.equal(afterExplicitTranscript.fetchCount, 2);
+  await nextTurn();
+
+  const beforeOldRelease = JSON.parse(fixture.snapshot());
+  assert.equal(queryGate.count(), 2);
+  assert.equal(beforeOldRelease.currentVideoId, "another-video");
+  assert.equal(beforeOldRelease.transcriptStatus, "needs_cc");
+  assert.deepEqual(beforeOldRelease.supadataConsents, [false, false]);
+
+  queryGate.release();
+  await obsoleteResume;
+  const completed = JSON.parse(fixture.snapshot());
+  assert.equal(completed.currentVideoId, "another-video");
+  assert.equal(completed.currentTranscriptText, null);
+});
+
+test("an old-tab same-route response cannot satisfy the new tab", async () => {
+  const timers = createFakeTimers();
+  const runtime = loadSidepanelRuntime({
+    sidepanelMvp: true,
+    setTimeoutImpl: timers.setTimeout,
+    clearTimeoutImpl: timers.clearTimeout,
+  });
+  const fixture = installNoteNavigationFixture(runtime, {
+    freeTranscriptSuccess: true,
+    deferFreeTranscript: true,
+    identifyTranscriptTab: true,
+  });
+
+  await fixture.playTarget();
+  const oldTabInspection = fixture.inspectActive();
+  await fixture.waitForFreeTranscript();
+
+  const newTabId = 909;
+  fixture.setActiveTab(fixture.targetUrl, newTabId);
+  await runtime.tabActivatedListeners[0]({ tabId: newTabId, windowId: 1 });
+  timers.fireActive(600);
+  await nextTurn();
+  await nextTurn();
+
+  const beforeOldRelease = JSON.parse(fixture.snapshot());
+  assert.equal(beforeOldRelease.fetchCount, 2);
   assert.equal(
-    afterExplicitTranscript.errorTitle,
-    "是否使用 Supadata 获取字幕？",
+    beforeOldRelease.currentTranscriptText,
+    `Free transcript from tab ${newTabId}`,
   );
-  assert.equal(afterExplicitTranscript.errorSecondaryText, "返回笔记");
-  assert.deepEqual(afterExplicitTranscript.supadataConsents, [false, false]);
-  assert.deepEqual(afterExplicitTranscript.captionRetries, [false, true]);
+  assert.equal(beforeOldRelease.transcriptStatus, "ready");
+
+  fixture.releaseFreeTranscript();
+  await oldTabInspection;
+  const completed = JSON.parse(fixture.snapshot());
+  assert.equal(completed.videoTabId, newTabId);
+  assert.equal(
+    completed.currentTranscriptText,
+    `Free transcript from tab ${newTabId}`,
+  );
+  assert.deepEqual(completed.supadataConsents, [false, false]);
+});
+
+test("old-tab metadata cannot start a same-route fetch in the new tab", async () => {
+  const timers = createFakeTimers();
+  const runtime = loadSidepanelRuntime({
+    sidepanelMvp: true,
+    setTimeoutImpl: timers.setTimeout,
+    clearTimeoutImpl: timers.clearTimeout,
+  });
+  const fixture = installNoteNavigationFixture(runtime, {
+    deferMetadataRelay: true,
+    identifyMetadataTab: true,
+  });
+
+  await fixture.playTarget();
+  const oldTabInspection = fixture.inspectActive();
+  await fixture.waitForMetadataRelay();
+  const oldTabId = JSON.parse(fixture.snapshot()).createdTabs[0].id;
+
+  const newTabId = 909;
+  fixture.setActiveTab(fixture.targetUrl, newTabId);
+  await runtime.tabActivatedListeners[0]({ tabId: newTabId, windowId: 1 });
+  fixture.releaseMetadataRelay();
+  await oldTabInspection;
+
+  const beforeNewCheck = JSON.parse(fixture.snapshot());
+  assert.equal(beforeNewCheck.fetchCount, 0);
+  assert.notEqual(beforeNewCheck.currentVideoTitle, `Metadata from tab ${oldTabId}`);
+  assert.notEqual(beforeNewCheck.currentVideoSourceLanguage, "fr");
+
+  timers.fireActive(600);
+  await nextTurn();
+  await nextTurn();
+
+  const completed = JSON.parse(fixture.snapshot());
+  assert.equal(completed.fetchCount, 1);
+  assert.equal(completed.currentVideoTitle, `Metadata from tab ${newTabId}`);
+  assert.equal(completed.currentVideoSourceLanguage, "de");
+  assert.deepEqual(completed.transcriptRequests, [
+    { tabId: newTabId, preferredLanguage: "de" },
+  ]);
 });
 
 test("declining consent after a saved-note jump returns to All Notes without a third-party request", async () => {
@@ -5984,22 +6407,29 @@ test("playing a saved note for the current video still seeks without opening a t
   assert.deepEqual(snapshot.tabSeekTabIds, []);
 });
 
-test("an active saved-note context survives side-panel reconstruction without fetching a transcript", async () => {
+test("an active saved-note context survives reconstruction and restarts free recovery", async () => {
   const sharedSession = createMemoryStorageArea();
-  const firstRuntime = loadSidepanelRuntime({ storageSession: sharedSession });
+  const firstRuntime = loadSidepanelRuntime({
+    storageSession: sharedSession,
+    sidepanelMvp: true,
+  });
   const first = installNoteNavigationFixture(firstRuntime);
 
   await first.playTarget();
   await first.inspectActive();
   await nextTurn();
   const firstSnapshot = JSON.parse(first.snapshot());
-  assert.equal(firstSnapshot.fetchCount, 0);
+  assert.equal(firstSnapshot.fetchCount, 1);
+  assert.equal(firstSnapshot.transcriptStatus, "needs_cc");
   assert.equal(Object.values(sharedSession.snapshot())[0]?.phase, "active");
 
   // A newly constructed side panel starts with no in-memory intent. It must
-  // hydrate the active tab+route context from chrome.storage.session and keep
-  // the local All Notes view instead of treating reconstruction as a new visit.
-  const rebuiltRuntime = loadSidepanelRuntime({ storageSession: sharedSession });
+  // hydrate the active tab+route context from chrome.storage.session, keep the
+  // local All Notes view, and restart only the free transcript check.
+  const rebuiltRuntime = loadSidepanelRuntime({
+    storageSession: sharedSession,
+    sidepanelMvp: true,
+  });
   const rebuilt = installNoteNavigationFixture(rebuiltRuntime);
   rebuilt.setActiveTab(
     first.targetUrl,
@@ -6009,7 +6439,9 @@ test("an active saved-note context survives side-panel reconstruction without fe
   await nextTurn();
 
   const rebuiltSnapshot = JSON.parse(rebuilt.snapshot());
-  assert.equal(rebuiltSnapshot.fetchCount, 0);
+  assert.equal(rebuiltSnapshot.fetchCount, 1);
+  assert.equal(rebuiltSnapshot.transcriptStatus, "needs_cc");
+  assert.deepEqual(rebuiltSnapshot.supadataConsents, [false]);
   assert.equal(rebuiltSnapshot.errorTitle, "");
   assert.equal(rebuiltSnapshot.activeTab, "notes");
   assert.equal(rebuiltSnapshot.currentVideoId, first.targetMediaKey);
@@ -6118,7 +6550,7 @@ test("a Bilibili P2 note jump preserves its CID media identity and stays local w
 });
 
 test("a matching saved-note jump can read local notes when no AI provider key is configured", async () => {
-  const runtime = loadSidepanelRuntime();
+  const runtime = loadSidepanelRuntime({ sidepanelMvp: true });
   const fixture = installNoteNavigationFixture(runtime, { hasAiKey: false });
 
   await fixture.playTarget();
@@ -6126,7 +6558,9 @@ test("a matching saved-note jump can read local notes when no AI provider key is
   await nextTurn();
 
   const snapshot = JSON.parse(fixture.snapshot());
-  assert.equal(snapshot.fetchCount, 0);
+  assert.equal(snapshot.fetchCount, 1);
+  assert.equal(snapshot.transcriptStatus, "needs_cc");
+  assert.deepEqual(snapshot.supadataConsents, [false]);
   assert.equal(snapshot.errorTitle, "");
   assert.equal(snapshot.resultsVisible, true);
   assert.equal(snapshot.activeTab, "notes");
@@ -6135,7 +6569,7 @@ test("a matching saved-note jump can read local notes when no AI provider key is
     snapshot.backgroundActions.filter(
       (action) => action !== "mutateResetFencedSession",
     ),
-    ["getNotes"],
+    ["getNotes", "relayToContent", "fetchTranscript"],
   );
 });
 
@@ -6162,6 +6596,7 @@ test("activating the same video in another tab clears note-only state and rebind
   const timers = new Map();
   let nextTimerId = 1;
   const runtime = loadSidepanelRuntime({
+    sidepanelMvp: true,
     setTimeoutImpl(callback, delay) {
       const id = nextTimerId++;
       timers.set(id, { callback, delay, cancelled: false });
@@ -6176,7 +6611,7 @@ test("activating the same video in another tab clears note-only state and rebind
   await fixture.playTarget();
   await fixture.inspectActive();
   const noteOnly = JSON.parse(fixture.snapshot());
-  assert.equal(noteOnly.fetchCount, 0);
+  assert.equal(noteOnly.fetchCount, 1);
   assert.equal(noteOnly.videoTabId, noteOnly.createdTabs[0].id);
   assert.equal(noteOnly.sessionKeys.length, 1);
 
@@ -6188,7 +6623,7 @@ test("activating the same video in another tab clears note-only state and rebind
   const afterActivation = JSON.parse(fixture.snapshot());
   assert.deepEqual(afterActivation.sessionKeys, []);
   const scheduledRefreshes = [...timers.values()].filter(
-    (timer) => !timer.cancelled,
+    (timer) => !timer.cancelled && timer.delay === 600,
   );
   assert.equal(scheduledRefreshes.length, 1);
   assert.equal(scheduledRefreshes[0].delay, 600);
@@ -6198,7 +6633,7 @@ test("activating the same video in another tab clears note-only state and rebind
   await nextTurn();
   const afterRefresh = JSON.parse(fixture.snapshot());
   assert.equal(afterRefresh.videoTabId, secondTabId);
-  assert.equal(afterRefresh.fetchCount, 1);
+  assert.equal(afterRefresh.fetchCount, 2);
 
   await fixture.playTarget();
   await nextTurn();
@@ -7794,6 +8229,83 @@ test("a newly confirmed audio language does not reset the same video's validated
   assert.equal(snapshot.sourceLanguage, "en");
   assert.equal(snapshot.transcriptText, "transcript-video-a");
   assert.equal(snapshot.overviewMode, "zh");
+});
+
+test("a newly confirmed Chinese caption track replaces same-video English memory once", async () => {
+  const runtime = loadSidepanelRuntime();
+  const fixture = installSidepanelDigestFixture(runtime);
+  fixture.setVideoSourceLanguage("en-US");
+  const englishTrack = { language: "en-US", kind: "manual" };
+  const chineseTrack = { language: "zh-Hans", kind: "manual" };
+
+  const englishLoad = fixture.start("video-a", {
+    captionSelection: englishTrack,
+  });
+  await nextTurn();
+  fixture.resolveCache(
+    "video-a",
+    fixture.makeCache(
+      "video-a",
+      true,
+      "en-US",
+      false,
+      null,
+      null,
+      englishTrack,
+    ),
+  );
+  await englishLoad;
+  assert.equal(fixture.cacheRequestCount(), 1);
+
+  await fixture.start("video-a", { captionSelection: englishTrack });
+  assert.equal(
+    fixture.cacheRequestCount(),
+    1,
+    "the same non-Chinese track must keep the existing zero-repeat shortcut",
+  );
+
+  const chineseLoad = fixture.start("video-a", {
+    captionSelection: chineseTrack,
+  });
+  await nextTurn();
+  assert.equal(
+    fixture.cacheRequestCount(),
+    2,
+    "stronger page track evidence must bypass the READY/memory shortcut",
+  );
+  fixture.resolveCache(
+    "video-a",
+    fixture.makeCache(
+      "video-a",
+      true,
+      "zh-Hans",
+      false,
+      null,
+      null,
+      chineseTrack,
+    ),
+  );
+  await chineseLoad;
+
+  const replaced = JSON.parse(fixture.snapshot());
+  assert.equal(JSON.parse(fixture.selectedTrack()).language, "zh-hans");
+  assert.equal(replaced.sourceLanguage, "zh-Hans");
+
+  await fixture.start("video-a", { captionSelection: chineseTrack });
+  assert.equal(
+    fixture.cacheRequestCount(),
+    2,
+    "the same confirmed track must keep the zero-repeat shortcut",
+  );
+
+  await fixture.start("video-a", {
+    captionSelection: { language: "zh-Hant", kind: "manual" },
+  });
+  assert.equal(
+    fixture.cacheRequestCount(),
+    2,
+    "Simplified and Traditional manual tracks must not trigger a refresh loop",
+  );
 });
 
 test("an active Overview tab starts analysis for the newly selected video", async () => {
@@ -11701,7 +12213,7 @@ test("notes generate Chinese once from polished English and persist it", async (
   const backgroundSource = read("background.js");
   assert.match(
     backgroundSource,
-    /async function handleSaveNote\([\s\S]*?cleanupNoteText\([\s\S]*?saveNoteToStorage\(\s*note,\s*saveGeneration,\s*dataGeneration,\s*\)[\s\S]*?action: "noteSaved"/,
+    /async function handleSaveNote\([\s\S]*?cleanupNoteText\([\s\S]*?saveNoteToStorage\(\s*note,\s*saveGeneration,\s*dataGeneration,\s*true,\s*captureRawText,\s*\)[\s\S]*?action: "noteSaved"/,
   );
   assert.doesNotMatch(backgroundSource, /handleTranslateNotes\(\[note\]\)/);
   assert.match(
@@ -14435,7 +14947,7 @@ test("all AI product requests use DeepSeek non-thinking and JSON behavior", asyn
   const backgroundSource = read("background.js");
   assert.equal(
     (backgroundSource.match(/await requestAiCompletion\(\{/g) || []).length,
-    4,
+    5,
   );
   assert.doesNotMatch(backgroundSource, /disableThinking/);
   for (const callPath of [
@@ -14443,6 +14955,7 @@ test("all AI product requests use DeepSeek non-thinking and JSON behavior", asyn
     "cleanupNoteText",
     "handleExplainSelection",
     "callAiTranslation",
+    "handleFindNoteCandidates",
   ]) {
     assert.match(
       backgroundSource,

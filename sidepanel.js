@@ -238,13 +238,24 @@ function applyExtensionDataResetFence(runtimeInstanceId, dataGeneration) {
   exportTranslationGeneration += 1;
   notesLoadGeneration += 1;
   notesTranslationGeneration += 1;
+  notesSearchGeneration += 1;
+  notesSearchResults = [];
+  notesSearchBusy = false;
+  notesSearchError = "";
+  notesAiBusy = false;
+  notesAiNotice = "";
+  notesAiError = "";
+  noteJumpGeneration += 1;
+  clearNoteJumpFeedback();
   noteExportAuthorizationGeneration += 1;
   activeNoteExportAuthorization = null;
   activeExportJobId = "";
   pendingNoteNavigation = null;
   activeNotesOnlyContext = null;
+  noteNavigationResumeTarget = null;
   currentAnalysis = null;
   currentNotes = [];
+  notesGroupingMode = "date";
   currentPersistedNoteSource = null;
   transcriptParagraphCache.clear();
   activeTranslationQueue = null;
@@ -256,6 +267,7 @@ function applyExtensionDataResetFence(runtimeInstanceId, dataGeneration) {
   transcriptScrollObserver = null;
   sidepanelMvpTaskGate?.clear?.();
   sidepanelMvpConsentVault?.clear?.();
+  renderNotes(currentNotes, currentNotesFilterVideoId);
   return true;
 }
 
@@ -406,12 +418,11 @@ function openAiSettings() {
   return chrome.runtime.sendMessage({ action: "openOptions" });
 }
 
-// A cross-video click from the saved-notes library means "open this note",
-// not "start acquiring subtitles".  Keep that intent in session storage so
-// it survives Chrome swapping/recreating the global side-panel document while
-// the new tab is activated.  The pending phase is short-lived and exact-tab
-// bound; after it matches, the active phase lasts only while that tab remains
-// on the same media route or until the user explicitly requests a digest tab.
+// A cross-video click from the saved-notes library keeps Notes selected while
+// a normal YouTube jump may warm cached/free subtitles in the background.
+// Keep that intent in session storage so it survives Chrome recreating the
+// global side-panel document. The pending phase is short-lived and exact-tab
+// bound; the active phase retains a safe return path for CC/provider choices.
 const NOTE_NAVIGATION_SESSION_KEY = "ytd_note_navigation";
 const NOTE_NAVIGATION_SCHEMA_VERSION = 1;
 const NOTE_NAVIGATION_PENDING_TTL_MS = 15_000;
@@ -419,6 +430,7 @@ const NOTE_EXPORT_AUTHORIZATION_TTL_MS = 10 * 60_000;
 let pendingNoteNavigation = null;
 let activeNotesOnlyContext = null;
 let noteNavigationResumePromise = null;
+let noteNavigationResumeTarget = null;
 let noteNavigationStorageQueue = Promise.resolve();
 let noteExportContinuationResumePromise = null;
 let activeNoteExportAuthorization = null;
@@ -433,6 +445,20 @@ let currentNotesMode = "bilingual";
 let currentNotes = [];
 let currentNotesFilterVideoId;
 let notesFilterShowAll = false;
+let notesSearchQuery = "";
+const NOTES_GROUPING_STORAGE_KEY = "digestdock_notes_grouping";
+let notesGroupingMode = "date";
+let notesSearchGeneration = 0;
+let notesSearchResults = [];
+let notesSearchBusy = false;
+let notesSearchError = "";
+let notesAiBusy = false;
+let notesAiNotice = "";
+let notesAiError = "";
+let noteJumpGeneration = 0;
+let noteJumpFeedbackElement = null;
+let noteJumpFeedbackHome = null;
+let noteJumpFeedbackGeneration = 0;
 let noteExportPickerGroups = [];
 let noteExportPickerPrecheck = null;
 let noteExportPickerSourcesByKey = {};
@@ -501,6 +527,22 @@ function transcriptSelectedTrackIdentity(track) {
   ].join(":");
 }
 
+function transcriptTrackMatchesPagePreference(
+  pageTrack,
+  transcriptTrack = currentTranscriptSelectedTrack,
+) {
+  const expected = sanitizeTranscriptSelectedTrack(pageTrack);
+  const current = sanitizeTranscriptSelectedTrack(transcriptTrack);
+  if (!expected?.language) return true;
+  if (!current?.language || current.kind !== expected.kind) return false;
+  if (isChineseLanguage(expected.language)) {
+    return isChineseLanguage(current.language);
+  }
+  return Boolean(
+    current.language === expected.language,
+  );
+}
+
 function transcriptContentFingerprint(transcriptTimestamped, transcriptText = "") {
   return overviewTranscriptFingerprint(
     String(transcriptTimestamped || transcriptText || ""),
@@ -566,6 +608,7 @@ function buildTranscriptFetchRequest({
   videoId,
   mediaRef,
   preferredLanguage = "",
+  pagePreferredTrack = null,
   tabId = null,
   generation,
   routeKey,
@@ -578,6 +621,7 @@ function buildTranscriptFetchRequest({
     videoId: mediaRef?.videoId || videoId,
     mediaRef,
     preferredLanguage,
+    pagePreferredTrack: sanitizeTranscriptSelectedTrack(pagePreferredTrack),
     trackKind: YOUTUBE_TRANSCRIPT_TRACK_KIND,
     tabId,
     runId,
@@ -1022,7 +1066,7 @@ function sidepanelMvpRunCurrentTask({ captionRetry = false, consentToken = null 
       currentRouteKey,
       Boolean(consentToken),
       captionRetry,
-      { mvpTask: task, consentToken },
+      { mvpTask: task, consentToken, videoTabId },
     ),
   );
 }
@@ -1247,7 +1291,7 @@ const FOLLOW_IDLE_RESUME_DELAY_MS = 5000;
 const FOLLOW_PLAYBACK_READ_TIMEOUT_MS = 900;
 let autoScrollEnabled = true; // True = scroll transcript to follow video playback
 let autoScrollInterval = null; // setInterval ID for polling video time
-let lastAutoScrollTime = 0; // Timestamp of last programmatic scroll (ignores scroll events within 1s)
+let playbackNeedsReposition = false;
 let playbackTrackingEpoch = 0;
 let playbackTrackingRequestToken = 0;
 let playbackTrackingRequestInFlight = false;
@@ -1618,6 +1662,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     showRuntimeVersionError();
     return;
   }
+  await restoreNotesGroupingPreference();
   await evictOldCacheEntries(20);
 
   const configRequestFence = extensionDataFenceSnapshot();
@@ -2216,6 +2261,7 @@ function handleFrontTabUrl(url, tabId = null) {
   }
 
   const newRouteKey = locator.routeKey;
+  const routeChanged = newRouteKey !== currentRouteKey;
   const exactTabChanged =
     Number.isInteger(tabId) &&
     Number.isInteger(videoTabId) &&
@@ -2227,12 +2273,42 @@ function handleFrontTabUrl(url, tabId = null) {
   ) {
     void clearNoteNavigationState(activeNotesOnlyContext.token);
   }
+  if (exactTabChanged) {
+    // The exact tab is part of a check's ownership even when the media route
+    // is identical. Invalidate any metadata relay still owned by the old tab.
+    tabCheckGeneration += 1;
+    const shouldRestartSameMediaTranscript =
+      SIDEPANEL_MVP_AVAILABLE &&
+      locator.platform === "youtube" &&
+      currentVideoId === locator.mediaKey &&
+      currentRouteKey === locator.routeKey &&
+      !currentTranscript;
+    // Rebind immediately so an old-tab response cannot commit while the
+    // debounced inspection of the new tab is still waiting to run.
+    videoTabId = tabId;
+    if (shouldRestartSameMediaTranscript) {
+      digestGeneration += 1;
+      sidepanelMvpBindSession(locator.mediaKey, locator.routeKey, {
+        forceNewTask: true,
+      });
+    }
+  }
+  // A YouTube URL already identifies the new video. Invalidate old metadata
+  // and subtitle work now, before the debounced metadata lookup can finish.
+  // Bilibili's mediaKey still requires its separate CID resolution below.
+  if (routeChanged && currentVideoId && locator.platform === "youtube") {
+    tabCheckGeneration += 1;
+    currentVideoTitle = "";
+    currentChannelName = "";
+    currentVideoDuration = 0;
+    resetDigestStateForVideo(locator.mediaKey, url, locator, newRouteKey);
+  }
   // Refresh when the video changed, or when we're not currently showing
   // results (e.g. user went home, then clicked back into the same video), or
   // when another tab shows the same route. The latter must rebind videoTabId so
   // note seek/play messages never target a background copy of the video.
   if (
-    newRouteKey !== currentRouteKey ||
+    routeChanged ||
     exactTabChanged ||
     !panelIsShowingResults()
   ) {
@@ -2399,9 +2475,6 @@ function setupEventListeners() {
   for (const eventName of ["pointerdown", "touchstart", "wheel", "keydown", "focusin"]) {
     contentArea?.addEventListener(eventName, onFollowWorkspaceInteraction);
   }
-  contentArea?.addEventListener("scroll", onFollowWorkspaceInteraction, {
-    passive: true,
-  });
   document.addEventListener("selectionchange", onFollowWorkspaceInteraction);
 
   // Follow controls belong only to manual reading inside the Transcript tab.
@@ -2417,6 +2490,41 @@ function setupEventListeners() {
   });
 
   // Notes filter buttons
+  document.querySelectorAll("[data-notes-grouping]").forEach((button) => {
+    button.addEventListener("click", () => {
+      notesGroupingMode = button.dataset.notesGrouping === "video" ? "video" : "date";
+      renderNotes(currentNotes, currentNotesFilterVideoId);
+      chrome.storage.local.set({ [NOTES_GROUPING_STORAGE_KEY]: notesGroupingMode }).catch(() => {});
+    });
+  });
+  if (typeof ResizeObserver === "function") {
+    const observer = new ResizeObserver(syncNoteStickyHeaders);
+    ["contentArea", "notesToolbar", "notesList"].forEach((id) => {
+      const element = document.getElementById(id);
+      if (element) observer.observe(element);
+    });
+  }
+  document.getElementById("notesAiFind")?.addEventListener("click", () => void findNotesWithAi());
+  document.getElementById("notesSearch")?.addEventListener("input", (event) => {
+    noteJumpGeneration += 1;
+    clearNoteJumpFeedback();
+    notesSearchQuery = normalizeNotesSearchText(event.target.value);
+    notesSearchGeneration += 1;
+    notesLoadGeneration += 1;
+    notesTranslationGeneration += 1;
+    setNotesTranslationLoading(false);
+    for (const id of ["notesFilterThis", "notesFilterAll"]) {
+      const button = document.getElementById(id);
+      if (button) button.disabled = !!notesSearchQuery;
+    }
+    if (notesSearchQuery) void searchNotesLocally();
+    else {
+      notesSearchResults = [];
+      notesSearchError = "";
+      notesSearchBusy = false;
+      void loadNotes(notesFilterShowAll ? null : currentVideoId, { translateMissing: false });
+    }
+  });
   document.getElementById("notesFilterThis")?.addEventListener("click", () => {
     setNotesFilter(false);
     loadNotes(currentVideoId);
@@ -2504,6 +2612,26 @@ function setNotesFilter(showAll) {
 // ============================================================
 
 function checkCurrentTab(options = {}) {
+  const resumeNoteNavigationToken = String(
+    options?.resumeNoteNavigationToken || "",
+  );
+  // A tab activation/complete event can arrive just after the user explicitly
+  // asks to recover a saved-note transcript. Reuse that recovery instead of
+  // incrementing the global check generation and cancelling it midway.
+  const resumeTargetIsCurrent =
+    !!noteNavigationResumeTarget &&
+    activeNotesOnlyContext?.token === noteNavigationResumeTarget.token &&
+    activeNotesOnlyContext?.tabId === noteNavigationResumeTarget.tabId &&
+    activeNotesOnlyContext?.routeKey === noteNavigationResumeTarget.routeKey &&
+    videoTabId === noteNavigationResumeTarget.tabId &&
+    currentRouteKey === noteNavigationResumeTarget.routeKey;
+  if (
+    !resumeNoteNavigationToken &&
+    noteNavigationResumePromise &&
+    resumeTargetIsCurrent
+  ) {
+    return noteNavigationResumePromise;
+  }
   const generation = ++tabCheckGeneration;
   return runCheckCurrentTab(generation, options);
 }
@@ -2585,6 +2713,22 @@ async function runCheckCurrentTab(generation, options = {}) {
     // Capture the exact supported tab before any navigation-intent lookup or
     // content relay. Viewing an already-saved note is a local action and must
     // remain available even when no AI key is configured.
+    const shouldReconnectSameMediaTab =
+      SIDEPANEL_MVP_AVAILABLE &&
+      locator.platform === "youtube" &&
+      Number.isInteger(videoTabId) &&
+      videoTabId !== tab.id &&
+      currentVideoId === locator.mediaKey &&
+      currentRouteKey === locator.routeKey &&
+      !currentTranscript;
+    if (shouldReconnectSameMediaTab) {
+      // Direct inspections can discover a tab switch before onActivated does.
+      // Invalidate the old-tab task before any metadata or cache await.
+      digestGeneration += 1;
+      sidepanelMvpBindSession(locator.mediaKey, locator.routeKey, {
+        forceNewTask: true,
+      });
+    }
     videoTabId = tab.id;
     const noteNavigation = await resolveNoteNavigationForTab(tab, locator);
     if (!isLatestCheck()) return;
@@ -2595,9 +2739,20 @@ async function runCheckCurrentTab(generation, options = {}) {
       !!noteNavigation &&
       !!resumeNoteNavigationToken &&
       noteNavigation.token === resumeNoteNavigationToken;
+    const isAutomaticNoteDigestResume =
+      !!noteNavigation &&
+      !isExplicitNoteDigestResume &&
+      SIDEPANEL_MVP_AVAILABLE &&
+      locator.platform === "youtube" &&
+      !noteNavigation.captureMetadata &&
+      !noteNavigation.exportContinuation;
     if (noteNavigation && !isExplicitNoteDigestResume) {
       await enterNotesOnlyView(noteNavigation, tab, locator);
-      return;
+      if (!isLatestCheck() || !isActiveNotesOnlyContext()) return;
+      // A normal YouTube note jump now warms the transcript from cache or the
+      // free native chain. Metadata/export continuations and Bilibili keep
+      // their existing local-only behavior.
+      if (!isAutomaticNoteDigestResume) return;
     }
 
     let nextMediaRef = locator;
@@ -2708,7 +2863,17 @@ async function runCheckCurrentTab(generation, options = {}) {
       nextMediaRef,
       locator.routeKey,
       nextCaptionSelection,
+      { translateMissingNotes: !isAutomaticNoteDigestResume },
     );
+    if (
+      isLatestCheck() &&
+      currentTranscript &&
+      noteNavigation &&
+      activeNotesOnlyContext?.token === noteNavigation.token &&
+      isActiveNotesOnlyContext()
+    ) {
+      await clearNoteNavigationState(noteNavigation.token);
+    }
   } catch (error) {
     if (!isLatestCheck()) return;
     if (isTransientTabLookupError(error)) {
@@ -2757,7 +2922,6 @@ function resetDigestStateForVideo(videoId, videoUrl, mediaRef, routeKey) {
   currentVideoUrl = videoUrl;
   currentMediaRef = mediaRef;
   currentRouteKey = routeKey;
-  sidepanelMvpBindSession(videoId, routeKey, { forceNewTask: true });
   currentAnalysis = null;
   currentTranscript = null;
   currentTranscriptText = null;
@@ -2768,6 +2932,9 @@ function resetDigestStateForVideo(videoId, videoUrl, mediaRef, routeKey) {
   currentTranscriptSourceAttempt = "";
   currentVideoCaptionSelection = null;
   currentPersistedNoteSource = null;
+  document.getElementById("transcriptList")?.replaceChildren?.();
+  document.getElementById("transcriptSourceBadge")?.remove?.();
+  sidepanelMvpBindSession(videoId, routeKey, { forceNewTask: true });
   activeExportJobId = "";
   if (previousExportJobId) {
     sendResetFencedStorageMessage({
@@ -3057,6 +3224,7 @@ function startDigest(
   mediaRef = currentMediaRef,
   routeKey = currentRouteKey,
   captionSelection = currentVideoCaptionSelection,
+  digestOptions = {},
 ) {
   const nextMediaRef = mediaRef || currentMediaRef;
   const nextRouteKey = routeKey || currentRouteKey;
@@ -3089,13 +3257,26 @@ function startDigest(
 
   if (SIDEPANEL_MVP_AVAILABLE && !videoChanged) {
     const transcriptStatus = sidepanelMvpState?.transcript?.status;
+    const transcriptInProgress = [
+      SIDEPANEL_STATE_API.TRANSCRIPT_STATUSES.LOADING,
+      SIDEPANEL_STATE_API.TRANSCRIPT_STATUSES.RETRYING_FREE,
+      SIDEPANEL_STATE_API.TRANSCRIPT_STATUSES.FETCHING_SUPADATA,
+    ].includes(transcriptStatus);
+    const knownChineseTrackChanged =
+      Boolean(currentTranscript) &&
+      isChineseLanguage(currentVideoCaptionSelection?.language) &&
+      !transcriptTrackMatchesPagePreference(currentVideoCaptionSelection);
+    if (knownChineseTrackChanged && !transcriptInProgress) {
+      // A later MAIN-world metadata read may reveal the Chinese track after an
+      // English Passive result was already rendered. Start one new fenced task
+      // so the old READY state cannot mask that stronger page evidence.
+      digestGeneration += 1;
+      sidepanelMvpBindSession(videoId, nextRouteKey, { forceNewTask: true });
+    }
     if (
-      transcriptStatus === SIDEPANEL_STATE_API.TRANSCRIPT_STATUSES.READY ||
-      ![
-        SIDEPANEL_STATE_API.TRANSCRIPT_STATUSES.LOADING,
-        SIDEPANEL_STATE_API.TRANSCRIPT_STATUSES.RETRYING_FREE,
-        SIDEPANEL_STATE_API.TRANSCRIPT_STATUSES.FETCHING_SUPADATA,
-      ].includes(transcriptStatus)
+      !knownChineseTrackChanged &&
+      (transcriptStatus === SIDEPANEL_STATE_API.TRANSCRIPT_STATUSES.READY ||
+        !transcriptInProgress)
     ) {
       renderSidepanelMvpTranscriptState();
       return Promise.resolve();
@@ -3103,6 +3284,7 @@ function startDigest(
   }
 
   const generation = digestGeneration;
+  const requestVideoTabId = videoTabId;
   const requestKey = `${generation}:${videoId}`;
   return runDigestSingleFlight(requestKey, () =>
     runDigestLoad(
@@ -3111,6 +3293,13 @@ function startDigest(
       videoChanged,
       nextMediaRef,
       nextRouteKey,
+      false,
+      false,
+      {
+        videoTabId: requestVideoTabId,
+        translateMissingNotes:
+          digestOptions.translateMissingNotes !== false,
+      },
     ),
   );
 }
@@ -3157,6 +3346,14 @@ async function runDigestLoad(
   mvpOptions = {},
 ) {
   const dataFence = captureExtensionDataFence();
+  const requestVideoTabId = Number.isInteger(mvpOptions.videoTabId)
+    ? mvpOptions.videoTabId
+    : videoTabId;
+  // Freeze this at task entry. Reading/retrying subtitles from a saved-note
+  // context never grants permission to translate missing note text with AI.
+  const translateMissingNotes =
+    mvpOptions.translateMissingNotes !== false &&
+    !isActiveNotesOnlyContext();
   if (!isCurrentDigest(videoId, generation, routeKey)) return;
   const mvpTask = SIDEPANEL_MVP_AVAILABLE
     ? mvpOptions.mvpTask || sidepanelMvpState?.transcript?.activeTask
@@ -3165,12 +3362,19 @@ async function runDigestLoad(
   const ownsDigestLoad = () =>
     extensionDataFenceIsCurrent(dataFence) &&
     isCurrentDigest(videoId, generation, routeKey) &&
+    videoTabId === requestVideoTabId &&
     (!SIDEPANEL_MVP_AVAILABLE ||
       (mvpTask && sidepanelMvpTaskGate.isCurrent(mvpEnvelope)));
   if (!ownsDigestLoad()) return;
 
   // Check if we already have this video loaded in memory
-  if (!videoChanged && videoId === currentVideoId && currentAnalysis) {
+  if (
+    !videoChanged &&
+    videoId === currentVideoId &&
+    currentAnalysis &&
+    (!isChineseLanguage(currentVideoCaptionSelection?.language) ||
+      transcriptTrackMatchesPagePreference(currentVideoCaptionSelection))
+  ) {
     if (SIDEPANEL_MVP_AVAILABLE && currentTranscript) {
       sidepanelMvpResolveTranscript(
         { success: true, routeOutcome: "HAVE_TRANSCRIPT", source: "memory" },
@@ -3306,7 +3510,9 @@ async function runDigestLoad(
     // Respect the user's explicit All Notes filter. A saved-note navigation
     // must not silently collapse the library back to the current video after
     // they later request Transcript or Overview.
-    loadNotes(notesFilterShowAll ? null : videoId);
+    loadNotes(notesFilterShowAll ? null : videoId, {
+      translateMissing: translateMissingNotes,
+    });
 
     // Setup explain feature
     setupExplainFeature();
@@ -3342,7 +3548,8 @@ async function runDigestLoad(
     videoId,
     mediaRef: requestMediaRef,
     preferredLanguage: currentVideoSourceLanguage,
-    tabId: videoTabId,
+    pagePreferredTrack: currentVideoCaptionSelection,
+    tabId: requestVideoTabId,
     generation,
     routeKey,
     supadataConsent,
@@ -3405,7 +3612,7 @@ async function runDigestLoad(
     return;
   }
 
-  if (SIDEPANEL_MVP_AVAILABLE) {
+  if (SIDEPANEL_MVP_AVAILABLE && transcriptResult?.success !== true) {
     sidepanelMvpResolveTranscript(transcriptResult, mvpTask, {
       finishTask: transcriptResult?.success !== true,
     });
@@ -3609,6 +3816,9 @@ async function runDigestLoad(
 
   // Render transcript immediately (no LLM needed)
   renderTranscript();
+  if (SIDEPANEL_MVP_AVAILABLE) {
+    sidepanelMvpResolveTranscript(transcriptResult, mvpTask, { finishTask: false });
+  }
   if (currentAnalysis) {
     renderAnalysisResults(currentAnalysis);
     highlightMomentsOnPage(currentAnalysis.keyMoments);
@@ -3620,7 +3830,9 @@ async function runDigestLoad(
   }
 
   // Preserve an explicitly selected All Notes view across digest loading.
-  loadNotes(notesFilterShowAll ? null : videoId);
+  loadNotes(notesFilterShowAll ? null : videoId, {
+    translateMissing: translateMissingNotes,
+  });
 
   // Setup explain feature for text selection
   setupExplainFeature();
@@ -4051,6 +4263,11 @@ async function saveCurrentMomentFromPanel() {
     if (!contextIsCurrent()) {
       throw new Error("视频页面已切换，请在当前视频重新保存。");
     }
+    if (!usableFollowPlayback(timing)) {
+      throw new Error(timing.isAd
+        ? "广告结束后再保存当前时刻。"
+        : "播放位置暂未就绪，请稍后再试。");
+    }
     const timestamp = Math.max(
       0,
       Math.floor(Number(timing.currentTime) || 0) - 3,
@@ -4073,8 +4290,9 @@ async function saveCurrentMomentFromPanel() {
     if (!result?.success) {
       throw new Error(result?.message || result?.error || "笔记保存失败。");
     }
-    setLabel("已保存");
-    setNotesTranslationStatus("已保存当前时刻。");
+    setLabel(result.duplicate ? "已记录" : "已保存");
+    if (result.duplicate) await loadNotes(notesFilterShowAll ? null : currentVideoId, { translateMissing: false });
+    setNotesTranslationStatus(result.duplicate ? "已找到此前保存的笔记，没有重复记录。" : "已保存当前时刻。");
   } catch (error) {
     setLabel("保存当前时刻");
     setNotesTranslationStatus(
@@ -4109,7 +4327,7 @@ async function saveQuoteAsNote(quote, btn) {
 
     if (result.success) {
       btn.disabled = false;
-      flashIconDone(btn, "已保存为笔记", restoreTitle);
+      flashIconDone(btn, result.duplicate ? "已记录，未重复保存" : "已保存为笔记", restoreTitle);
       // The background noteSaved broadcast owns the Notes refresh. Calling
       // loadNotes here as well can start two translation jobs for one save.
     } else {
@@ -7244,9 +7462,16 @@ function configureNotesReturnAction(context = activeNotesOnlyContext) {
 }
 
 function resumeDigestFromNotesOnly(tabName) {
-  if (noteNavigationResumePromise) return noteNavigationResumePromise;
   const context = activeNotesOnlyContext;
   if (!context) return Promise.resolve();
+  if (
+    noteNavigationResumePromise &&
+    noteNavigationResumeTarget?.token === context.token &&
+    noteNavigationResumeTarget?.tabId === context.tabId &&
+    noteNavigationResumeTarget?.routeKey === context.routeKey
+  ) {
+    return noteNavigationResumePromise;
+  }
 
   if (SIDEPANEL_MVP_AVAILABLE) {
     sidepanelMvpProgressOverride = {
@@ -7261,7 +7486,12 @@ function resumeDigestFromNotesOnly(tabName) {
       "",
     );
   }
-  noteNavigationResumePromise = checkCurrentTab({
+  noteNavigationResumeTarget = {
+    token: context.token,
+    tabId: context.tabId,
+    routeKey: context.routeKey,
+  };
+  const resumePromise = checkCurrentTab({
     resumeNoteNavigationToken: context.token,
   })
     .then(async () => {
@@ -7281,8 +7511,12 @@ function resumeDigestFromNotesOnly(tabName) {
       );
     })
     .finally(() => {
-      noteNavigationResumePromise = null;
+      if (noteNavigationResumePromise === resumePromise) {
+        noteNavigationResumePromise = null;
+        noteNavigationResumeTarget = null;
+      }
     });
+  noteNavigationResumePromise = resumePromise;
   return noteNavigationResumePromise;
 }
 
@@ -7354,9 +7588,9 @@ function switchTab(tabName, { restoreScroll = true } = {}) {
   updateHeaderLanguageControlsVisibility();
   if (restoreScroll) restoreWorkspaceTabSnapshot(tabName);
 
-  // A saved-note jump intentionally performs no transcript acquisition. The
-  // user's explicit switch to Transcript or Overview is the point at which we
-  // leave that local-only state and resume the ordinary digest/consent flow.
+  // A normal YouTube saved-note jump already warms cache/the free native path
+  // in the background while keeping Notes selected. An explicit switch reuses
+  // that work, or resumes the same guarded flow if it has not completed.
   if (
     (tabName === "transcript" || tabName === "overview") &&
     isActiveNotesOnlyContext() &&
@@ -7545,8 +7779,13 @@ async function seekTo(seconds) {
  */
 async function playNote(
   note,
-  { captureMetadata = false, exportContinuation = null } = {},
+  { captureMetadata = false, exportContinuation = null, verifyPlayback = false, anchor = null } = {},
 ) {
+  const jumpGeneration = ++noteJumpGeneration;
+  clearNoteJumpFeedback();
+  if (!captureMetadata && verifyPlayback) {
+    showNoteJumpFeedback(note, anchor, "正在确认视频是否打开…", jumpGeneration);
+  }
   const noteMediaKey = note?.mediaKey || note?.videoId;
   if (noteMediaKey && noteMediaKey === currentVideoId) {
     if (captureMetadata && activeNotesOnlyContext) {
@@ -7600,13 +7839,16 @@ async function playNote(
       }
       return !!captured;
     }
-    await seekTo(note.timestampSeconds);
-    return true;
+    const jumped = await seekTo(note.timestampSeconds);
+    if (!jumped) showNoteJumpFallback(note, anchor, jumpGeneration);
+    else clearNoteJumpFeedback(jumpGeneration);
+    return jumped;
   }
 
   const targetUrl = String(note?.timestampedUrl || noteCanonicalUrl(note) || "");
   if (!extractMediaLocator(targetUrl)) {
     setNoteExportStatus("该笔记缺少可打开的视频网址。", true);
+    if (!captureMetadata) showNoteJumpFallback(note, anchor, jumpGeneration);
     return false;
   }
 
@@ -7632,6 +7874,7 @@ async function playNote(
       throw new Error("浏览器暂时无法激活视频标签页，请重试。");
     }
     await chrome.tabs.update(createdTab.id, { active: true });
+    if (!captureMetadata && verifyPlayback) void verifyOpenedNotePlayback(createdTab.id, note, jumpGeneration, anchor);
     return true;
   } catch (error) {
     if (intent) await clearNoteNavigationState(intent.token);
@@ -7639,8 +7882,95 @@ async function playNote(
       await chrome.tabs.remove(createdTab.id).catch(() => undefined);
     }
     debugLog("[DigestDock Panel] Open saved note failed:", error);
+    if (!captureMetadata) showNoteJumpFallback(note, anchor, jumpGeneration);
     return false;
   }
+}
+
+async function verifyOpenedNotePlayback(tabId, note, generation, anchor = null) {
+  const routeKey = extractMediaLocator(note.timestampedUrl || noteCanonicalUrl(note))?.routeKey;
+  let sought = false;
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    if (generation !== noteJumpGeneration) {
+      clearNoteJumpFeedback(generation);
+      return;
+    }
+    try {
+      const probe = await chrome.runtime.sendMessage({
+        action: "relayToContent", tabId, expectedRouteKey: routeKey,
+        payload: { action: "getNotePlaybackState" },
+      });
+      const state = probe?.success ? probe.response : null;
+      if (generation !== noteJumpGeneration) {
+        clearNoteJumpFeedback(generation);
+        return;
+      }
+      // A different supported video means the user has superseded this jump.
+      if (state?.routeKey && state.routeKey !== routeKey) {
+        clearNoteJumpFeedback(generation);
+        return;
+      }
+      if (state?.available && state.ready) {
+        if (Math.abs(Number(state.currentTime) - note.timestampSeconds) <= 2) {
+          clearNoteJumpFeedback(generation);
+          return;
+        }
+        if (!sought) {
+          const result = await chrome.runtime.sendMessage({
+            action: "relayToContent", tabId, expectedRouteKey: routeKey,
+            payload: { action: "seekTo", seconds: note.timestampSeconds },
+          });
+          sought = result?.success === true && result.response?.success === true;
+        }
+      }
+    } catch (_error) {
+      // The content script may not yet be ready. No subtitle/provider request.
+    }
+    if (attempt < 9) await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+  if (generation === noteJumpGeneration) showNoteJumpFallback(note, anchor, generation);
+}
+
+function getNoteJumpFeedback() {
+  if (!noteJumpFeedbackElement) {
+    noteJumpFeedbackElement = document.getElementById("noteJumpFallback");
+    noteJumpFeedbackHome = noteJumpFeedbackElement?.parentElement || null;
+  }
+  return noteJumpFeedbackElement;
+}
+
+function clearNoteJumpFeedback(generation) {
+  if (generation !== undefined && generation !== noteJumpFeedbackGeneration) return;
+  const element = getNoteJumpFeedback();
+  if (!element) return;
+  element.hidden = true;
+  element.textContent = "";
+  element.classList?.remove("note-jump-feedback");
+  if (noteJumpFeedbackHome?.isConnected) noteJumpFeedbackHome.appendChild(element);
+  noteJumpFeedbackGeneration = 0;
+}
+
+function showNoteJumpFeedback(note, anchor, text, generation) {
+  if (generation !== noteJumpGeneration) return;
+  const element = getNoteJumpFeedback();
+  if (!element) return;
+  // A notes refresh may rebuild the originating card during verification.
+  const card = anchor?.isConnected ? anchor : anchor &&
+    Array.from(document.querySelectorAll(".note-item")).find((item) => item.dataset.noteId === note.id);
+  const host = card || noteJumpFeedbackHome;
+  if (host?.isConnected) host.appendChild(element);
+  element.classList?.add("note-jump-feedback");
+  element.style.whiteSpace = "pre-wrap";
+  element.textContent = text;
+  element.hidden = false;
+  noteJumpFeedbackGeneration = generation;
+}
+
+function showNoteJumpFallback(note, anchor = null, generation = noteJumpGeneration) {
+  const windowText = (Array.isArray(note.triggerWindow) ? note.triggerWindow : [])
+    .map((row) => `${formatTimecode(row.t)} ${row.text || ""}`).join("\n");
+  showNoteJumpFeedback(note, anchor, `没能打开这个视频\n${windowText}`, generation);
+  if (generation === noteJumpGeneration) getNoteJumpFeedback()?.scrollIntoView?.({ block: "nearest" });
 }
 
 async function highlightMomentsOnPage(moments) {
@@ -8329,9 +8659,7 @@ function validateTranscriptCacheRecord(
   }
   if (
     expectedTrack?.language &&
-    (!selectedTrack ||
-      selectedTrack.language !== expectedTrack.language ||
-      selectedTrack.kind !== expectedTrack.kind)
+    !transcriptTrackMatchesPagePreference(expectedTrack, selectedTrack)
   ) {
     return null;
   }
@@ -9076,6 +9404,9 @@ function handleNotesModeChange(mode) {
  * generate missing Chinese note content. Storage-change refreshes stay local.
  */
 async function loadNotes(videoId, { translateMissing = true } = {}) {
+  // A temporary global search never changes the saved filter or starts the
+  // existing missing-Chinese translation path below.
+  if (notesSearchQuery) return searchNotesLocally();
   const loadGeneration = ++notesLoadGeneration;
   const digestSnapshot = digestGeneration;
   const previousShowAll = currentNotesFilterVideoId === null;
@@ -9160,6 +9491,256 @@ function renderNotesCapacity() {
   if (backup) backup.hidden = true;
 }
 
+function normalizeNotesSearchText(value) {
+  return String(value || "").normalize("NFKC").trim().replace(/\s+/g, " ");
+}
+
+async function searchNotesLocally() {
+  const query = notesSearchQuery;
+  const generation = ++notesSearchGeneration;
+  notesSearchResults = [];
+  notesSearchBusy = true;
+  notesSearchError = "";
+  notesAiBusy = false;
+  notesAiNotice = "";
+  notesAiError = "";
+  renderNotes(currentNotes, currentNotesFilterVideoId);
+  try {
+    const result = await chrome.runtime.sendMessage({ action: "getNotes", videoId: null });
+    if (generation !== notesSearchGeneration || query !== notesSearchQuery) return;
+    if (!result?.success) throw new Error(result?.message || "读取笔记失败，请重试。");
+    notesSearchResults = (result.notes || []).filter((note) => {
+      const text = [note.thought, noteOriginalText(note), notePolishedText(note),
+        noteChineseText(note), note.videoTitle, noteChineseVideoTitle(note), note.channelName]
+        .filter((value) => typeof value === "string" && value.trim()).join(" ");
+      return normalizeNotesSearchText(text).includes(query);
+    }).sort((left, right) =>
+      Number(!!String(right.thought || "").trim()) - Number(!!String(left.thought || "").trim()) ||
+      right.createdAt - left.createdAt,
+    );
+  } catch (error) {
+    if (generation !== notesSearchGeneration) return;
+    notesSearchError = error.message || "读取笔记失败，请重试。";
+  }
+  if (generation !== notesSearchGeneration) return;
+  notesSearchBusy = false;
+  renderNotes(currentNotes, currentNotesFilterVideoId);
+}
+
+async function findNotesWithAi() {
+  if (!notesSearchQuery || notesSearchResults.length || notesSearchBusy || notesAiBusy || notesSearchError) return;
+  const generation = notesSearchGeneration;
+  const query = notesSearchQuery;
+  const ownsRequest = () => generation === notesSearchGeneration && query === notesSearchQuery;
+  notesAiBusy = true;
+  notesAiError = "";
+  renderNotes(currentNotes, currentNotesFilterVideoId);
+  try {
+    const result = await chrome.runtime.sendMessage({ action: "findNoteCandidates", query, userInitiated: true });
+    if (!ownsRequest()) return;
+    notesAiNotice = result?.truncated ? `只检索了最近 ${result.searchedCount} 条` : "";
+    if (!result?.success) throw new Error(result?.error || "AI 检索失败，请重试。");
+    const library = await chrome.runtime.sendMessage({ action: "getNotes", videoId: null });
+    if (!ownsRequest()) return;
+    if (!library?.success) throw new Error("读取候选笔记失败，请重试。");
+    const byId = new Map((library.notes || []).map((note) => [note.id, note]));
+    notesSearchResults = [...new Set(Array.isArray(result.noteIds) ? result.noteIds : [])]
+      .filter((id) => typeof id === "string" && byId.has(id)).slice(0, 5).map((id) => byId.get(id))
+      .sort((left, right) =>
+        Number(!!String(right.thought || "").trim()) - Number(!!String(left.thought || "").trim()) ||
+        right.createdAt - left.createdAt,
+      );
+  } catch (error) {
+    if (!ownsRequest()) return;
+    notesAiError = error.message || "AI 检索失败，请重试。";
+  }
+  if (!ownsRequest()) return;
+  notesAiBusy = false;
+  renderNotes(currentNotes, currentNotesFilterVideoId);
+}
+
+function noteLocalDate(note) {
+  const date = new Date(note.createdAt);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
+async function restoreNotesGroupingPreference() {
+  try {
+    const stored = await chrome.storage.local.get(NOTES_GROUPING_STORAGE_KEY);
+    notesGroupingMode = stored[NOTES_GROUPING_STORAGE_KEY] === "video" ? "video" : "date";
+  } catch (_error) { /* The current view still works without a saved preference. */ }
+}
+
+// This is a display preview. The frozen triggerWindow stays intact in storage.
+function noteContextPreview(note) {
+  const rows = (Array.isArray(note.triggerWindow) ? note.triggerWindow : [])
+    .filter((row) => Number.isFinite(row?.t) && typeof row?.text === "string")
+    .slice().sort((left, right) => left.t - right.t);
+  if (!rows.length) return "";
+  let target = rows.findIndex((row) => row.text === note.rawText);
+  if (target < 0) {
+    target = rows.reduce((best, row, index) =>
+      Math.abs(row.t - note.timestampSeconds) < Math.abs(rows[best].t - note.timestampSeconds)
+        ? index : best, 0);
+  }
+  const start = Math.max(0, Math.min(target - 3, rows.length - 8));
+  return rows.slice(start, start + 8).map((row) => row.text).join("\n");
+}
+
+function renderNoteCardContent(note, showSource) {
+  const preview = noteContextPreview(note);
+  return `
+    <div class="note-thought-row">
+      <div class="note-thought">${escapeHtml(note.thought || "")}</div>
+      ${note.thought ? '<button type="button" class="note-delete-thought">删除想法</button>' : ""}
+    </div>
+    <div class="note-trigger">
+      ${showSource ? `<div class="note-thought-source">${renderNoteVideoTitle(note)} · ${escapeHtml(note.channelName || "")} · ${notePlatformLabel(note)}</div>` : ""}
+      ${preview
+        ? `<button type="button" class="note-quote" aria-expanded="false" title="点击金句展开上下文">${renderNoteLanguageContent(note)}</button>`
+        : `<div class="note-quote">${renderNoteLanguageContent(note)}</div>`}
+      ${preview ? `<div class="note-trigger-window" aria-label="触发上下文" hidden>${escapeHtml(preview)}</div>` : ""}
+    </div>
+  `;
+}
+
+function renderThoughtNoteItem(note, editable, {
+  showSource = true, exportSource = true, filteredVideoId = currentNotesFilterVideoId,
+} = {}) {
+  const card = buildNoteItemElement(note, filteredVideoId, {
+    verifyPlayback: filteredVideoId === null || !!notesSearchQuery, showSource,
+  });
+  const body = card.querySelector(".note-text");
+  if (exportSource) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "enhance-btn note-source-export";
+    button.textContent = "导出本视频笔记";
+    button.addEventListener("click", () => exportSingleSourceGroup({
+      mediaKey: note.mediaKey || note.videoId, notes: [note],
+    }));
+    card.querySelector(".note-actions").appendChild(button);
+  }
+  if (editable) {
+    const removeThought = card.querySelector(".note-delete-thought");
+    removeThought?.addEventListener("click", () => showThoughtDeleteConfirmation(note, card));
+    const edit = document.createElement("button");
+    edit.type = "button";
+    edit.className = "enhance-btn note-edit-thought";
+    edit.textContent = note.thought ? "编辑想法" : "补写想法";
+    edit.addEventListener("click", () => {
+      if (card.querySelector(".note-thought-editor")) return;
+      card.querySelector(".note-thought-delete-confirm")?.remove();
+      if (removeThought) removeThought.disabled = true;
+      const editor = document.createElement("div");
+      editor.className = "note-thought-editor";
+      editor.innerHTML = '<textarea aria-label="想法" rows="3"></textarea><button type="button" class="enhance-btn note-save-thought">保存</button> <button type="button" class="enhance-btn note-cancel-thought">取消</button><div role="status"></div>';
+      body.querySelector(".note-thought").replaceChildren(editor);
+      const input = editor.querySelector("textarea");
+      const save = editor.querySelector(".note-save-thought");
+      const cancel = editor.querySelector(".note-cancel-thought");
+      const status = editor.querySelector('[role="status"]');
+      input.value = note.thought || "";
+      input.focus();
+      cancel.addEventListener("click", () => renderNotes(currentNotes, currentNotesFilterVideoId));
+      save.addEventListener("click", async () => {
+        save.disabled = true;
+        cancel.disabled = true;
+        input.readOnly = true;
+        const fence = captureExtensionDataFence();
+        try {
+          const result = fence && await sendResetFencedStorageMessage({
+            action: "updateNoteThought", noteId: note.id, thought: input.value,
+          }, fence);
+          if (!result?.success) throw new Error("保存失败，请重试。");
+          await loadNotes(notesFilterShowAll ? null : currentVideoId, { translateMissing: false });
+        } catch (_error) {
+          status.textContent = "保存失败，请重试。";
+          save.disabled = false;
+          cancel.disabled = false;
+          input.readOnly = false;
+        }
+      });
+    });
+    card.querySelector(".note-actions").appendChild(edit);
+  }
+  return card;
+}
+
+function showThoughtDeleteConfirmation(note, card) {
+  if (card.querySelector(".note-thought-delete-confirm")) return;
+  const confirmation = document.createElement("div");
+  confirmation.className = "note-thought-delete-confirm";
+  confirmation.setAttribute("role", "alertdialog");
+  confirmation.setAttribute("aria-label", "删除想法确认");
+  confirmation.innerHTML = '<p>删除这条想法？金句和来源会保留。</p><button type="button" class="enhance-btn note-confirm-delete-thought">确认删除</button> <button type="button" class="enhance-btn note-cancel-delete-thought">取消</button><div role="status"></div>';
+  card.querySelector(".note-thought-row").appendChild(confirmation);
+  const confirm = confirmation.querySelector(".note-confirm-delete-thought");
+  const cancel = confirmation.querySelector(".note-cancel-delete-thought");
+  const dismiss = () => {
+    confirmation.remove();
+    card.querySelector(".note-delete-thought")?.focus();
+    syncNoteStickyHeaders();
+  };
+  cancel.addEventListener("click", dismiss);
+  confirmation.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !cancel.disabled) {
+      event.stopPropagation();
+      dismiss();
+    }
+  });
+  confirm.addEventListener("click", async () => {
+    confirm.disabled = true;
+    cancel.disabled = true;
+    const edit = card.querySelector(".note-edit-thought");
+    if (edit) edit.disabled = true;
+    const fence = captureExtensionDataFence();
+    try {
+      const result = fence && await sendResetFencedStorageMessage({
+        action: "updateNoteThought", noteId: note.id, thought: "",
+        expectedThought: { thought: note.thought, thoughtAt: note.thoughtAt },
+      }, fence);
+      if (result?.code === "NOTE_THOUGHT_CHANGED") {
+        await loadNotes(notesFilterShowAll ? null : currentVideoId, { translateMissing: false });
+        const status = document.getElementById("notesSearchStatus");
+        if (status) {
+          status.hidden = false;
+          status.textContent = `${notesSearchQuery ? `${status.textContent} · ` : ""}想法已在别处更新，请重新查看后再删除。`;
+        }
+        return;
+      }
+      if (!result?.success) throw new Error("删除失败");
+      await loadNotes(notesFilterShowAll ? null : currentVideoId, { translateMissing: false });
+    } catch (_error) {
+      confirmation.querySelector('[role="status"]').textContent = "删除失败，请重试。";
+      confirm.disabled = false;
+      cancel.disabled = false;
+      if (edit) edit.disabled = false;
+    }
+  });
+  cancel.focus();
+  syncNoteStickyHeaders();
+}
+
+// A short video group fits on screen without a pinned title. Recalculate when
+// the viewport, toolbar, or expanded context changes size.
+function syncNoteStickyHeaders() {
+  const viewport = document.getElementById("contentArea");
+  const toolbar = document.getElementById("notesToolbar");
+  if (!viewport || !toolbar) return;
+  const toolbarHeight = toolbar.getBoundingClientRect().height;
+  const availableHeight = viewport.getBoundingClientRect().height - toolbarHeight;
+  if (availableHeight <= 0) return;
+  const padding = typeof getComputedStyle === "function"
+    ? parseFloat(getComputedStyle(viewport).paddingTop) || 0 : 18;
+  document.querySelectorAll(".note-source-group").forEach((group) => {
+    const header = group.querySelector(".note-source-header");
+    if (!header) return;
+    header.classList.toggle("is-sticky", group.getBoundingClientRect().height > availableHeight);
+    header.style.top = `${Math.max(0, toolbarHeight - padding)}px`;
+  });
+}
+
 function renderNotes(notes, filteredVideoId) {
   renderNotesCapacity();
   const notesList = document.getElementById("notesList");
@@ -9171,6 +9752,36 @@ function renderNotes(notes, filteredVideoId) {
 
   notesList.innerHTML = "";
   setNotesModeButtons(currentNotesMode);
+  const title = document.getElementById("notesViewTitle");
+  if (title) title.textContent = notesSearchQuery ? "搜索结果"
+    : filteredVideoId === null ? (notesGroupingMode === "date" ? "最近" : "全部笔记") : "已保存的笔记";
+  const groupingRow = document.getElementById("notesGroupingRow");
+  if (groupingRow) groupingRow.hidden = filteredVideoId !== null || !!notesSearchQuery;
+  document.querySelectorAll("[data-notes-grouping]").forEach((button) => {
+    const selected = button.dataset.notesGrouping === notesGroupingMode;
+    button.classList.toggle("active", selected);
+    button.setAttribute("aria-pressed", String(selected));
+  });
+  const searchStatus = document.getElementById("notesSearchStatus");
+  if (searchStatus) {
+    searchStatus.hidden = !notesSearchQuery;
+    searchStatus.textContent = [notesSearchError || notesAiError ||
+      (notesSearchBusy ? "正在搜索…" : notesAiBusy ? "AI 正在查找…" : `${notesSearchResults.length} 条结果`), notesAiNotice].filter(Boolean).join(" · ");
+  }
+  const aiButton = document.getElementById("notesAiFind");
+  if (aiButton) {
+    aiButton.hidden = !notesSearchQuery || notesSearchBusy || !!notesSearchError || notesSearchResults.length > 0;
+    aiButton.disabled = notesAiBusy;
+  }
+  if (notesSearchQuery) {
+    if (notesIntro) notesIntro.style.display = "none";
+    setNotesTranslationStatus();
+    // Search is temporary: export scope still comes from the selected side.
+    updateNoteExportMenuContext(groupNotesBySource(notes || []).length);
+    notesSearchResults.forEach((note) => notesList.appendChild(renderThoughtNoteItem(note, true)));
+    ensureNoteMenuDismissHandler();
+    return;
+  }
 
   if (!notes || notes.length === 0) {
     updateNoteExportMenuContext(0);
@@ -9199,13 +9810,51 @@ function renderNotes(notes, filteredVideoId) {
     if (!missingCount) setNotesTranslationStatus();
   }
 
-  const groups = sortNoteGroups(groupNotesBySource(notes));
+  const groups = recentNoteSourceGroups(notes);
   updateNoteExportMenuContext(groups.length);
-  groups.forEach((group) => {
-    notesList.appendChild(renderNoteSourceGroup(group, filteredVideoId));
-  });
+  if (filteredVideoId === null && notesGroupingMode === "date") {
+    for (const [date, dayNotes] of notesByLocalDay(notes)) {
+      const day = buildNoteDaySection(date, "note-day-group", "note-day-title");
+      recentNoteSourceGroups(dayNotes).forEach((group) =>
+        day.appendChild(renderNoteSourceGroup(group, filteredVideoId)));
+      notesList.appendChild(day);
+    }
+  } else {
+    groups.forEach((group) => notesList.appendChild(renderNoteSourceGroup(group, filteredVideoId, {
+      showDates: filteredVideoId === null,
+    })));
+  }
 
   ensureNoteMenuDismissHandler();
+  syncNoteStickyHeaders();
+}
+
+function recentNoteSourceGroups(notes) {
+  const latest = (group) => group.notes.reduce((time, note) =>
+    Math.max(time, Number(note.createdAt) || 0), 0);
+  return groupNotesBySource(notes).sort((left, right) =>
+    latest(right) - latest(left) || left.mediaKey.localeCompare(right.mediaKey));
+}
+
+function notesByLocalDay(notes) {
+  const days = new Map();
+  for (const note of notes) {
+    const date = noteLocalDate(note);
+    if (!days.has(date)) days.set(date, []);
+    days.get(date).push(note);
+  }
+  return [...days].sort(([left], [right]) => right.localeCompare(left));
+}
+
+function buildNoteDaySection(date, className, headingClass) {
+  const section = document.createElement("div");
+  section.className = className;
+  section.dataset.date = date;
+  const heading = document.createElement("h3");
+  heading.className = headingClass;
+  heading.textContent = date;
+  section.appendChild(heading);
+  return section;
 }
 
 /**
@@ -9220,7 +9869,7 @@ function noteSourceMetaText(representative, noteCount) {
     .join(" · ");
 }
 
-function renderNoteSourceGroup(group, filteredVideoId) {
+function renderNoteSourceGroup(group, filteredVideoId, { showDates = false } = {}) {
   const representative = group.representative || group.notes[0];
   const container = document.createElement("div");
   container.className = "note-source-group";
@@ -9235,7 +9884,7 @@ function renderNoteSourceGroup(group, filteredVideoId) {
     <div class="note-source-meta">${escapeHtml(metaText)}</div>
     <div class="note-source-actions">
       <button class="note-source-open" type="button" title="打开视频" aria-label="打开视频">打开视频</button>
-      <button class="note-source-export" type="button" title="导出此视频笔记" aria-label="导出此视频笔记">导出此视频</button>
+      <button class="note-source-export" type="button" title="导出本视频的笔记为文本文件" aria-label="导出本视频笔记">导出本视频笔记</button>
     </div>
   `;
   header
@@ -9248,9 +9897,19 @@ function renderNoteSourceGroup(group, filteredVideoId) {
 
   const list = document.createElement("div");
   list.className = "note-source-list";
-  group.notes.forEach((note) => {
-    list.appendChild(buildNoteItemElement(note, filteredVideoId));
-  });
+  const appendNotes = (parent, notes) => sortNotesByTimecode(notes).forEach((note) =>
+    parent.appendChild(renderThoughtNoteItem(note, true, {
+      filteredVideoId, showSource: false, exportSource: false,
+    })));
+  if (showDates) {
+    for (const [date, dayNotes] of notesByLocalDay(group.notes)) {
+      const day = buildNoteDaySection(date, "note-source-day", "note-source-day-title");
+      appendNotes(day, dayNotes);
+      list.appendChild(day);
+    }
+  } else {
+    appendNotes(list, group.notes);
+  }
   container.appendChild(list);
   return container;
 }
@@ -9259,14 +9918,17 @@ function renderNoteSourceGroup(group, filteredVideoId) {
  * Builds a single note row (timecode, mode-aware body, per-note actions). The
  * video title now lives on the enclosing source container, not the row.
  */
-function buildNoteItemElement(note, filteredVideoId) {
+function buildNoteItemElement(note, filteredVideoId, { verifyPlayback = false, showSource = false } = {}) {
   const noteEl = document.createElement("div");
-  noteEl.className = "note-item";
+  const hasThought = !!String(note.thought || "").trim();
+  noteEl.className = `note-item ${hasThought ? "note-item--thought" : "note-item--quote"}`;
+  noteEl.dataset.noteId = note.id;
   const noteCopyText = noteCopyTextForMode(note);
   const noteTime = formatTimecode(note.timestampSeconds);
   noteEl.innerHTML = `
     <div class="note-header">
       <span class="note-timestamp" role="button" tabindex="0" data-seconds="${Number(note.timestampSeconds) || 0}" title="从 ${escapeHtml(noteTime)} 播放" aria-label="从 ${escapeHtml(noteTime)} 播放">${escapeHtml(noteTime)}</span>
+      <span class="note-kind">${hasThought ? "想法" : "金句"}</span>
       <div class="note-more">
         <button class="note-more-btn" type="button" aria-haspopup="true" aria-expanded="false" title="更多操作" aria-label="更多操作">${UI_ICONS.more}</button>
         <div class="note-more-menu" role="menu" hidden>
@@ -9274,7 +9936,7 @@ function buildNoteItemElement(note, filteredVideoId) {
         </div>
       </div>
     </div>
-    <div class="note-text">${renderNoteLanguageContent(note)}</div>
+    <div class="note-text">${renderNoteCardContent(note, showSource)}</div>
     <div class="note-actions">
       <button class="icon-btn primary note-play" type="button" title="从此处播放" aria-label="从此处播放">${UI_ICONS.play}</button>
       <button class="icon-btn note-copy-text" type="button" title="复制文字" aria-label="复制文字">${UI_ICONS.copy}</button>
@@ -9283,12 +9945,22 @@ function buildNoteItemElement(note, filteredVideoId) {
   `;
 
   // Timestamp click / keyboard - play from this point (in this tab or a new one)
+  const quote = noteEl.querySelector(".note-quote");
+  const context = noteEl.querySelector(".note-trigger-window");
+  if (context) quote.addEventListener("click", () => {
+    // Selecting a sentence to copy must not also open or close its context.
+    if (window.getSelection?.()?.toString()) return;
+    context.hidden = !context.hidden;
+    quote.setAttribute("aria-expanded", String(!context.hidden));
+    quote.title = context.hidden ? "点击金句展开上下文" : "点击金句收起上下文";
+    syncNoteStickyHeaders();
+  });
   const timestampEl = noteEl.querySelector(".note-timestamp");
-  timestampEl.addEventListener("click", () => playNote(note));
+  timestampEl.addEventListener("click", () => playNote(note, { verifyPlayback, anchor: noteEl }));
   timestampEl.addEventListener("keydown", (e) => {
     if (e.key === "Enter" || e.key === " " || e.key === "Spacebar") {
       e.preventDefault();
-      playNote(note);
+      playNote(note, { verifyPlayback, anchor: noteEl });
     }
   });
 
@@ -9337,7 +10009,7 @@ function buildNoteItemElement(note, filteredVideoId) {
   // Play button (in this tab if it's the current video, else a new tab)
   noteEl
     .querySelector(".note-play")
-    .addEventListener("click", () => playNote(note));
+    .addEventListener("click", () => playNote(note, { verifyPlayback, anchor: noteEl }));
 
   return noteEl;
 }
@@ -9527,12 +10199,15 @@ function idleFollowController() {
           !isActiveNotesOnlyContext() &&
           !notesFilterShowAll &&
           (playback == null ||
+            !usableFollowPlayback(playback) ||
             playback?.paused === true ||
             followResumeHasBlockingUi());
         if (shouldRetry) {
           showFollowPlaybackPrompt({
             message:
-              playback?.paused === true
+              playback?.isAd === true
+                ? "广告期间暂停跟随，正文恢复后继续"
+                : playback?.paused === true
                 ? "视频暂停，播放后将回到字幕"
                 : playback == null
                   ? "暂未读到播放位置，将继续重试"
@@ -9573,12 +10248,9 @@ function scheduleFollowIdleResume() {
 
 function onFollowWorkspaceInteraction(event = {}) {
   if (currentWorkspaceTab() !== "transcript") return;
-  if (
-    event.type === "scroll" &&
-    Date.now() - lastAutoScrollTime < 1000
-  ) {
-    return;
-  }
+  // scroll events also come from animations and layout changes. Only actual
+  // input/selection/focus intent can take the user out of following mode.
+  if (event.type === "scroll") return;
   const selectedText = String(window.getSelection?.()?.toString?.() || "").trim();
   const intentionalTranscriptInteraction =
     currentWorkspaceTab() === "transcript" &&
@@ -9647,13 +10319,21 @@ function shouldAutoResumeFollow(snapshot, playback) {
     followPlaybackSnapshotIsCurrent(snapshot) &&
       followContextIsDeparted() &&
       !followResumeHasBlockingUi() &&
+      usableFollowPlayback(playback) &&
       playback?.paused === false &&
       Number.isFinite(Number(playback.currentTime)),
   );
 }
 
-function playbackScrollBehavior() {
-  return window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches
+function usableFollowPlayback(playback) {
+  return !!playback && playback.isAd !== true && playback.ready !== false &&
+    typeof playback.currentTime === "number" &&
+    Number.isFinite(playback.currentTime) && playback.currentTime >= 0;
+}
+
+function playbackScrollBehavior({ instant = false, distance = 0, height = 0 } = {}) {
+  return instant || (height > 0 && distance > height) ||
+    window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches
     ? "auto"
     : "smooth";
 }
@@ -9764,7 +10444,7 @@ function stopPlaybackTracking() {
     autoScrollInterval = null;
   }
   autoScrollEnabled = true; // Reset for next time
-  lastAutoScrollTime = 0;
+  playbackNeedsReposition = false;
   hideFollowPlaybackPrompt();
 
   // Remove active highlights
@@ -9807,8 +10487,15 @@ async function playbackTrackingTick({
       return false;
     }
 
-    const currentTime = playback.currentTime || 0;
-    highlightActiveEntry(currentTime, { forceScroll });
+    if (!usableFollowPlayback(playback)) {
+      playbackNeedsReposition = true;
+      return false;
+    }
+    highlightActiveEntry(playback.currentTime, {
+      forceScroll: forceScroll || playbackNeedsReposition,
+      instant: playbackNeedsReposition,
+    });
+    playbackNeedsReposition = false;
     return true;
   } catch (error) {
     // Silently ignore — YouTube tab might be closed or navigated away
@@ -9823,19 +10510,26 @@ async function playbackTrackingTick({
 /**
  * Scrolls the transcript to the entry currently being spoken (the one
  * carrying the active-playback highlight). Returns false if nothing is
- * highlighted yet. Stamps lastAutoScrollTime BEFORE scrolling so the scroll
- * events from our own smooth animation aren't mistaken for the user
- * scrolling away (which would re-disable auto-scroll immediately).
+ * highlighted yet. Normal playback moves only when the cue leaves the
+ * reading region; explicit restores may reposition even an unchanged cue.
  */
-function scrollToActiveEntry() {
+function scrollToActiveEntry({ forceScroll = true, instant = false } = {}) {
   const activeEntry = document.querySelector(
     "#transcriptList .transcript-entry.active-playback",
   );
   if (!activeEntry) return false;
 
-  lastAutoScrollTime = Date.now();
+  const viewport = document.getElementById("contentArea")?.getBoundingClientRect?.();
+  const cue = activeEntry.getBoundingClientRect?.();
+  const height = Number(viewport?.height) || 0;
+  if (!forceScroll && height > 0 && cue &&
+    cue.top >= viewport.top + height * 0.2 &&
+    cue.bottom <= viewport.bottom - height * 0.2) return true;
+  const distance = height > 0 && cue
+    ? Math.abs((cue.top + cue.bottom) / 2 - (viewport.top + viewport.bottom) / 2)
+    : 0;
   activeEntry.scrollIntoView({
-    behavior: playbackScrollBehavior(),
+    behavior: playbackScrollBehavior({ instant, distance, height }),
     block: "center",
   });
   return true;
@@ -9847,7 +10541,7 @@ function scrollToActiveEntry() {
  *
  * @param {number} currentSeconds - Current video playback time in seconds
  */
-function highlightActiveEntry(currentSeconds, { forceScroll = false } = {}) {
+function highlightActiveEntry(currentSeconds, { forceScroll = false, instant = false } = {}) {
   const transcriptList = document.getElementById("transcriptList");
   if (!transcriptList) return;
 
@@ -9872,7 +10566,7 @@ function highlightActiveEntry(currentSeconds, { forceScroll = false } = {}) {
 
   // Skip if this entry is already highlighted (no DOM thrashing)
   if (activeEntry.classList.contains("active-playback")) {
-    if (forceScroll && autoScrollEnabled) scrollToActiveEntry();
+    if (forceScroll && autoScrollEnabled) scrollToActiveEntry({ forceScroll, instant });
     return;
   }
 
@@ -9882,11 +10576,7 @@ function highlightActiveEntry(currentSeconds, { forceScroll = false } = {}) {
 
   // Only scroll if auto-scroll is enabled
   if (autoScrollEnabled) {
-    lastAutoScrollTime = Date.now();
-    activeEntry.scrollIntoView({
-      behavior: playbackScrollBehavior(),
-      block: "center",
-    });
+    scrollToActiveEntry({ forceScroll, instant });
   }
 }
 
@@ -9896,14 +10586,9 @@ function highlightActiveEntry(currentSeconds, { forceScroll = false } = {}) {
  * can read at their own pace without being yanked back.
  */
 function onContentAreaScroll() {
-  // Ignore scroll events within 1 second of a programmatic scroll
-  // (smooth scroll animations can last longer than a simple boolean flag)
-  if (Date.now() - lastAutoScrollTime < 1000) return;
-
-  // User scrolled manually — disable auto-scroll and show the button
-  if (autoScrollEnabled && autoScrollInterval) {
-    autoScrollEnabled = false;
-    followIntentRevision += 1;
+  // Input listeners already paused follow. Scrollbar drags and momentum may
+  // continue after the initial input; extend the existing reading idle timer.
+  if (!autoScrollEnabled && autoScrollInterval) {
     scheduleFollowIdleResume();
   }
 }
