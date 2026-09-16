@@ -4,7 +4,8 @@
   const GLOBAL_KEY = "__DIGESTDOCK_YOUTUBE_PASSIVE_BRIDGE_V1__";
   const CAPTURE_CHANNEL = "digestdock-youtube-passive-state-v1";
   const CONTROL_CHANNEL = "digestdock-youtube-passive-control-v1";
-  const MAX_BODY_BYTES = 8 * 1024 * 1024;
+  const MAX_BODY_BYTES = 32 * 1024 * 1024;
+  const MAX_MESSAGE_BYTES = 48 * 1024 * 1024;
   const existing = globalThis[GLOBAL_KEY];
   if (existing?.destroy) {
     existing.destroy({ disconnect: false, preserveKnown: true });
@@ -118,10 +119,19 @@
   function sendRuntime(payload) {
     if (destroyed) return;
     try {
-      const result = chrome.runtime.sendMessage({
+      let message = {
         action: "youtubePassiveState",
         payload,
-      });
+      };
+      // Chrome caps serialized messages at 64 MiB. Leave room for the envelope
+      // and JSON escaping even when the observed response is below 32 MiB.
+      if (payload.type === "capture" && utf8ByteLength(JSON.stringify(message)) > MAX_MESSAGE_BYTES) {
+        message = { action: "youtubePassiveState", payload: {
+          type: "clear", videoId: payload.videoId, language: payload.language,
+          kind: payload.kind, status: payload.status, inFlight: false,
+        } };
+      }
+      const result = chrome.runtime.sendMessage(message);
       if (result?.catch) result.catch(() => {});
     } catch {
       // Extension teardown must not affect the YouTube page.

@@ -118,6 +118,10 @@ let extensionDataGeneration = 0;
 let extensionDataRuntimeInstanceId = "";
 let extensionDataFenceRevision = 0;
 let extensionDataResetInProgress = false;
+let pendingYoutubePassiveRecovery = null;
+let youtubePassiveRecoveryFlight = null;
+let youtubeFreeReadDiagnostic = "";
+let youtubePassiveReadDiagnostic = "";
 
 function extensionDataFenceSnapshot() {
   return {
@@ -232,6 +236,8 @@ function applyExtensionDataResetFence(runtimeInstanceId, dataGeneration) {
     return false;
   }
   extensionDataResetInProgress = true;
+  youtubeFreeReadDiagnostic = "";
+  youtubePassiveReadDiagnostic = "";
   tabCheckGeneration += 1;
   digestGeneration += 1;
   translationGeneration += 1;
@@ -789,6 +795,19 @@ function sidepanelMvpResolveTranscript(result, task, { finishTask = true } = {})
   if (!SIDEPANEL_MVP_AVAILABLE || !task) return false;
   const envelope = sidepanelMvpTaskResultEnvelope(task);
   if (!sidepanelMvpTaskGate.isCurrent(envelope)) return false;
+  if (result?.success === true) {
+    youtubeFreeReadDiagnostic = "";
+    youtubePassiveReadDiagnostic = "";
+  }
+  else if (result?.diagnostics?.freeRead) {
+    youtubeFreeReadDiagnostic = formatYoutubeFreeReadDiagnostic(result.diagnostics);
+  }
+  if (result?.diagnostics?.passiveRead) {
+    const detail = result.diagnostics.passiveRead;
+    const code = /^[A-Z_]{1,50}$/.test(String(detail.code || "")) ? detail.code : "UNKNOWN";
+    const number = (value) => Number.isSafeInteger(value) && value >= 0 ? value : "?";
+    youtubePassiveReadDiagnostic = `最近页面字幕: ${code}, HTTP=${number(detail.status)}, 字节=${number(detail.bytes)}`;
+  }
   sidepanelMvpDispatch({
     type: SIDEPANEL_STATE_API.EVENTS.TRANSCRIPT_RESULT,
     identity: task.identity,
@@ -797,7 +816,117 @@ function sidepanelMvpResolveTranscript(result, task, { finishTask = true } = {})
     result,
   });
   if (finishTask) sidepanelMvpTaskGate.finish(envelope);
+  // A capture may arrive after the background gate closes but before its
+  // failure reaches this panel. Drain that notification once the task settles.
+  void recoverPendingYoutubePassiveTranscript();
   return true;
+}
+
+function queueYoutubePassiveRecovery(message, sender) {
+  const fence = captureExtensionDataFence();
+  if (
+    !SIDEPANEL_MVP_AVAILABLE ||
+    !fence ||
+    sender?.id !== chrome.runtime.id ||
+    sender?.tab ||
+    message?.runtimeInstanceId !== fence.runtimeInstanceId ||
+    message?.dataGeneration !== fence.dataGeneration ||
+    currentMediaRef?.platform !== "youtube" ||
+    message?.tabId !== videoTabId ||
+    message?.videoId !== currentVideoId ||
+    isActiveNotesOnlyContext()
+  ) return Promise.resolve();
+  pendingYoutubePassiveRecovery = {
+    fence,
+    videoId: currentVideoId,
+    tabId: videoTabId,
+    routeKey: currentRouteKey,
+    generation: digestGeneration,
+  };
+  return recoverPendingYoutubePassiveTranscript();
+}
+
+function recoverPendingYoutubePassiveTranscript() {
+  if (youtubePassiveRecoveryFlight) return youtubePassiveRecoveryFlight;
+  if (!pendingYoutubePassiveRecovery) return Promise.resolve();
+  const statuses = SIDEPANEL_STATE_API.TRANSCRIPT_STATUSES;
+  const status = sidepanelMvpState?.transcript?.status;
+  if ([statuses.LOADING, statuses.RETRYING_FREE].includes(status)) {
+    return Promise.resolve();
+  }
+  const pending = pendingYoutubePassiveRecovery;
+  pendingYoutubePassiveRecovery = null;
+  const recoverable = [
+    statuses.NEEDS_CC,
+    statuses.NEEDS_SUPADATA_CHOICE,
+    statuses.NEEDS_SUPADATA_CONFIG,
+    statuses.FALLBACK_DECLINED,
+  ].includes(status);
+  const stillCurrent = () =>
+    extensionDataFenceIsCurrent(pending.fence) &&
+    isCurrentDigest(pending.videoId, pending.generation, pending.routeKey) &&
+    videoTabId === pending.tabId &&
+    !isActiveNotesOnlyContext();
+  if (!recoverable || !stillCurrent()) return Promise.resolve();
+
+  // Probe the already captured buffer without changing the displayed card.
+  // A miss cannot start Active, unlock Supadata, or reset the user's choice.
+  const previousTranscriptState = sidepanelMvpState.transcript;
+  const request = {
+    ...buildTranscriptFetchRequest({
+      videoId: pending.videoId,
+      mediaRef: currentMediaRef,
+      preferredLanguage: currentVideoSourceLanguage,
+      pagePreferredTrack: currentVideoCaptionSelection,
+      tabId: pending.tabId,
+      generation: pending.generation,
+      routeKey: pending.routeKey,
+    }),
+    action: "readYoutubePassiveTranscript",
+  };
+  youtubePassiveRecoveryFlight = (async () => {
+    const result = await chrome.runtime.sendMessage(request);
+    if (
+      !stillCurrent() ||
+      sidepanelMvpState.transcript !== previousTranscriptState ||
+      result?.runtimeInstanceId !== pending.fence.runtimeInstanceId ||
+      result?.dataGeneration !== pending.fence.dataGeneration ||
+      result?.success !== true ||
+      result?.source !== "youtube-passive" ||
+      !transcriptResponseMatchesRequest(result, request)
+    ) return;
+    const task = {
+      id: sidepanelMvpNextTaskId("passive"),
+      origin: SIDEPANEL_STATE_API.TASK_ORIGINS.PASSIVE,
+      identity: sidepanelMvpCurrentIdentity(),
+    };
+    sidepanelMvpTaskGate.begin({
+      scope: "transcript",
+      taskId: task.id,
+      taskOrigin: task.origin,
+      identity: task.identity,
+    });
+    await runDigestLoad(
+      pending.videoId, pending.generation, false,
+      currentMediaRef, pending.routeKey, false, false,
+      {
+        mvpTask: task,
+        videoTabId: pending.tabId,
+        prefetchedTranscript: result,
+        passiveRecovery: true,
+        passiveRecoveryState: previousTranscriptState,
+        translateMissingNotes: false,
+      },
+    );
+  })().catch(() => {
+    // A closed/restarted worker leaves the existing recovery controls intact.
+  }).finally(() => {
+    youtubePassiveRecoveryFlight = null;
+    if (pendingYoutubePassiveRecovery) {
+      void recoverPendingYoutubePassiveTranscript();
+    }
+  });
+  return youtubePassiveRecoveryFlight;
 }
 
 function sidepanelMvpShowWorkspaceShell() {
@@ -869,6 +998,25 @@ function appendSidepanelMvpSkeleton(region) {
   region.append(list);
 }
 
+function formatYoutubeFreeReadDiagnostic(diagnostics) {
+  const detail = diagnostics?.freeRead;
+  if (!detail) return "";
+  const code = (value) => /^[A-Z0-9_]{1,80}$/.test(String(value || "")) ? value : "UNKNOWN";
+  const number = (value) => Number.isSafeInteger(value) && value >= 0 ? value : "?";
+  const flag = (value) => value === true ? "yes" : value === false ? "no" : "?";
+  const response = diagnostics.responseSummary || {};
+  const counts = diagnostics.providerInitiated || {};
+  // Only explicit scalar fields. Never render a provider's raw error, URL,
+  // request headers, caption text or arbitrary diagnostics object.
+  return [
+    `D1 首次免费读取: ${code(detail.code)}`,
+    `页面轨道=${number(detail.observedTrackCount)}, 可用轨道证据=${number(detail.trackCount)}, 已选轨=${flag(detail.selectedTrackKnown)}, 直播内容标记=${flag(detail.liveContent)}`,
+    `请求数: player=${number(counts.youtubePlayer)}, timedtext=${number(counts.youtubeTimedtext)}`,
+    `响应: player=${number(response.playerStatus)}, 字幕=${number(response.captionStatus)}, 字节=${number(response.captionBytes)}`,
+    `请求错误=${code(response.requestError)}`,
+  ].join("\n");
+}
+
 function appendSidepanelMvpDetails(card, component) {
   if (component.status === SIDEPANEL_STATE_API.TRANSCRIPT_STATUSES.NEEDS_CC) {
     const steps = document.createElement("div");
@@ -900,6 +1048,23 @@ function appendSidepanelMvpDetails(card, component) {
       scope.append(item);
     }
     card.append(scope);
+  }
+  if ((youtubeFreeReadDiagnostic || youtubePassiveReadDiagnostic) && [
+    SIDEPANEL_STATE_API.TRANSCRIPT_STATUSES.NEEDS_CC,
+    SIDEPANEL_STATE_API.TRANSCRIPT_STATUSES.NEEDS_SUPADATA_CHOICE,
+    SIDEPANEL_STATE_API.TRANSCRIPT_STATUSES.NEEDS_SUPADATA_CONFIG,
+    SIDEPANEL_STATE_API.TRANSCRIPT_STATUSES.FALLBACK_DECLINED,
+    SIDEPANEL_STATE_API.TRANSCRIPT_STATUSES.ERROR,
+  ].includes(component.status)) {
+    const detail = document.createElement("details");
+    const summary = document.createElement("summary");
+    summary.textContent = "读取详情（排查用）";
+    const text = document.createElement("pre");
+    text.style.whiteSpace = "pre-wrap";
+    text.style.overflowWrap = "anywhere";
+    text.textContent = [youtubeFreeReadDiagnostic, youtubePassiveReadDiagnostic].filter(Boolean).join("\n");
+    detail.append(summary, text);
+    card.append(detail);
   }
 }
 
@@ -1692,6 +1857,10 @@ document.addEventListener("DOMContentLoaded", async () => {
 
 // Listen for messages from the Digest button on YouTube page
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.action === "youtubePassiveTranscriptAvailable") {
+    void queueYoutubePassiveRecovery(message, sender);
+    return false;
+  }
   if (
     message?.action === "downloadNotesMigrationBackup" &&
     message?.target === "sidepanel"
@@ -2904,6 +3073,9 @@ async function runCheckCurrentTab(generation, options = {}) {
 // ============================================================
 
 function resetDigestStateForVideo(videoId, videoUrl, mediaRef, routeKey) {
+  youtubeFreeReadDiagnostic = "";
+  youtubePassiveReadDiagnostic = "";
+  pendingYoutubePassiveRecovery = null;
   const previousExportJobId = activeExportJobId;
   stopPlaybackTracking();
   cancelFollowIdleResume({ clearHold: true });
@@ -3363,6 +3535,9 @@ async function runDigestLoad(
     extensionDataFenceIsCurrent(dataFence) &&
     isCurrentDigest(videoId, generation, routeKey) &&
     videoTabId === requestVideoTabId &&
+    (!mvpOptions.passiveRecovery ||
+      sidepanelMvpState.transcript === mvpOptions.passiveRecoveryState ||
+      sidepanelMvpState.transcript.status === SIDEPANEL_STATE_API.TRANSCRIPT_STATUSES.READY) &&
     (!SIDEPANEL_MVP_AVAILABLE ||
       (mvpTask && sidepanelMvpTaskGate.isCurrent(mvpEnvelope)));
   if (!ownsDigestLoad()) return;
@@ -3389,13 +3564,15 @@ async function runDigestLoad(
   }
 
   // Check cache for this video
-  let cached = await loadFromCache(videoId, {
-    mediaRef,
-    requestedLanguage: currentVideoSourceLanguage,
-    trackKind: YOUTUBE_TRANSCRIPT_TRACK_KIND,
-    routeKey,
-    selectedTrack: currentVideoCaptionSelection,
-  });
+  let cached = mvpOptions.prefetchedTranscript
+    ? null
+    : await loadFromCache(videoId, {
+        mediaRef,
+        requestedLanguage: currentVideoSourceLanguage,
+        trackKind: YOUTUBE_TRANSCRIPT_TRACK_KIND,
+        routeKey,
+        selectedTrack: currentVideoCaptionSelection,
+      });
   if (!ownsDigestLoad()) return;
   if (
     cached &&
@@ -3557,7 +3734,9 @@ async function runDigestLoad(
   });
   let transcriptResult;
   try {
-    if (SIDEPANEL_MVP_AVAILABLE && mvpOptions.consentToken) {
+    if (mvpOptions.prefetchedTranscript) {
+      transcriptResult = mvpOptions.prefetchedTranscript;
+    } else if (SIDEPANEL_MVP_AVAILABLE && mvpOptions.consentToken) {
       const consentToken = mvpOptions.consentToken;
       transcriptResult = await sidepanelMvpSupadataDispatcher.dispatch({
         identity: mvpTask.identity,
@@ -3836,13 +4015,18 @@ async function runDigestLoad(
 
   // Setup explain feature for text selection
   setupExplainFeature();
-  if (currentTranscriptMode !== "original") translateTranscript();
+  if (!mvpOptions.passiveRecovery && currentTranscriptMode !== "original") {
+    translateTranscript();
+  }
 
   // Save transcript to cache (without analysis)
-  await saveToCache(videoId, dataFence);
+  const transcriptCached = await saveToCache(videoId, dataFence);
   if (!ownsDigestLoad()) return;
+  if (!transcriptCached) {
+    setTranscriptTranslationStatus("字幕已读取，但本地缓存未保存；再次打开时可能需要重新读取。", true);
+  }
 
-  refreshOverviewForCurrentVideoIfVisible();
+  if (!mvpOptions.passiveRecovery) refreshOverviewForCurrentVideoIfVisible();
 
   if (SIDEPANEL_MVP_AVAILABLE) {
     sidepanelMvpTaskGate.finish(mvpEnvelope);
@@ -8349,6 +8533,8 @@ async function persistResetFencedCacheRecord(
   record,
   expectedFence = captureExtensionDataFence(),
 ) {
+  // Preserve room below Chrome's 64 MiB message limit after JSON serialization.
+  if (new TextEncoder().encode(JSON.stringify({ key, record })).byteLength > 48 * 1024 * 1024) return false;
   const result = await sendResetFencedStorageMessage(
     {
       action: "persistResetFencedCache",

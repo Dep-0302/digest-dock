@@ -967,3 +967,31 @@ test('unavailable ad time cannot become a saved note at timestamp zero', async (
   await h.evaluate('saveCurrentMomentFromPanel()');
   assert.equal(messages.filter(m=>m.action==='saveNote').length,0);
 });
+
+test("failure cards expose safe diagnostic details and retain the first error across CC retry", () => {
+  const h = createHarness();
+  const task = bindCurrentVideo(h, "video-diagnostic", 1);
+  h.helpers.sidepanelMvpResolveTranscript({
+    success:false, routeOutcome:"UNKNOWN", error:"YOUTUBE_CAPTIONS_REQUIRED",
+    diagnostics:{
+      freeRead:{code:"EMPTY_TRANSCRIPT",liveContent:true,observedTrackCount:1,trackCount:null,selectedTrackKnown:true},
+      responseSummary:{captionStatus:200,captionBytes:0,requestError:"TIMEOUT",url:"https://private.invalid/token"},
+      providerInitiated:{youtubePlayer:1,youtubeTimedtext:1},
+      passiveRead:{code:"NOT_OBSERVED"},
+    },
+  },task);
+  assert.match(h.elements.stateRegion.textContent,/读取详情（排查用）/);
+  assert.match(h.elements.stateRegion.textContent,/D1 首次免费读取: EMPTY_TRANSCRIPT/);
+  assert.match(h.elements.stateRegion.textContent,/直播内容标记=yes/);
+  const retry = h.helpers.sidepanelMvpBeginEvent(h.stateApi.EVENTS.USER_RETRY_FREE,h.stateApi.TASK_ORIGINS.USER_RETRY_FREE);
+  h.helpers.sidepanelMvpResolveTranscript({
+    success:false,routeOutcome:"UNKNOWN",error:"SUPADATA_CONSENT_REQUIRED",hasSupadataKey:true,
+    diagnostics:{passiveRead:{code:"STATE_TOO_LARGE",status:200,bytes:5000000}},
+  },retry);
+  assert.match(h.elements.stateRegion.textContent,/EMPTY_TRANSCRIPT/);
+  assert.match(h.elements.stateRegion.textContent,/STATE_TOO_LARGE/);
+  assert.doesNotMatch(h.elements.stateRegion.textContent,/private.invalid|token/);
+  h.evaluate("resetDigestStateForVideo('next-video', '', {platform:'youtube'}, 'youtube:next-video')");
+  assert.equal(h.evaluate("youtubeFreeReadDiagnostic"), "");
+  assert.equal(h.evaluate("youtubePassiveReadDiagnostic"), "");
+});
