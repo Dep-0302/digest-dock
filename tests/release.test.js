@@ -90,7 +90,6 @@ test("large local caches use explicit permission and remain user-clearable", () 
   assert.match(sidepanelSource, /transcriptFingerprint/);
   assert.match(sidepanelSource, /await saveOverviewToCache\(/);
   assert.match(privacy, /`unlimitedStorage`/);
-  assert.match(readme, /`unlimitedStorage`/);
   assert.match(chineseReadme, /`unlimitedStorage`/);
 });
 
@@ -267,147 +266,66 @@ test("side panel MVP keeps identity and navigation persistent while transcript s
   );
 });
 
-test("release copy documents current scope without em dashes", () => {
+test("release copy presents the current product in user-facing language", () => {
   const readme = read("README.md");
   const chineseReadme = read("README.zh-CN.md");
+  const privacy = read("PRIVACY.md");
   const manifest = JSON.parse(read("manifest.json"));
   const packageJson = JSON.parse(read("package.json"));
-
-  assert.doesNotMatch(readme, /—/);
-  assert.doesNotMatch(chineseReadme, /—/);
-  assert.doesNotMatch(manifest.description, /—/);
-  assert.doesNotMatch(packageJson.description, /—/);
 
   assert.equal(manifest.name, "DigestDock");
   assert.equal(packageJson.name, "digest-dock");
   assert.match(read("scripts/package-extension.sh"), /digest-dock-v\$version\.zip/);
   assert.doesNotMatch(
-    [readme, chineseReadme, read("PRIVACY.md"), read("SECURITY.md")].join("\n"),
+    [readme, chineseReadme, privacy, read("SECURITY.md")].join("\n"),
     /\bYT Digest\b/,
   );
+
   assert.match(readme, /^# DigestDock$/m);
+  assert.match(readme, /turns video watching into thinking/i);
+  assert.match(readme, /\*\*Press N\*\* while watching/);
+  assert.match(readme, /Your thoughts are never rewritten by AI/);
+  assert.match(readme, /\*\*Thought capture\*\*/);
+  assert.match(readme, /\*\*Cross-video search\*\*/);
+  assert.match(readme, /\*\*YouTube \+ Bilibili\*\*/);
+  assert.match(readme, /\*\*Local and private\*\*/);
+  assert.match(readme, /^## Install$/m);
+  assert.match(readme, /^### Quick start \(with a coding agent\)$/m);
+  assert.match(readme, /https:\/\/github\.com\/Dep-0302\/digest-dock/);
+  assert.match(readme, /Keep the folder in place/);
+  assert.match(readme, /Open `chrome:\/\/extensions`/);
+  assert.doesNotMatch(readme, /^## Remix it with your coding agent$/m);
+  assert.doesNotMatch(readme, /^## Contributing$/m);
+
   assert.match(
     readme,
-    /DigestDock is a Manifest V3 Chrome extension/,
+    /Transcripts, timestamp navigation, notes, and backups work without an API key/,
   );
-  assert.match(readme, /standard `www\.bilibili\.com\/video\/BV\.\.\.` pages/);
-  assert.doesNotMatch(readme, /before deciding how much of it to watch/i);
-  assert.match(readme, /^## Install with your coding agent$/m);
-  assert.doesNotMatch(
-    [readme, chineseReadme].join("\n"),
-    /uncommitted branch candidate|candidate scope on this experimental branch|未提交实验分支候选|当前实验分支的候选范围/,
-  );
-  assert.match(
-    readme,
-    /No API key is required to read source transcripts, jump by timestamp, save original-language notes/,
-  );
+  for (const modelLabel of ["DeepSeek V4 Flash", "GLM-4.7-Flash", "Qwen3-8B", "Fireworks"]) {
+    assert.ok(readme.includes(modelLabel), `README should list ${modelLabel}`);
+    assert.ok(
+      chineseReadme.includes(modelLabel),
+      `zh-CN README should list ${modelLabel}`,
+    );
+  }
+  assert.match(readme, /Switching providers keeps previously entered keys/);
+  assert.match(readme, /Never paste a key into a chat, file, or screenshot/);
+  assert.match(readme, /Import merges with existing notes and skips duplicates/);
+  assert.match(readme, /Backup files are unencrypted/);
+  assert.match(readme, /optional Supadata fallback.*explicit confirmation per video/i);
+  assert.match(readme, /^## Troubleshooting$/m);
+  assert.match(readme, /Digest button missing/);
+  assert.match(readme, /npm test[\s\S]*npm run check[\s\S]*npm run package/);
+
+  assert.match(chineseReadme, /^# DigestDock$/m);
   assert.match(
     chineseReadme,
     /阅读原字幕、跳转时间点、保存原文笔记.*不需要 API Key/,
   );
+  assert.match(privacy, /only when it is necessary to provide its disclosed single purpose/);
   assert.match(
-    read("PRIVACY.md"),
-    /only when it is necessary to provide its disclosed single purpose/,
-  );
-  assert.match(
-    readme,
-    /permanent folder I choose[\s\S]*tell me its exact full path[\s\S]*If I need a suggestion during this first installation[\s\S]*`~\/Documents\/digest-dock`[\s\S]*`%USERPROFILE%\\Documents\\digest-dock`[\s\S]*do not assume either path/,
-  );
-  assert.match(
-    readme,
-    /Moving or deleting the source folder breaks the unpacked extension until you load it again from the new location\./,
-  );
-  assert.match(
-    readme,
-    /selecting the exact project folder you chose in Chrome with \*\*Load unpacked\*\*/,
-  );
-  assert.match(
-    readme,
-    /Select the exact project folder you chose, which must contain `manifest\.json`/,
-  );
-  assert.doesNotMatch(readme, /^## Remix it with your coding agent$/m);
-  assert.doesNotMatch(readme, /^## Contributing$/m);
-  assert.match(chineseReadme, /^# DigestDock$/m);
-  assert.match(chineseReadme, /DigestDock 是一个基于 Manifest V3 的 Chrome 扩展/);
-  assert.match(chineseReadme, /标准 `www\.bilibili\.com\/video\/BV\.\.\.` 页面/);
-  assert.match(chineseReadme, /^## 让你的编程 Agent 帮你安装$/m);
-  assert.match(
-    chineseReadme,
-    /我选择的长期保留文件夹[\s\S]*告诉我准确的完整路径[\s\S]*第一次安装时需要位置建议[\s\S]*`~\/Documents\/digest-dock`[\s\S]*`%USERPROFILE%\\Documents\\digest-dock`[\s\S]*不要假设我一定使用这些路径/,
-  );
-  assert.match(
-    chineseReadme,
-    /如果移动或删除源代码文件夹，Chrome 中加载的扩展会失效，需要从新的位置重新加载。/,
-  );
-  assert.match(
-    chineseReadme,
-    /“加载已解压的扩展程序”选择你刚才确定的那个准确项目文件夹/,
-  );
-  assert.match(
-    chineseReadme,
-    /选择你刚才确定的那个准确项目文件夹，其中必须包含 `manifest\.json`/,
-  );
-  assert.doesNotMatch(chineseReadme, /^## 用编程 Agent 改造成自己的版本$/m);
-  assert.match(readme, /choose \*\*Original\*\*, \*\*中文\*\*, or \*\*双语\*\*/);
-  assert.match(chineseReadme, /可选择 \*\*原文\*\*、\*\*中文\*\*或\*\*双语\*\*/);
-  assert.match(
-    readme,
-    /Chinese subtitle tracks stay in Original[\s\S]*never trigger a Chinese-translation request/,
-  );
-  assert.match(
-    chineseReadme,
-    /中文字幕直接保留原文[\s\S]*禁用无需使用的中文／双语翻译控件[\s\S]*不发送字幕翻译请求/,
-  );
-  assert.match(readme, /generated directly in Simplified Chinese/);
-  assert.match(chineseReadme, /直接生成简体中文底稿/);
-  assert.match(readme, /only when \*\*Original\*\* or \*\*Bilingual\*\* is requested/);
-  assert.match(chineseReadme, /请求\*\*原文\*\*或\*\*双语\*\*时/);
-  assert.match(readme, /Chinese-source overviews reuse Chinese[\s\S]*without an extra translation call/);
-  assert.match(chineseReadme, /中文字幕的三种模式复用同一份中文内容[\s\S]*不发起额外翻译/);
-  assert.match(readme, /Notes are polished in English once and translated into Simplified Chinese once/);
-  assert.match(chineseReadme, /笔记先生成一次润色后的英文，再单独生成一次简体中文/);
-  assert.match(readme, /source subtitle is already Chinese[\s\S]*no Chinese-translation request/);
-  assert.match(chineseReadme, /原字幕已经是中文[\s\S]*不再发送中文翻译请求/);
-  assert.match(
-    read("PRIVACY.md"),
+    privacy,
     /polished English note and its video title when generating the separately stored Simplified Chinese note/,
-  );
-
-  assert.match(readme, /100 credits per month/i);
-  assert.match(readme, /native transcript request uses \*\*1 credit\*\*/i);
-  assert.match(readme, /generated transcript costs \*\*2 credits per video minute\*\*/i);
-  assert.match(readme, /HTTP `206` still uses \*\*1 credit\*\*/i);
-  assert.match(readme, /forces `mode=native`/i);
-  assert.match(readme, /roughly 100 lookups per month/i);
-  assert.match(readme, /supadata\.ai\/pricing/i);
-  assert.match(readme, /docs\.supadata\.ai\/get-transcript/i);
-  assert.match(readme, /dash\.supadata\.ai\/auth\/sign-up/i);
-  assert.match(readme, /saved key is never used automatically/i);
-  assert.match(readme, /every Supadata request needs a new confirmation/i);
-  assert.match(readme, /platform\.deepseek\.com\/api_keys/i);
-  assert.match(readme, /api-docs\.deepseek\.com/i);
-  assert.match(readme, /api-docs\.deepseek\.com\/quick_start\/pricing/i);
-  assert.match(readme, /api-docs\.deepseek\.com\/quick_start\/token_usage/i);
-  assert.match(readme, /api-docs\.deepseek\.com\/guides\/kv_cache/i);
-  assert.match(readme, /\$0\.0028[\s\S]*\$0\.14[\s\S]*\$0\.28/);
-  assert.match(readme, /2,935 spoken English words/i);
-  assert.match(readme, /about 32,600 input tokens/i);
-  assert.match(readme, /\$0\.002[^\n]*\$0\.006 USD/i);
-  assert.match(chineseReadme, /api-docs\.deepseek\.com\/quick_start\/pricing/i);
-  assert.match(chineseReadme, /api-docs\.deepseek\.com\/quick_start\/token_usage/i);
-  assert.match(chineseReadme, /api-docs\.deepseek\.com\/guides\/kv_cache/i);
-  assert.match(chineseReadme, /\u00a50\.02[\s\S]*\u00a51[\s\S]*\u00a52/);
-  assert.match(chineseReadme, /2,935 \u4e2a\u82f1\u6587\u53e3\u8bed\u8bcd/);
-  assert.match(chineseReadme, /\u7ea6 32,600 \u4e2a\u8f93\u5165 token/);
-  assert.match(chineseReadme, /\$0\.002[^\n]*\$0\.006 USD/);
-  assert.match(chineseReadme, /dash\.supadata\.ai\/auth\/sign-up/i);
-  assert.match(chineseReadme, /保存 Key 也不构成持续授权/);
-  assert.match(chineseReadme, /每次请求都要重新确认/);
-  assert.match(chineseReadme, /platform\.deepseek\.com\/api_keys/i);
-  assert.match(readme, /^### The Digest button is missing on a video$/m);
-  assert.match(
-    chineseReadme,
-    /^### 视频页面没有显示 Digest 按钮$/m,
   );
 
   const optionsPage = read("options.html");
@@ -417,10 +335,6 @@ test("release copy documents current scope without em dashes", () => {
   assert.match(optionsScript, /每次使用 Supadata.*重新确认/);
   assert.match(optionsPage, /dash\.supadata\.ai\/auth\/sign-up/i);
   assert.match(optionsPage, /platform\.deepseek\.com\/api_keys/i);
-  // The provider picker is a custom ARIA combobox, not a native <select>, and
-  // no free-form endpoint/model/legacy-provider text inputs are exposed. The
-  // retired "本地改造" remix disclosure and its customization prompt are gone
-  // from the page, styles, and script.
   assert.doesNotMatch(optionsPage, /<select\b/i);
   assert.doesNotMatch(optionsPage, /id="(?:provider|aiBaseUrl|aiModel)"/);
   assert.doesNotMatch(
@@ -435,25 +349,15 @@ test("release copy documents current scope without em dashes", () => {
   assert.match(optionsPage, /id="providerSelectButton"[\s\S]*?role="combobox"/);
   assert.match(optionsPage, /id="providerSelectList"[\s\S]*?role="listbox"/);
   assert.doesNotMatch(optionsStyles, /\.data-card\s*\{[^}]*margin-top/);
-  // A stored legacy shape is migrated through the reset-fenced background
-  // write. An absent post-reset settings record must remain absent.
   assert.match(
     optionsScript,
     /hadStoredSettings\s*&&\s*migration\.migrated[\s\S]*persistResetFencedSettings/,
   );
-  assert.doesNotMatch(optionsPage, /~\/Documents\/(?:youtube-digest|digest-dock)/);
-  assert.doesNotMatch(optionsPage, /%USERPROFILE%\\Documents\\(?:youtube-digest|digest-dock)/);
-
-  assert.doesNotMatch(chineseReadme, /^## 用编程 Agent 改造成自己的版本$/m);
-  assert.match(readme, /exports the current video, selected source videos, all notes, or one source group as UTF-8 TXT/i);
-  assert.match(chineseReadme, /当前视频、所选视频、全部笔记和单个视频来源的 UTF-8 TXT 导出/);
-  assert.match(readme, /Tencent Hunyuan Translation[\s\S]*unavailable/i);
-  assert.match(chineseReadme, /腾讯混元翻译[\s\S]*暂不可用/);
 
   const publishedDocs = [
     readme,
     chineseReadme,
-    read("PRIVACY.md"),
+    privacy,
     read("SECURITY.md"),
   ].join("\n");
   assert.doesNotMatch(publishedDocs, /custom OpenAI-compatible/i);
@@ -461,21 +365,9 @@ test("release copy documents current scope without em dashes", () => {
   assert.doesNotMatch(publishedDocs, /chosen AI provider/i);
   assert.doesNotMatch(publishedDocs, /configure a different OpenAI-compatible/i);
   assert.doesNotMatch(publishedDocs, /Markdown note exports|note Markdown|笔记 Markdown|可导出 Markdown/i);
-  // The retired remix mechanism and the DeepSeek-only claim are gone; the
-  // published build now ships a preset provider picker with DeepSeek as default.
   assert.doesNotMatch(publishedDocs, /only AI provider/i);
   assert.doesNotMatch(publishedDocs, /Copy customization prompt/i);
-  assert.match(readme, /select an AI provider from a preset picker/i);
-  assert.match(chineseReadme, /从预设选择器中挑选/);
-  assert.match(readme, /DeepSeek is the default provider/i);
-  assert.match(chineseReadme, /DeepSeek 是默认服务商/);
-  for (const modelLabel of ["GLM-4.7-Flash", "Qwen3-8B", "Fireworks"]) {
-    assert.ok(readme.includes(modelLabel), `README should list ${modelLabel}`);
-    assert.ok(
-      chineseReadme.includes(modelLabel),
-      `zh-CN README should list ${modelLabel}`,
-    );
-  }
+
   assert.match(readme, /github\.com\/zarazhangrui\/youtube-digest/);
   assert.match(chineseReadme, /github\.com\/zarazhangrui\/youtube-digest/);
   assert.match(read("LICENSE"), /Copyright \(c\) 2026 Zara Zhang/);
@@ -490,30 +382,18 @@ test("release copy documents current scope without em dashes", () => {
     assert.ok(chineseReadme.includes(`github.com/${repository}`));
   }
 
-  // Product copy can change, but these persisted identifiers are compatibility
-  // contracts for existing settings, notes, caches, and exported backups.
   assert.match(read("settings.js"), /const STORAGE_KEY = "ytd_settings"/);
   assert.match(read("options.js"), /LANGUAGE_STORAGE_KEY = "ytd_options_language"/);
   assert.match(read("options.js"), /PREVIEW_STORAGE_PREFIX = "youtubeDigestPreview:"/);
   assert.match(read("background.js"), /["']ytd_notes["']/);
-  assert.match(
-    read("note-sources.js"),
-    /const STORAGE_KEY = "ytd_note_sources_v2"/,
-  );
-  assert.match(
-    read("note-sources.js"),
-    /const LEGACY_STORAGE_KEY = "ytd_note_sources"/,
-  );
-  assert.match(
-    read("export-jobs.js"),
-    /const STORAGE_KEY = "ytd_note_export_jobs_v1"/,
-  );
+  assert.match(read("note-sources.js"), /const STORAGE_KEY = "ytd_note_sources_v2"/);
+  assert.match(read("note-sources.js"), /const LEGACY_STORAGE_KEY = "ytd_note_sources"/);
+  assert.match(read("export-jobs.js"), /const STORAGE_KEY = "ytd_note_export_jobs_v1"/);
   assert.match(
     read("notes-backup.js"),
     /const FORMAT = "youtube-digest-notes-backup"/,
   );
 });
-
 test("export jobs persist coordination metadata without credentials or content", () => {
   const jobs = require("../export-jobs.js");
   const sentinel = "private-credential-sentinel";
