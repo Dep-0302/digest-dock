@@ -484,6 +484,54 @@ test("enforces the 8 MiB response ceiling before text()", async () => {
   assert.equal(bodyReads, 0);
 });
 
+test("reads a nine-hour JSON3 body above 8 MiB completely in one bounded request", async () => {
+  const fixture = require("./helpers/long-youtube-transcript.js")();
+  const bytes = new TextEncoder().encode(fixture.body).byteLength;
+  assert.ok(bytes > 8 * 1024 * 1024 && bytes < 32 * 1024 * 1024);
+  let requests = 0;
+  const result = await active.run({videoId:VIDEO_ID,language:"en",trackKind:"asr"}, {
+    fetchImpl: async () => ++requests === 1
+      ? response(playerBody([asrTrack()]))
+      : response(fixture.body, 200, {"content-length":String(bytes)}),
+  });
+  assert.equal(result.status,"HAVE_TRANSCRIPT");
+  assert.equal(result.transcript.length,fixture.cueCount);
+  assert.match(result.transcript[0].text,/FIRST/);
+  assert.match(result.transcript.at(-1).text,/LAST/);
+  assert.equal(result.transcript.at(-1).start,fixture.lastStart);
+  assert.equal(result.transcript.at(-1).timingPoints.length,10);
+  assert.equal(requests,2);
+});
+
+test("oversized timedtext retains its actual limit error, status and byte count", async () => {
+  let requests = 0;
+  let bodyReads = 0;
+  const size = 32 * 1024 * 1024 + 1;
+  const result = await active.run({videoId:VIDEO_ID,language:"en",trackKind:"asr"}, {
+    fetchImpl: async () => ++requests === 1
+      ? response(playerBody([asrTrack()]))
+      : {ok:true,status:200,headers:{get:()=>String(size)},text:async()=>{bodyReads++;return "";}},
+  });
+  assert.equal(result.errorCode,"RESPONSE_TOO_LARGE");
+  assert.equal(result.diagnostics.attempts[0].formats[0].status,200);
+  assert.equal(result.diagnostics.attempts[0].formats[0].bytes,size);
+  assert.equal(result.diagnostics.attempts[0].formats[0].maxBytes,32*1024*1024);
+  assert.equal(bodyReads,0);
+  assert.equal(requests,2);
+});
+
+test("a legal raw body cannot produce an oversized Chrome result message", async () => {
+  let requests=0;
+  const body=json3({start:0,duration:2,text:"x".repeat(17*1024*1024)});
+  const result=await active.run({videoId:VIDEO_ID,language:"en",trackKind:"manual"},{
+    fetchImpl:async()=>++requests===1?response(playerBody([manualTrack()])):response(body),
+  });
+  assert.equal(result.errorCode,"RESPONSE_TOO_LARGE");
+  assert.equal(result.diagnostics.attempts[0].formats[0].maxBytes,48*1024*1024);
+  assert.equal(result.transcript.length,0);
+  assert.equal(requests,2);
+});
+
 test("uses a fixed 15 second abort timer and maps timeouts to a technical failure", async () => {
   const delays = [];
   const result = await active.run(

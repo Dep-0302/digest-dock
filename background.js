@@ -52,9 +52,37 @@ const YOUTUBE_NATIVE_COOLDOWN_STORAGE_KEY =
 const YOUTUBE_PASSIVE_SESSION_STORAGE_KEY =
   "youtube_passive_session_buffer";
 const YOUTUBE_PASSIVE_WAIT_MS = 1_500;
-const YOUTUBE_PASSIVE_MAX_BODY_BYTES = 8 * 1024 * 1024;
-const YOUTUBE_PASSIVE_MAX_STATE_BYTES = 6 * 1024 * 1024;
+const YOUTUBE_PASSIVE_MAX_BODY_BYTES = 32 * 1024 * 1024;
+// Session storage has its own 10 MiB memory quota, even with unlimitedStorage.
+// Keep headroom for UTF-16 strings, metadata and the other session keys.
+const YOUTUBE_PASSIVE_MAX_STATE_BYTES = 4 * 1024 * 1024;
+const YOUTUBE_PASSIVE_MAX_DECODED_BYTES = 48 * 1024 * 1024;
+const YOUTUBE_TRANSCRIPT_MAX_RESULT_BYTES = 48 * 1024 * 1024;
 const YOUTUBE_PASSIVE_MAX_ENTRIES = 6;
+const youtubePassiveLastObservation = new Map();
+
+function recordYoutubePassiveObservation(tabId, videoId, code, status = 0, bytes = null) {
+  if (code === "RESPONSE_DISCARDED" &&
+      youtubePassiveLastObservation.has(tabId) &&
+      youtubePassiveLastObservation.get(tabId).videoId !== videoId) return;
+  youtubePassiveLastObservation.delete(tabId);
+  youtubePassiveLastObservation.set(tabId, {
+    videoId, dataGeneration: extensionDataGeneration, code, status, bytes,
+  });
+  if (youtubePassiveLastObservation.size > 32) {
+    youtubePassiveLastObservation.delete(youtubePassiveLastObservation.keys().next().value);
+  }
+}
+
+function youtubePassiveObservation(tabId, videoId) {
+  const observation = youtubePassiveLastObservation.get(tabId);
+  if (!observation || observation.videoId !== videoId ||
+      observation.dataGeneration !== extensionDataGeneration) {
+    return { code: "NOT_OBSERVED", status: null, bytes: null };
+  }
+  const { code, status, bytes } = observation;
+  return { code, status, bytes };
+}
 const YOUTUBE_MAX_TIMING_POINTS_PER_CUE = 512;
 const YOUTUBE_ACTIVE_PRODUCT_FILE = "youtube-transcript-active.js";
 const YOUTUBE_TRANSCRIPT_CACHE_SOURCES = new Set([
@@ -1161,7 +1189,7 @@ function buildYoutubeTranscriptResult(
     normalizeLanguageCode(language) ||
     normalizeLanguageCode(normalized.find((segment) => segment.language)?.language) ||
     null;
-  return {
+  const result = {
     success: true,
     routeOutcome: "HAVE_TRANSCRIPT",
     transcript: normalized,
@@ -1180,6 +1208,17 @@ function buildYoutubeTranscriptResult(
     selectedTrack: selectedTrack || null,
     providerVariant,
     diagnostics,
+    supadataEligible: false,
+  };
+  return boundYoutubeTranscriptResult(result);
+}
+
+function boundYoutubeTranscriptResult(result) {
+  if (new TextEncoder().encode(JSON.stringify(result)).byteLength <= YOUTUBE_TRANSCRIPT_MAX_RESULT_BYTES) return result;
+  return {
+    success: false, error: "RESPONSE_TOO_LARGE", routeOutcome: "UNKNOWN",
+    message: "字幕展开数据超过 48 MiB 的安全传输上限，未截断或发送给第三方。",
+    sourceAttempt: result.sourceAttempt, diagnostics: result.diagnostics,
     supadataEligible: false,
   };
 }
@@ -1231,32 +1270,130 @@ function normalizePassiveCapture(payload) {
   return result ? { result, videoId, language, trackKind } : null;
 }
 
+async function packYoutubePassiveEntry(entry) {
+  if (!entry?.capture?.success) return entry;
+  const compact = { ...entry.capture };
+  // These two strings are derived from the segments; do not store all three.
+  delete compact.transcriptText;
+  delete compact.transcriptTextTimestamped;
+  const json = JSON.stringify(compact);
+  const bytes = new TextEncoder().encode(json).byteLength;
+  if (bytes > YOUTUBE_PASSIVE_MAX_DECODED_BYTES) return null;
+  // Small records preserve the existing representation. Large records are
+  // compressed in memory using Chrome's native API, without a new permission
+  // or dependency. The JSON fallback also omits the duplicate strings.
+  if (bytes < 256 * 1024) return entry;
+  let codec = "json-v1";
+  let data = json;
+  if (typeof CompressionStream === "function") {
+    const stream = new Blob([json]).stream().pipeThrough(new CompressionStream("gzip"));
+    const compressed = new Uint8Array(await new Response(stream).arrayBuffer());
+    let binary = "";
+    for (let offset = 0; offset < compressed.length; offset += 32768) {
+      binary += String.fromCharCode(...compressed.subarray(offset, offset + 32768));
+    }
+    data = btoa(binary);
+    codec = "gzip-base64-v1";
+  }
+  const { capture, ...metadata } = entry;
+  return { ...metadata, capturePacked: { codec, data } };
+}
+
+async function unpackYoutubePassiveEntry(entry) {
+  if (!entry?.capturePacked) return entry;
+  try {
+    const { codec, data } = entry.capturePacked;
+    if (typeof data !== "string" || data.length > YOUTUBE_PASSIVE_MAX_STATE_BYTES) return null;
+    let json = data;
+    if (codec === "gzip-base64-v1") {
+      const compressed = Uint8Array.from(atob(data), (character) => character.charCodeAt(0));
+      const reader = new Blob([compressed]).stream()
+        .pipeThrough(new DecompressionStream("gzip")).getReader();
+      const decoder = new TextDecoder();
+      let bytes = 0;
+      json = "";
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          bytes += value.byteLength;
+          if (bytes > YOUTUBE_PASSIVE_MAX_DECODED_BYTES) {
+            await reader.cancel();
+            return null;
+          }
+          json += decoder.decode(value, { stream: true });
+        }
+        json += decoder.decode();
+      } finally {
+        reader.releaseLock();
+      }
+    } else if (codec !== "json-v1") return null;
+    const compact = JSON.parse(json);
+    if (compact.source !== "youtube-passive" || compact.success !== true ||
+        !Array.isArray(compact.transcript) || !compact.transcript.length ||
+        compact.transcript.some((row) => typeof row?.text !== "string" || !Number.isFinite(row?.start))) return null;
+    // Rebuild derived strings without cleaning/decoding the already normalized
+    // source again: escaped text and precise timing must round-trip exactly.
+    const capture = { ...compact,
+      transcriptText: compact.transcript.map((row) => row.text).join(" "),
+      transcriptTextTimestamped: compact.transcript.map((row) =>
+        `[${formatYoutubeTranscriptTimestamp(row.start)}] ${row.text}`).join("\n"),
+    };
+    const { capturePacked, ...metadata } = entry;
+    return boundYoutubeTranscriptResult(capture).success ? { ...metadata, capture } : null;
+  } catch (_error) {
+    // A damaged entry must not hide other usable captions or break a retry.
+    return null;
+  }
+}
+
 async function readYoutubePassiveEntries() {
   try {
     const stored = await chrome.storage?.session?.get?.(
       YOUTUBE_PASSIVE_SESSION_STORAGE_KEY,
     );
     const value = stored?.[YOUTUBE_PASSIVE_SESSION_STORAGE_KEY];
-    return Array.isArray(value) ? value : [];
+    if (!Array.isArray(value)) return [];
+    const entries = [];
+    for (const entry of value.slice(-YOUTUBE_PASSIVE_MAX_ENTRIES)) {
+      const decoded = await unpackYoutubePassiveEntry(entry);
+      if (decoded) entries.push(decoded);
+    }
+    return entries;
   } catch (_error) {
     return [];
   }
 }
 
 async function writeYoutubePassiveEntries(entries) {
-  const bounded = (Array.isArray(entries) ? entries : [])
+  const candidates = (Array.isArray(entries) ? entries : [])
     .filter((entry) => entry && Number.isInteger(entry.tabId))
     .sort((left, right) => Number(left.updatedAt) - Number(right.updatedAt));
-  while (
-    bounded.length > YOUTUBE_PASSIVE_MAX_ENTRIES ||
-    new TextEncoder().encode(JSON.stringify(bounded)).byteLength >
-      YOUTUBE_PASSIVE_MAX_STATE_BYTES
-  ) {
+  const bounded = [];
+  const packed = [];
+  for (const entry of candidates.slice(-YOUTUBE_PASSIVE_MAX_ENTRIES)) {
+    const encoded = await packYoutubePassiveEntry(entry);
+    if (encoded) {
+      bounded.push(entry);
+      packed.push(encoded);
+    }
+  }
+  while (packed.length && new TextEncoder().encode(JSON.stringify(packed)).byteLength > YOUTUBE_PASSIVE_MAX_STATE_BYTES) {
+    packed.shift();
     bounded.shift();
   }
-  await chrome.storage?.session?.set?.({
-    [YOUTUBE_PASSIVE_SESSION_STORAGE_KEY]: bounded,
-  });
+  // Chrome measures session allocation, not just JSON bytes. If other session
+  // keys leave less room, evict the oldest caption and retry within this queue.
+  while (true) {
+    try {
+      await chrome.storage?.session?.set?.({ [YOUTUBE_PASSIVE_SESSION_STORAGE_KEY]: packed });
+      break;
+    } catch (error) {
+      if (!packed.length || !/quota/i.test(String(error?.message || error))) throw error;
+      packed.shift();
+      bounded.shift();
+    }
+  }
   return bounded;
 }
 
@@ -1305,6 +1442,33 @@ function youtubePassiveEntryStartedAt(entry, now = Date.now()) {
   return now;
 }
 
+function notifyYoutubePassiveTranscriptAvailable(tabId, videoId, dataGeneration) {
+  if (
+    !Number.isInteger(tabId) ||
+    !validYoutubeVideoId(videoId) ||
+    !extensionDataGenerationIsWritable(dataGeneration)
+  ) {
+    return;
+  }
+  // The bridge must never wait for a side panel receiver: a closed panel is a
+  // normal state, and its missing receiver must not change a successful page
+  // capture into a failed one. Keep this event metadata-only so the transcript
+  // remains in session storage until the side panel explicitly reads it.
+  try {
+    Promise.resolve(
+      chrome.runtime.sendMessage?.({
+        action: "youtubePassiveTranscriptAvailable",
+        tabId,
+        videoId,
+        runtimeInstanceId,
+        dataGeneration,
+      }),
+    ).catch(() => {});
+  } catch (_error) {
+    // sendMessage can synchronously reject while the worker is shutting down.
+  }
+}
+
 async function handleYoutubePassiveState(payload, sender) {
   const dataGeneration = extensionDataGeneration;
   const type = String(payload?.type || "");
@@ -1339,6 +1503,11 @@ async function handleYoutubePassiveState(payload, sender) {
     const previous = entries.find((entry) => entry.identity === identity);
     let next = entries.filter((entry) => entry.identity !== identity);
     const observedStatus = Number(payload?.status);
+    recordYoutubePassiveObservation(
+      tabId, videoId,
+      type === "inflight" ? "REQUEST_STARTED" : type === "clear" ? "RESPONSE_DISCARDED" : "RESPONSE_RECEIVED",
+      Number.isInteger(observedStatus) ? observedStatus : 0,
+    );
     if (
       (type === "capture" || type === "clear") &&
       observedStatus === 429 &&
@@ -1378,14 +1547,17 @@ async function handleYoutubePassiveState(payload, sender) {
         return { ok: false, error: "PASSIVE_CAPTURE_NOT_INFLIGHT" };
       }
       const capture = normalizePassiveCapture(payload);
-      if (!capture || capture.videoId !== videoId) {
+      if (!capture || capture.result?.success !== true || capture.videoId !== videoId) {
+        recordYoutubePassiveObservation(tabId, videoId,
+          capture?.result?.error === "RESPONSE_TOO_LARGE" ? "NORMALIZED_STATE_TOO_LARGE" : "INVALID_BODY", observedStatus,
+          typeof payload?.body === "string" ? new TextEncoder().encode(payload.body).byteLength : 0);
         // A completed page response with an empty or unusable body is not a
         // transcript, but it must still close the matching inflight state.
         // Leaving that state behind would make later gates wait on work that
         // has already finished.
         await writeYoutubePassiveEntries(next);
         notifyYoutubePassiveWaiters();
-        return { ok: false, error: "INVALID_PASSIVE_CAPTURE" };
+        return { ok: false, error: capture?.result?.error === "RESPONSE_TOO_LARGE" ? "PASSIVE_CAPTURE_TOO_LARGE" : "INVALID_PASSIVE_CAPTURE" };
       }
       next.push({
         identity,
@@ -1405,6 +1577,17 @@ async function handleYoutubePassiveState(payload, sender) {
     notifyYoutubePassiveWaiters();
     if (type === "clear") return { ok: true, cleared: true };
     const retained = stored.some((entry) => entry.identity === identity);
+    const retainedCapture = stored.find(
+      (entry) => entry.identity === identity && entry.state === "capture",
+    );
+    if (type === "capture" && retainedCapture?.capture?.success === true) {
+      recordYoutubePassiveObservation(tabId, videoId, "CAPTURED", observedStatus,
+        retainedCapture.capture.diagnostics?.bodyBytes ?? null);
+      notifyYoutubePassiveTranscriptAvailable(tabId, videoId, dataGeneration);
+    } else if (type === "capture") {
+      recordYoutubePassiveObservation(tabId, videoId, "PACKED_STATE_TOO_LARGE", observedStatus,
+        typeof payload?.body === "string" ? new TextEncoder().encode(payload.body).byteLength : 0);
+    }
     return retained
       ? { ok: true, state: type }
       : { ok: false, error: "PASSIVE_CAPTURE_TOO_LARGE" };
@@ -1966,6 +2149,90 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           ok: false,
           error: String(error?.code || "PASSIVE_STATE_FAILED").slice(0, 80),
         }),
+      );
+    return true;
+  }
+
+  if (message.action === "readYoutubePassiveTranscript") {
+    const responseRuntimeInstanceId = runtimeInstanceId;
+    const responseDataGeneration = extensionDataGeneration;
+    const routeOptions = {
+      runId: message.runId,
+      digestGeneration: message.digestGeneration,
+      routeKey: message.routeKey,
+      trackKind: message.trackKind,
+      pagePreferredTrack: message.pagePreferredTrack,
+      passiveOnly: true,
+    };
+    const mediaRef = message.mediaRef;
+    const isYoutubeRequest =
+      !mediaRef ||
+      (typeof mediaRef === "object" &&
+        (!mediaRef.platform || mediaRef.platform === "youtube"));
+    const videoId = validYoutubeVideoId(
+      mediaRef?.platform === "youtube" ? mediaRef.videoId : message.videoId,
+    );
+    const respond = (result) => {
+      const responseIsStillCurrent = extensionDataFenceIsWritable(
+        responseRuntimeInstanceId,
+        responseDataGeneration,
+      );
+      const fencedResult = responseIsStillCurrent
+        ? result
+        : withYoutubeRouteIdentity(
+            {
+              success: false,
+              error: "EXTENSION_DATA_RESET",
+              routeOutcome: "UNKNOWN",
+              message: "扩展数据已重置，请重新读取当前页面字幕。",
+              sourceAttempt: "YOUTUBE_PASSIVE",
+              supadataEligible: false,
+            },
+            youtubeRouteIdentity(routeOptions),
+          );
+      sendResponse({
+        ...fencedResult,
+        runtimeInstanceId: responseRuntimeInstanceId,
+        dataGeneration: responseDataGeneration,
+      });
+    };
+    if (!isYoutubeRequest || !videoId) {
+      respond(
+        withYoutubeRouteIdentity(
+          {
+            success: false,
+            error: "PASSIVE_NOT_AVAILABLE",
+            routeOutcome: "UNKNOWN",
+            message: "当前页面没有可读取的 YouTube 被动字幕。",
+            sourceAttempt: "YOUTUBE_PASSIVE",
+            supadataEligible: false,
+          },
+          youtubeRouteIdentity(routeOptions),
+        ),
+      );
+      return false;
+    }
+    handleFetchYoutubeNativeTranscript(
+      videoId,
+      message.preferredLanguage,
+      message.tabId ?? sender.tab?.id ?? null,
+      routeOptions,
+    )
+      .then(respond)
+      .catch(() =>
+        respond(
+          withYoutubeRouteIdentity(
+            {
+              success: false,
+              error: "PASSIVE_NOT_AVAILABLE",
+              routeOutcome: "UNKNOWN",
+              message: "当前页面还没有可读取的 YouTube 被动字幕。",
+              sourceAttempt: "YOUTUBE_PASSIVE",
+              supadataEligible: false,
+            },
+            youtubeRouteIdentity(routeOptions),
+          ),
+        ),
       );
     return true;
   }
@@ -3051,6 +3318,11 @@ async function readYouTubePlayabilitySnapshot(tabId, expectedVideoId) {
               response?.playabilityStatus?.reason || "",
             ).slice(0, 200),
             sourceLanguage: String(sourceLanguage || "").slice(0, 35),
+            isLiveContent:
+              typeof response?.videoDetails?.isLiveContent === "boolean"
+                ? response.videoDetails.isLiveContent
+                : null,
+            observedTrackCount: rawTracks.length,
             captionTrackCountKnown,
             captionTrackCount: captionTrackCountKnown
               ? rawTracks.length
@@ -3421,6 +3693,11 @@ function youtubeNativeErrorCode(result) {
 }
 
 function youtubeNativeDiagnostics(result, route) {
+  const attempt = result?.diagnostics?.attempts?.[0];
+  const format = attempt?.formats?.[0];
+  const safeNumber = (value) =>
+    Number.isSafeInteger(value) && value >= 0 ? value : null;
+  const requestError = String(format?.error || attempt?.error || "");
   const providerInitiated =
     result?.diagnostics?.providerInitiated ||
     result?.providerInitiated ||
@@ -3428,6 +3705,13 @@ function youtubeNativeDiagnostics(result, route) {
     null;
   return {
     route,
+    responseSummary: {
+      playerStatus: safeNumber(attempt?.player?.status),
+      captionStatus: safeNumber(format?.status),
+      captionBytes: safeNumber(format?.bytes),
+      captionLimit: safeNumber(format?.maxBytes),
+      requestError: /^[A-Z0-9_]{1,80}$/.test(requestError) ? requestError : null,
+    },
     providerVariant: String(result?.providerVariant || "").slice(0, 80) || null,
     providerInitiated,
     sawTracks:
@@ -3570,7 +3854,9 @@ function normalizeYoutubeNativeProviderResult(result, route) {
     success: false,
     error,
     routeOutcome: "UNKNOWN",
-    message: String(result?.message || "暂时无法取得 YouTube 字幕。").slice(
+    message: String(result?.message || (error === "RESPONSE_TOO_LARGE"
+      ? `字幕数据超过 ${(diagnostics.responseSummary?.captionLimit || YOUTUBE_PASSIVE_MAX_BODY_BYTES) / 1024 / 1024} MiB 的安全上限，未截断或发送给第三方。`
+      : "暂时无法取得 YouTube 字幕。")).slice(
       0,
       500,
     ),
@@ -3578,7 +3864,7 @@ function normalizeYoutubeNativeProviderResult(result, route) {
       route === "active" ? "YOUTUBE_ACTIVE" : "YOUTUBE_PANEL",
     selectedTrack,
     diagnostics,
-    supadataEligible: true,
+    supadataEligible: error !== "RESPONSE_TOO_LARGE",
   };
 }
 
@@ -3724,6 +4010,31 @@ async function handleFetchYoutubeNativeTranscript(
   options = {},
 ) {
   const routeIdentity = youtubeRouteIdentity(options);
+  const passiveOnly = options.passiveOnly === true;
+  const passiveOnlyResetResult = () =>
+    withYoutubeRouteIdentity(
+      {
+        success: false,
+        error: "EXTENSION_DATA_RESET",
+        routeOutcome: "UNKNOWN",
+        message: "扩展数据已重置，请重新读取当前页面字幕。",
+        sourceAttempt: "YOUTUBE_PASSIVE",
+        supadataEligible: false,
+      },
+      routeIdentity,
+    );
+  const passiveOnlyUnavailableResult = () =>
+    withYoutubeRouteIdentity(
+      {
+        success: false,
+        error: "PASSIVE_NOT_AVAILABLE",
+        routeOutcome: "UNKNOWN",
+        message: "当前页面还没有可读取的 YouTube 被动字幕。",
+        sourceAttempt: "YOUTUBE_PASSIVE",
+        supadataEligible: false,
+      },
+      routeIdentity,
+    );
   const metadataPreferredTrack = normalizeYoutubePagePreferredTrack(
     options.pagePreferredTrack,
   );
@@ -3736,6 +4047,12 @@ async function handleFetchYoutubeNativeTranscript(
     dataGeneration: extensionDataGeneration,
   };
   request.language = request.preferredLanguage;
+  if (
+    passiveOnly &&
+    !extensionDataGenerationIsWritable(request.dataGeneration)
+  ) {
+    return passiveOnlyResetResult();
+  }
   if (!request.videoId || !Number.isInteger(tabId)) {
     return withYoutubeRouteIdentity(
       {
@@ -3775,6 +4092,12 @@ async function handleFetchYoutubeNativeTranscript(
     );
     pageCaptionEvidence = normalizeYoutubePageCaptionEvidence(pageSnapshot);
   } catch (error) {
+    if (
+      passiveOnly &&
+      !extensionDataGenerationIsWritable(request.dataGeneration)
+    ) {
+      return passiveOnlyResetResult();
+    }
     if (error?.code === "PAGE_CONTEXT_CHANGED") {
       return withYoutubeRouteIdentity(
         {
@@ -3785,6 +4108,12 @@ async function handleFetchYoutubeNativeTranscript(
         routeIdentity,
       );
     }
+  }
+  if (
+    passiveOnly &&
+    !extensionDataGenerationIsWritable(request.dataGeneration)
+  ) {
+    return passiveOnlyResetResult();
   }
   if (!(await requestStillCurrent())) {
     return withYoutubeRouteIdentity(
@@ -3804,9 +4133,27 @@ async function handleFetchYoutubeNativeTranscript(
       : metadataPreferredTrack);
   request.pagePreferredTrack = pagePreferredTrack;
 
-  const passiveDeadlineAt = Date.now() + YOUTUBE_PASSIVE_WAIT_MS;
+  // A late side-panel notification may arrive after the original 1.5-second
+  // Passive window. Read the already-captured buffer once, but never make a
+  // new page request wait or start another subtitle provider from this path.
+  const passiveDeadlineAt = passiveOnly
+    ? Date.now()
+    : Date.now() + YOUTUBE_PASSIVE_WAIT_MS;
   const passive = await awaitYoutubePassiveGate(request, passiveDeadlineAt);
-  if (!(await requestStillCurrent())) {
+  if (
+    passiveOnly &&
+    !extensionDataGenerationIsWritable(request.dataGeneration)
+  ) {
+    return passiveOnlyResetResult();
+  }
+  const passivePageStillCurrent = await requestStillCurrent();
+  if (
+    passiveOnly &&
+    !extensionDataGenerationIsWritable(request.dataGeneration)
+  ) {
+    return passiveOnlyResetResult();
+  }
+  if (!passivePageStillCurrent) {
     return withYoutubeRouteIdentity(
       {
         ...pageContextChangedResult(),
@@ -3819,6 +4166,7 @@ async function handleFetchYoutubeNativeTranscript(
   if (passive?.success) {
     return withYoutubeRouteIdentity(passive, routeIdentity);
   }
+  if (passiveOnly) return passiveOnlyUnavailableResult();
   const terminalPlayabilityMessages = {
     LOGIN_REQUIRED:
       "此视频需要登录、年龄验证或其他访问权限，DigestDock 不会继续获取字幕。",
@@ -3943,7 +4291,7 @@ async function handleFetchYoutubeNativeTranscript(
           routeIdentity,
         );
       }
-      if (activeResult?.routeOutcome !== "UNKNOWN") {
+      if (activeResult?.routeOutcome !== "UNKNOWN" || activeResult?.error === "RESPONSE_TOO_LARGE") {
         return withYoutubeRouteIdentity(activeResult, routeIdentity);
       }
     }
@@ -3957,15 +4305,25 @@ async function handleFetchYoutubeNativeTranscript(
         sourceAttempt: "YOUTUBE_PASSIVE",
         requiresCaptionEnable: true,
         supadataEligible: false,
-        diagnostics:
-          activeResult?.diagnostics || {
+        diagnostics: {
+          ...(activeResult?.diagnostics || {
             providerInitiated: {
               youtubePlayer: 0,
               youtubeTimedtext: 0,
               thirdParty: 0,
               loopback: 0,
             },
+          }),
+          freeRead: {
+            code: activeResult ? youtubeNativeErrorCode(activeResult) : "NO_TRACK_EVIDENCE",
+            liveContent: pageSnapshot?.isLiveContent ?? null,
+            tracksKnown: pageCaptionEvidence?.captionTrackCountKnown === true,
+            trackCount: pageCaptionEvidence?.captionTrackCount ?? null,
+            observedTrackCount: pageSnapshot?.observedTrackCount ?? null,
+            selectedTrackKnown: Boolean(automaticTrack),
           },
+          passiveRead: youtubePassiveObservation(tabId, request.videoId),
+        },
       },
       routeIdentity,
     );
@@ -3980,6 +4338,7 @@ async function handleFetchYoutubeNativeTranscript(
         "打开 YouTube 字幕后仍未读取到字幕；如有需要，可选择 Supadata 第三方后备。",
       sourceAttempt: "YOUTUBE_PASSIVE_RETRY",
       supadataEligible: true,
+      diagnostics: { passiveRead: youtubePassiveObservation(tabId, request.videoId) },
     }),
     routeIdentity,
   );

@@ -4,8 +4,9 @@
   const GLOBAL_KEY = "__DIGESTDOCK_YOUTUBE_PASSIVE_MAIN_V1__";
   const CAPTURE_CHANNEL = "digestdock-youtube-passive-state-v1";
   const CONTROL_CHANNEL = "digestdock-youtube-passive-control-v1";
-  const MAX_BODY_BYTES = 8 * 1024 * 1024;
+  const MAX_BODY_BYTES = 32 * 1024 * 1024;
   const MAX_PENDING_MESSAGES = 4;
+  const MAX_PENDING_BODY_BYTES = MAX_BODY_BYTES;
   const CLONE_READ_TIMEOUT_MS = 15_000;
 
   if (window[GLOBAL_KEY]?.active) return;
@@ -16,6 +17,7 @@
   const xhrRequests = new WeakMap();
   const inFlight = new Map();
   const pendingMessages = [];
+  let pendingBodyBytes = 0;
   let enabled = false;
   let bridgeNonce = null;
   let destroyed = false;
@@ -100,12 +102,13 @@
     return `${summary.videoId}:${summary.language}:${summary.kind}`;
   }
 
-  function postPayload(payload) {
+  function postPayload(payload, bodyBytes = 0) {
     if (destroyed) return;
     if (!bridgeNonce) {
-      pendingMessages.push(payload);
-      while (pendingMessages.length > MAX_PENDING_MESSAGES) {
-        pendingMessages.shift();
+      pendingMessages.push({ payload, bodyBytes });
+      pendingBodyBytes += bodyBytes;
+      while (pendingMessages.length > MAX_PENDING_MESSAGES || pendingBodyBytes > MAX_PENDING_BODY_BYTES) {
+        pendingBodyBytes -= pendingMessages.shift().bodyBytes;
       }
       return;
     }
@@ -203,7 +206,7 @@
       status: normalizedStatus,
       body,
       inFlight: stillInFlight,
-    });
+    }, bodyBytes);
   }
 
   function sameObservedTrack(left, right) {
@@ -393,6 +396,7 @@
     disable();
     destroyed = true;
     pendingMessages.length = 0;
+    pendingBodyBytes = 0;
     window.removeEventListener("message", onControlMessage);
     window.removeEventListener("yt-navigate-start", resetForNavigation);
     window.removeEventListener("pagehide", destroy);
@@ -411,7 +415,11 @@
     const nonce = String(event.data.nonce || "");
     if (event.data.action === "connect" && /^[0-9a-f]{32}$/.test(nonce)) {
       bridgeNonce = nonce;
-      while (pendingMessages.length) postPayload(pendingMessages.shift());
+      while (pendingMessages.length) {
+        const entry = pendingMessages.shift();
+        pendingBodyBytes -= entry.bodyBytes;
+        postPayload(entry.payload, entry.bodyBytes);
+      }
       return;
     }
     if (!bridgeNonce || nonce !== bridgeNonce) return;

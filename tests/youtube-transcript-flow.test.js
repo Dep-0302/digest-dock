@@ -10,6 +10,9 @@ const backgroundSource = fs.readFileSync(
   "utf8",
 );
 const bilibiliAdapter = require("../bilibili.js");
+const notesBackup = require("../notes-backup.js");
+const noteSources = require("../note-sources.js");
+const exportJobs = require("../export-jobs.js");
 
 const VIDEO_ID = "jNQXAC9IVRw";
 const OTHER_VIDEO_ID = "aqz-KE-bpKQ";
@@ -107,6 +110,9 @@ function loadBackground({
   pageSnapshotOptions = {},
   pageSnapshotRun,
   bilibiliAdapterImpl = bilibiliAdapter,
+  runtimeSendMessage,
+  initialSessionState = {},
+  storageSessionSet,
   setTimeoutImpl = setTimeout,
   clearTimeoutImpl = clearTimeout,
   nowImpl = Date.now,
@@ -119,7 +125,8 @@ function loadBackground({
     fetch: 0,
   };
   const localState = { ytd_settings: settings };
-  const sessionState = {};
+  const sessionState = initialSessionState;
+  const runtimeMessages = [];
   const runtimeMessageListeners = [];
   const tabUpdatedListeners = [];
   const listeners = { addListener() {} };
@@ -184,6 +191,7 @@ function loadBackground({
     TextEncoder,
     Intl,
     AbortController,
+    CompressionStream, DecompressionStream, Blob, Response, btoa, atob,
     setTimeout: setTimeoutImpl,
     clearTimeout: clearTimeoutImpl,
     fetch: async (...args) => {
@@ -199,7 +207,9 @@ function loadBackground({
             storageLocalGet ||
             (async (key) =>
               typeof key === "string"
-                ? { [key]: localState[key] }
+                ? Object.hasOwn(localState, key)
+                  ? { [key]: localState[key] }
+                  : {}
                 : { ...localState }),
           set: async (items) => Object.assign(localState, items),
           remove: async (key) => delete localState[key],
@@ -212,7 +222,12 @@ function loadBackground({
             typeof key === "string"
               ? { [key]: sessionState[key] }
               : { ...sessionState },
-          set: async (items) => Object.assign(sessionState, items),
+          set: async (items) => storageSessionSet
+            ? storageSessionSet(items, sessionState)
+            : Object.assign(sessionState, items),
+          clear: async () => {
+            for (const key of Object.keys(sessionState)) delete sessionState[key];
+          },
         },
       },
       action: { onClicked: listeners },
@@ -231,7 +246,12 @@ function loadBackground({
         openOptionsPage() {},
         getURL: (value) => `chrome-extension://test/${value}`,
         getManifest: () => ({ version: "test" }),
-        sendMessage: async () => ({ success: true }),
+        sendMessage: async (message) => {
+          runtimeMessages.push(message);
+          return typeof runtimeSendMessage === "function"
+            ? runtimeSendMessage(message)
+            : { success: true };
+        },
       },
       tabs: {
         onUpdated: {
@@ -264,6 +284,9 @@ function loadBackground({
       apiKeyFor: () => "test",
     },
     BILIBILI_ADAPTER: bilibiliAdapterImpl,
+    YTD_NOTES_BACKUP: notesBackup,
+    YTD_NOTE_SOURCES: noteSources,
+    YTD_EXPORT_JOBS: exportJobs,
   };
   sandbox.globalThis = sandbox;
   vm.runInNewContext(backgroundSource, sandbox);
@@ -285,6 +308,7 @@ function loadBackground({
     helpers: sandbox.__YTD_TRANSLATION_TESTING__,
     counts,
     sessionState,
+    runtimeMessages,
     tabVideoIds,
     dispatch,
     triggerTabUpdated(tabId, changeInfo) {
@@ -402,6 +426,419 @@ test("Passive capture ends the route with zero Active, Panel, and third-party ca
     JSON.stringify(worker.sessionState.youtube_passive_session_buffer),
     /https?:|signature|expire/i,
   );
+});
+
+test("a delayed valid Passive capture notifies the side panel without transcript data", async () => {
+  const timers = createManualTimers();
+  const worker = loadBackground({
+    nowImpl: timers.now,
+    runtimeSendMessage: async () => {
+      throw new Error("Could not establish connection. Receiving end does not exist.");
+    },
+  });
+  await worker.dispatch(
+    {
+      action: "youtubePassiveState",
+      payload: {
+        type: "inflight",
+        videoId: VIDEO_ID,
+        language: "en",
+        kind: "manual",
+        status: 0,
+        inFlight: true,
+      },
+    },
+    { tab: { id: 1 } },
+  );
+  timers.advance(1_501);
+
+  const captured = await worker.dispatch(
+    {
+      action: "youtubePassiveState",
+      payload: {
+        type: "capture",
+        videoId: VIDEO_ID,
+        language: "en",
+        kind: "manual",
+        status: 200,
+        inFlight: false,
+        body: json3Body("late capture"),
+      },
+    },
+    { tab: { id: 1 } },
+  );
+
+  assert.equal(captured.ok, true);
+  await flushTurns();
+  assert.deepEqual(JSON.parse(JSON.stringify(worker.runtimeMessages)), [
+    {
+      action: "youtubePassiveTranscriptAvailable",
+      tabId: 1,
+      videoId: VIDEO_ID,
+      runtimeInstanceId: worker.helpers.getRuntimeInstanceId(),
+      dataGeneration: worker.helpers.getExtensionDataGeneration(),
+    },
+  ]);
+  assert.doesNotMatch(JSON.stringify(worker.runtimeMessages), /late capture/);
+});
+
+test("invalid or oversized Passive captures do not notify the side panel", async (t) => {
+  for (const testCase of [
+    { name: "invalid", body: "" },
+    {
+      name: "body exceeds the bounded 32 MiB read",
+      body: "x".repeat(32 * 1024 * 1024 + 1),
+    },
+  ]) {
+    await t.test(testCase.name, async () => {
+      const worker = loadBackground();
+      await worker.dispatch(
+        {
+          action: "youtubePassiveState",
+          payload: {
+            type: "inflight",
+            videoId: VIDEO_ID,
+            language: "en",
+            kind: "manual",
+            status: 0,
+            inFlight: true,
+          },
+        },
+        { tab: { id: 1 } },
+      );
+      const response = await worker.dispatch(
+        {
+          action: "youtubePassiveState",
+          payload: {
+            type: "capture",
+            videoId: VIDEO_ID,
+            language: "en",
+            kind: "manual",
+            status: 200,
+            inFlight: false,
+            body: testCase.body,
+          },
+        },
+        { tab: { id: 1 } },
+      );
+      assert.equal(response.ok, false);
+      assert.equal(worker.runtimeMessages.length, 0);
+      const retry = await worker.helpers.handleFetchYoutubeNativeTranscript(
+        VIDEO_ID, "en", 1, { ...nativeOptions("diagnostic-retry"), captionRetry: true },
+      );
+      assert.equal(retry.diagnostics.passiveRead.code, "INVALID_BODY");
+      assert.equal(retry.diagnostics.passiveRead.bytes, new TextEncoder().encode(testCase.body).byteLength);
+    });
+  }
+});
+
+test("free-read diagnostics retain the real Active failure using scalar fields only", async () => {
+  const worker = loadBackground({
+    pageSnapshotOptions: {
+      captionTrackCountKnown: true, captionTrackCount: 1,
+      availableTracks: [{language:"en",kind:"asr"}],
+      pageDefaultTrack: {language:"en",kind:"asr"},
+    },
+    activeResult: {
+      status: "UNKNOWN", errorCode: "EMPTY_TRANSCRIPT",
+      diagnostics: {
+        providerInitiated: {youtubePlayer:1,youtubeTimedtext:1,thirdParty:0,loopback:0},
+        attempts: [{ player:{status:200}, formats:[{
+          status:200,bytes:0,error:"RESPONSE_TOO_LARGE",
+          url:"https://caption.invalid/?signature=DO_NOT_DISPLAY", body:"PRIVATE_CAPTION",
+        }] }],
+      },
+    },
+  });
+  const result = await worker.helpers.handleFetchYoutubeNativeTranscript(
+    VIDEO_ID,"en",1,nativeOptions("diagnostic-first"),
+  );
+  assert.equal(result.error,"YOUTUBE_CAPTIONS_REQUIRED");
+  assert.equal(result.diagnostics.freeRead.code,"EMPTY_TRANSCRIPT");
+  assert.equal(result.diagnostics.responseSummary.requestError,"RESPONSE_TOO_LARGE");
+  assert.equal(result.diagnostics.responseSummary.captionBytes,0);
+  assert.doesNotMatch(JSON.stringify(result.diagnostics), /signature|DO_NOT_DISPLAY|PRIVATE_CAPTION/);
+});
+
+test("missing track evidence remains distinguishable from a failed Active request", async () => {
+  const worker = loadBackground();
+  const result = await worker.helpers.handleFetchYoutubeNativeTranscript(
+    VIDEO_ID,"en",1,nativeOptions("diagnostic-no-track"),
+  );
+  assert.equal(result.diagnostics.freeRead.code,"NO_TRACK_EVIDENCE");
+  assert.equal(result.diagnostics.freeRead.selectedTrackKnown,false);
+  assert.equal(result.diagnostics.passiveRead.code,"NOT_OBSERVED");
+  assert.equal(worker.counts.activeRun,0);
+});
+
+test("a native size limit is reported as a technical error instead of asking for CC or Supadata", async () => {
+  const worker=loadBackground({pageSnapshotOptions:{captionTrackCountKnown:true,captionTrackCount:1,
+    availableTracks:[{language:"en",kind:"asr"}],pageDefaultTrack:{language:"en",kind:"asr"}},
+    activeResult:{status:"UNKNOWN",errorCode:"RESPONSE_TOO_LARGE",
+      diagnostics:{attempts:[{formats:[{status:200,bytes:33554433,maxBytes:33554432,error:"RESPONSE_TOO_LARGE"}]}]}},
+  });
+  const result=await worker.helpers.handleFetchYoutubeNativeTranscript(VIDEO_ID,"en",1,nativeOptions("native-limit"));
+  assert.equal(result.error,"RESPONSE_TOO_LARGE");
+  assert.equal(result.supadataEligible,false);
+  assert.match(result.message,/32 MiB/);
+  assert.equal(worker.counts.activeRun,1);
+  assert.equal(worker.counts.fetch,0);
+});
+
+test("the Passive-only runtime read adopts a stored capture without providers", async () => {
+  const worker = loadBackground({
+    settings: { aiApiKey: "test", supadataApiKey: "optional-key" },
+  });
+  await worker.dispatch(
+    {
+      action: "youtubePassiveState",
+      payload: {
+        type: "inflight",
+        videoId: VIDEO_ID,
+        language: "en",
+        kind: "manual",
+        status: 0,
+        inFlight: true,
+      },
+    },
+    { tab: { id: 1 } },
+  );
+  await worker.dispatch(
+    {
+      action: "youtubePassiveState",
+      payload: {
+        type: "capture",
+        videoId: VIDEO_ID,
+        language: "en",
+        kind: "manual",
+        status: 200,
+        inFlight: false,
+        body: json3Body("recovered after sidebar prompt"),
+      },
+    },
+    { tab: { id: 1 } },
+  );
+
+  const result = await worker.dispatch(
+    {
+      action: "readYoutubePassiveTranscript",
+      mediaRef: { platform: "youtube", videoId: VIDEO_ID },
+      videoId: VIDEO_ID,
+      preferredLanguage: "en",
+      tabId: 1,
+      runId: "passive-recovery",
+      digestGeneration: 42,
+      routeKey: `youtube:${VIDEO_ID}`,
+      trackKind: "manual-first",
+      supadataConsent: true,
+    },
+    { tab: { id: 1 } },
+  );
+
+  assert.equal(result.success, true);
+  assert.equal(result.source, "youtube-passive");
+  assert.equal(result.transcript[0].text, "recovered after sidebar prompt");
+  assert.equal(result.runId, "passive-recovery");
+  assert.equal(result.routeKey, `youtube:${VIDEO_ID}`);
+  assert.equal(result.runtimeInstanceId, worker.helpers.getRuntimeInstanceId());
+  assert.equal(result.dataGeneration, worker.helpers.getExtensionDataGeneration());
+  assert.equal(worker.counts.activeInject, 0);
+  assert.equal(worker.counts.activeRun, 0);
+  assert.equal(worker.counts.panelInject, 0);
+  assert.equal(worker.counts.panelRun, 0);
+  assert.equal(worker.counts.fetch, 0);
+});
+
+test("a nine-hour Passive transcript survives compressed session storage and worker restart intact", async () => {
+  const fixture = require("./helpers/long-youtube-transcript.js")();
+  assert.ok(new TextEncoder().encode(fixture.body).byteLength > 8*1024*1024);
+  const worker = loadBackground();
+  for (const type of ["inflight","capture"]) {
+    const result = await worker.dispatch({action:"youtubePassiveState",payload:{
+      type,videoId:VIDEO_ID,language:"en",kind:"asr",status:type==="capture"?200:0,
+      inFlight:type!=="capture",...(type==="capture"?{body:fixture.body}:{}),
+    }},{tab:{id:1}});
+    assert.equal(result.ok,true);
+  }
+  const buffer = worker.sessionState.youtube_passive_session_buffer;
+  assert.equal(buffer[0].capture,undefined);
+  assert.equal(buffer[0].capturePacked.codec,"gzip-base64-v1");
+  assert.ok(new TextEncoder().encode(JSON.stringify(buffer)).byteLength < 4*1024*1024);
+  assert.doesNotMatch(JSON.stringify(buffer),/FIRST-0-0/);
+  const restarted = loadBackground({initialSessionState:JSON.parse(JSON.stringify(worker.sessionState))});
+  const result = await restarted.helpers.handleFetchYoutubeNativeTranscript(VIDEO_ID,"en",1,
+    {...nativeOptions("long-restart"),captionRetry:true});
+  assert.equal(result.success,true);
+  assert.equal(result.transcript.length,fixture.cueCount);
+  assert.match(result.transcript[0].text,/FIRST/);
+  assert.match(result.transcript.at(-1).text,/LAST/);
+  assert.equal(result.transcript.at(-1).start,fixture.lastStart);
+  assert.equal(result.transcript.at(-1).timingPoints.length,10);
+  assert.match(result.transcriptTextTimestamped,/\[539:58\]/);
+  assert.equal(restarted.counts.activeRun,0);
+  assert.equal(restarted.counts.fetch,0);
+});
+
+test("a corrupt packed capture does not hide another valid caption", async () => {
+  const worker = loadBackground({initialSessionState:{youtube_passive_session_buffer:[{
+    identity:`1:${VIDEO_ID}:en:asr`,tabId:1,videoId:VIDEO_ID,language:"en",trackKind:"asr",state:"capture",
+    capturePacked:{codec:"gzip-base64-v1",data:"not gzip"},updatedAt:0,
+  }]}});
+  for (const type of ["inflight","capture"]) await worker.dispatch({action:"youtubePassiveState",payload:{
+    type,videoId:VIDEO_ID,language:"en",kind:"manual",status:type==="capture"?200:0,
+    inFlight:type!=="capture",...(type==="capture"?{body:json3Body("valid preserved")}:{}),
+  }},{tab:{id:1}});
+  const result = await worker.helpers.handleFetchYoutubeNativeTranscript(VIDEO_ID,"en",1,nativeOptions("corrupt"));
+  assert.equal(result.transcript[0].text,"valid preserved");
+  assert.equal(worker.sessionState.youtube_passive_session_buffer.length,1);
+});
+
+test("a real session quota rejection evicts old captions instead of failing the newest capture", async () => {
+  const worker = loadBackground({storageSessionSet:async(items,state)=>{
+    if (items.youtube_passive_session_buffer?.length > 1) throw new Error("QUOTA_BYTES quota exceeded");
+    Object.assign(state,items);
+  }});
+  for (const language of ["en","fr"]) for (const type of ["inflight","capture"]) {
+    const result = await worker.dispatch({action:"youtubePassiveState",payload:{
+      type,videoId:VIDEO_ID,language,kind:"manual",status:type==="capture"?200:0,
+      inFlight:type!=="capture",...(type==="capture"?{body:json3Body(language)}:{}),
+    }},{tab:{id:1}});
+    assert.equal(result.ok,true);
+  }
+  const result=await worker.helpers.handleFetchYoutubeNativeTranscript(VIDEO_ID,"fr",1,nativeOptions("quota"));
+  assert.equal(result.transcript[0].text,"fr");
+  assert.equal(worker.sessionState.youtube_passive_session_buffer.length,1);
+});
+
+test("the Passive-only runtime read never waits or starts a provider on a miss", async () => {
+  const timers = createManualTimers();
+  const worker = loadBackground({
+    settings: { aiApiKey: "test", supadataApiKey: "optional-key" },
+    nowImpl: timers.now,
+    setTimeoutImpl: timers.setTimeout,
+    clearTimeoutImpl: timers.clearTimeout,
+  });
+  await worker.dispatch(
+    {
+      action: "youtubePassiveState",
+      payload: {
+        type: "inflight",
+        videoId: VIDEO_ID,
+        language: "en",
+        kind: "manual",
+        status: 0,
+        inFlight: true,
+      },
+    },
+    { tab: { id: 1 } },
+  );
+
+  const result = await worker.dispatch(
+    {
+      action: "readYoutubePassiveTranscript",
+      mediaRef: { platform: "youtube", videoId: VIDEO_ID },
+      videoId: VIDEO_ID,
+      preferredLanguage: "en",
+      tabId: 1,
+      runId: "passive-miss",
+      digestGeneration: 43,
+      routeKey: `youtube:${VIDEO_ID}`,
+      trackKind: "manual-first",
+      supadataConsent: true,
+    },
+    { tab: { id: 1 } },
+  );
+
+  assert.equal(result.success, false);
+  assert.equal(result.error, "PASSIVE_NOT_AVAILABLE");
+  assert.equal(result.routeOutcome, "UNKNOWN");
+  assert.equal(result.supadataEligible, false);
+  assert.equal(result.runtimeInstanceId, worker.helpers.getRuntimeInstanceId());
+  assert.equal(result.dataGeneration, worker.helpers.getExtensionDataGeneration());
+  assert.deepEqual(timers.scheduledDelays(), []);
+  assert.equal(worker.counts.activeInject, 0);
+  assert.equal(worker.counts.activeRun, 0);
+  assert.equal(worker.counts.panelInject, 0);
+  assert.equal(worker.counts.panelRun, 0);
+  assert.equal(worker.counts.fetch, 0);
+});
+
+test("the Passive-only read rejects a navigated or reset identity before it can return data", async (t) => {
+  await t.test("navigation", async () => {
+    const worker = loadBackground({
+      tabVideoIds: new Map([[1, OTHER_VIDEO_ID]]),
+    });
+    const result = await worker.dispatch(
+      {
+        action: "readYoutubePassiveTranscript",
+        mediaRef: { platform: "youtube", videoId: VIDEO_ID },
+        videoId: VIDEO_ID,
+        preferredLanguage: "en",
+        tabId: 1,
+        runId: "passive-navigation",
+        digestGeneration: 44,
+        routeKey: `youtube:${VIDEO_ID}`,
+        trackKind: "manual-first",
+      },
+      { tab: { id: 1 } },
+    );
+    assert.equal(result.success, false);
+    assert.equal(result.error, "PAGE_CONTEXT_CHANGED");
+    assert.equal(result.runtimeInstanceId, worker.helpers.getRuntimeInstanceId());
+    assert.equal(result.dataGeneration, worker.helpers.getExtensionDataGeneration());
+    assert.equal(worker.counts.activeRun, 0);
+    assert.equal(worker.counts.panelRun, 0);
+    assert.equal(worker.counts.fetch, 0);
+  });
+
+  await t.test("data reset", async () => {
+    let releasePageSnapshot;
+    let pageSnapshotStarted;
+    const pageSnapshotStartedPromise = new Promise((resolve) => {
+      pageSnapshotStarted = resolve;
+    });
+    const releasePageSnapshotPromise = new Promise((resolve) => {
+      releasePageSnapshot = resolve;
+    });
+    const worker = loadBackground({
+      pageSnapshotRun: async () => {
+        pageSnapshotStarted();
+        await releasePageSnapshotPromise;
+        return pageSnapshot(VIDEO_ID);
+      },
+    });
+    const startDataGeneration = worker.helpers.getExtensionDataGeneration();
+    const pending = worker.dispatch(
+      {
+        action: "readYoutubePassiveTranscript",
+        mediaRef: { platform: "youtube", videoId: VIDEO_ID },
+        videoId: VIDEO_ID,
+        preferredLanguage: "en",
+        tabId: 1,
+        runId: "passive-reset",
+        digestGeneration: 45,
+        routeKey: `youtube:${VIDEO_ID}`,
+        trackKind: "manual-first",
+      },
+      { tab: { id: 1 } },
+    );
+    await pageSnapshotStartedPromise;
+    const reset = await worker.helpers.handleResetAllExtensionData("zh-CN");
+    assert.equal(reset.success, true);
+    releasePageSnapshot();
+    const result = await pending;
+    assert.equal(result.success, false);
+    assert.equal(result.error, "EXTENSION_DATA_RESET");
+    assert.equal(result.runtimeInstanceId, worker.helpers.getRuntimeInstanceId());
+    assert.equal(result.dataGeneration, startDataGeneration);
+    assert.notEqual(
+      worker.helpers.getExtensionDataGeneration(),
+      startDataGeneration,
+    );
+    assert.equal(worker.counts.activeRun, 0);
+    assert.equal(worker.counts.panelRun, 0);
+    assert.equal(worker.counts.fetch, 0);
+  });
 });
 
 test("Passive JSON3 preserves exact word timing without changing the cue", async () => {

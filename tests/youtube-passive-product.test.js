@@ -17,7 +17,7 @@ const VIDEO_A = "jNQXAC9IVRw";
 const VIDEO_B = "dQw4w9WgXcQ";
 const CHANNEL = "digestdock-youtube-passive-state-v1";
 const CONTROL = "digestdock-youtube-passive-control-v1";
-const MAX_BODY_BYTES = 8 * 1024 * 1024;
+const MAX_BODY_BYTES = 32 * 1024 * 1024;
 
 function eventTarget() {
   const listeners = new Map();
@@ -149,6 +149,48 @@ function passivePayloads(posted) {
     .filter((message) => message.source === CHANNEL)
     .map((message) => message.payload);
 }
+
+test("MAIN bounds pending large captions by total body bytes before the bridge connects", async () => {
+  const body = "x".repeat(17*1024*1024);
+  const harness=loadMain({fetchImpl:async(url)=>responseDouble(url,body)});
+  try {
+    await harness.window.fetch(`https://www.youtube.com/api/timedtext?v=${VIDEO_A}&lang=en`);
+    await flush();
+    await harness.window.fetch(`https://www.youtube.com/api/timedtext?v=${VIDEO_A}&lang=fr`);
+    await flush();
+    harness.connect();
+    const payloads=passivePayloads(harness.posted);
+    const captures=payloads.filter((payload)=>payload.type==="capture");
+    assert.equal(captures.length,1);
+    assert.equal(captures[0].language,"fr");
+    assert.equal(captures[0].body.length,body.length);
+    assert.ok(payloads.some((payload)=>payload.type==="inflight"&&payload.language==="fr"));
+  } finally {
+    harness.window.__DIGESTDOCK_YOUTUBE_PASSIVE_MAIN_V1__.destroy();
+  }
+});
+
+test("MAIN and bridge pass the complete nine-hour body above the previous 8 MiB limit", async () => {
+  const fixture=require("./helpers/long-youtube-transcript.js")();
+  const url=`https://www.youtube.com/api/timedtext?v=${VIDEO_A}&lang=en&kind=asr&fmt=json3`;
+  const harness=loadMain({fetchImpl:async()=>responseDouble(url,fixture.body)});
+  try {
+    harness.connect();
+    await harness.window.fetch(url);
+    await flush();
+    const observed=passivePayloads(harness.posted);
+    assert.equal(observed.at(-1).type,"capture");
+    assert.equal(observed.at(-1).body,fixture.body);
+    const bridge=loadBridge();
+    for(const payload of observed) bridge.fromMain(payload);
+    const result=bridge.runtimeMessages.at(-1);
+    assert.equal(result.payload.type,"capture");
+    assert.equal(result.payload.body,fixture.body);
+    assert.ok(new TextEncoder().encode(JSON.stringify(result)).byteLength < 48*1024*1024);
+  } finally {
+    harness.window.__DIGESTDOCK_YOUTUBE_PASSIVE_MAIN_V1__.destroy();
+  }
+});
 
 async function flush() {
   await new Promise((resolve) => setImmediate(resolve));

@@ -18,7 +18,9 @@
   const PLAYER_ENDPOINT =
     "https://www.youtube.com/youtubei/v1/player?prettyPrint=false";
   const TIMEOUT_MS = 15_000;
-  const MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
+  const MAX_PLAYER_RESPONSE_BYTES = 8 * 1024 * 1024;
+  const MAX_CAPTION_RESPONSE_BYTES = 32 * 1024 * 1024;
+  const MAX_RESULT_BYTES = 48 * 1024 * 1024;
   const MAX_PLAYER_REQUESTS = 1;
   const MAX_TIMEDTEXT_REQUESTS = 1;
   const MAX_TIMING_POINTS_PER_CUE = 512;
@@ -72,6 +74,8 @@
       this.name = "ActiveError";
       this.code = code;
       if (Number.isInteger(details.status)) this.status = details.status;
+      if (Number.isSafeInteger(details.bytes)) this.bytes = details.bytes;
+      if (Number.isSafeInteger(details.maxBytes)) this.maxBytes = details.maxBytes;
     }
   }
 
@@ -456,10 +460,10 @@
     return bytes;
   }
 
-  async function readResponseText(response) {
+  async function readResponseText(response, maxBytes) {
     const declared = Number(response?.headers?.get?.("content-length"));
-    if (Number.isFinite(declared) && declared > MAX_RESPONSE_BYTES) {
-      fail("RESPONSE_TOO_LARGE");
+    if (Number.isFinite(declared) && declared > maxBytes) {
+      fail("RESPONSE_TOO_LARGE", { bytes: declared, maxBytes });
     }
 
     if (response?.body?.getReader && typeof TextDecoder === "function") {
@@ -472,9 +476,9 @@
           const { done, value } = await reader.read();
           if (done) break;
           bytes += value?.byteLength || 0;
-          if (bytes > MAX_RESPONSE_BYTES) {
+          if (bytes > maxBytes) {
             await reader.cancel().catch(() => {});
-            fail("RESPONSE_TOO_LARGE");
+            fail("RESPONSE_TOO_LARGE", { bytes, maxBytes });
           }
           text += decoder.decode(value, { stream: true });
         }
@@ -488,7 +492,7 @@
     if (typeof response?.text !== "function") fail("INVALID_RESPONSE");
     const text = await response.text();
     const bytes = utf8ByteLength(text);
-    if (bytes > MAX_RESPONSE_BYTES) fail("RESPONSE_TOO_LARGE");
+    if (bytes > maxBytes) fail("RESPONSE_TOO_LARGE", { bytes, maxBytes });
     return { text, bytes };
   }
 
@@ -526,6 +530,7 @@
     let controller = null;
     let timeoutId = null;
     let startedAt = 0;
+    let responseStatus = null;
     try {
       assertCurrentPage(runtime);
       const countKey = requestCountKey(requestClass);
@@ -554,10 +559,12 @@
         signal: controller.signal,
       });
       const status = Number(response?.status) || 0;
+      responseStatus = status;
       // This guard must remain before headers, stream, text(), or any body read.
       if (status === 429) fail("RATE_LIMITED", { status: 429 });
       assertCurrentPage(runtime);
-      const readable = await readResponseText(response);
+      const readable = await readResponseText(response,
+        requestClass === "timedtext" ? MAX_CAPTION_RESPONSE_BYTES : MAX_PLAYER_RESPONSE_BYTES);
       assertCurrentPage(runtime);
       return {
         ok: Boolean(response?.ok),
@@ -567,7 +574,10 @@
         elapsedMs: Math.max(0, runtime.now() - startedAt),
       };
     } catch (error) {
-      if (error instanceof ActiveError) throw error;
+      if (error instanceof ActiveError) {
+        if (Number.isInteger(responseStatus)) error.status = responseStatus;
+        throw error;
+      }
       if (runtime.runState.cancelled) fail("PAGE_CONTEXT_CHANGED");
       if (error?.name === "AbortError" || controller.signal.aborted) {
         fail("TIMEOUT");
@@ -646,7 +656,7 @@
     transcript,
     diagnostics,
   ) {
-    return {
+    const result = {
       ...makeBaseResult(request, videoId, language, selectedTrack),
       status: "HAVE_TRANSCRIPT",
       transcript,
@@ -656,6 +666,9 @@
         .join("\n"),
       diagnostics,
     };
+    const bytes = utf8ByteLength(JSON.stringify(result));
+    if (bytes > MAX_RESULT_BYTES) fail("RESPONSE_TOO_LARGE", { bytes, maxBytes: MAX_RESULT_BYTES });
+    return result;
   }
 
   function failureResult(
@@ -890,17 +903,22 @@
             );
           } catch (error) {
             formatAttempt.error = safeAttemptError(error);
+            if (Number.isSafeInteger(error?.bytes)) formatAttempt.bytes = error.bytes;
+            if (Number.isSafeInteger(error?.maxBytes)) formatAttempt.maxBytes = error.maxBytes;
             if (Number.isInteger(error?.status)) {
               formatAttempt.status = error.status;
             }
             if (
               error?.code === "RATE_LIMITED" ||
-              error?.code === "PAGE_CONTEXT_CHANGED"
+              error?.code === "PAGE_CONTEXT_CHANGED" ||
+              error?.code === "RESPONSE_TOO_LARGE"
             ) {
               attempt.outcome =
                 error?.code === "RATE_LIMITED"
                   ? "rate-limited"
-                  : "page-context-changed";
+                  : error?.code === "RESPONSE_TOO_LARGE"
+                    ? "caption-too-large"
+                    : "page-context-changed";
               throw error;
             }
           }
