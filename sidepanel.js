@@ -120,6 +120,7 @@ let extensionDataFenceRevision = 0;
 let extensionDataResetInProgress = false;
 let pendingYoutubePassiveRecovery = null;
 let youtubePassiveRecoveryFlight = null;
+const youtubePassiveRecoveryRevisions = new Map();
 let youtubeFreeReadDiagnostic = "";
 let youtubePassiveReadDiagnostic = "";
 
@@ -238,6 +239,8 @@ function applyExtensionDataResetFence(runtimeInstanceId, dataGeneration) {
   extensionDataResetInProgress = true;
   youtubeFreeReadDiagnostic = "";
   youtubePassiveReadDiagnostic = "";
+  pendingYoutubePassiveRecovery = null;
+  youtubePassiveRecoveryRevisions.clear();
   tabCheckGeneration += 1;
   digestGeneration += 1;
   translationGeneration += 1;
@@ -824,6 +827,11 @@ function sidepanelMvpResolveTranscript(result, task, { finishTask = true } = {})
 
 function queueYoutubePassiveRecovery(message, sender) {
   const fence = captureExtensionDataFence();
+  const captureRevision = Number(message?.captureRevision);
+  const captureLanguage = normalizeLanguageCode(message?.language) || "unknown";
+  const captureTrackKind = ["manual", "asr"].includes(message?.trackKind)
+    ? message.trackKind
+    : "unknown";
   if (
     !SIDEPANEL_MVP_AVAILABLE ||
     !fence ||
@@ -836,14 +844,100 @@ function queueYoutubePassiveRecovery(message, sender) {
     message?.videoId !== currentVideoId ||
     isActiveNotesOnlyContext()
   ) return Promise.resolve();
+  const captureIdentity = [
+    currentVideoId,
+    captureLanguage,
+    captureTrackKind,
+  ].join(":");
+  const previousRevision =
+    youtubePassiveRecoveryRevisions.get(captureIdentity) || 0;
+  if (
+    Number.isSafeInteger(captureRevision) &&
+    captureRevision > 0 &&
+    captureRevision <= previousRevision
+  ) {
+    return Promise.resolve();
+  }
+  if (Number.isSafeInteger(captureRevision) && captureRevision > 0) {
+    youtubePassiveRecoveryRevisions.set(captureIdentity, captureRevision);
+  }
   pendingYoutubePassiveRecovery = {
     fence,
     videoId: currentVideoId,
     tabId: videoTabId,
     routeKey: currentRouteKey,
     generation: digestGeneration,
+    captureIdentity,
+    captureRevision,
   };
   return recoverPendingYoutubePassiveTranscript();
+}
+
+function mergeYoutubePassiveRecoveryResult(result, status) {
+  if (result?.success !== true || !Array.isArray(result.transcript)) return null;
+  if (status !== SIDEPANEL_STATE_API.TRANSCRIPT_STATUSES.READY) return result;
+  if (
+    currentTranscriptSource !== "youtube-passive" ||
+    !Array.isArray(currentTranscript) ||
+    currentTranscript.length === 0
+  ) {
+    return null;
+  }
+
+  const incomingLanguage = normalizeLanguageCode(result.language);
+  const currentLanguage = normalizeLanguageCode(currentTranscriptLanguage);
+  if (
+    incomingLanguage &&
+    currentLanguage &&
+    !languagesSharePrimary(incomingLanguage, currentLanguage)
+  ) {
+    return null;
+  }
+  const incomingTrack = sanitizeTranscriptSelectedTrack(result.selectedTrack);
+  if (
+    currentTranscriptSelectedTrack?.language &&
+    incomingTrack?.language &&
+    !transcriptTrackMatchesPagePreference(
+      currentTranscriptSelectedTrack,
+      incomingTrack,
+    )
+  ) {
+    return null;
+  }
+
+  const rowsByStart = new Map();
+  let contentExpanded = false;
+  const addRows = (rows, incoming = false) => {
+    for (const row of rows) {
+      const start = Number(row?.start);
+      const text = String(row?.text || "").trim();
+      if (!Number.isFinite(start) || start < 0 || !text) continue;
+      const key = Math.round(start * 1000);
+      const existing = rowsByStart.get(key);
+      if (!existing || (incoming && text.length >= existing.text.length)) {
+        if (incoming && existing && text.length > existing.text.length) {
+          contentExpanded = true;
+        }
+        rowsByStart.set(key, { ...row, start, text });
+      }
+    }
+  };
+  addRows(currentTranscript);
+  const previousSize = rowsByStart.size;
+  addRows(result.transcript, true);
+  const transcript = [...rowsByStart.values()].sort(
+    (left, right) => left.start - right.start,
+  );
+  if (rowsByStart.size <= previousSize && !contentExpanded) return null;
+
+  return {
+    ...result,
+    transcript,
+    transcriptText: transcript.map((row) => row.text).join(" "),
+    transcriptTextTimestamped: transcript
+      .map((row) => `[${formatTimecode(row.start)}] ${row.text}`)
+      .join("\n"),
+  };
 }
 
 function recoverPendingYoutubePassiveTranscript() {
@@ -851,13 +945,13 @@ function recoverPendingYoutubePassiveTranscript() {
   if (!pendingYoutubePassiveRecovery) return Promise.resolve();
   const statuses = SIDEPANEL_STATE_API.TRANSCRIPT_STATUSES;
   const status = sidepanelMvpState?.transcript?.status;
-  if ([statuses.LOADING, statuses.RETRYING_FREE].includes(status)) {
-    return Promise.resolve();
-  }
   const pending = pendingYoutubePassiveRecovery;
   pendingYoutubePassiveRecovery = null;
   const recoverable = [
+    statuses.LOADING,
+    statuses.READY,
     statuses.NEEDS_CC,
+    statuses.RETRYING_FREE,
     statuses.NEEDS_SUPADATA_CHOICE,
     statuses.NEEDS_SUPADATA_CONFIG,
     statuses.FALLBACK_DECLINED,
@@ -885,7 +979,8 @@ function recoverPendingYoutubePassiveTranscript() {
     action: "readYoutubePassiveTranscript",
   };
   youtubePassiveRecoveryFlight = (async () => {
-    const result = await chrome.runtime.sendMessage(request);
+    const rawResult = await chrome.runtime.sendMessage(request);
+    const result = mergeYoutubePassiveRecoveryResult(rawResult, status);
     if (
       !stillCurrent() ||
       sidepanelMvpState.transcript !== previousTranscriptState ||
@@ -1454,6 +1549,9 @@ function sendTranslationMessage(message) {
 // --- Auto-scroll state (follow video playback in transcript) ---
 const FOLLOW_IDLE_RESUME_DELAY_MS = 5000;
 const FOLLOW_PLAYBACK_READ_TIMEOUT_MS = 900;
+const FOLLOW_READING_TOP_RATIO = 0.2;
+const FOLLOW_READING_BOTTOM_RATIO = 0.6;
+const YOUTUBE_TRANSCRIPT_LATE_START_WARNING_SECONDS = 30;
 let autoScrollEnabled = true; // True = scroll transcript to follow video playback
 let autoScrollInterval = null; // setInterval ID for polling video time
 let playbackNeedsReposition = false;
@@ -1980,9 +2078,40 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 let navigationRefreshTimer = null;
 let panelWindowId = null;
+const YOUTUBE_PAGE_CONTEXT_AUTO_RETRY_LIMIT = 4;
+let youtubePageContextRetryKey = "";
+let youtubePageContextRetryCount = 0;
 chrome.windows.getCurrent().then((w) => {
   panelWindowId = w.id;
 });
+
+function resetYoutubePageContextRetries() {
+  youtubePageContextRetryKey = "";
+  youtubePageContextRetryCount = 0;
+}
+
+function claimYoutubePageContextRetry({
+  tabId,
+  videoId,
+  routeKey,
+  taskId,
+} = {}) {
+  const retryKey = [tabId, videoId, routeKey, taskId]
+    .map((value) => String(value ?? ""))
+    .join(":");
+  if (retryKey !== youtubePageContextRetryKey) {
+    youtubePageContextRetryKey = retryKey;
+    youtubePageContextRetryCount = 0;
+  }
+  if (
+    !retryKey ||
+    youtubePageContextRetryCount >= YOUTUBE_PAGE_CONTEXT_AUTO_RETRY_LIMIT
+  ) {
+    return false;
+  }
+  youtubePageContextRetryCount += 1;
+  return true;
+}
 
 function scheduleDigestRefresh() {
   // Small delay lets YouTube finish rendering the new video's title and
@@ -3076,6 +3205,8 @@ function resetDigestStateForVideo(videoId, videoUrl, mediaRef, routeKey) {
   youtubeFreeReadDiagnostic = "";
   youtubePassiveReadDiagnostic = "";
   pendingYoutubePassiveRecovery = null;
+  youtubePassiveRecoveryRevisions.clear();
+  resetYoutubePageContextRetries();
   const previousExportJobId = activeExportJobId;
   stopPlaybackTracking();
   cancelFollowIdleResume({ clearHold: true });
@@ -3106,6 +3237,7 @@ function resetDigestStateForVideo(videoId, videoUrl, mediaRef, routeKey) {
   currentPersistedNoteSource = null;
   document.getElementById("transcriptList")?.replaceChildren?.();
   document.getElementById("transcriptSourceBadge")?.remove?.();
+  renderTranscriptCoveragePresentation();
   sidepanelMvpBindSession(videoId, routeKey, { forceNewTask: true });
   activeExportJobId = "";
   if (previousExportJobId) {
@@ -3544,6 +3676,7 @@ async function runDigestLoad(
 
   // Check if we already have this video loaded in memory
   if (
+    !mvpOptions.prefetchedTranscript &&
     !videoChanged &&
     videoId === currentVideoId &&
     currentAnalysis &&
@@ -3791,6 +3924,33 @@ async function runDigestLoad(
     return;
   }
 
+  // YouTube SPA navigation can commit the new watch URL before its player and
+  // caption context finish switching. This is a transient ownership race, not
+  // a terminal subtitle outcome. Keep the current MVP task loading and retry
+  // the freshly bound video after the page settles; resolving it into the
+  // state machine here would strand the panel on "reconnect current video".
+  const routeOutcome = transcriptRouteOutcome(transcriptResult);
+  if (
+    transcriptResult?.success !== true &&
+    routeOutcome === "PAGE_CONTEXT_CHANGED"
+  ) {
+    if (
+      claimYoutubePageContextRetry({
+        tabId: requestVideoTabId,
+        videoId,
+        routeKey,
+        taskId: mvpTask?.id || transcriptRequest.runId,
+      })
+    ) {
+      debugLog("[DigestDock Panel] YouTube page context is still changing");
+      scheduleDigestRefresh();
+      return;
+    }
+    debugLog("[DigestDock Panel] YouTube page context retry limit reached");
+  } else {
+    resetYoutubePageContextRetries();
+  }
+
   if (SIDEPANEL_MVP_AVAILABLE && transcriptResult?.success !== true) {
     sidepanelMvpResolveTranscript(transcriptResult, mvpTask, {
       finishTask: transcriptResult?.success !== true,
@@ -3802,11 +3962,6 @@ async function runDigestLoad(
       return;
     }
   } else if (!transcriptResult.success) {
-    const routeOutcome = transcriptRouteOutcome(transcriptResult);
-    if (routeOutcome === "PAGE_CONTEXT_CHANGED") {
-      scheduleDigestRefresh();
-      return;
-    }
     if (routeOutcome === "CONFIRMED_UNAVAILABLE") {
       showError(
         "当前视频没有可用字幕",
@@ -4647,8 +4802,69 @@ function flashIconDone(btn, doneTitle, restoreTitle, ms = 1600) {
   }, ms);
 }
 
+function transcriptCoveragePresentation(
+  transcript = currentTranscript,
+  mediaRef = currentMediaRef,
+) {
+  const starts = (Array.isArray(transcript) ? transcript : [])
+    .map((entry) => Number(entry?.start))
+    .filter((start) => Number.isFinite(start) && start >= 0);
+  const firstStart = starts.length ? Math.min(...starts) : null;
+  const partial =
+    mediaRef?.platform === "youtube" &&
+    firstStart !== null &&
+    firstStart >= YOUTUBE_TRANSCRIPT_LATE_START_WARNING_SECONDS;
+
+  if (!partial) {
+    return {
+      partial: false,
+      firstStart,
+      title: "完整字幕",
+      message: "",
+      copyLabel: "复制完整字幕",
+      exportLabel: "导出完整字幕",
+    };
+  }
+
+  const startLabel = formatTimecode(firstStart);
+  return {
+    partial: true,
+    firstStart,
+    title: `字幕从 ${startLabel} 开始`,
+    message: `YouTube 提供的字幕轨从 ${startLabel} 开始；此前内容不在字幕轨中。画面内烧录文字当前不会作为字幕读取。`,
+    copyLabel: "复制当前可用字幕",
+    exportLabel: "导出当前可用字幕",
+  };
+}
+
+function renderTranscriptCoveragePresentation() {
+  const presentation = transcriptCoveragePresentation();
+  const title = document.getElementById("transcriptSectionTitle");
+  const notice = document.getElementById("transcriptCoverageNotice");
+  const copyButton = document.getElementById("copyTranscriptBtn");
+  const exportButton = document.getElementById("exportTranscriptBtn");
+
+  if (title) title.textContent = presentation.title;
+  if (notice) {
+    notice.textContent = presentation.message;
+    notice.hidden = !presentation.partial;
+  }
+  if (copyButton) {
+    copyButton.setAttribute("title", presentation.copyLabel);
+    copyButton.setAttribute("aria-label", presentation.copyLabel);
+  }
+  if (exportButton) {
+    exportButton.setAttribute("title", presentation.exportLabel);
+    exportButton.setAttribute("aria-label", presentation.exportLabel);
+  }
+
+  return presentation;
+}
+
 function renderTranscript() {
   if (!currentTranscript) return;
+
+  renderTranscriptCoveragePresentation();
 
   const transcriptList = document.getElementById("transcriptList");
   transcriptList.innerHTML = "";
@@ -4968,6 +5184,7 @@ function currentVideoTitleZh() {
  */
 function buildTranscriptExportSource(mode) {
   const resolved = resolveCurrentVideoTranscript(mode);
+  const coverage = transcriptCoveragePresentation();
   const source = {
     mediaKey: currentVideoId || currentMediaRef?.mediaKey || "",
     platform: currentPlatformIsBilibili() ? "bilibili" : "youtube",
@@ -4985,6 +5202,7 @@ function buildTranscriptExportSource(mode) {
     transcriptZh: resolved.transcriptZh,
     sourceLanguage:
       currentTranscriptLanguage || currentVideoSourceLanguage || "",
+    ...(coverage.partial ? { transcriptTruncated: true } : {}),
   };
   return { source, missingCount: resolved.missingCount, total: resolved.total };
 }
@@ -5248,6 +5466,7 @@ function filterNoteGroupsByMediaKeys(groups, mediaKeys, { requireAll = true } = 
  */
 function buildCurrentVideoSourceRecord() {
   const resolved = resolveCurrentVideoTranscript("bilingual");
+  const coverage = transcriptCoveragePresentation();
   return {
     mediaKey: currentVideoId || currentMediaRef?.mediaKey || "",
     platform: currentPlatformIsBilibili() ? "bilibili" : "youtube",
@@ -5267,6 +5486,7 @@ function buildCurrentVideoSourceRecord() {
       currentTranscriptLanguage || currentVideoSourceLanguage || "",
     transcriptOriginal: resolved.transcriptOriginal,
     transcriptZh: resolved.transcriptZh,
+    ...(coverage.partial ? { transcriptTruncated: true } : {}),
   };
 }
 
@@ -10709,8 +10929,8 @@ function scrollToActiveEntry({ forceScroll = true, instant = false } = {}) {
   const cue = activeEntry.getBoundingClientRect?.();
   const height = Number(viewport?.height) || 0;
   if (!forceScroll && height > 0 && cue &&
-    cue.top >= viewport.top + height * 0.2 &&
-    cue.bottom <= viewport.bottom - height * 0.2) return true;
+    cue.top >= viewport.top + height * FOLLOW_READING_TOP_RATIO &&
+    cue.bottom <= viewport.top + height * FOLLOW_READING_BOTTOM_RATIO) return true;
   const distance = height > 0 && cue
     ? Math.abs((cue.top + cue.bottom) / 2 - (viewport.top + viewport.bottom) / 2)
     : 0;
@@ -11352,6 +11572,9 @@ globalThis.__YTD_TRANSCRIPT_TESTING__ = {
   isConfirmedSimplifiedChineseSource,
   currentPlatformIsBilibili,
   transcriptOriginalBadgeText,
+  transcriptCoveragePresentation,
+  claimYoutubePageContextRetry,
+  resetYoutubePageContextRetries,
   isTransientTabLookupError,
   noteHasChineseSource,
   noteHasPolishedChineseText,

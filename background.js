@@ -1213,6 +1213,71 @@ function buildYoutubeTranscriptResult(
   return boundYoutubeTranscriptResult(result);
 }
 
+function mergeYoutubePassiveCaptures(previous, incoming) {
+  if (previous?.success !== true) return incoming;
+  if (incoming?.success !== true) return previous;
+
+  const language =
+    normalizeLanguageCode(incoming.language) ||
+    normalizeLanguageCode(previous.language) ||
+    null;
+  const rowsByStart = new Map();
+  for (const row of [
+    ...normalizePassiveSegments(previous.transcript, language),
+    ...normalizePassiveSegments(incoming.transcript, language),
+  ]) {
+    const key = Math.round(row.start * 1000);
+    const existing = rowsByStart.get(key);
+    if (!existing || row.text.length >= existing.text.length) {
+      rowsByStart.set(key, row);
+    }
+  }
+
+  const previousCount = Math.max(
+    1,
+    Number(previous.diagnostics?.captureCount) || 1,
+  );
+  const incomingCount = Math.max(
+    1,
+    Number(incoming.diagnostics?.captureCount) || 1,
+  );
+  const previousBytes = Math.max(
+    0,
+    Number(previous.diagnostics?.bodyBytes) || 0,
+  );
+  const incomingBytes = Math.max(
+    0,
+    Number(incoming.diagnostics?.bodyBytes) || 0,
+  );
+  const captureCount = previousCount + incomingCount;
+  const result = buildYoutubeTranscriptResult([...rowsByStart.values()], {
+    source: "youtube-passive",
+    sourceAttempt: "YOUTUBE_PASSIVE",
+    language,
+    selectedTrack: incoming.selectedTrack || previous.selectedTrack || null,
+    providerVariant: "page-observed-timedtext-merged",
+    diagnostics: {
+      ...(incoming.diagnostics || previous.diagnostics || {}),
+      providerInitiated: {
+        youtubePlayer: 0,
+        youtubeTimedtext: 0,
+        thirdParty: 0,
+        loopback: 0,
+      },
+      pageObserved: { youtubeTimedtext: captureCount },
+      bodyBytes: previousBytes + incomingBytes,
+      captureCount,
+      trackKind:
+        incoming.diagnostics?.trackKind ||
+        previous.diagnostics?.trackKind ||
+        incoming.selectedTrack?.kind ||
+        previous.selectedTrack?.kind ||
+        null,
+    },
+  });
+  return result?.success === true ? result : previous;
+}
+
 function boundYoutubeTranscriptResult(result) {
   if (new TextEncoder().encode(JSON.stringify(result)).byteLength <= YOUTUBE_TRANSCRIPT_MAX_RESULT_BYTES) return result;
   return {
@@ -1442,11 +1507,24 @@ function youtubePassiveEntryStartedAt(entry, now = Date.now()) {
   return now;
 }
 
-function notifyYoutubePassiveTranscriptAvailable(tabId, videoId, dataGeneration) {
+function notifyYoutubePassiveTranscriptAvailable(
+  tabId,
+  videoId,
+  dataGeneration,
+  language,
+  trackKind,
+  captureRevision,
+) {
+  const normalizedLanguage = normalizeLanguageCode(language);
+  const normalizedTrackKind = normalizeYoutubeTrackKind(trackKind);
   if (
     !Number.isInteger(tabId) ||
     !validYoutubeVideoId(videoId) ||
-    !extensionDataGenerationIsWritable(dataGeneration)
+    !extensionDataGenerationIsWritable(dataGeneration) ||
+    !normalizedLanguage ||
+    !["manual", "asr"].includes(normalizedTrackKind) ||
+    !Number.isSafeInteger(captureRevision) ||
+    captureRevision < 1
   ) {
     return;
   }
@@ -1462,6 +1540,9 @@ function notifyYoutubePassiveTranscriptAvailable(tabId, videoId, dataGeneration)
         videoId,
         runtimeInstanceId,
         dataGeneration,
+        language: normalizedLanguage,
+        trackKind: normalizedTrackKind,
+        captureRevision,
       }),
     ).catch(() => {});
   } catch (_error) {
@@ -1495,7 +1576,8 @@ async function handleYoutubePassiveState(payload, sender) {
     //
     // A stale SPA identity is still allowed to clear only its exact old entry.
     // It may never create or replace a capture for the newly active video.
-    if (type !== "clear" && !(await youtubeTabStillMatches(tabId, videoId))) {
+    const pageStillMatches = await youtubeTabStillMatches(tabId, videoId);
+    if (type !== "clear" && !pageStillMatches) {
       return { ok: false, error: "PAGE_CONTEXT_CHANGED" };
     }
     const entries = await readYoutubePassiveEntries();
@@ -1525,17 +1607,26 @@ async function handleYoutubePassiveState(payload, sender) {
         (previous.state === "inflight" || previous.inFlight === true)
           ? youtubePassiveEntryStartedAt(previous, now)
           : now;
-      next.push({
-        identity,
-        tabId,
-        videoId,
-        language,
-        trackKind,
-        state: "inflight",
-        inFlight: true,
-        startedAt,
-        updatedAt: now,
-      });
+      if (previous?.state === "capture" && previous.capture?.success === true) {
+        next.push({
+          ...previous,
+          inFlight: true,
+          startedAt,
+          updatedAt: now,
+        });
+      } else {
+        next.push({
+          identity,
+          tabId,
+          videoId,
+          language,
+          trackKind,
+          state: "inflight",
+          inFlight: true,
+          startedAt,
+          updatedAt: now,
+        });
+      }
     } else if (type === "capture") {
       if (
         !previous ||
@@ -1555,10 +1646,25 @@ async function handleYoutubePassiveState(payload, sender) {
         // transcript, but it must still close the matching inflight state.
         // Leaving that state behind would make later gates wait on work that
         // has already finished.
-        await writeYoutubePassiveEntries(next);
+        const retainedPrevious =
+          previous?.state === "capture" && previous.capture?.success === true
+            ? {
+                ...previous,
+                inFlight:
+                  payload?.inFlight === true || Number(payload?.inFlight) > 0,
+                updatedAt: Date.now(),
+              }
+            : null;
+        await writeYoutubePassiveEntries(
+          retainedPrevious ? [...next, retainedPrevious] : next,
+        );
         notifyYoutubePassiveWaiters();
         return { ok: false, error: capture?.result?.error === "RESPONSE_TOO_LARGE" ? "PASSIVE_CAPTURE_TOO_LARGE" : "INVALID_PASSIVE_CAPTURE" };
       }
+      const mergedCapture =
+        previous?.state === "capture" && previous.capture?.success === true
+          ? mergeYoutubePassiveCaptures(previous.capture, capture.result)
+          : capture.result;
       next.push({
         identity,
         tabId,
@@ -1568,8 +1674,19 @@ async function handleYoutubePassiveState(payload, sender) {
         state: "capture",
         inFlight:
           payload?.inFlight === true || Number(payload?.inFlight) > 0,
-        capture: capture.result,
+        capture: mergedCapture,
         startedAt: youtubePassiveEntryStartedAt(previous),
+        updatedAt: Date.now(),
+      });
+    } else if (
+      type === "clear" &&
+      pageStillMatches &&
+      previous?.state === "capture" &&
+      previous.capture?.success === true
+    ) {
+      next.push({
+        ...previous,
+        inFlight: false,
         updatedAt: Date.now(),
       });
     }
@@ -1583,7 +1700,17 @@ async function handleYoutubePassiveState(payload, sender) {
     if (type === "capture" && retainedCapture?.capture?.success === true) {
       recordYoutubePassiveObservation(tabId, videoId, "CAPTURED", observedStatus,
         retainedCapture.capture.diagnostics?.bodyBytes ?? null);
-      notifyYoutubePassiveTranscriptAvailable(tabId, videoId, dataGeneration);
+      notifyYoutubePassiveTranscriptAvailable(
+        tabId,
+        videoId,
+        dataGeneration,
+        retainedCapture.language,
+        retainedCapture.trackKind,
+        Math.max(
+          1,
+          Number(retainedCapture.capture.diagnostics?.captureCount) || 1,
+        ),
+      );
     } else if (type === "capture") {
       recordYoutubePassiveObservation(tabId, videoId, "PACKED_STATE_TOO_LARGE", observedStatus,
         typeof payload?.body === "string" ? new TextEncoder().encode(payload.body).byteLength : 0);

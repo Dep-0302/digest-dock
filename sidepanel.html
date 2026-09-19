@@ -296,7 +296,7 @@
           ></div>
           <div class="section transcript-ready-region" id="transcriptReadyRegion">
             <div class="section-header transcript-section-header">
-              <div class="section-title">完整字幕</div>
+              <div class="section-title" id="transcriptSectionTitle">完整字幕</div>
               <div class="transcript-actions">
                 <button
                   class="icon-btn"
@@ -325,6 +325,13 @@
                 </button>
               </div>
             </div>
+            <p
+              class="transcript-coverage-notice"
+              id="transcriptCoverageNotice"
+              role="status"
+              aria-live="polite"
+              hidden
+            ></p>
             <div
               class="notes-export-precheck transcript-export-precheck"
               id="transcriptExportPrecheck"
