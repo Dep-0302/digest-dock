@@ -428,6 +428,66 @@ test("Passive capture ends the route with zero Active, Panel, and third-party ca
   );
 });
 
+test("sequential Passive caption chunks merge instead of replacing earlier subtitles", async () => {
+  const worker = loadBackground();
+  const send = (payload) =>
+    worker.dispatch(
+      {
+        action: "youtubePassiveState",
+        payload: {
+          videoId: VIDEO_ID,
+          language: "zh-Hans",
+          kind: "manual",
+          status: 0,
+          inFlight: true,
+          ...payload,
+        },
+      },
+      { tab: { id: 1 } },
+    );
+  const chunk = (startMs, text) =>
+    JSON.stringify({
+      events: [
+        {
+          tStartMs: startMs,
+          dDurationMs: 2_000,
+          segs: [{ utf8: text }],
+        },
+      ],
+    });
+
+  await send({ type: "inflight" });
+  await send({
+    type: "capture",
+    status: 200,
+    inFlight: false,
+    body: chunk(0, "开场字幕"),
+  });
+  await send({ type: "inflight" });
+  await send({
+    type: "capture",
+    status: 200,
+    inFlight: false,
+    body: chunk(55_000, "后续字幕"),
+  });
+
+  const gate = await worker.helpers.readYoutubePassiveGate({
+    tabId: 1,
+    videoId: VIDEO_ID,
+    preferredLanguage: "zh-Hans",
+    trackKind: "manual-first",
+  });
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(gate.capture.transcript)).map(({ start, text }) => ({ start, text })),
+    [
+      { start: 0, text: "开场字幕" },
+      { start: 55, text: "后续字幕" },
+    ],
+  );
+  assert.equal(gate.capture.diagnostics.captureCount, 2);
+  assert.equal(gate.inFlight, false);
+});
+
 test("a delayed valid Passive capture notifies the side panel without transcript data", async () => {
   const timers = createManualTimers();
   const worker = loadBackground({
@@ -477,6 +537,9 @@ test("a delayed valid Passive capture notifies the side panel without transcript
       videoId: VIDEO_ID,
       runtimeInstanceId: worker.helpers.getRuntimeInstanceId(),
       dataGeneration: worker.helpers.getExtensionDataGeneration(),
+      language: "en",
+      trackKind: "manual",
+      captureRevision: 1,
     },
   ]);
   assert.doesNotMatch(JSON.stringify(worker.runtimeMessages), /late capture/);

@@ -7297,6 +7297,117 @@ test("a newer active-tab check is not swallowed by an older pending check", asyn
   });
 });
 
+test("an MVP page-context race during YouTube SPA navigation retries automatically", async () => {
+  const timers = createFakeTimers();
+  let transcriptCalls = 0;
+  const runtime = loadSidepanelRuntime({
+    sidepanelMvp: true,
+    setTimeoutImpl: timers.setTimeout,
+    clearTimeoutImpl: timers.clearTimeout,
+    sendMessage: async (message) => {
+      if (message.action !== "fetchTranscript") return {};
+      transcriptCalls += 1;
+      if (transcriptCalls === 1) {
+        return {
+          success: false,
+          error: "PAGE_CONTEXT_CHANGED",
+          routeOutcome: "PAGE_CONTEXT_CHANGED",
+          message: "YouTube 页面已切换到其他视频，请重试。",
+          runId: message.runId,
+          routeKey: message.routeKey,
+        };
+      }
+      return {
+        success: true,
+        routeOutcome: "HAVE_TRANSCRIPT",
+        transcript: [
+          { start: 0, duration: 2, text: "Recovered new video", language: "zh" },
+        ],
+        transcriptText: "Recovered new video",
+        transcriptTextTimestamped: "[00:00] Recovered new video",
+        language: "zh",
+        source: "youtube-passive",
+        runId: message.runId,
+        routeKey: message.routeKey,
+      };
+    },
+  });
+
+  runtime.evaluate(`
+    videoTabId = 77;
+    loadFromCache = async () => null;
+    readStoredTranscriptArtifactIdentity = async () => "";
+    invalidateTranscriptDerivedArtifacts = async () => {};
+    hydrateCurrentVideoNoteSource = async () => {};
+    loadOverviewFromCache = async () => null;
+    saveToCache = async () => true;
+    applyMediaLanguageDefaults = () => {};
+    renderTranscript = () => {};
+    loadNotes = () => {};
+    setupExplainFeature = () => {};
+    refreshOverviewForCurrentVideoIfVisible = () => {};
+    checkCurrentTab = () => {
+      globalThis.__spaRetryPromise = startDigest(
+        currentVideoId,
+        currentVideoUrl,
+        currentMediaRef,
+        currentRouteKey,
+      );
+      return globalThis.__spaRetryPromise;
+    };
+  `);
+
+  await runtime.evaluate(`startDigest(
+    "video-b",
+    "https://www.youtube.com/watch?v=video-b",
+    { platform: "youtube", videoId: "video-b", mediaKey: "video-b" },
+    "youtube:video-b"
+  )`);
+
+  assert.equal(transcriptCalls, 1);
+  assert.equal(
+    runtime.helpers.getSidepanelMvpState().transcript.status,
+    runtime.sandbox.DIGESTDOCK_SIDEPANEL_STATE.TRANSCRIPT_STATUSES.LOADING,
+  );
+  assert.equal(timers.activeCount(600), 1);
+
+  timers.fireActive(600);
+  await runtime.evaluate("globalThis.__spaRetryPromise");
+
+  assert.equal(transcriptCalls, 2);
+  assert.equal(
+    runtime.helpers.getSidepanelMvpState().transcript.status,
+    runtime.sandbox.DIGESTDOCK_SIDEPANEL_STATE.TRANSCRIPT_STATUSES.READY,
+  );
+  assert.equal(runtime.evaluate("currentTranscriptText"), "Recovered new video");
+});
+
+test("automatic page-context recovery is bounded per video task", () => {
+  const runtime = loadSidepanelRuntime({ sidepanelMvp: true });
+  const context = {
+    tabId: 77,
+    videoId: "video-b",
+    routeKey: "youtube:video-b",
+    taskId: "task-b-1",
+  };
+
+  runtime.helpers.resetYoutubePageContextRetries();
+  assert.deepEqual(
+    Array.from({ length: 5 }, () =>
+      runtime.helpers.claimYoutubePageContextRetry(context),
+    ),
+    [true, true, true, true, false],
+  );
+  assert.equal(
+    runtime.helpers.claimYoutubePageContextRetry({
+      ...context,
+      taskId: "task-b-2",
+    }),
+    true,
+    "an explicit new task receives its own bounded recovery window",
+  );
+});
+
 test("a vanished tab is retried without surfacing an extension error", async () => {
   const runtime = loadSidepanelRuntime();
   const fixture = runtime.evaluate(`

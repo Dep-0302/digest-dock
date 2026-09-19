@@ -98,7 +98,8 @@ function harness({ reply, status = "needs_cc", cache = {} } = {}) {
     };
   }
   const notification = {
-    action: "youtubePassiveTranscriptAvailable", tabId: 7, videoId: "video_00001", ...fence,
+    action: "youtubePassiveTranscriptAvailable", tabId: 7, videoId: "video_00001",
+    language: "en", trackKind: "asr", captureRevision: 1, ...fence,
   };
   async function notify(overrides = {}, sender = { id: "test" }) {
     for (const listener of messageListeners) listener({ ...notification, ...overrides }, sender, () => {});
@@ -124,13 +125,12 @@ for (const status of ["needs_cc", "needs_supadata_choice", "needs_supadata_confi
   });
 }
 
-test("a notification arriving before the failed task resolves is consumed after the failure", async () => {
+test("a notification arriving while the original task is loading recovers immediately", async () => {
   const h = harness({ status: "loading" });
   await h.notify();
-  assert.equal(h.messages.length, 0);
-  h.run(`sidepanelMvpResolveTranscript({success:false, routeOutcome:'UNKNOWN'}, sidepanelMvpState.transcript.activeTask)`);
-  await settle();
   assert.equal(h.run("sidepanelMvpState.transcript.status"), "ready");
+  assert.equal(h.messages.filter((m) => m.action === "readYoutubePassiveTranscript").length, 1);
+  assert.match(h.document.getElementById("transcriptList").textContent, /A late English caption/);
 });
 
 test("missing or evicted Passive data preserves the existing Supadata choice", async () => {
@@ -155,6 +155,49 @@ test("duplicate notifications are coalesced and stale results cannot overwrite n
   await Promise.all([first, second]);
   assert.equal(h.run("currentTranscript"), null);
   assert.equal(h.run("sidepanelMvpState.session.videoId"), "video_00002");
+});
+
+test("the same revision on a second caption track is not discarded as a duplicate", async () => {
+  let reads = 0;
+  let h;
+  h = harness({
+    status: "needs_supadata_choice",
+    reply: (message) => {
+      reads += 1;
+      if (reads === 1) return { success: false };
+      return {
+        ...h.success(message),
+        language: "zh-TW",
+        selectedTrack: { language: "zh-TW", kind: "manual" },
+        transcript: [
+          {
+            start: 0,
+            duration: 2,
+            text: "真正可用的中文字幕",
+            language: "zh-TW",
+          },
+        ],
+        transcriptText: "真正可用的中文字幕",
+        transcriptTextTimestamped: "[0:00] 真正可用的中文字幕",
+      };
+    },
+  });
+
+  await h.notify({ language: "en", trackKind: "asr", captureRevision: 1 });
+  assert.equal(h.run("sidepanelMvpState.transcript.status"), "needs_supadata_choice");
+
+  await h.notify({
+    language: "zh-TW",
+    trackKind: "manual",
+    captureRevision: 1,
+  });
+
+  assert.equal(h.messages.filter((m) => m.action === "readYoutubePassiveTranscript").length, 2);
+  assert.equal(h.run("sidepanelMvpState.transcript.status"), "ready");
+  assert.match(
+    h.document.getElementById("transcriptList").textContent,
+    /真正可用的中文字幕/,
+  );
 });
 
 test("reset or a user action during recovery invalidates the result", async () => {
@@ -185,11 +228,83 @@ test("notifications from other pages/workers or protected states cause no reads"
     await h.notify({}, sender);
     assert.equal(h.messages.length, 0);
   }
-  for (const status of ["ready", "terminal", "error", "fetching_supadata"]) {
+  for (const status of ["terminal", "error", "fetching_supadata"]) {
     const h = harness({ status });
     await h.notify();
     assert.equal(h.messages.length, 0);
   }
+});
+
+test("a later Passive chunk expands an already visible incomplete transcript", async () => {
+  let h;
+  h = harness({
+    status: "ready",
+    reply: (message) => ({
+      ...h.success(message),
+      transcript: [
+        { start: 0, duration: 2, text: "Opening caption", language: "en" },
+        { start: 55, duration: 2, text: "A late English caption", language: "en" },
+      ],
+      transcriptText: "Opening caption A late English caption",
+      transcriptTextTimestamped:
+        "[0:00] Opening caption\n[0:55] A late English caption",
+    }),
+  });
+  h.run(`
+    currentTranscript = [{ start: 55, duration: 2, text: 'A late English caption', language: 'en' }];
+    currentTranscriptText = 'A late English caption';
+    currentTranscriptTimestamped = '[0:55] A late English caption';
+    currentTranscriptLanguage = 'en';
+    currentTranscriptSource = 'youtube-passive';
+    currentTranscriptSelectedTrack = { language: 'en', kind: 'asr' };
+  `);
+
+  await h.notify();
+
+  assert.equal(h.run("currentTranscript.length"), 2);
+  assert.equal(h.run("currentTranscript[0].start"), 0);
+  assert.match(h.document.getElementById("transcriptList").textContent, /Opening caption/);
+  assert.equal(h.stored.digest_video_00001.transcript.length, 2);
+});
+
+test("a later Passive revision completes truncated text at the same timestamp", async () => {
+  let h;
+  h = harness({
+    status: "ready",
+    reply: (message) => ({
+      ...h.success(message),
+      transcript: [
+        {
+          start: 55,
+          duration: 2,
+          text: "A late English caption is now complete",
+          language: "en",
+        },
+      ],
+      transcriptText: "A late English caption is now complete",
+      transcriptTextTimestamped:
+        "[0:55] A late English caption is now complete",
+    }),
+  });
+  h.run(`
+    currentTranscript = [{ start: 55, duration: 2, text: 'A late English caption', language: 'en' }];
+    currentTranscriptText = 'A late English caption';
+    currentTranscriptTimestamped = '[0:55] A late English caption';
+    currentTranscriptLanguage = 'en';
+    currentTranscriptSource = 'youtube-passive';
+    currentTranscriptSelectedTrack = { language: 'en', kind: 'asr' };
+  `);
+
+  await h.notify();
+
+  assert.equal(
+    h.run("currentTranscript[0].text"),
+    "A late English caption is now complete",
+  );
+  assert.match(
+    h.document.getElementById("transcriptList").textContent,
+    /now complete/,
+  );
 });
 
 test("automatic recovery never spends AI credits for an already selected translated view", async () => {

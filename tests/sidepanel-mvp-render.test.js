@@ -181,7 +181,12 @@ function createHarness({
   element("transcriptModeControl");
   element("overviewModeControl");
   element("notesModeControl");
-  element("exportTranscriptBtn", "button");
+  const transcriptSectionTitle = element("transcriptSectionTitle");
+  transcriptSectionTitle.textContent = "完整字幕";
+  const transcriptCoverageNotice = element("transcriptCoverageNotice");
+  transcriptCoverageNotice.hidden = true;
+  const copyTranscriptBtn = element("copyTranscriptBtn", "button");
+  const exportTranscriptBtn = element("exportTranscriptBtn", "button");
   element("saveCurrentMomentBtn", "button");
   const stateRegion = element("transcriptStateRegion");
   stateRegion.hidden = true;
@@ -305,6 +310,10 @@ function createHarness({
       followBar,
       followHint,
       followStatus,
+      transcriptSectionTitle,
+      transcriptCoverageNotice,
+      copyTranscriptBtn,
+      exportTranscriptBtn,
     },
   };
 }
@@ -425,6 +434,70 @@ test("free first-use copy and the Notes empty state expose the no-key core", () 
   assert.match(
     html,
     /id="saveCurrentMomentBtn"[\s\S]*?type="button"[\s\S]*?保存当前时刻/,
+  );
+});
+
+test("a late-start YouTube track is labeled partial instead of complete", () => {
+  const harness = createHarness();
+  harness.evaluate(`
+    currentMediaRef = { platform: "youtube", videoId: "video-partial" };
+    currentTranscript = [
+      { start: 55.916, duration: 1, text: "恭喜恭喜", language: "zh" },
+      { start: 56.483, duration: 1, text: "我刚看了一下", language: "zh" },
+    ];
+    renderTranscriptCoveragePresentation();
+  `);
+
+  assert.equal(
+    harness.elements.transcriptSectionTitle.textContent,
+    "字幕从 00:55 开始",
+  );
+  assert.equal(harness.elements.transcriptCoverageNotice.hidden, false);
+  assert.match(
+    harness.elements.transcriptCoverageNotice.textContent,
+    /此前内容不在字幕轨中/,
+  );
+  assert.match(
+    harness.elements.transcriptCoverageNotice.textContent,
+    /画面内烧录文字当前不会作为字幕读取/,
+  );
+  assert.equal(
+    harness.elements.copyTranscriptBtn.getAttribute("aria-label"),
+    "复制当前可用字幕",
+  );
+  assert.equal(
+    harness.elements.exportTranscriptBtn.getAttribute("aria-label"),
+    "导出当前可用字幕",
+  );
+  assert.equal(
+    harness.evaluate("buildCurrentVideoSourceRecord().transcriptTruncated"),
+    true,
+  );
+});
+
+test("an early-start YouTube track keeps the complete transcript label", () => {
+  const harness = createHarness();
+  harness.evaluate(`
+    currentMediaRef = { platform: "youtube", videoId: "video-complete" };
+    currentTranscript = [
+      { start: 10, duration: 2, text: "开场字幕", language: "zh" },
+    ];
+    renderTranscriptCoveragePresentation();
+  `);
+
+  assert.equal(harness.elements.transcriptSectionTitle.textContent, "完整字幕");
+  assert.equal(harness.elements.transcriptCoverageNotice.hidden, true);
+  assert.equal(
+    harness.elements.copyTranscriptBtn.getAttribute("aria-label"),
+    "复制完整字幕",
+  );
+  assert.equal(
+    harness.elements.exportTranscriptBtn.getAttribute("aria-label"),
+    "导出完整字幕",
+  );
+  assert.equal(
+    harness.evaluate("buildCurrentVideoSourceRecord().transcriptTruncated"),
+    undefined,
   );
 });
 
@@ -929,6 +1002,16 @@ test('consecutive cues already in the reading region update highlight without re
   h.evaluate('highlightActiveEntry(10)');
   assert.equal(next.classList.contains('active-playback'), true);
   assert.equal(next.scrollIntoViewCount, 0);
+});
+
+test('the active subtitle recenters before it falls into the lower reading area', () => {
+  const h = followingHarness({value:{}});
+  const cue = addTranscriptCue(h, 1800);
+  cue.rect = {top:470,bottom:560,height:90};
+  h.evaluate('window.matchMedia = () => ({matches:false}); highlightActiveEntry(1800)');
+  assert.equal(cue.scrollIntoViewCount, 1);
+  assert.equal(cue.scrollCalls[0].block, 'center');
+  assert.equal(cue.scrollCalls[0].behavior, 'smooth');
 });
 
 for (const [label, rect, reduced, behavior] of [
